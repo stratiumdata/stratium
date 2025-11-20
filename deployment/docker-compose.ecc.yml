@@ -1,0 +1,30 @@
+# Docker Compose configuration for testing Elliptic Curve Cryptography algorithms
+# Supports P256, P384, and P521
+version: '3.8'
+
+services:
+  platform:
+    extends:
+      file: docker-compose.yml
+      service: platform
+    environment:
+      - PORT=50051
+      - ENCRYPTION_ALGORITHM=${ECC_ALGORITHM:-P256}
+
+  key-manager:
+    extends:
+      file: docker-compose.yml
+      service: key-manager
+    environment:
+      - PORT=50052
+      - ENCRYPTION_ALGORITHM=${ECC_ALGORITHM:-P256}
+      - KEY_ROTATION_ENABLED=false
+
+  key-access:
+    extends:
+      file: docker-compose.yml
+      service: key-access
+    environment:
+      - PORT=50053
+      - KEY_MANAGER_ADDR=key-manager:50052
+      - ENCRYPTION_ALGORITHM=${ECC_ALGORITHM:-P256}

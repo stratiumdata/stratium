@@ -1,0 +1,108 @@
+# Free Tier Values for Stratium on t4g.small instances
+# Designed to keep resource usage within AWS Free Tier constraints.
+#
+# Usage:
+#   helm install stratium ./stratium \
+#     -n stratium \
+#     --create-namespace \
+#     -f values-ecr.yaml \
+#     -f values-free-tier.yaml
+
+# =============================================================================
+# Core infrastructure tuning
+# =============================================================================
+
+postgresql:
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+redis:
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+keycloak:
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 768Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# =============================================================================
+# Application services (single replica, low resources)
+# =============================================================================
+
+platform:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 384Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+keyManager:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 384Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  persistence:
+    enabled: false
+
+keyAccess:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 384Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+pap:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 384Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+papUI:
+  replicaCount: 1
+  service:
+    port: 8080  # Non-privileged container port for restricted PSPs
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+envoy:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi

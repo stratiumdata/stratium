@@ -1,0 +1,56 @@
+# Docker Compose override for DEMO builds with feature flags
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+#
+# This configuration builds all services in DEMO mode with the following feature flags:
+# - rate-limiting: Enabled (4 calls/min for key-access, 10 calls/min for key-manager)
+# - short-timeouts: Enabled (5s server timeouts, 3s client timeouts)
+# - Minimal logging: Only startup messages shown
+# - No metrics: Metrics collection disabled
+# - No observability: Tracing disabled
+
+services:
+  # Platform Service - Demo Build
+  platform:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+      args:
+        SERVICE_NAME: platform-server
+        SERVICE_PORT: 50051
+        BUILD_MODE: demo
+        BUILD_FEATURES: rate-limiting,short-timeouts
+        BUILD_VERSION: ${BUILD_VERSION:-demo-1.0.0}
+    container_name: stratium-platform-demo
+
+  # Key Manager Service - Demo Build
+  key-manager:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+      args:
+        SERVICE_NAME: key-manager-server
+        SERVICE_PORT: 50052
+        BUILD_MODE: demo
+        BUILD_FEATURES: rate-limiting,short-timeouts
+        BUILD_VERSION: ${BUILD_VERSION:-demo-1.0.0}
+    container_name: stratium-key-manager-demo
+
+  # Key Access Service - Demo Build with 4 calls/min rate limit
+  key-access:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+      args:
+        SERVICE_NAME: key-access-server
+        SERVICE_PORT: 50053
+        BUILD_MODE: demo
+        BUILD_FEATURES: rate-limiting,short-timeouts
+        BUILD_VERSION: ${BUILD_VERSION:-demo-1.0.0}
+    container_name: stratium-key-access-demo
+
+  # PAP Service - Demo Build
+  pap:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.pap
+    container_name: stratium-pap-demo

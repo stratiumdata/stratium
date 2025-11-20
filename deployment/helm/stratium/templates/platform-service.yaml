@@ -1,0 +1,21 @@
+{{- if .Values.platform.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stratium.platform.serviceName" . }}
+  labels:
+    {{- include "stratium.platform.labels" . | nindent 4 }}
+  {{- with .Values.platform.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.platform.service.type }}
+  ports:
+  - name: grpc
+    port: {{ .Values.platform.service.port }}
+    targetPort: grpc
+    protocol: TCP
+  selector:
+    {{- include "stratium.platform.selectorLabels" . | nindent 4 }}
+{{- end }}

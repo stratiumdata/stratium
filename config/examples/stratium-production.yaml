@@ -1,0 +1,132 @@
+# Stratium Platform Configuration - Production Environment
+# This configuration is suitable for production deployments
+
+service:
+  name: stratium
+  version: 1.0.0
+  environment: production
+
+server:
+  host: 0.0.0.0
+  port: 50051
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 300s
+  graceful_stop: 60s
+  tls:
+    enabled: true
+    cert_file: /etc/stratium/certs/server.crt
+    key_file: /etc/stratium/certs/server.key
+    ca_file: /etc/stratium/certs/ca.crt
+
+database:
+  driver: postgres
+  host: postgres.stratium.svc.cluster.local
+  port: 5432
+  database: stratium_pap
+  user: stratium
+  # Password should be set via environment variable: STRATIUM_DATABASE_PASSWORD
+  password: ""
+  sslmode: require
+  max_open_conns: 100
+  max_idle_conns: 25
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 10m
+
+cache:
+  type: redis
+  ttl: 10m
+  max_size: 10000
+  redis:
+    address: redis.stratium.svc.cluster.local:6379
+    # Password should be set via environment variable: STRATIUM_CACHE_REDIS_PASSWORD
+    password: ""
+    db: 0
+    prefix: "stratium:policy:"
+
+encryption:
+  algorithm: RSA4096
+  key_rotation: true
+  admin_key_provider: file
+  admin_key_config: /var/run/secrets/stratium/admin-key
+
+oidc:
+  enabled: true
+  issuer_url: https://auth.example.com/realms/stratium
+  client_id: stratium-platform
+  # Client secret should be set via environment variable: STRATIUM_OIDC_CLIENT_SECRET
+  client_secret: ""
+  redirect_url: https://stratium.example.com/callback
+  scopes:
+    - openid
+    - profile
+    - email
+    - groups
+
+services:
+  platform:
+    address: platform.stratium.svc.cluster.local:50051
+    timeout: 30s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt
+  key_manager:
+    address: key-manager.stratium.svc.cluster.local:50052
+    timeout: 30s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt
+  key_access:
+    address: key-access.stratium.svc.cluster.local:50053
+    timeout: 30s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt
+  pap:
+    address: pap.stratium.svc.cluster.local:8090
+    timeout: 30s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt
+
+logging:
+  level: info
+  format: json
+  output: stdout
+
+security:
+  rate_limiting:
+    enabled: true
+    requests_per_min: 100
+    burst: 50
+  cors:
+    enabled: true
+    allowed_origins:
+      - https://stratium.example.com
+      - https://admin.stratium.example.com
+    allowed_methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowed_headers:
+      - Authorization
+      - Content-Type
+      - X-Request-ID
+    expose_headers:
+      - Content-Length
+      - Content-Type
+    allow_credentials: true
+    max_age: 3600s
+
+observability:
+  metrics:
+    enabled: true
+    address: ":9090"
+    path: /metrics
+  tracing:
+    enabled: true
+    provider: jaeger
+    endpoint: jaeger-collector.observability.svc.cluster.local:14268
+    service_name: stratium-platform

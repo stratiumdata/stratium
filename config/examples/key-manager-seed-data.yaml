@@ -1,0 +1,24 @@
+# Sample key manager seed data manifest. Mount this file via ConfigMap and set
+# key_manager.seed_data_path to its location to bootstrap demo keys.
+keys:
+  - name: service-encryption-key
+    key_type: KEY_TYPE_RSA_2048
+    provider_type: KEY_PROVIDER_TYPE_SOFTWARE
+    rotation_policy: ROTATION_POLICY_TIME_BASED
+    rotation_interval_days: 90
+    authorized_subjects: ["user123", "service-account-1"]
+    authorized_resources: ["document-service", "user-service"]
+    metadata:
+      environment: development
+      created_by: seed_data_init
+
+  - name: backup-encryption-key
+    key_type: KEY_TYPE_RSA_2048
+    provider_type: KEY_PROVIDER_TYPE_SOFTWARE
+    rotation_policy: ROTATION_POLICY_TIME_BASED
+    rotation_interval_days: 90
+    authorized_subjects: ["admin456", "backup-service"]
+    authorized_resources: ["backup-storage", "archive-service"]
+    metadata:
+      environment: development
+      created_by: seed_data_init

@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+option go_package = "stratium/models";
+
+enum Classification {
+  CLASSIFICATION_NONE = 0;
+  CLASSIFICATION_UNCLASSIFIED = 1;
+  CLASSIFICATION_RESTRICTED = 2;
+  CLASSIFICATION_CONFIDENTIAL = 3;
+  CLASSIFICATION_SECRET = 4;
+  CLASSIFICATION_TOP_SECRET = 5;
+}
+
+enum SpecialCategoryDesignator {
+  DESIGNATOR_NONE = 0;
+  DESIGNATOR_ATOMAL = 1;
+  DESIGNATOR_BOHEMIA = 2;
+  DESIGNATOR_CRYPTO = 3;
+  DESIGNATOR_SIOP = 4;
+}
+
+enum Administrative {
+  ADMINISTRATIVE_NONE = 0;
+  ADMINISTRATIVE_COMMERCIAL = 1;
+  ADMINISTRATIVE_MANAGEMENT = 2;
+  ADMINISTRATIVE_MEDICAL = 3;
+  ADMINISTRATIVE_PERSONAL = 4;
+  ADMINISTRATIVE_STAFF = 5;
+}
+
+message Stanag4774 {
+  message Category {
+    enum CategoryType {
+      CATEGORY_TYPE_RESTRICTIVE = 0;
+      CATEGORY_TYPE_PERMISSIVE = 1;
+      CATEGORY_TYPE_INFORMATIVE = 2;
+    }
+    CategoryType type = 1;
+    repeated string values = 2;
+  }
+  string policy_identifier = 1;
+  Category context = 2;
+  Classification classification = 3;
+  string privacy_mark = 4;
+  Category releasable_to = 5;
+  Category only = 6;
+  Category limited = 7;
+  repeated SpecialCategoryDesignator special_category_designators = 8;
+  Administrative administrative = 9;
+}

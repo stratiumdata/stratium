@@ -1,0 +1,21 @@
+{{- if .Values.papUI.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stratium.papUI.serviceName" . }}
+  labels:
+    {{- include "stratium.papUI.labels" . | nindent 4 }}
+  {{- with .Values.papUI.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.papUI.service.type }}
+  ports:
+  - name: http
+    port: {{ .Values.papUI.service.port }}
+    targetPort: http
+    protocol: TCP
+  selector:
+    {{- include "stratium.papUI.selectorLabels" . | nindent 4 }}
+{{- end }}

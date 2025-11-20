@@ -1,0 +1,352 @@
+# Production values for Stratium
+# This is a template - copy and customize for your environment
+
+global:
+  imageRegistry: "your-registry.azurecr.io"
+  imagePullSecrets:
+    - name: registry-credentials
+  storageClass: "managed-premium"
+
+# PostgreSQL - Production Configuration
+postgresql:
+  enabled: true
+  replicaCount: 1  # For production HA, consider PostgreSQL Operator
+
+  auth:
+    # IMPORTANT: Use external secret management (e.g., Azure Key Vault, AWS Secrets Manager)
+    postgresPassword: "CHANGE-ME-STRONG-PASSWORD"
+    password: "CHANGE-ME-STRONG-PASSWORD"
+    stratiumPassword: "CHANGE-ME-STRONG-PASSWORD"
+
+  persistence:
+    enabled: true
+    size: 100Gi
+    storageClass: "managed-premium"
+
+  resources:
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+
+# Redis - Production Configuration
+redis:
+  enabled: true
+  replicaCount: 1
+
+  auth:
+    enabled: true
+    password: "CHANGE-ME-REDIS-PASSWORD"
+
+  persistence:
+    enabled: true
+    size: 10Gi
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# Keycloak - Production Configuration
+keycloak:
+  enabled: true
+  replicaCount: 2
+
+  auth:
+    adminUser: admin
+    adminPassword: "CHANGE-ME-ADMIN-PASSWORD"
+
+  config:
+    hostname: "auth.yourdomain.com"
+    httpEnabled: false  # Use HTTPS in production
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts:
+      - host: auth.yourdomain.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: keycloak-tls
+        hosts:
+          - auth.yourdomain.com
+
+# Platform Service - Production Configuration
+platform:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: stratium/platform-server
+    tag: "v1.0.0"
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# Key Manager - Production Configuration
+keyManager:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: stratium/key-manager-server
+    tag: "v1.0.0"
+
+  config:
+    oidcClientSecret: "CHANGE-ME-KEY-MANAGER-SECRET"
+
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# Key Access - Production Configuration
+keyAccess:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: stratium/key-access-server
+    tag: "v1.0.0"
+
+  config:
+    oidcClientSecret: "CHANGE-ME-KEY-ACCESS-SECRET"
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# PAP Service - Production Configuration
+pap:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: stratium/pap-server
+    tag: "v1.0.0"
+
+  config:
+    oidcClientSecret: "CHANGE-ME-PAP-SECRET"
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: pap-api.yourdomain.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: pap-tls
+        hosts:
+          - pap-api.yourdomain.com
+
+# PAP UI - Production Configuration
+papUI:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: stratium/pap-ui
+    tag: "v1.0.0"
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts:
+      - host: stratium.yourdomain.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: stratium-ui-tls
+        hosts:
+          - stratium.yourdomain.com
+
+# Envoy - Production Configuration
+envoy:
+  enabled: true
+  replicaCount: 3
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    hosts:
+      - host: grpc.yourdomain.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: grpc-tls
+        hosts:
+          - grpc.yourdomain.com
+
+# Security - Production Configuration
+security:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+
+  networkPolicy:
+    enabled: true
+
+# Monitoring - Production Configuration
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      prometheus: kube-prometheus
+
+  grafanaDashboard:
+    enabled: true
+
+# Anti-affinity for HA
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: stratium
+          topologyKey: kubernetes.io/hostname
+
+# Node selector for dedicated nodes (optional)
+# nodeSelector:
+#   workload: stratium
+
+# Tolerations for dedicated nodes (optional)
+# tolerations:
+#   - key: "workload"
+#     operator: "Equal"
+#     value: "stratium"
+#     effect: "NoSchedule"

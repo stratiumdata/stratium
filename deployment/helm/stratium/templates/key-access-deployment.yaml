@@ -1,0 +1,131 @@
+{{- if .Values.keyAccess.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-access
+  labels:
+    {{- include "stratium.keyAccess.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.keyAccess.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "stratium.keyAccess.selectorLabels" . | nindent 6 }}
+  {{- $caBundle := .Values.keyAccess.caBundle }}
+  template:
+    metadata:
+      labels:
+        {{- include "stratium.keyAccess.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/key-access-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "stratium.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      initContainers:
+      - name: wait-for-keycloak
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.keycloak.serviceName" . }} {{ .Values.keycloak.service.port }}; do
+            echo "Waiting for Keycloak..."
+            sleep 2
+          done
+      - name: wait-for-key-manager
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.keyManager.serviceName" . }} {{ .Values.keyManager.service.port }}; do
+            echo "Waiting for Key Manager..."
+            sleep 2
+          done
+      containers:
+      - name: key-access
+        image: {{ include "stratium.image" (dict "registry" .Values.keyAccess.image.registry "repository" .Values.keyAccess.image.repository "tag" .Values.keyAccess.image.tag "global" .Values.global) }}
+        command:
+          {{- if .Values.keyAccess.command }}
+          {{- range .Values.keyAccess.command }}
+          - {{ . | quote }}
+          {{- end }}
+          {{- else }}
+          - "/usr/local/bin/server"
+          {{- end }}
+        args:
+          {{- range .Values.keyAccess.args }}
+          - {{ . | quote }}
+          {{- end }}
+        imagePullPolicy: {{ .Values.keyAccess.image.pullPolicy }}
+        securityContext:
+          {{- toYaml .Values.security.containerSecurityContext | nindent 10 }}
+        env:
+        - name: PORT
+          value: {{ .Values.keyAccess.config.port | quote }}
+        - name: STRATIUM_OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "stratium.stratiumSecretName" . }}
+              key: key-access-oidc-secret
+        {{- with .Values.keyAccess.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        ports:
+        - name: grpc
+          containerPort: {{ .Values.keyAccess.config.port }}
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.keyAccess.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/stratium
+          readOnly: true
+        {{- if $caBundle.enabled }}
+        - name: key-access-ca
+          mountPath: {{ default "/etc/ssl/certs/ca-certificates.crt" $caBundle.mountPath | quote }}
+          subPath: {{ default "ca-certificates.crt" $caBundle.subPath | quote }}
+          readOnly: true
+        {{- end }}
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "stratium.fullname" . }}-key-access-config
+      {{- if $caBundle.enabled }}
+      - name: key-access-ca
+        configMap:
+          name: {{ default (printf "%s-key-access-ca" (include "stratium.fullname" .)) $caBundle.configMapName }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,66 @@
+{{- if .Values.keyAccess.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-access-config
+  labels:
+    {{- include "stratium.keyAccess.labels" . | nindent 4 }}
+data:
+  stratium.yaml: |
+    # Key Access Service Configuration
+    service:
+      name: key-access-server
+      version: 1.0.0
+      environment: {{ default "development" .Values.keyAccess.config.environment | quote }}
+      service_key_cache_ttl_seconds: {{ default 300 .Values.keyAccess.config.serviceKeyCacheTTLSeconds }}
+
+    server:
+      host: "0.0.0.0"
+      port: {{ .Values.keyAccess.config.port }}
+      read_timeout: 30s
+      write_timeout: 30s
+      idle_timeout: 300s
+
+    services:
+      key_manager:
+        address: {{ include "stratium.keyManager.serviceName" . }}:{{ .Values.keyManager.service.port }}
+        timeout: 30s
+      platform:
+        address: {{ include "stratium.platform.serviceName" . }}:{{ .Values.platform.service.port }}
+        timeout: 30s
+
+    encryption:
+      algorithm: RSA2048
+
+    {{- $oidc := default (dict) .Values.keyAccess.config.oidc }}
+    {{- $issuer := default (include "stratium.keycloak.issuerURL" .) $oidc.issuerURL }}
+    {{- $clientID := default "stratium-key-access" $oidc.clientID }}
+    {{- $legacySecret := .Values.keyAccess.config.oidcClientSecret }}
+    {{- $clientSecret := default $legacySecret $oidc.clientSecret }}
+    {{- $scopes := default (list "openid" "profile") $oidc.scopes }}
+    {{- $allowInsecure := default false $oidc.allowInsecureIssuer }}
+    {{- $skipClientID := default false $oidc.skipClientIDCheck }}
+    oidc:
+      enabled: true
+      issuer_url: {{ $issuer | quote }}
+      client_id: {{ $clientID | quote }}
+      client_secret: {{ $clientSecret | quote }}
+      allow_insecure_issuer: {{ $allowInsecure }}
+      skip_client_id_check: {{ $skipClientID }}
+      scopes:
+      {{- range $scopes }}
+        - {{ . | quote }}
+      {{- end }}
+
+    logging:
+      level: info
+      format: json
+      output: stdout
+
+    {{- $rate := default (dict) .Values.keyAccess.config.rateLimiting }}
+    security:
+      rate_limiting:
+        enabled: {{ default false $rate.enabled }}
+        requests_per_min: {{ default 1000 $rate.requestsPerMin }}
+        burst: {{ default 500 $rate.burst }}
+{{- end }}

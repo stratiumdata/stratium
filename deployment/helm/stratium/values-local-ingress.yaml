@@ -1,0 +1,73 @@
+# Local Ingress overlay for Stratium on Minikube or other local clusters
+# Usage:
+#   helm install stratium ./stratium \
+#     -n stratium \
+#     --create-namespace \
+#     -f values-local.yaml \
+#     -f values-local-ingress.yaml
+#
+# Prerequisites:
+#   1. Enable the nginx ingress controller (e.g., `minikube addons enable ingress`)
+#   2. Point the hostnames below at your cluster IP (see LOCAL_DEVELOPMENT.md)
+#
+# Hostname map used in this file:
+#   PAP UI: ui.stratium.local
+#   Keycloak: auth.stratium.local
+#   PAP API: api.stratium.local
+#   Envoy gRPC: grpc.stratium.local
+
+keycloak:
+  config:
+    hostname: auth.stratium.local
+    hostnamePort: "80"
+    frontendUrl: ""
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: auth.stratium.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+papUI:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: ui.stratium.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+pap:
+  config:
+    redirectUrl: "http://api.stratium.local/callback"
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: api.stratium.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+envoy:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    hosts:
+      - host: grpc.stratium.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    servicePort: 8443

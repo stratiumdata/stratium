@@ -1,0 +1,36 @@
+# Public URL Configuration for Stratium
+# This file configures services to use their public ALB DNS names
+#
+# Usage:
+#   helm install stratium ./stratium -n stratium \
+#     -f values-ecr.yaml \
+#     -f values-free-tier.yaml \
+#     -f values-rds.yaml \
+#     -f values-ingress.yaml \
+#     -f values-public-urls.yaml
+
+# =============================================================================
+# Keycloak Public Configuration
+# =============================================================================
+keycloak:
+  config:
+    hostname: "auth.demostratium.com"
+    hostnamePort: "443"  # ALB listens on HTTPS port 443
+    httpEnabled: true  # Still enable HTTP internally, ALB handles HTTPS termination
+
+# =============================================================================
+# PAP UI Configuration
+# =============================================================================
+papUI:
+  env:
+    VITE_KEYCLOAK_URL: "https://auth.demostratium.com"
+    VITE_KEYCLOAK_REALM: "stratium"
+    VITE_KEYCLOAK_CLIENT_ID: "stratium-pap-ui"
+    VITE_API_URL: "https://api.demostratium.com"
+
+# =============================================================================
+# PAP API Configuration
+# =============================================================================
+pap:
+  config:
+    oidcIssuerUrl: "https://auth.demostratium.com/realms/stratium"

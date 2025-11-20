@@ -1,0 +1,21 @@
+{{- if .Values.keyManager.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stratium.keyManager.serviceName" . }}
+  labels:
+    {{- include "stratium.keyManager.labels" . | nindent 4 }}
+  {{- with .Values.keyManager.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.keyManager.service.type }}
+  ports:
+  - name: grpc
+    port: {{ .Values.keyManager.service.port }}
+    targetPort: grpc
+    protocol: TCP
+  selector:
+    {{- include "stratium.keyManager.selectorLabels" . | nindent 4 }}
+{{- end }}

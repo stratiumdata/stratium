@@ -1,0 +1,55 @@
+{{- if and .Values.platform.enabled .Values.platform.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "stratium.fullname" . }}-platform
+  labels:
+    {{- include "stratium.platform.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.platform.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "stratium.platform.selectorLabels" . | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.keyManager.enabled .Values.keyManager.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-manager
+  labels:
+    {{- include "stratium.keyManager.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.keyManager.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "stratium.keyManager.selectorLabels" . | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.keyAccess.enabled .Values.keyAccess.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-access
+  labels:
+    {{- include "stratium.keyAccess.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.keyAccess.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "stratium.keyAccess.selectorLabels" . | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.pap.enabled .Values.pap.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap
+  labels:
+    {{- include "stratium.pap.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pap.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "stratium.pap.selectorLabels" . | nindent 6 }}
+{{- end }}

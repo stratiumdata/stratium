@@ -1,0 +1,29 @@
+{{- if .Values.envoy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stratium.envoy.serviceName" . }}
+  labels:
+    {{- include "stratium.envoy.labels" . | nindent 4 }}
+  {{- with .Values.envoy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.envoy.service.type }}
+  ports:
+  - name: grpc-web
+    port: {{ .Values.envoy.service.grpcWebPort }}
+    targetPort: grpc-web
+    protocol: TCP
+  - name: grpc-native
+    port: {{ .Values.envoy.service.grpcNativePort }}
+    targetPort: grpc-native
+    protocol: TCP
+  - name: admin
+    port: {{ .Values.envoy.service.adminPort }}
+    targetPort: admin
+    protocol: TCP
+  selector:
+    {{- include "stratium.envoy.selectorLabels" . | nindent 4 }}
+{{- end }}

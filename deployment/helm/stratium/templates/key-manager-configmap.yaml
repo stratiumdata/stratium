@@ -1,0 +1,83 @@
+{{- if .Values.keyManager.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-manager-config
+  labels:
+    {{- include "stratium.keyManager.labels" . | nindent 4 }}
+data:
+  stratium.yaml: |
+    # Key Manager Service Configuration
+    service:
+      name: key-manager-server
+      version: 1.0.0
+      environment: {{ default "development" .Values.keyManager.config.environment | quote }}
+      service_key_cache_ttl_seconds: {{ default 300 .Values.keyManager.config.serviceKeyCacheTTLSeconds }}
+
+    server:
+      host: "0.0.0.0"
+      port: {{ .Values.keyManager.config.port }}
+      read_timeout: 30s
+      write_timeout: 30s
+      idle_timeout: 300s
+
+    database:
+      driver: postgres
+      {{- if .Values.postgresql.enabled }}
+      host: {{ include "stratium.postgresql.host" . }}
+      port: {{ .Values.postgresql.service.port }}
+      database: stratium_keymanager
+      user: {{ .Values.postgresql.auth.stratiumUser }}
+      password: {{ .Values.postgresql.auth.stratiumPassword }}
+      {{- else if .Values.keyManager.config.database }}
+      host: {{ .Values.keyManager.config.database.host }}
+      port: {{ .Values.keyManager.config.database.port }}
+      database: {{ .Values.keyManager.config.database.name }}
+      user: {{ .Values.keyManager.config.database.user }}
+      password: {{ .Values.keyManager.config.database.password }}
+      {{- end }}
+      {{- if .Values.postgresql.enabled }}
+      sslmode: disable
+      {{- else }}
+      sslmode: require
+      {{- end }}
+      max_open_conns: 50
+      max_idle_conns: 10
+
+    encryption:
+      algorithm: RSA2048
+      key_rotation: false
+      admin_key_provider: composite
+      admin_key_config: {{ printf "%s/admin.key" .Values.keyManager.persistence.mountPath | quote }}
+
+    externalKeys:
+      enabled: {{ .Values.keyManager.config.externalKeysEnabled | default false }}
+      emergencyDisable: {{ .Values.keyManager.config.externalKeysEmergencyDisable | default false }}
+      sources:
+{{- if .Values.keyManager.config.externalKeySources }}
+{{ toYaml .Values.keyManager.config.externalKeySources | indent 8 }}
+{{- else }}
+        []
+{{- end }}
+
+    oidc:
+      enabled: true
+      issuer_url: {{ include "stratium.keycloak.issuerURL" . | quote }}
+      client_id: stratium-key-manager
+      client_secret: {{ .Values.keyManager.config.oidcClientSecret }}
+      scopes:
+        - openid
+        - profile
+
+    logging:
+      level: info
+      format: json
+      output: stdout
+
+    {{- $rate := default (dict) .Values.keyAccess.config.rateLimiting }}
+    security:
+      rate_limiting:
+        enabled: {{ default false $rate.enabled }}
+        requests_per_min: {{ default 1000 $rate.requestsPerMin }}
+        burst: {{ default 500 $rate.burst }}
+{{- end }}

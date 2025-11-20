@@ -1,0 +1,26 @@
+{{- if and .Values.postgresql.enabled .Values.postgresql.initScripts.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stratium.fullname" . }}-postgresql-init
+  labels:
+    {{- include "stratium.postgresql.labels" . | nindent 4 }}
+data:
+  01-init-multiple-dbs.sql: |
+    -- Create shared user 'stratium' for both databases
+    CREATE USER {{ .Values.postgresql.auth.stratiumUser }} WITH PASSWORD '{{ .Values.postgresql.auth.stratiumPassword }}';
+
+    -- Create stratium_pap database
+    CREATE DATABASE stratium_pap;
+    GRANT ALL PRIVILEGES ON DATABASE stratium_pap TO {{ .Values.postgresql.auth.stratiumUser }};
+
+    -- Create stratium_keymanager database
+    CREATE DATABASE stratium_keymanager;
+    GRANT ALL PRIVILEGES ON DATABASE stratium_keymanager TO {{ .Values.postgresql.auth.stratiumUser }};
+
+  02-init.sql: |
+    {{- .Files.Get "02-init.sql" | nindent 4 }}
+
+  03-init-keymanager.sql: |
+    {{- .Files.Get "03-init-keymanager.sql" | nindent 4 }}
+{{- end }}

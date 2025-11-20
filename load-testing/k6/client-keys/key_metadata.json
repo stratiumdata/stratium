@@ -1,0 +1,9 @@
+{
+  "key_id": "client-key-8acd0383-2ce1-4ae5-a14b-3d0ab6d1c437-1763133207161480649",
+  "created_at": "2025-11-14T10:13:26.857185-05:00",
+  "registered_at": "2025-11-14T18:05:51.903189-05:00",
+  "client": "stratium-key-manager",
+  "key_type": 1,
+  "status": "active",
+  "key_size": 2048
+}

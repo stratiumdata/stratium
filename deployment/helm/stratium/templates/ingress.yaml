@@ -1,0 +1,167 @@
+{{- if .Values.keycloak.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "stratium.fullname" . }}-keycloak
+  labels:
+    {{- include "stratium.keycloak.labels" . | nindent 4 }}
+  {{- with .Values.keycloak.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.keycloak.ingress.className }}
+  ingressClassName: {{ .Values.keycloak.ingress.className }}
+  {{- end }}
+  {{- if .Values.keycloak.ingress.tls }}
+  tls:
+    {{- range .Values.keycloak.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.keycloak.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "stratium.keycloak.serviceName" $ }}
+                port:
+                  number: {{ $.Values.keycloak.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.pap.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap
+  labels:
+    {{- include "stratium.pap.labels" . | nindent 4 }}
+  {{- with .Values.pap.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.pap.ingress.className }}
+  ingressClassName: {{ .Values.pap.ingress.className }}
+  {{- end }}
+  {{- if .Values.pap.ingress.tls }}
+  tls:
+    {{- range .Values.pap.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.pap.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "stratium.pap.serviceName" $ }}
+                port:
+                  number: {{ $.Values.pap.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.papUI.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap-ui
+  labels:
+    {{- include "stratium.papUI.labels" . | nindent 4 }}
+  {{- with .Values.papUI.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.papUI.ingress.className }}
+  ingressClassName: {{ .Values.papUI.ingress.className }}
+  {{- end }}
+  {{- if .Values.papUI.ingress.tls }}
+  tls:
+    {{- range .Values.papUI.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.papUI.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "stratium.papUI.serviceName" $ }}
+                port:
+                  number: {{ $.Values.papUI.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.envoy.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "stratium.fullname" . }}-envoy
+  labels:
+    {{- include "stratium.envoy.labels" . | nindent 4 }}
+  {{- with .Values.envoy.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.envoy.ingress.className }}
+  ingressClassName: {{ .Values.envoy.ingress.className }}
+  {{- end }}
+  {{- if .Values.envoy.ingress.tls }}
+  tls:
+    {{- range .Values.envoy.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.envoy.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "stratium.envoy.serviceName" $ }}
+                port:
+                  number: {{ default $.Values.envoy.service.grpcWebPort $.Values.envoy.ingress.servicePort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

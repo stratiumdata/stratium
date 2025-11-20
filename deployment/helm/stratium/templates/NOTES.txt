@@ -1,0 +1,260 @@
+================================================================================
+ _____ _             _   _
+/  ___| |           | | (_)
+\ `--.| |_ _ __ __ _| |_ _ _   _ _ __ ___
+ `--. \ __| '__/ _` | __| | | | | '_ ` _ \
+/\__/ / |_| | | (_| | |_| | |_| | | | | | |
+\____/ \__|_|  \__,_|\__|_|\__,_|_| |_| |_|
+
+Zero Trust Data Fabric Platform
+================================================================================
+
+Thank you for installing {{ .Chart.Name }} v{{ .Chart.Version }}!
+
+Your release is named: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+================================================================================
+DEPLOYMENT STATUS
+================================================================================
+
+To check the status of your deployment:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+To watch the deployment progress:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+================================================================================
+ACCESSING YOUR SERVICES
+================================================================================
+
+{{- if .Values.papUI.enabled }}
+
+🌐 Web UI (PAP UI)
+--------------------------------------------------------------------------------
+{{- if .Values.papUI.ingress.enabled }}
+{{- range .Values.papUI.ingress.hosts }}
+  URL: http{{ if $.Values.papUI.ingress.tls }}s{{ end }}://{{ .host }}{{ range .paths }}{{ .path }}{{ end }}
+{{- end }}
+{{- else }}
+  Run the following to access the Web UI:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.papUI.serviceName" . }} 3000:{{ .Values.papUI.service.port }}
+
+  Then visit: http://localhost:3000
+{{- end }}
+
+{{- end }}
+
+{{- if .Values.keycloak.enabled }}
+
+🔐 Keycloak Admin Console
+--------------------------------------------------------------------------------
+{{- if .Values.keycloak.ingress.enabled }}
+{{- range .Values.keycloak.ingress.hosts }}
+  URL: http{{ if $.Values.keycloak.ingress.tls }}s{{ end }}://{{ .host }}{{ range .paths }}{{ .path }}{{ end }}
+{{- end }}
+{{- else }}
+  Run the following to access Keycloak:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.keycloak.serviceName" . }} 8080:{{ .Values.keycloak.service.port }}
+
+  Then visit: http://localhost:8080
+{{- end }}
+
+  Admin Username: {{ .Values.keycloak.auth.adminUser }}
+  Admin Password: {{ .Values.keycloak.auth.adminPassword }}
+
+  ⚠️  IMPORTANT: Change the default admin password in production!
+
+{{- end }}
+
+{{- if .Values.pap.enabled }}
+
+📋 PAP REST API
+--------------------------------------------------------------------------------
+{{- if .Values.pap.ingress.enabled }}
+{{- range .Values.pap.ingress.hosts }}
+  URL: http{{ if $.Values.pap.ingress.tls }}s{{ end }}://{{ .host }}{{ range .paths }}{{ .path }}{{ end }}
+{{- end }}
+{{- else }}
+  Run the following to access the PAP API:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.pap.serviceName" . }} 8090:{{ .Values.pap.service.port }}
+
+  Then access: http://localhost:8090
+{{- end }}
+
+{{- end }}
+
+{{- if .Values.platform.enabled }}
+
+🔧 Platform Service (gRPC)
+--------------------------------------------------------------------------------
+  Service: {{ include "stratium.platform.serviceName" . }}
+  Port: {{ .Values.platform.service.port }}
+
+  Connect via:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.platform.serviceName" . }} 50051:{{ .Values.platform.service.port }}
+
+{{- end }}
+
+{{- if .Values.keyManager.enabled }}
+
+🔑 Key Manager Service (gRPC)
+--------------------------------------------------------------------------------
+  Service: {{ include "stratium.keyManager.serviceName" . }}
+  Port: {{ .Values.keyManager.service.port }}
+
+  Connect via:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.keyManager.serviceName" . }} 50052:{{ .Values.keyManager.service.port }}
+
+{{- end }}
+
+{{- if .Values.keyAccess.enabled }}
+
+🔓 Key Access Service (gRPC)
+--------------------------------------------------------------------------------
+  Service: {{ include "stratium.keyAccess.serviceName" . }}
+  Port: {{ .Values.keyAccess.service.port }}
+
+  Connect via:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.keyAccess.serviceName" . }} 50053:{{ .Values.keyAccess.service.port }}
+
+{{- end }}
+
+{{- if .Values.envoy.enabled }}
+
+🌍 Envoy Proxy (gRPC-Web)
+--------------------------------------------------------------------------------
+{{- if .Values.envoy.ingress.enabled }}
+{{- range .Values.envoy.ingress.hosts }}
+  gRPC-Web URL: http{{ if $.Values.envoy.ingress.tls }}s{{ end }}://{{ .host }}{{ range .paths }}{{ .path }}{{ end }}
+{{- end }}
+{{- else }}
+  Run the following to access Envoy:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "stratium.envoy.serviceName" . }} 8081:{{ .Values.envoy.service.grpcWebPort }}
+
+  gRPC-Web endpoint: http://localhost:8081
+{{- end }}
+
+{{- end }}
+
+================================================================================
+DATABASE INFORMATION
+================================================================================
+
+PostgreSQL:
+  Service: {{ include "stratium.postgresql.serviceName" . }}
+  Port: {{ .Values.postgresql.service.port }}
+
+  Databases:
+    - keycloak (Keycloak)
+    - stratium_pap (PAP Service)
+    - stratium_keymanager (Key Manager)
+
+  Users:
+    - {{ .Values.postgresql.auth.username }} (Keycloak)
+    - {{ .Values.postgresql.auth.stratiumUser }} (Stratium Services)
+
+{{- if .Values.redis.enabled }}
+
+Redis Cache:
+  Service: {{ include "stratium.redis.serviceName" . }}
+  Port: {{ .Values.redis.service.port }}
+{{- end }}
+
+================================================================================
+SECURITY NOTES
+================================================================================
+
+⚠️  PRODUCTION CHECKLIST:
+
+1. Update all default passwords in values.yaml:
+   - postgresql.auth.postgresPassword
+   - postgresql.auth.password
+   - postgresql.auth.stratiumPassword
+   - keycloak.auth.adminPassword
+   - keyManager.config.oidcClientSecret
+   - keyAccess.config.oidcClientSecret
+   - pap.config.oidcClientSecret
+
+2. Configure TLS/HTTPS:
+   - Enable ingress TLS
+   - Configure certificate secrets
+   - Update Keycloak hostname settings
+
+3. Enable ingress controllers for external access:
+   - Set keycloak.ingress.enabled=true
+   - Set pap.ingress.enabled=true
+   - Set papUI.ingress.enabled=true
+   - Set envoy.ingress.enabled=true
+
+4. Configure persistent storage:
+   - Set appropriate storageClass
+   - Enable persistence for PostgreSQL
+   - Configure backup strategy
+
+5. Review security settings:
+   - Network policies are {{ if .Values.security.networkPolicy.enabled }}enabled{{ else }}disabled{{ end }}
+   - Pod security contexts configured
+   - Resource limits set
+
+6. Configure monitoring:
+   - Enable ServiceMonitor for Prometheus
+   - Configure logging aggregation
+   - Set up alerting
+
+================================================================================
+USEFUL COMMANDS
+================================================================================
+
+# View all resources
+kubectl get all -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+# View logs
+kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=platform --tail=100 -f
+kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=key-manager --tail=100 -f
+kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=pap --tail=100 -f
+
+# Describe a pod
+kubectl describe pod -n {{ .Release.Namespace }} <pod-name>
+
+# Access a pod shell
+kubectl exec -it -n {{ .Release.Namespace }} <pod-name> -- /bin/sh
+
+# View secrets
+kubectl get secrets -n {{ .Release.Namespace }}
+
+# Upgrade the release
+helm upgrade {{ .Release.Name }} stratium -n {{ .Release.Namespace }} -f values.yaml
+
+# Rollback
+helm rollback {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+If pods are not starting:
+
+1. Check pod status:
+   kubectl describe pod -n {{ .Release.Namespace }} <pod-name>
+
+2. Check logs:
+   kubectl logs -n {{ .Release.Namespace }} <pod-name>
+
+3. Verify dependencies are ready:
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=postgresql
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=keycloak
+
+4. Check persistent volume claims:
+   kubectl get pvc -n {{ .Release.Namespace }}
+
+For more information, visit:
+  https://github.com/yourusername/stratium
+
+================================================================================

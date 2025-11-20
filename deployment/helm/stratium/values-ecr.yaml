@@ -1,0 +1,114 @@
+# AWS ECR Values for Stratium
+# This file configures Stratium to use images from AWS ECR
+#
+# Usage:
+#   helm install stratium ./stratium -n stratium -f values-ecr.yaml
+#
+
+# =============================================================================
+# Global Settings - Use ECR Registry
+# =============================================================================
+global:
+  imageRegistry: "536176198371.dkr.ecr.us-east-2.amazonaws.com"
+
+  imagePullSecrets:
+    - ecr-registry-secret
+
+# =============================================================================
+# Image Configuration - All services use ECR
+# =============================================================================
+
+platform:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: stratiumdata-platform
+    tag: "v0.19.0"
+    pullPolicy: IfNotPresent
+
+keyManager:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: stratiumdata-key-manager
+    tag: "v0.19.0"
+    pullPolicy: IfNotPresent
+
+keyAccess:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: stratiumdata-key-access
+    tag: "v0.19.0"
+    pullPolicy: IfNotPresent
+
+pap:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: stratiumdata-pap
+    tag: "v0.19.0"
+    pullPolicy: Always  # Force pull to get latest ARM64 image
+
+papUI:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: stratiumdata-pap-ui
+    tag: "v0.19.0"
+    pullPolicy: Always  # Force pull to get ARM64 image with port 8080 (no cache build)
+  service:
+    port: 8080  # Use non-privileged port for container security context
+
+# =============================================================================
+# Infrastructure Services - Use ECR Mirrored Images
+# =============================================================================
+# PostgreSQL, Redis, Keycloak, and Envoy are mirrored from public registries to ECR
+
+postgresql:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: postgres
+    tag: "latest"
+    pullPolicy: Always  # Force pull to get ARM64 image
+  persistence:
+    storageClass: "gp2-csi"
+
+redis:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: redis
+    tag: "latest"
+    pullPolicy: Always  # Force pull to get AMD64 image
+
+keycloak:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: keycloak
+    tag: "latest"
+    pullPolicy: Always  # Force pull to get AMD64 image
+
+envoy:
+  image:
+    registry: ""  # Uses global.imageRegistry
+    repository: envoy
+    tag: "latest"
+    pullPolicy: Always  # Force pull to get AMD64 image
+
+# =============================================================================
+# IMPORTANT: Create ECR Pull Secret
+# =============================================================================
+# Before deploying, create the image pull secret:
+#
+# 1. Get ECR login token:
+#    aws ecr get-login-password --region us-east-2 > /tmp/ecr-token.txt
+#
+# 2. Create Kubernetes secret:
+#    kubectl create secret docker-registry ecr-registry-secret \
+#      --docker-server=536176198371.dkr.ecr.us-east-2.amazonaws.com \
+#      --docker-username=AWS \
+#      --docker-password=$(cat /tmp/ecr-token.txt) \
+#      --namespace=stratium
+#
+# 3. Clean up token file:
+#    rm /tmp/ecr-token.txt
+#
+# Note: ECR tokens expire after 12 hours. For production, use:
+# - AWS IAM roles for service accounts (IRSA)
+# - Or a tool like k8s-ecr-login-renew to refresh tokens
+# =============================================================================

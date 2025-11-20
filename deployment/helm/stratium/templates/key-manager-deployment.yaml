@@ -1,0 +1,162 @@
+{{- if .Values.keyManager.enabled }}
+{{- $defaultStratiumSecret := include "stratium.stratiumSecretName" . }}
+{{- $hasInlineAdminKey := ne (default "" .Values.secrets.stratium.adminKey) "" }}
+{{- $hasCustomAdminKeySecret := ne (default "" .Values.keyManager.adminKey.secretName) "" }}
+{{- $useAdminKeySecret := or .Values.keyManager.adminKey.useSecret $hasInlineAdminKey $hasCustomAdminKeySecret }}
+{{- $adminKeySecretName := default $defaultStratiumSecret .Values.keyManager.adminKey.secretName }}
+{{- $adminKeySecretKey := default "admin-key" .Values.keyManager.adminKey.secretKey }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-manager
+  labels:
+    {{- include "stratium.keyManager.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.keyManager.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "stratium.keyManager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stratium.keyManager.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/key-manager-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "stratium.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      initContainers:
+      {{- if .Values.postgresql.enabled }}
+      - name: wait-for-postgresql
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.postgresql.host" . }} {{ .Values.postgresql.service.port }}; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+      {{- end }}
+      - name: wait-for-keycloak
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.keycloak.serviceName" . }} {{ .Values.keycloak.service.port }}; do
+            echo "Waiting for Keycloak..."
+            sleep 2
+          done
+      containers:
+      - name: key-manager
+        image: {{ include "stratium.image" (dict "registry" .Values.keyManager.image.registry "repository" .Values.keyManager.image.repository "tag" .Values.keyManager.image.tag "global" .Values.global) }}
+        command:
+          {{- if .Values.keyManager.command }}
+          {{- range .Values.keyManager.command }}
+          - {{ . | quote }}
+          {{- end }}
+          {{- else }}
+          - "/usr/local/bin/server"
+          {{- end }}
+        args:
+          {{- range .Values.keyManager.args }}
+          - {{ . | quote }}
+          {{- end }}
+        imagePullPolicy: {{ .Values.keyManager.image.pullPolicy }}
+        securityContext:
+          {{- toYaml .Values.security.containerSecurityContext | nindent 10 }}
+        env:
+        - name: PORT
+          value: {{ .Values.keyManager.config.port | quote }}
+        - name: STRATIUM_DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "stratium.stratiumSecretName" . }}
+              key: database-password
+        - name: STRATIUM_OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "stratium.stratiumSecretName" . }}
+              key: key-manager-oidc-secret
+        {{- if .Values.keyManager.config.adminKey }}
+        - name: STRATIUM_ADMIN_KEY
+          value: {{ .Values.keyManager.config.adminKey | quote }}
+        {{- end }}
+        ports:
+        - name: grpc
+          containerPort: {{ .Values.keyManager.config.port }}
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.keyManager.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/stratium
+          readOnly: true
+        - name: admin-key
+          mountPath: {{ .Values.keyManager.persistence.mountPath }}
+          readOnly: {{ ternary "true" "false" $useAdminKeySecret }}
+        - name: external-keys
+          mountPath: /var/run/stratium/external-keys
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "stratium.fullname" . }}-key-manager-config
+      - name: admin-key
+        {{- if $useAdminKeySecret }}
+        secret:
+          secretName: {{ $adminKeySecretName }}
+          items:
+            - key: {{ $adminKeySecretKey }}
+              path: admin.key
+        {{- else if .Values.keyManager.persistence.enabled }}
+        persistentVolumeClaim:
+          claimName: {{ include "stratium.fullname" . }}-key-manager-pvc
+        {{- else }}
+        emptyDir: {}
+        {{- end }}
+      - name: external-keys
+        secret:
+          secretName: external-keys
+          items:
+            - key: partner-a-manifest.json
+              path: partner-a/manifest.json
+            - key: partner-a-public.pem
+              path: partner-a/public.pem
+            - key: partner-a-private.pem
+              path: partner-a/private.pem
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

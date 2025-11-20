@@ -1,0 +1,85 @@
+# Dockerfile for PostgreSQL with Stratium initialization scripts
+# This builds a PostgreSQL container with databases pre-initialized during build
+#
+# Build:
+#   docker build -f deployment/Dockerfile.postgres -t stratium/postgres:latest .
+#
+# Run:
+#   docker run -d \
+#     -e POSTGRES_PASSWORD=stratium \
+#     -e POSTGRES_USER=stratium \
+#     -p 5432:5432 \
+#     stratium/postgres:latest
+
+FROM cgr.dev/chainguard/postgres:latest
+
+# Set maintainer label
+LABEL maintainer="Stratium Platform"
+LABEL description="PostgreSQL with Stratium databases pre-initialized"
+
+# Set environment variables for initialization
+ENV POSTGRES_USER=stratium \
+    POSTGRES_PASSWORD=stratium \
+    POSTGRES_DB=stratium_pap \
+    PGDATA=/var/lib/postgresql/data
+
+# Copy initialization scripts
+COPY deployment/postgres/01-init-multiple-dbs.sql /tmp/init-scripts/
+COPY deployment/postgres/02-init.sql /tmp/init-scripts/
+COPY deployment/postgres/03-init-keymanager.sql /tmp/init-scripts/
+
+# Initialize the database and run all scripts during build
+RUN set -e && \
+    # Initialize PostgreSQL data directory as postgres user
+    chown -R postgres:postgres /var/lib/postgresql && \
+    su -c "initdb -D $PGDATA" postgres && \
+    \
+    # Start PostgreSQL in the background
+    su -c "pg_ctl -D $PGDATA -o \"-c listen_addresses=''\" -w start" postgres && \
+    \
+    # Run initialization scripts in order
+    echo "Running database initialization scripts..." && \
+    \
+    # Run the multiple database creation script (creates stratium user and both databases)
+    echo "Creating databases and users..." && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres --dbname postgres -f /tmp/init-scripts/01-init-multiple-dbs.sql" postgres && \
+    \
+    # Run PAP database schema initialization
+    echo "Initializing stratium_pap schema..." && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres --dbname stratium_pap -f /tmp/init-scripts/02-init.sql" postgres && \
+    \
+    # Run Key Manager database schema initialization
+    echo "Initializing stratium_keymanager schema..." && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres --dbname stratium_keymanager -f /tmp/init-scripts/03-init-keymanager.sql" postgres && \
+    \
+    # Create Keycloak user and database
+    echo "Creating Keycloak user and database..." && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres -c \"CREATE USER keycloak WITH PASSWORD 'keycloak';\"" postgres && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres -c \"CREATE DATABASE keycloak;\"" postgres && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres -c \"GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;\"" postgres && \
+    su -c "psql -v ON_ERROR_STOP=1 --username postgres --dbname keycloak -c \"GRANT ALL ON SCHEMA public TO keycloak;\"" postgres && \
+    \
+    # Configure pg_hba.conf to allow network connections
+    echo "Configuring pg_hba.conf for network access..." && \
+    echo "# Allow connections from Docker network" >> $PGDATA/pg_hba.conf && \
+    echo "host    all             all             0.0.0.0/0               md5" >> $PGDATA/pg_hba.conf && \
+    echo "host    all             all             ::/0                    md5" >> $PGDATA/pg_hba.conf && \
+    \
+    # Configure PostgreSQL to listen on all addresses
+    echo "Configuring PostgreSQL to listen on all addresses..." && \
+    echo "listen_addresses = '*'" >> $PGDATA/postgresql.conf && \
+    \
+    # Stop PostgreSQL cleanly
+    echo "Stopping PostgreSQL..." && \
+    su -c "pg_ctl -D $PGDATA -m fast -w stop" postgres && \
+    \
+    # Clean up initialization scripts
+    rm -rf /tmp/init-scripts && \
+    \
+    echo "Database initialization completed successfully"
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# The base postgres image already defines ENTRYPOINT and CMD
+# No need to redefine them here

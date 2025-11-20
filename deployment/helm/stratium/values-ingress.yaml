@@ -1,0 +1,100 @@
+# Ingress Configuration for Stratium
+# This file enables public internet access via AWS Application Load Balancer
+#
+# Usage:
+#   helm install stratium ./stratium -n stratium \
+#     -f values-ecr.yaml \
+#     -f values-free-tier.yaml \
+#     -f values-rds.yaml \
+#     -f values-ingress.yaml
+
+# =============================================================================
+# PAP UI Ingress - Web Application
+# =============================================================================
+papUI:
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      # ALB Configuration
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/b5d88931-09cb-4fe4-bf6e-3ffeeee1976d
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/subnets: subnet-0e81700630d26decc,subnet-01701b660ce0a1277,subnet-056d8aaf00d98eed9
+      # Health Check
+      alb.ingress.kubernetes.io/healthcheck-path: /health
+      alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+      alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+      alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+      alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+      # Tags
+      alb.ingress.kubernetes.io/tags: Environment=demo,Application=stratium,Component=pap-ui
+    hosts:
+      - host: ""  # Empty host means it will accept all hostnames
+        paths:
+          - path: /
+            pathType: Prefix
+
+# =============================================================================
+# Keycloak Ingress - Authentication Service
+# =============================================================================
+keycloak:
+  config:
+    hostname: ""
+    frontendUrl: "https://auth.demostratium.com"
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      # ALB Configuration
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/b5d88931-09cb-4fe4-bf6e-3ffeeee1976d
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/subnets: subnet-0e81700630d26decc,subnet-01701b660ce0a1277,subnet-056d8aaf00d98eed9
+      # Health Check
+      alb.ingress.kubernetes.io/healthcheck-path: /health/ready
+      alb.ingress.kubernetes.io/healthcheck-port: '9000'
+      alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+      alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '10'
+      alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+      alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+      # Tags
+      alb.ingress.kubernetes.io/tags: Environment=demo,Application=stratium,Component=keycloak
+    hosts:
+      - host: ""
+        paths:
+          - path: /
+            pathType: Prefix
+
+# =============================================================================
+# PAP REST API Ingress
+# =============================================================================
+pap:
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      # ALB Configuration
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/b5d88931-09cb-4fe4-bf6e-3ffeeee1976d
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/subnets: subnet-0e81700630d26decc,subnet-01701b660ce0a1277,subnet-056d8aaf00d98eed9
+      # Health Check
+      alb.ingress.kubernetes.io/healthcheck-path: /health
+      alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+      alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+      alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+      alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+      # Tags
+      alb.ingress.kubernetes.io/tags: Environment=demo,Application=stratium,Component=pap-api
+    hosts:
+      - host: ""
+        paths:
+          - path: /
+            pathType: Prefix

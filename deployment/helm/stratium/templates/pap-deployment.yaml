@@ -1,0 +1,127 @@
+{{- if .Values.pap.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap
+  labels:
+    {{- include "stratium.pap.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.pap.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "stratium.pap.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stratium.pap.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/pap-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "stratium.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      initContainers:
+      {{- if .Values.postgresql.enabled }}
+      - name: wait-for-postgresql
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.postgresql.host" . }} {{ .Values.postgresql.service.port }}; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+      {{- end }}
+      - name: wait-for-keycloak
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.keycloak.serviceName" . }} {{ .Values.keycloak.service.port }}; do
+            echo "Waiting for Keycloak..."
+            sleep 2
+          done
+      - name: wait-for-redis
+        image: {{ include "stratium.busyboxImage" . }}
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z {{ include "stratium.redis.serviceName" . }} {{ .Values.redis.service.port }}; do
+            echo "Waiting for Redis..."
+            sleep 2
+          done
+      containers:
+      - name: pap
+        image: {{ include "stratium.image" (dict "registry" .Values.pap.image.registry "repository" .Values.pap.image.repository "tag" .Values.pap.image.tag "global" .Values.global) }}
+        imagePullPolicy: {{ .Values.pap.image.pullPolicy }}
+        securityContext:
+          {{- toYaml .Values.security.containerSecurityContext | nindent 10 }}
+        env:
+        - name: PORT
+          value: {{ .Values.pap.config.port | quote }}
+        - name: STRATIUM_DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "stratium.stratiumSecretName" . }}
+              key: database-password
+        {{- if .Values.pap.config.cacheRedisPassword }}
+        - name: STRATIUM_CACHE_REDIS_PASSWORD
+          value: {{ .Values.pap.config.cacheRedisPassword | quote }}
+        {{- end }}
+        - name: STRATIUM_OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "stratium.stratiumSecretName" . }}
+              key: pap-oidc-secret
+        ports:
+        - name: http
+          containerPort: {{ .Values.pap.config.port }}
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pap.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/stratium
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "stratium.fullname" . }}-pap-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

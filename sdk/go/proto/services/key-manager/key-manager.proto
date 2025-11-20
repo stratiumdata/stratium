@@ -1,0 +1,384 @@
+syntax = "proto3";
+
+option go_package = "stratium/services/key-manager";
+
+package key_manager;
+
+import "google/protobuf/timestamp.proto";
+
+// Key Management Service for handling encryption keys and DEK unwrapping
+service KeyManagerService {
+  // Service Key Management Operations
+  rpc CreateKey(CreateKeyRequest) returns (CreateKeyResponse);
+  rpc GetKey(GetKeyRequest) returns (GetKeyResponse);
+  rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
+  rpc DeleteKey(DeleteKeyRequest) returns (DeleteKeyResponse);
+  rpc RotateKey(RotateKeyRequest) returns (RotateKeyResponse);
+
+  // DEK Unwrapping Operations
+  rpc UnwrapDEK(UnwrapDEKRequest) returns (UnwrapDEKResponse);
+
+  // Key Provider Management
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
+  rpc GetProviderInfo(GetProviderInfoRequest) returns (GetProviderInfoResponse);
+
+  // User Public Key Management (require OIDC authentication)
+  rpc RegisterClientKey(RegisterClientKeyRequest) returns (RegisterClientKeyResponse);
+  rpc GetClientKey(GetClientKeyRequest) returns (GetClientKeyResponse);
+  rpc ListClientKeys(ListClientKeysRequest) returns (ListClientKeysResponse);
+  rpc RevokeClientKey(RevokeClientKeyRequest) returns (RevokeClientKeyResponse);
+  rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
+}
+
+// Key Provider Types
+enum KeyProviderType {
+  KEY_PROVIDER_TYPE_UNSPECIFIED = 0;
+  KEY_PROVIDER_TYPE_SOFTWARE = 1;
+  KEY_PROVIDER_TYPE_HSM = 2;
+  KEY_PROVIDER_TYPE_SMART_CARD = 3;
+  KEY_PROVIDER_TYPE_USB_TOKEN = 4;
+}
+
+// Key Types
+enum KeyType {
+  KEY_TYPE_UNSPECIFIED = 0;
+  KEY_TYPE_RSA_2048 = 1;
+  KEY_TYPE_RSA_3072 = 2;
+  KEY_TYPE_RSA_4096 = 3;
+  KEY_TYPE_ECC_P256 = 4;
+  KEY_TYPE_ECC_P384 = 5;
+  KEY_TYPE_ECC_P521 = 6;
+  KEY_TYPE_KYBER_512 = 7;
+  KEY_TYPE_KYBER_768 = 8;
+  KEY_TYPE_KYBER_1024 = 9;
+}
+
+// Key Status
+enum KeyStatus {
+  KEY_STATUS_UNSPECIFIED = 0;
+  KEY_STATUS_ACTIVE = 1;
+  KEY_STATUS_INACTIVE = 2;
+  KEY_STATUS_PENDING_ROTATION = 3;
+  KEY_STATUS_DEPRECATED = 4;
+  KEY_STATUS_COMPROMISED = 5;
+  KEY_STATUS_REVOKED = 6;
+}
+
+// Key Rotation Policy
+enum RotationPolicy {
+  ROTATION_POLICY_UNSPECIFIED = 0;
+  ROTATION_POLICY_MANUAL = 1;
+  ROTATION_POLICY_TIME_BASED = 2;
+  ROTATION_POLICY_USAGE_BASED = 3;
+  ROTATION_POLICY_COMBINED = 4;
+}
+
+// Key metadata and information
+message Key {
+  string key_id = 1;
+  string client_id = 2;
+  string name = 3;
+  KeyType key_type = 4;
+  KeyProviderType provider_type = 5;
+  KeyStatus status = 6;
+  string public_key_pem = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp expires_at = 9;
+  google.protobuf.Timestamp last_rotated = 10;
+  string key_integrity_hash = 11;
+  RotationPolicy rotation_policy = 12;
+  int32 rotation_interval_days = 13;
+  int64 usage_count = 14;
+  int64 max_usage_count = 15;
+  map<string, string> metadata = 16;
+}
+
+// Key Provider Information
+message KeyProvider {
+  KeyProviderType type = 1;
+  string name = 2;
+  string description = 3;
+  bool available = 4;
+  map<string, string> configuration = 5;
+  repeated KeyType supported_key_types = 6;
+  bool supports_rotation = 7;
+  bool supports_hardware_security = 8;
+}
+
+// ABAC Rule for key access control
+message ABACRule {
+  string rule_id = 1;
+  string name = 2;
+  repeated string required_attributes = 3;
+  repeated Condition conditions = 4;
+  repeated string allowed_actions = 5;
+  bool enabled = 6;
+}
+
+// Condition for ABAC evaluation
+message Condition {
+  string type = 1;
+  string operator = 2;
+  string value = 3;
+  map<string, string> parameters = 4;
+}
+
+// Create Key Request
+message CreateKeyRequest {
+  string name = 1;
+  KeyType key_type = 2;
+  KeyProviderType provider_type = 3;
+  RotationPolicy rotation_policy = 4;
+  int32 rotation_interval_days = 5;
+  int64 max_usage_count = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  map<string, string> metadata = 8;
+  repeated string authorized_subjects = 9;
+  repeated string authorized_resources = 10;
+  map<string, string> provider_config = 11;
+}
+
+// Create Key Response
+message CreateKeyResponse {
+  Key key = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+// Get Key Request
+message GetKeyRequest {
+  string key_id = 1;
+  bool include_public_key = 2;
+}
+
+// Get Key Response
+message GetKeyResponse {
+  Key key = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+// List Keys Request
+message ListKeysRequest {
+  string subject_filter = 1;
+  string resource_filter = 2;
+  KeyProviderType provider_type_filter = 3;
+  KeyStatus status_filter = 4;
+  int32 page_size = 5;
+  string page_token = 6;
+}
+
+// List Keys Response
+message ListKeysResponse {
+  repeated Key keys = 1;
+  string next_page_token = 2;
+  int64 total_count = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// Delete Key Request
+message DeleteKeyRequest {
+  string key_id = 1;
+  bool force = 2;
+}
+
+// Delete Key Response
+message DeleteKeyResponse {
+  bool success = 1;
+  string message = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+// Rotate Key Request
+message RotateKeyRequest {
+  string key_id = 1;
+  bool force = 2;
+  google.protobuf.Timestamp effective_at = 3;
+}
+
+// Rotate Key Response
+message RotateKeyResponse {
+  Key old_key = 1;
+  Key new_key = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+// Unwrap DEK Request
+message UnwrapDEKRequest {
+  string subject = 1;
+  string resource = 2;
+  bytes encrypted_dek = 3;
+  string key_id = 4;
+  string client_key_id = 5;
+  map<string, string> context = 6;
+  string action = 7;
+}
+
+// Unwrap DEK Response
+message UnwrapDEKResponse {
+  bytes encrypted_dek_for_subject = 1;
+  string subject_key_id = 2;
+  bool access_granted = 3;
+  string access_reason = 4;
+  repeated string applied_rules = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// List Providers Request
+message ListProvidersRequest {
+  bool available_only = 1;
+}
+
+// List Providers Response
+message ListProvidersResponse {
+  repeated KeyProvider providers = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+// Get Provider Info Request
+message GetProviderInfoRequest {
+  KeyProviderType provider_type = 1;
+}
+
+// Get Provider Info Response
+message GetProviderInfoResponse {
+  KeyProvider provider = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+// ============================================================================
+// User Public Key Management Messages
+// ============================================================================
+
+// RegisterClientKeyRequest represents a request to register a public key
+message RegisterClientKeyRequest {
+  // The client name
+  string client_id = 1;
+
+  // The public key in PEM format
+  string public_key_pem = 2;
+
+  // Type of the key
+  KeyType key_type = 3;
+
+  // When the key should expire (optional)
+  google.protobuf.Timestamp expires_at = 4;
+
+  // Key metadata
+  map<string, string> metadata = 5;
+}
+
+// RegisterClientKeyResponse represents the response from registering a key
+message RegisterClientKeyResponse {
+  // The registered key information
+  Key key = 1;
+
+  // Success indicator
+  bool success = 2;
+
+  // Error message if registration failed
+  string error_message = 3;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// GetClientKeyRequest represents a request to get a specific user key
+message GetClientKeyRequest {
+  // The client name
+  string client_id = 1;
+
+  // The key ID to retrieve (optional, gets active key if not specified)
+  string key_id = 2;
+}
+
+// GetClientKeyResponse represents the response from getting a user key
+message GetClientKeyResponse {
+  // The requested key
+  Key key = 1;
+
+  // Whether the key was found
+  bool found = 2;
+
+  // Error message if retrieval failed
+  string error_message = 3;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// ListClientKeysRequest represents a request to list clients's keys
+message ListClientKeysRequest {
+  // The client name
+  string client_id = 1;
+
+  // Page size for pagination
+  int32 page_size = 2;
+
+  // Page token for pagination
+  string page_token = 3;
+
+  // Include revoked keys
+  bool include_revoked = 4;
+}
+
+// ListClientKeysResponse represents the response from listing user's keys
+message ListClientKeysResponse {
+  // List of keys
+  repeated Key keys = 1;
+
+  // Next page token
+  string next_page_token = 2;
+
+  // Total count of keys
+  int32 total_count = 3;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// RevokeClientKeyRequest represents a request to revoke a user key
+message RevokeClientKeyRequest {
+  // The client name
+  string client_id = 1;
+
+  // The key ID to revoke
+  string key_id = 2;
+
+  // Reason for revocation
+  string reason = 3;
+}
+
+// RevokeClientKeyResponse represents the response from revoking a key
+message RevokeClientKeyResponse {
+  // Success indicator
+  bool success = 1;
+
+  // Error message if revocation failed
+  string error_message = 2;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+// ListClientsRequest represents a request to list all clients (admin operation)
+message ListClientsRequest {
+  // Page size for pagination
+  int32 page_size = 1;
+
+  // Page token for pagination
+  string page_token = 2;
+}
+
+// ListClientsResponse represents the response from listing clients
+message ListClientsResponse {
+  // List of client IDs
+  repeated string clients = 1;
+
+  // Next page token
+  string next_page_token = 2;
+
+  // Total count of clients
+  int32 total_count = 3;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 4;
+}

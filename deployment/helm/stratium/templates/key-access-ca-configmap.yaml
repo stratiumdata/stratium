@@ -1,0 +1,16 @@
+{{- if and .Values.keyAccess.enabled .Values.keyAccess.caBundle.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ default (printf "%s-key-access-ca" (include "stratium.fullname" .)) .Values.keyAccess.caBundle.configMapName }}
+  labels:
+    {{- include "stratium.keyAccess.labels" . | nindent 4 }}
+binaryData:
+  ca-certificates.crt: |
+{{ $caFile := default "certs/amazon-root-ca1.crt" .Values.keyAccess.caBundle.file }}
+{{ if not (hasPrefix $caFile "/") }}
+    {{ printf "%s" (.Files.Get $caFile | b64enc) }}
+{{ else }}
+{{ fail "keyAccess.caBundle.file must be relative to the chart (certs/...)" }}
+{{ end }}
+{{- end }}

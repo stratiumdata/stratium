@@ -1,0 +1,611 @@
+# Default values for stratium.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Global settings
+global:
+  # Image registry (override to use private registry)
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: ""
+
+  # Namespace to deploy into (if not using helm --namespace)
+  namespace: stratium
+
+# =============================================================================
+# Secret Management
+# =============================================================================
+secrets:
+  # Master secret containing Stratium app passwords + OIDC client secrets
+  stratium:
+    create: true
+    name: ""  # Override to reuse an existing Kubernetes Secret
+    adminKey: ""  # Optional base64-encoded admin key (written to admin-key entry)
+
+  # Keycloak admin credentials
+  keycloak:
+    create: true
+    name: ""
+
+  # PostgreSQL credentials (used by bundled database)
+  postgresql:
+    create: true
+    name: ""
+
+# =============================================================================
+# PostgreSQL Database
+# =============================================================================
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
+
+  # StatefulSet configuration
+  replicaCount: 1
+
+  auth:
+    # PostgreSQL superuser credentials
+    postgresPassword: "keycloak_password"  # CHANGE IN PRODUCTION
+    username: keycloak
+    password: "keycloak_password"  # CHANGE IN PRODUCTION
+    database: keycloak
+
+    # Stratium application user
+    stratiumUser: stratium
+    stratiumPassword: "stratium"  # CHANGE IN PRODUCTION
+
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  service:
+    type: ClusterIP
+    port: 5432
+
+  # Init scripts (will be mounted as ConfigMaps)
+  initScripts:
+    enabled: true
+
+# =============================================================================
+# Redis Cache
+# =============================================================================
+redis:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  auth:
+    enabled: false
+    password: ""  # Set if auth.enabled is true
+
+  persistence:
+    enabled: false  # Redis used as cache, persistence optional
+    size: 8Gi
+    storageClass: ""
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  service:
+    type: ClusterIP
+    port: 6379
+
+# =============================================================================
+# External Database Configuration (used when postgresql.enabled=false)
+# =============================================================================
+externalDatabase:
+  host: ""
+  port: 5432
+  username: ""
+  password: ""
+
+# =============================================================================
+# Keycloak OIDC Provider
+# =============================================================================
+keycloak:
+  enabled: true
+  realm: stratium
+  image:
+    registry: docker.io
+    repository: keycloak/keycloak
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  auth:
+    adminUser: admin
+    adminPassword: "admin"  # CHANGE IN PRODUCTION
+  externalDatabase:
+    enabled: false
+    host: ""
+    port: 5432
+    database: keycloak
+    user: ""
+    password: ""
+
+  # Keycloak configuration
+  config:
+    hostname: "localhost"  # CHANGE IN PRODUCTION to your domain
+    hostnamePort: "8080"
+    httpEnabled: true
+    issuerURL: ""
+    # For production, enable HTTPS:
+    # httpEnabled: false
+    # httpsEnabled: true
+    # tlsSecretName: keycloak-tls
+
+  # Realm import
+  realmImport:
+    enabled: true
+    configMapName: keycloak-realm-config
+
+  resources:
+    limits:
+      cpu: 4000m
+      memory: 6Gi
+    requests:
+      cpu: 2000m
+      memory: 3Gi
+
+  service:
+    type: ClusterIP
+    port: 8080
+
+  # Ingress for Keycloak
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: keycloak.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+# =============================================================================
+# Platform Service
+# =============================================================================
+platform:
+  enabled: true
+
+  image:
+    registry: ""
+    repository: stratium/platform-server
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  args:
+    - --config=/etc/stratium/stratium.yaml
+    - --pprof-addr=:6060
+
+  config:
+    port: 50051
+    databasePassword: "stratium"  # CHANGE IN PRODUCTION
+    cacheRedisPassword: ""
+    policyCacheTTLSeconds: 5
+    rateLimiting:
+      enabled: false
+      requestsPerMin: 2000
+      burst: 1000
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  extraEnv: []
+
+  service:
+    type: ClusterIP
+    port: 50051
+    annotations: {}
+
+  # Autoscaling
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  # Pod Disruption Budget
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# =============================================================================
+# Key Manager Service
+# =============================================================================
+keyManager:
+  enabled: true
+
+  image:
+    registry: ""
+    repository: stratium/key-manager-server
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  args:
+    - --config=/etc/stratium/stratium.yaml
+    - --pprof-addr=:6060
+
+  config:
+    port: 50052
+    databasePassword: "stratium"  # CHANGE IN PRODUCTION
+    oidcClientSecret: "stratium-key-manager-secret"  # CHANGE IN PRODUCTION
+    adminKey: ""  # Optional: Set for development only
+    externalKeysEnabled: false
+    externalKeysEmergencyDisable: false
+    externalKeySources: []
+    serviceKeyCacheTTLSeconds: 15
+
+  # Admin key persistence
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+    mountPath: /var/run/secrets/stratium/admin-key
+
+  adminKey:
+    useSecret: false         # When true, mount admin key from a Kubernetes Secret
+    secretName: ""           # Defaults to secrets.stratium.name (or generated secret)
+    secretKey: "admin-key"   # Key within the Secret containing the base64 admin key
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  service:
+    type: ClusterIP
+    port: 50052
+    annotations: {}
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# =============================================================================
+# Key Access Service
+# =============================================================================
+keyAccess:
+  enabled: true
+
+  image:
+    registry: ""
+    repository: stratium/key-access-server
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  args:
+    - --config=/etc/stratium/stratium.yaml
+    - --pprof-addr=:6060
+
+  config:
+    port: 50053
+    environment: development
+    serviceKeyCacheTTLSeconds: 15
+    oidcClientSecret: "stratium-key-manager-secret"  # CHANGE IN PRODUCTION (legacy)
+    oidc:
+      issuerURL: ""          # Override to point at external Keycloak (defaults to in-cluster)
+      clientID: ""           # Defaults to stratium-key-access
+      clientSecret: ""       # Falls back to oidcClientSecret when empty
+      scopes:
+        - openid
+        - profile
+      allowInsecureIssuer: false
+      skipClientIDCheck: false
+    rateLimiting:
+      enabled: false
+      requestsPerMin: 2000
+      burst: 1000
+  caBundle:
+    enabled: true
+    configMapName: ""
+    mountPath: /etc/ssl/certs/ca-certificates.crt
+    subPath: ca-certificates.crt
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  service:
+    type: ClusterIP
+    port: 50053
+    annotations: {}
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# =============================================================================
+# PAP (Policy Administration Point) Service
+# =============================================================================
+pap:
+  enabled: true
+
+  image:
+    registry: ""
+    repository: stratium/pap-server
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  config:
+    port: 8090
+    databasePassword: "stratium"  # CHANGE IN PRODUCTION
+    cacheRedisPassword: ""
+    oidcClientSecret: "stratium-pap-secret"  # CHANGE IN PRODUCTION
+    redirectUrl: "http://localhost:8090/callback"
+    oidcAllowInsecureIssuer: false
+    rateLimiting:
+      enabled: false
+      requestsPerMin: 2000
+      burst: 1000
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  service:
+    type: ClusterIP
+    port: 8090
+    annotations: {}
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: pap.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+# =============================================================================
+# PAP Web UI
+# =============================================================================
+papUI:
+  enabled: true
+
+  image:
+    registry: ""
+    repository: stratium/pap-ui
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: stratium.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+# =============================================================================
+# Envoy Proxy (gRPC-Web)
+# =============================================================================
+envoy:
+  enabled: true
+
+  image:
+    registry: docker.io
+    repository: envoyproxy/envoy
+    tag: "v1.28-latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  service:
+    type: ClusterIP
+    grpcWebPort: 8081
+    grpcNativePort: 8443
+    adminPort: 9901
+    annotations: {}
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  ingress:
+    enabled: false
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    hosts:
+      - host: grpc.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    servicePort: ""  # Defaults to grpcWebPort when empty
+
+# =============================================================================
+# Security Settings
+# =============================================================================
+security:
+  # Pod Security Standards
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+
+  # Network Policies
+  networkPolicy:
+    enabled: true
+    policyTypes:
+      - Ingress
+      - Egress
+
+# =============================================================================
+# Monitoring and Observability
+# =============================================================================
+monitoring:
+  # ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+  # Grafana Dashboard
+  grafanaDashboard:
+    enabled: false
+
+# =============================================================================
+# Service Mesh Integration
+# =============================================================================
+serviceMesh:
+  # Istio
+  istio:
+    enabled: false
+    mtls:
+      mode: STRICT
+
+  # Linkerd
+  linkerd:
+    enabled: false
+
+# =============================================================================
+# Additional Configurations
+# =============================================================================
+
+# Pod annotations (applied to all pods)
+podAnnotations: {}
+
+# Pod labels (applied to all pods)
+podLabels: {}
+
+# Node selector (applied to all pods)
+nodeSelector: {}
+
+# Tolerations (applied to all pods)
+tolerations: []
+
+# Affinity rules (applied to all pods)
+affinity: {}
+
+# Priority class for pods
+priorityClassName: ""
+
+# DNS configuration
+dnsPolicy: ClusterFirst
+dnsConfig: {}

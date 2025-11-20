@@ -1,0 +1,71 @@
+{{- if .Values.pap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap-config
+  labels:
+    {{- include "stratium.pap.labels" . | nindent 4 }}
+data:
+  stratium.yaml: |
+    # PAP Service Configuration
+    service:
+      name: pap-server
+      version: 1.0.0
+      environment: development
+
+    server:
+      host: "0.0.0.0"
+      port: {{ .Values.pap.config.port }}
+      read_timeout: 30s
+      write_timeout: 30s
+      idle_timeout: 300s
+
+    database:
+      driver: postgres
+      {{- if .Values.postgresql.enabled }}
+      host: {{ include "stratium.postgresql.host" . }}
+      port: {{ .Values.postgresql.service.port }}
+      database: stratium_pap
+      user: {{ .Values.postgresql.auth.stratiumUser }}
+      password: {{ .Values.postgresql.auth.stratiumPassword }}
+      {{- else if .Values.pap.config.database }}
+      host: {{ .Values.pap.config.database.host }}
+      port: {{ .Values.pap.config.database.port }}
+      database: {{ .Values.pap.config.database.name }}
+      user: {{ .Values.pap.config.database.user }}
+      password: {{ .Values.pap.config.database.password }}
+      {{- end }}
+      {{- if .Values.postgresql.enabled }}
+      sslmode: disable
+      {{- else }}
+      sslmode: require
+      {{- end }}
+      max_open_conns: 50
+      max_idle_conns: 10
+
+    cache:
+      type: redis
+      ttl: 10m
+      redis:
+        address: {{ include "stratium.redis.serviceName" . }}:{{ .Values.redis.service.port }}
+        db: 0
+        prefix: "stratium:pap:"
+
+    oidc:
+      enabled: true
+      issuer_url: {{ include "stratium.keycloak.issuerURL" . | quote }}
+      client_id: stratium-pap
+      client_secret: {{ .Values.pap.config.oidcClientSecret }}
+      redirect_url: {{ default "http://localhost:8090/callback" .Values.pap.config.redirectUrl | quote }}
+      allow_insecure_issuer: {{ default false .Values.pap.config.oidcAllowInsecureIssuer }}
+      scopes:
+        - openid
+        - profile
+        - email
+        - groups
+
+    logging:
+      level: info
+      format: json
+      output: stdout
+{{- end }}

@@ -1,0 +1,21 @@
+{{- if .Values.keyAccess.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stratium.keyAccess.serviceName" . }}
+  labels:
+    {{- include "stratium.keyAccess.labels" . | nindent 4 }}
+  {{- with .Values.keyAccess.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.keyAccess.service.type }}
+  ports:
+  - name: grpc
+    port: {{ .Values.keyAccess.service.port }}
+    targetPort: grpc
+    protocol: TCP
+  selector:
+    {{- include "stratium.keyAccess.selectorLabels" . | nindent 4 }}
+{{- end }}

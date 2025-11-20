@@ -1,0 +1,11 @@
+{{- if and .Values.keycloak.enabled .Values.keycloak.realmImport.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.keycloak.realmImport.configMapName }}
+  labels:
+    {{- include "stratium.keycloak.labels" . | nindent 4 }}
+data:
+  realm-export.json: |
+    {{- .Files.Get "realm-export.json" | nindent 4 }}
+{{- end }}

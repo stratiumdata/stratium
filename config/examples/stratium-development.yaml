@@ -1,0 +1,105 @@
+# Stratium Platform Configuration - Development Environment
+# This configuration is suitable for local development
+
+service:
+  name: stratium
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 50051
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  graceful_stop: 30s
+  tls:
+    enabled: false
+
+database:
+  driver: postgres
+  host: localhost
+  port: 5432
+  database: stratium_pap
+  user: stratium
+  password: stratium
+  sslmode: disable
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 5m
+
+cache:
+  type: memory
+  ttl: 5m
+  max_size: 1000
+
+encryption:
+  algorithm: RSA2048
+  key_rotation: false
+  admin_key_provider: env
+  admin_keys:
+    - admin
+
+oidc:
+  enabled: false
+  # Uncomment and configure for OIDC authentication
+  # issuer_url: http://localhost:8080/realms/stratium
+  # client_id: stratium-platform
+  # client_secret: your-client-secret
+  # redirect_url: http://localhost:8090/callback
+  # scopes:
+  #   - openid
+  #   - profile
+  #   - email
+
+services:
+  platform:
+    address: localhost:50051
+    timeout: 10s
+  key_manager:
+    address: localhost:50052
+    timeout: 10s
+  key_access:
+    address: localhost:50053
+    timeout: 10s
+  pap:
+    address: localhost:8090
+    timeout: 10s
+
+logging:
+  level: debug
+  format: text
+  output: stdout
+
+security:
+  rate_limiting:
+    enabled: false
+    requests_per_min: 1000
+    burst: 500
+  cors:
+    enabled: true
+    allowed_origins:
+      - "*"
+    allowed_methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowed_headers:
+      - Authorization
+      - Content-Type
+    expose_headers:
+      - Content-Length
+      - Content-Type
+    allow_credentials: true
+    max_age: 3600s
+
+observability:
+  metrics:
+    enabled: false
+    address: ":9090"
+    path: /metrics
+  tracing:
+    enabled: false

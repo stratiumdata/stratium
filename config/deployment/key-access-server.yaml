@@ -1,0 +1,45 @@
+# Key Access Server Configuration - Docker Deployment
+
+service:
+  name: key-access-server
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 50053
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 300s
+  graceful_stop: 60s
+
+services:
+  key_manager:
+    address: key-manager:50052
+    timeout: 30s
+  platform:
+    address: platform:50051
+    timeout: 30s
+
+encryption:
+  algorithm: RSA2048
+
+oidc:
+  enabled: true
+  issuer_url: http://keycloak:8080/realms/stratium
+  client_id: stratium-key-access
+  client_secret: stratium-key-manager-secret  # Override via STRATIUM_OIDC_CLIENT_SECRET
+  scopes:
+    - openid
+    - profile
+
+logging:
+  level: info
+  format: json
+  output: stdout
+
+observability:
+  metrics:
+    enabled: true
+    address: ":9093"
+    path: /metrics

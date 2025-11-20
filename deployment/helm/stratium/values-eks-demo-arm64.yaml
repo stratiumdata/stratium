@@ -1,0 +1,138 @@
+# AWS EKS overlay for the demo-arm64 cluster (us-east-2).
+# Use alongside values-ecr.yaml and values-free-tier.yaml:
+#
+#   helm upgrade --install stratium ./stratium \
+#     -n stratium \
+#     --create-namespace \
+#     -f stratium/values-ecr.yaml \
+#     -f stratium/values-free-tier.yaml \
+#     -f stratium/values-eks-demo-arm64.yaml
+#
+# This file assumes:
+#   - Images live in your private ECR registry (values-ecr.yaml)
+#   - AWS Secrets Manager (or another external system) populates the
+#     Kubernetes secrets referenced below
+#   - ALB Ingress Controller is installed; TLS termination can be added later
+
+cluster:
+  name: demo-arm64
+  region: us-east-2
+
+secrets:
+  stratium:
+    create: false
+    name: stratium-aws-sm
+  keycloak:
+    create: false
+    name: keycloak-aws-sm
+  postgresql:
+    create: false
+    name: postgresql-aws-sm
+
+# =============================================================================
+# Public ingress (ALB, HTTP-only for now)
+# =============================================================================
+
+keycloak:
+  config:
+    hostname: "auth.demostratium.com"
+    hostnamePort: "443"
+    httpEnabled: true
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/ce537bd9-d5d5-4121-9db9-2c6ad56c7034
+    hosts:
+      - host: "auth.demostratium.com"
+        paths:
+          - path: /
+            pathType: Prefix
+
+pap:
+  config:
+    oidcClientSecret: "<pap-secret>"
+    redirectUrl: "https://api.demostratium.com/callback"
+    issuerURL: "https://auth.demostratium.com/realms/stratium"
+    oidcAllowInsecureIssuer: false
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/ce537bd9-d5d5-4121-9db9-2c6ad56c7034
+    hosts:
+      - host: "api.demostratium.com"
+        paths:
+          - path: /
+            pathType: Prefix
+
+papUI:
+  env:
+    VITE_KEYCLOAK_URL: "https://auth.demostratium.com"
+    VITE_KEYCLOAK_REALM: "stratium"
+    VITE_KEYCLOAK_CLIENT_ID: "stratium-pap-ui"
+    VITE_API_URL: "https://api.demostratium.com"
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/ce537bd9-d5d5-4121-9db9-2c6ad56c7034
+    hosts:
+      - host: "ui.demostratium.com"
+        paths:
+          - path: /
+            pathType: Prefix
+
+envoy:
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:536176198371:certificate/ce537bd9-d5d5-4121-9db9-2c6ad56c7034
+      alb.ingress.kubernetes.io/backend-protocol-version: HTTP2
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    hosts:
+      - host: "grpc.demostratium.com"
+        paths:
+          - path: /
+            pathType: Prefix
+    servicePort: 8443
+
+keyAccess:
+  config:
+    environment: production
+    oidc:
+      skipClientIDCheck: true
+  extraEnv:
+    - name: SSL_CERT_FILE
+      value: /etc/ssl/certs/ca-certificates.crt
+  caBundle:
+    enabled: true
+    configMapName: stratium-key-access-ca
+    file: certs/amazon-root-ca1.crt
+    mountPath: /etc/ssl/certs/ca-certificates.crt
+    subPath: ca-certificates.crt
+
+keyManager:
+  config:
+    environment: production
+  adminKey:
+    useSecret: true
+    secretName: stratium-admin-key
+    secretKey: admin-key

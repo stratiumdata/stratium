@@ -1,0 +1,60 @@
+# RDS PostgreSQL Configuration for Stratium
+# This file configures Stratium to use external RDS PostgreSQL
+#
+# Usage:
+#   helm install stratium ./stratium -n stratium \
+#     -f values-ecr.yaml \
+#     -f values-free-tier.yaml \
+#     -f values-rds.yaml
+
+# =============================================================================
+# Disable In-Cluster PostgreSQL
+# =============================================================================
+postgresql:
+  enabled: false
+  # Password used by Stratium services (via stratium-secret)
+  auth:
+    stratiumPassword: "StratiumDB2025"
+
+# =============================================================================
+# External PostgreSQL Configuration
+# =============================================================================
+# RDS Endpoint
+externalDatabase:
+  host: "stratium-postgres.c388sq8a85dn.us-east-2.rds.amazonaws.com"
+  port: 5432
+  username: "postgres"
+  password: "StratiumDB2025"
+  database: "postgres"
+
+# =============================================================================
+# Service-Specific Database Configuration
+# =============================================================================
+# Each service needs to be configured to use the external database
+
+keycloak:
+  externalDatabase:
+    enabled: true
+    host: "stratium-postgres.c388sq8a85dn.us-east-2.rds.amazonaws.com"
+    port: 5432
+    user: "postgres"
+    password: "StratiumDB2025"
+    database: "keycloak"
+
+keyManager:
+  config:
+    database:
+      host: "stratium-postgres.c388sq8a85dn.us-east-2.rds.amazonaws.com"
+      port: 5432
+      user: "postgres"
+      password: "StratiumDB2025"
+      name: "stratium_keymanager"
+
+pap:
+  config:
+    database:
+      host: "stratium-postgres.c388sq8a85dn.us-east-2.rds.amazonaws.com"
+      port: 5432
+      user: "postgres"
+      password: "StratiumDB2025"
+      name: "stratium_pap"

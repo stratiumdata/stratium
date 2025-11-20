@@ -1,0 +1,17 @@
+{{- if and .Values.keyManager.enabled .Values.keyManager.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-manager-pvc
+  labels:
+    {{- include "stratium.keyManager.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.keyManager.persistence.size }}
+  {{- if .Values.keyManager.persistence.storageClass }}
+  storageClassName: {{ .Values.keyManager.persistence.storageClass }}
+  {{- end }}
+{{- end }}

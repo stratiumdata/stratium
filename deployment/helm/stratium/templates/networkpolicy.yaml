@@ -1,0 +1,502 @@
+{{- if .Values.security.networkPolicy.enabled }}
+# PostgreSQL Network Policy
+{{- if .Values.postgresql.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-postgresql
+  labels:
+    {{- include "stratium.postgresql.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.postgresql.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Platform
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.platform.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow from Key Manager
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyManager.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow from PAP
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.pap.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow from Keycloak
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keycloak.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  egress:
+  - {}
+{{- end }}
+---
+# Redis Network Policy
+{{- if .Values.redis.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-redis
+  labels:
+    {{- include "stratium.redis.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.redis.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Platform
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.platform.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.redis.service.port }}
+  # Allow from PAP
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.pap.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.redis.service.port }}
+  egress:
+  - {}
+{{- end }}
+---
+# Keycloak Network Policy
+{{- if .Values.keycloak.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-keycloak
+  labels:
+    {{- include "stratium.keycloak.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.keycloak.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Key Manager
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyManager.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow from Key Access
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyAccess.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow from PAP
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.pap.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow from PAP UI
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.papUI.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow from Ingress
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  egress:
+  # Allow to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.postgresql.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+---
+# Platform Service Network Policy
+{{- if .Values.platform.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-platform
+  labels:
+    {{- include "stratium.platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.platform.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Envoy
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.envoy.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.platform.config.port }}
+  egress:
+  # Allow to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.postgresql.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow to Redis
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.redis.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.redis.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+---
+# Key Manager Service Network Policy
+{{- if .Values.keyManager.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-manager
+  labels:
+    {{- include "stratium.keyManager.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.keyManager.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Key Access
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyAccess.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keyManager.config.port }}
+  # Allow from Envoy
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.envoy.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keyManager.config.port }}
+  egress:
+  # Allow to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.postgresql.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow to Keycloak
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keycloak.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+---
+# Key Access Service Network Policy
+{{- if .Values.keyAccess.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-key-access
+  labels:
+    {{- include "stratium.keyAccess.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.keyAccess.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Envoy
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.envoy.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keyAccess.config.port }}
+  egress:
+  # Allow to Key Manager
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyManager.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keyManager.service.port }}
+  # Allow to Keycloak
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keycloak.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+---
+# PAP Service Network Policy
+{{- if .Values.pap.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap
+  labels:
+    {{- include "stratium.pap.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.pap.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from PAP UI
+  - from:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.papUI.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.pap.config.port }}
+  # Allow from Ingress
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: {{ .Values.pap.config.port }}
+  egress:
+  # Allow to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.postgresql.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.postgresql.service.port }}
+  # Allow to Redis
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.redis.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.redis.service.port }}
+  # Allow to Keycloak
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keycloak.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+---
+# PAP UI Network Policy
+{{- if .Values.papUI.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-pap-ui
+  labels:
+    {{- include "stratium.papUI.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.papUI.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Ingress
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: {{ .Values.papUI.service.port }}
+  egress:
+  # Allow to PAP
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.pap.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.pap.service.port }}
+  # Allow to Keycloak
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keycloak.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keycloak.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+---
+# Envoy Network Policy
+{{- if .Values.envoy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stratium.fullname" . }}-envoy
+  labels:
+    {{- include "stratium.envoy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stratium.envoy.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.security.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+  # Allow from Ingress
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: {{ .Values.envoy.service.grpcWebPort }}
+    - protocol: TCP
+      port: {{ .Values.envoy.service.adminPort }}
+  egress:
+  # Allow to Platform
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.platform.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.platform.service.port }}
+  # Allow to Key Manager
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyManager.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keyManager.service.port }}
+  # Allow to Key Access
+  - to:
+    - podSelector:
+        matchLabels:
+          {{- include "stratium.keyAccess.selectorLabels" . | nindent 10 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.keyAccess.service.port }}
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+{{- end }}
+{{- end }}

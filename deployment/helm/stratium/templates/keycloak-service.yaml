@@ -1,0 +1,17 @@
+{{- if .Values.keycloak.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stratium.keycloak.serviceName" . }}
+  labels:
+    {{- include "stratium.keycloak.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.keycloak.service.type }}
+  ports:
+  - name: http
+    port: {{ .Values.keycloak.service.port }}
+    targetPort: http
+    protocol: TCP
+  selector:
+    {{- include "stratium.keycloak.selectorLabels" . | nindent 4 }}
+{{- end }}

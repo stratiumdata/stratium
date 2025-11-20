@@ -1,0 +1,331 @@
+# Local Development Values for Stratium
+# Optimized for running on Docker Desktop, Minikube, or kind
+#
+# Usage:
+#   helm install stratium ./stratium -n stratium --create-namespace -f values-local.yaml
+#
+
+# =============================================================================
+# PostgreSQL - Lightweight for local dev
+# =============================================================================
+postgresql:
+  enabled: true
+  replicaCount: 1
+
+  # Disable persistence for faster cleanup
+  persistence:
+    enabled: false
+
+  # Reduced resources for local
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+  # Keep default passwords (not for production!)
+  auth:
+    postgresPassword: "keycloak_password"
+    password: "keycloak_password"
+    stratiumPassword: "stratium"
+
+# =============================================================================
+# Redis - Lightweight cache
+# =============================================================================
+redis:
+  enabled: true
+  replicaCount: 1
+
+  # No persistence needed for cache
+  persistence:
+    enabled: false
+
+  # No auth for local dev
+  auth:
+    enabled: false
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# =============================================================================
+# Keycloak - Single instance
+# =============================================================================
+keycloak:
+  enabled: true
+  replicaCount: 1
+
+  # Default admin credentials
+  auth:
+    adminUser: admin
+    adminPassword: "admin"
+
+  config:
+    hostname: ""  # Allow Keycloak to use the incoming Host header for port-forward + in-cluster calls
+    hostnamePort: "8080"
+    httpEnabled: true
+    frontendUrl: ""  # Leave empty; Keycloak forbids combining hostname-url with hostname
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+  # No ingress - use port-forward
+  ingress:
+    enabled: false
+
+# =============================================================================
+# Platform Service - Single instance
+# =============================================================================
+platform:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    registry: ""
+    repository: stratiumdata/platform
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  config:
+    port: 50051
+    databasePassword: "stratium"
+    cacheRedisPassword: ""
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  # Disable autoscaling
+  autoscaling:
+    enabled: false
+
+  # Disable PDB for local
+  podDisruptionBudget:
+    enabled: false
+
+# =============================================================================
+# Key Manager - Single instance
+# =============================================================================
+keyManager:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    registry: ""
+    repository: stratiumdata/key-manager
+    tag: "20251111134242"
+    pullPolicy: IfNotPresent
+
+  config:
+    port: 50052
+    databasePassword: "stratium"
+    oidcClientSecret: "stratium-key-manager-secret"
+    adminKey: ""
+    externalKeysEnabled: true
+    externalKeySources:
+      - name: partners
+        type: volume
+        volume:
+          basePath: /var/run/stratium/external-keys
+          manifestFile: manifest.json
+          publicKeyFile: public.pem
+          privateKeyFile: private.pem
+    externalKeysEmergencyDisable: false
+
+  # Disable persistence for local
+  persistence:
+    enabled: false
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: false
+
+# =============================================================================
+# Key Access - Single instance
+# =============================================================================
+keyAccess:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    registry: ""
+    repository: stratiumdata/key-access
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  config:
+    port: 50053
+    oidcClientSecret: "stratium-key-manager-secret"
+    oidc:
+      allowInsecureIssuer: true
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: false
+
+# =============================================================================
+# PAP Service - Single instance
+# =============================================================================
+pap:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    registry: ""
+    repository: stratiumdata/pap
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  config:
+    port: 8090
+    databasePassword: "stratium"
+    cacheRedisPassword: ""
+    oidcClientSecret: "stratium-pap-secret"
+    redirectUrl: "http://localhost:8090/callback"
+    oidcAllowInsecureIssuer: true
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: false
+
+  ingress:
+    enabled: false
+
+# =============================================================================
+# PAP UI - Single instance
+# =============================================================================
+papUI:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    registry: ""
+    repository: stratiumdata/pap-ui
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  autoscaling:
+    enabled: false
+
+  ingress:
+    enabled: false
+
+# =============================================================================
+# Envoy Proxy - Single instance
+# =============================================================================
+envoy:
+  enabled: true
+  replicaCount: 1
+
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  autoscaling:
+    enabled: false
+
+  ingress:
+    enabled: false
+
+# =============================================================================
+# Security - Relaxed for local development
+# =============================================================================
+security:
+  # Keep pod security contexts for testing
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+
+  # Disable network policies for easier debugging
+  networkPolicy:
+    enabled: false
+
+# =============================================================================
+# Monitoring - Disabled for local
+# =============================================================================
+monitoring:
+  serviceMonitor:
+    enabled: false
+
+  grafanaDashboard:
+    enabled: false
+
+# =============================================================================
+# No special affinity/node selection for local
+# =============================================================================
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

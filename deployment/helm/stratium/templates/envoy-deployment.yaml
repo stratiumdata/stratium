@@ -1,0 +1,87 @@
+{{- if .Values.envoy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stratium.fullname" . }}-envoy
+  labels:
+    {{- include "stratium.envoy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.envoy.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "stratium.envoy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stratium.envoy.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/envoy-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "stratium.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      containers:
+      - name: envoy
+        image: {{ include "stratium.image" (dict "registry" .Values.envoy.image.registry "repository" .Values.envoy.image.repository "tag" .Values.envoy.image.tag "global" .Values.global) }}
+        imagePullPolicy: {{ .Values.envoy.image.pullPolicy }}
+        securityContext:
+          {{- toYaml .Values.security.containerSecurityContext | nindent 10 }}
+        command:
+        - /usr/local/bin/envoy
+        - -c
+        - /etc/envoy/envoy.yaml
+        ports:
+        - name: grpc-web
+          containerPort: {{ .Values.envoy.service.grpcWebPort }}
+          protocol: TCP
+        - name: grpc-native
+          containerPort: {{ .Values.envoy.service.grpcNativePort }}
+          protocol: TCP
+        - name: admin
+          containerPort: 9901
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: admin
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: admin
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.envoy.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "stratium.fullname" . }}-envoy-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for Micro Research API
+  api-postgres:
+    image: postgres:15-alpine
+    container_name: micro-research-db
+    environment:
+      POSTGRES_DB: micro_research
+      POSTGRES_USER: research
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-research_password}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - api_postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - ${NETWORK_NAME:-stratium-network}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research -d micro_research"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Micro Research API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: micro-research-api
+    ports:
+      - "${API_PORT:-8888}:8888"
+    environment:
+      - PORT=:8888
+      - DATABASE_URL=postgres://research:${POSTGRES_PASSWORD:-research_password}@api-postgres:5432/micro_research?sslmode=disable
+      - PLATFORM_SERVICE_URL=${PLATFORM_SERVICE_URL:-platform:50051}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://localhost:8080/realms/stratium}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-micro-research-api}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-micro-research-secret}
+      - CORS_ENDPOINTS=${CORS_ENDPOINTS:-http://localhost:3001,http://127.0.0.1:3001}
+    extra_hosts:
+      # Map localhost to keycloak container IP for OIDC discovery
+      # This allows the API to use http://localhost:8080 for both external and internal access
+      - "localhost:172.18.0.6"
+    depends_on:
+      api-postgres:
+        condition: service_healthy
+    networks:
+      - ${NETWORK_NAME:-stratium-network}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  api_postgres_data:
+
+networks:
+  stratium-network:
+    external: true

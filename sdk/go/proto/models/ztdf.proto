@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+option go_package = "stratium/models";
+
+import "google/protobuf/struct.proto";
+
+enum AppliesTo {
+  CIPHERTEXT = 0;
+  PLAINTEXT = 1;
+}
+
+message Assertion {
+  enum AssertionScope {
+    PAYLOAD = 0;
+    TDO = 1;
+  }
+
+  enum AssertionType {
+    HANDLING = 0;
+    OTHER = 1;
+  }
+
+  message Statement {
+    enum StatementFormat {
+      JSON_STRUCTURED = 0;
+      XML_STRUCTURED = 1;
+      BASE_64_BINARY = 2;
+      STRING = 3;
+    }
+
+    StatementFormat format = 1;
+    string schema = 2;
+    google.protobuf.Struct value = 3;
+    string jsonValue = 4;
+  }
+
+  message AssertionBinding {
+    string method = 1;
+    string signature = 2;
+  }
+
+  string id = 1;
+  AssertionType type = 2;
+  AssertionScope scope = 3;
+  AppliesTo applies_to_state = 4;
+  Statement statement = 5;
+  AssertionBinding binding = 6;
+}
+
+message EncryptionInformation {
+  message KeyAccessObject {
+    message PolicyBinding {
+      string alg = 1;
+      string hash = 2;
+    }
+
+    enum KeyAccessObjectType {
+      WRAPPED = 0;
+      REMOTE = 1;
+    }
+
+    enum KeyAccessObjectProtocol {
+      KAS = 0;
+    }
+
+    KeyAccessObjectType type = 1;
+    string url = 2;
+    KeyAccessObjectProtocol protocol = 3;
+    string wrapped_key = 4;
+    string sid = 5;
+    string kid = 6;
+    PolicyBinding policy_binding = 7;
+    string encrypted_metadata = 8;
+    string tdf_spec_version = 9;
+  }
+
+  message Method {
+    string algorithm = 1;
+    bool is_streamable = 2;
+    string iv = 3;
+  }
+
+  message IntegrityInformation {
+    message RootSignature {
+      string alg = 1;
+      string sig = 2;
+    }
+
+    message Segment {
+      string hash = 1;
+      int32 segment_size = 2;
+      int32 encrypted_segment_size = 3;
+    }
+
+    RootSignature root_signature = 1;
+    string segment_hash_alg = 2;
+    repeated Segment segments = 3;
+    int32 segment_size_default = 4;
+    int32 encrypted_segment_size_default = 5;
+  }
+
+  enum EncryptionInformationType {
+    SPLIT = 0;
+  }
+
+  EncryptionInformationType type = 1;
+  repeated KeyAccessObject key_access = 2;
+  Method method = 3;
+  IntegrityInformation integrity_information = 4;
+  string policy = 5;
+}
+
+message ZtdfPolicy {
+  message Body {
+    message Attribute {
+      message AttributeDefinition {
+        enum AttributeRuleType {
+          ANY_OF = 0;
+          ALL_OF = 1;
+          HIERARCHY = 2;
+        }
+
+        AttributeRuleType rule_type = 1;
+        repeated string valid_values = 2;
+      }
+      string attribute = 1;
+      string display_name = 2;
+      bool is_default = 3;
+      string pub_key = 4;
+      string kas_URL = 5;
+    }
+
+    repeated Attribute data_attributes = 1;
+    repeated string dissem = 2;
+  }
+
+  string uuid = 1;
+  Body body = 2;
+  string tdf_spec_version = 3;
+}
+
+message PayloadReference {
+  string type = 1;
+  string url = 2;
+  string protocol = 3;
+  bool is_encrypted = 4;
+  string mime_type = 5;
+  string tdf_spec_version = 6;
+}
+
+message Manifest {
+  repeated Assertion assertions = 1;
+  EncryptionInformation encryption_information = 2;
+  PayloadReference payload = 3;
+}
+
+message Payload {
+  bytes data = 1;
+}
+
+message TrustedDataObject {
+  Manifest manifest = 1;
+  Payload payload = 2;
+}

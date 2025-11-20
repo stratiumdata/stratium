@@ -1,0 +1,44 @@
+# Multi-stage build for PAP service
+FROM golang:1.25-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go/go.mod go/go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY go/ ./
+
+# Build the PAP server
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o pap-server ./cmd/pap-server
+
+# Final stage
+FROM cgr.dev/chainguard/wolfi-base:latest
+
+# Install runtime dependencies
+RUN apk --no-cache add ca-certificates wget netcat-openbsd
+
+# Create non-root user
+RUN addgroup -g 1000 stratium && \
+    adduser -D -u 1000 -G stratium stratium
+
+WORKDIR /home/stratium
+
+# Copy binary from builder
+COPY --from=builder --chown=stratium:stratium /app/pap-server .
+
+# Switch to non-root user
+USER stratium
+
+# Expose port
+EXPOSE 8090
+
+# Run the server
+CMD ["./pap-server"]

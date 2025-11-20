@@ -1,0 +1,41 @@
+apiVersion: v2
+name: stratium
+description: A production-grade Helm chart for Stratium - Zero Trust Data Fabric platform with cryptographic key management, ABAC policy enforcement, and secure data access control
+type: application
+
+# Chart version - increment with chart changes
+version: 1.0.0
+
+# Application version - matches the Stratium release version
+appVersion: "1.0.0"
+
+keywords:
+  - zero-trust
+  - data-fabric
+  - key-management
+  - abac
+  - policy-enforcement
+  - grpc
+  - keycloak
+  - oidc
+
+maintainers:
+  - name: Stratium Team
+    email: support@stratium.io
+
+# Dependencies for external charts (optional - can use subcharts)
+# dependencies:
+#   - name: postgresql
+#     version: "12.x.x"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: postgresql.enabled
+#   - name: redis
+#     version: "17.x.x"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: redis.enabled
+
+home: https://github.com/yourusername/stratium
+sources:
+  - https://github.com/yourusername/stratium
+
+icon: https://raw.githubusercontent.com/yourusername/stratium/main/assets/logo.png

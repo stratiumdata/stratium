@@ -1,0 +1,14 @@
+    apiVersion: eksctl.io/v1alpha5
+    kind: ClusterConfig
+    metadata:
+      name: demo
+      region: us-east-2
+      version: "1.34"
+    managedNodeGroups:
+      - name: arm-nodes
+        instanceType: c6g.xlarge # Choose an appropriate ARM instance type
+        desiredCapacity: 2
+        minSize: 1
+        maxSize: 3
+        labels: {arch: arm64}
+        tags: {env: demmo}

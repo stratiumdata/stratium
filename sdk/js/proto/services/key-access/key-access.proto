@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package key_access;
+
+option go_package = "stratium/services/key-access";
+
+import "google/protobuf/timestamp.proto";
+
+// KeyAccessService provides DEK wrapping and unwrapping operations, plus user key management
+service KeyAccessService {
+  // WrapDEK wraps a Data Encryption Key using the current encryption key
+  rpc WrapDEK(WrapDEKRequest) returns (WrapDEKResponse);
+
+  // UnwrapDEK unwraps a Data Encryption Key with ABAC verification
+  rpc UnwrapDEK(UnwrapDEKRequest) returns (UnwrapDEKResponse);
+}
+
+// WrapDEKRequest represents a request to wrap a DEK
+// Note: Subject is extracted from OIDC token in Authorization header
+message WrapDEKRequest {
+  // The resource the DEK will protect
+  string resource = 1;
+
+  // The DEK encrypted with the user's private key
+  bytes dek = 2;
+
+  // The key ID to use for wrapping (optional, uses current key if not specified)
+  string key_id = 3;
+
+  // Action being performed (for ABAC evaluation)
+  string action = 4;
+
+  // Additional context for ABAC evaluation
+  map<string, string> context = 5;
+
+  // The base64-encoded ZTDF policy from the manifest
+  // Contains data attributes that must be matched against user's JWT claims
+  string policy = 6;
+}
+
+// WrapDEKResponse represents the response from wrapping a DEK
+message WrapDEKResponse {
+  // The wrapped (encrypted) DEK
+  bytes wrapped_dek = 1;
+
+  // The key ID used for wrapping
+  string key_id = 2;
+
+  // Whether access was granted for the wrap operation
+  bool access_granted = 3;
+
+  // Reason for the access decision
+  string access_reason = 4;
+
+  // List of ABAC rules that were applied
+  repeated string applied_rules = 5;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// UnwrapDEKRequest represents a request to unwrap a DEK
+// Note: Subject is extracted from OIDC token in Authorization header
+message UnwrapDEKRequest {
+  // The resource the DEK protects
+  string resource = 1;
+
+  // The wrapped (encrypted) DEK to be unwrapped
+  bytes wrapped_dek = 2;
+
+  // The key ID used for wrapping
+  string key_id = 3;
+
+  // The client key ID used for sending the DEK back to the client
+  string client_key_id = 4;
+
+  // Action being performed (for ABAC evaluation)
+  string action = 5;
+
+  // Additional context for ABAC evaluation
+  map<string, string> context = 6;
+
+  // The base64-encoded ZTDF policy from the manifest
+  // Contains data attributes that must be matched against user's JWT claims
+  string policy = 7;
+}
+
+// UnwrapDEKResponse represents the response from unwrapping a DEK
+message UnwrapDEKResponse {
+  // The DEK encrypted with the subject's public key
+  bytes dek_for_subject = 1;
+
+  // Whether access was granted for the unwrap operation
+  bool access_granted = 2;
+
+  // Reason for the access decision
+  string access_reason = 3;
+
+  // List of ABAC rules that were applied
+  repeated string applied_rules = 4;
+
+  // Timestamp of the operation
+  google.protobuf.Timestamp timestamp = 5;
+}

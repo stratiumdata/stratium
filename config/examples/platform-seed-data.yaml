@@ -1,0 +1,56 @@
+# Sample platform seed data manifest. This file can be mounted via a ConfigMap
+# and referenced with platform.seed_data_path to bootstrap entitlements and
+# policies for development or demo environments.
+entitlements:
+  - id: ent-1
+    subject: user123
+    resource: document-service
+    actions: ["read", "write"]
+    conditions:
+      - type: time
+        operator: before
+        value: 2025-12-31T23:59:59Z
+    metadata:
+      department: engineering
+      level: senior
+    expires_at: 2025-12-31T23:59:59Z
+
+  - id: ent-2
+    subject: user123
+    resource: user-service
+    actions: ["read"]
+    conditions:
+      - type: attribute
+        operator: equals
+        value: engineering
+        parameters:
+          attribute: department
+    metadata:
+      scope: department
+
+  - id: ent-admin-1
+    subject: admin456
+    resource: "*"
+    actions: ["*"]
+    metadata:
+      role: admin
+
+policies:
+  - id: admin-policy
+    name: Admin Policy
+    description: Full access for administrators
+    rules:
+      - resource: "*"
+        action: "*"
+        subject: "*"
+        condition: role == 'admin'
+        effect: allow
+
+  - id: default-deny-policy
+    name: Default Deny Policy
+    description: Default deny when no other rules match
+    rules:
+      - resource: "*"
+        action: "*"
+        subject: "*"
+        effect: deny
