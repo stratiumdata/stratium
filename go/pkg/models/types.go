@@ -28,6 +28,9 @@ type KeyManager interface {
 	// DecryptDEK decrypts a DEK with the private key
 	DecryptDEK(encryptedDEK []byte) ([]byte, error)
 
+	// WrapDEK encrypts a DEK with the private key before sending to the service
+	WrapDEK(dek []byte) ([]byte, error)
+
 	// GetKeyID returns the key identifier
 	GetKeyID() string
 

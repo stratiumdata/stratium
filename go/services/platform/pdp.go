@@ -54,6 +54,11 @@ func NewPolicyDecisionPoint(repo *repository.Repository, cache PolicyCache, ttl 
 	}
 }
 
+// NewPolicyDecisionPointWithCache preserves the legacy signature used by existing tests.
+func NewPolicyDecisionPointWithCache(repo *repository.Repository, cache PolicyCache, ttl time.Duration) *PolicyDecisionPoint {
+	return NewPolicyDecisionPoint(repo, cache, ttl)
+}
+
 // EvaluateDecision evaluates a decision request against policies and entitlements
 func (pdp *PolicyDecisionPoint) EvaluateDecision(ctx context.Context, req *GetDecisionRequest) (*DecisionResult, error) {
 	logger.Info("PDP: Evaluating decision for subject_attributes=%v, resource_attributes=%v, action=%s",

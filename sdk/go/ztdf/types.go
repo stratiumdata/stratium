@@ -26,6 +26,10 @@ type WrapOptions struct {
 
 	// Manifest template for ZTDF
 	Manifest *models.Manifest
+
+	// Client key information for DEK wrapping
+	ClientKeyID          string
+	ClientPrivateKeyPath string
 }
 
 // UnwrapOptions contains options for unwrapping a ZTDF

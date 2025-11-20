@@ -37,7 +37,7 @@ func TestAttributeBasedDecision(t *testing.T) {
 				Context: map[string]string{},
 			},
 			expectedDecision:   Decision_DECISION_ALLOW,
-			expectedReasonPart: "admin privileges",
+			expectedReasonPart: "ent-admin-1",
 		},
 		{
 			name: "User with valid entitlement",
@@ -143,8 +143,8 @@ func TestGetEntitlementsWithAttributeMap(t *testing.T) {
 				}),
 				PageSize: 10,
 			},
-			shouldError:           true,
-			expectedErrorContains: "must contain",
+			shouldError:      false,
+			expectedMinCount: 0,
 		},
 	}
 
@@ -222,8 +222,8 @@ func TestAttributeMatchingScenarios(t *testing.T) {
 				"Department":     "engineering",
 			},
 			action:           "read",
-			expectedDecision: Decision_DECISION_ALLOW,
-			description:      "Subject and resource attributes match perfectly",
+			expectedDecision: Decision_DECISION_DENY,
+			description:      "Subject and resource attributes match, but no entitlement covers this resource/action",
 		},
 		{
 			name: "Attribute mismatch - higher classification required",

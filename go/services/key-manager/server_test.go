@@ -5,15 +5,11 @@ import (
 	"fmt"
 	"testing"
 
-	"stratium/config"
 	"stratium/pkg/security/encryption"
 )
 
 func TestServer_CreateKey(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	tests := []struct {
 		name            string
@@ -100,10 +96,7 @@ func TestServer_CreateKey(t *testing.T) {
 }
 
 func TestServer_GetKey(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	// First create a key
 	createReq := &CreateKeyRequest{
@@ -191,10 +184,7 @@ func TestServer_GetKey(t *testing.T) {
 }
 
 func TestServer_ListKeys(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	// Create multiple test keys
 	testKeys := []struct {
@@ -241,7 +231,7 @@ func TestServer_ListKeys(t *testing.T) {
 		{
 			name:           "List all keys",
 			request:        &ListKeysRequest{},
-			expectMinCount: len(testKeys) + 2, // +2 for sample keys
+			expectMinCount: len(testKeys),
 		},
 		{
 			name: "List keys with subject filter",
@@ -284,10 +274,7 @@ func TestServer_ListKeys(t *testing.T) {
 }
 
 func TestServer_UnwrapDEK(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	// Create a test key for DEK unwrapping
 	createReq := &CreateKeyRequest{
@@ -414,10 +401,7 @@ func TestServer_UnwrapDEK(t *testing.T) {
 }
 
 func TestServer_RotateKey(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	// Create a test key with rotation enabled
 	createReq := &CreateKeyRequest{
@@ -505,10 +489,7 @@ func TestServer_RotateKey(t *testing.T) {
 }
 
 func TestServer_ListProviders(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	tests := []struct {
 		name           string
@@ -565,10 +546,7 @@ func TestServer_ListProviders(t *testing.T) {
 }
 
 func TestServer_DeleteKey(t *testing.T) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
 
 	// Create a test key
 	createReq := &CreateKeyRequest{
@@ -649,10 +627,7 @@ func TestServer_DeleteKey(t *testing.T) {
 
 // Benchmark tests
 func BenchmarkServer_CreateKey(b *testing.B) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		b.Fatal(err)
-	}
+	server := newTestKeyManagerServer(b, encryption.RSA2048)
 
 	req := &CreateKeyRequest{
 		Name:         "benchmark-key",
@@ -671,10 +646,7 @@ func BenchmarkServer_CreateKey(b *testing.B) {
 }
 
 func BenchmarkServer_UnwrapDEK(b *testing.B) {
-	server, err := NewServer(encryption.RSA2048, &config.Config{})
-	if err != nil {
-		b.Fatal(err)
-	}
+	server := newTestKeyManagerServer(b, encryption.RSA2048)
 
 	// Create a test key
 	createReq := &CreateKeyRequest{

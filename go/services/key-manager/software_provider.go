@@ -324,7 +324,7 @@ func (s *SoftwareKeyProvider) Decrypt(ctx context.Context, keyID string, ciphert
 	case *rsa.PrivateKey:
 		return rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, ciphertext, nil)
 	case *ecdsa.PrivateKey:
-		return nil, fmt.Errorf("ECC keys do not support direct encryption/decryption")
+		return decryptDEKWithECCPrivateKey(privateKey, ciphertext)
 	case *kyber512.PrivateKey:
 		return s.decryptWithKyber512(privateKey, ciphertext)
 	case *kyber768.PrivateKey:
@@ -351,7 +351,7 @@ func (s *SoftwareKeyProvider) Encrypt(ctx context.Context, keyID string, plainte
 	case *rsa.PublicKey:
 		return rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, plaintext, nil)
 	case *ecdsa.PublicKey:
-		return nil, fmt.Errorf("ECC keys do not support direct encryption/decryption")
+		return encryptDEKWithECCPublicKey(publicKey, plaintext)
 	case *kyber512.PublicKey:
 		// Kyber uses KEM - encapsulate generates a shared secret and ciphertext
 		// Note: For actual data encryption, the shared secret should be used as a key for symmetric encryption

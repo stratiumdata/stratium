@@ -32,10 +32,10 @@ type mockKeyAccessServer struct {
 	keyaccess.UnimplementedKeyAccessServiceServer
 
 	// Configure response behavior
-	shouldDenyAccess bool
+	shouldDenyAccess  bool
 	shouldReturnError bool
-	wrapResponse *keyaccess.WrapDEKResponse
-	unwrapResponse *keyaccess.UnwrapDEKResponse
+	wrapResponse      *keyaccess.WrapDEKResponse
+	unwrapResponse    *keyaccess.UnwrapDEKResponse
 }
 
 func (m *mockKeyAccessServer) WrapDEK(ctx context.Context, req *keyaccess.WrapDEKRequest) (*keyaccess.WrapDEKResponse, error) {
@@ -68,9 +68,9 @@ func (m *mockKeyAccessServer) UnwrapDEK(ctx context.Context, req *keyaccess.Unwr
 
 	// Default response
 	return &keyaccess.UnwrapDEKResponse{
-		AccessGranted:   !m.shouldDenyAccess,
-		AccessReason:    "Policy evaluation passed",
-		DekForSubject:   []byte("unwrapped-dek-data"),
+		AccessGranted: !m.shouldDenyAccess,
+		AccessReason:  "Policy evaluation passed",
+		DekForSubject: []byte("unwrapped-dek-data"),
 	}, nil
 }
 
@@ -132,6 +132,8 @@ func TestKeyAccessClient_RequestDEK(t *testing.T) {
 		Purpose:            "encryption",
 		DEK:                []byte("test-dek"),
 		Policy:             "test-policy",
+		ClientKeyID:        "client-key",
+		ClientWrappedDEK:   []byte("wrapped"),
 	}
 
 	ctx := context.Background()
@@ -177,6 +179,8 @@ func TestKeyAccessClient_RequestDEK_MissingResource(t *testing.T) {
 	req := &DEKRequest{
 		ResourceAttributes: map[string]string{"classification": "secret"},
 		Purpose:            "encryption",
+		ClientKeyID:        "client-key",
+		ClientWrappedDEK:   []byte("wrapped"),
 	}
 
 	ctx := context.Background()
@@ -192,14 +196,58 @@ func TestKeyAccessClient_RequestDEK_MissingResourceAttributes(t *testing.T) {
 	defer cleanup()
 
 	req := &DEKRequest{
-		Resource: "test-resource",
-		Purpose:  "encryption",
+		Resource:         "test-resource",
+		Purpose:          "encryption",
+		ClientKeyID:      "client-key",
+		ClientWrappedDEK: []byte("wrapped"),
 	}
 
 	ctx := context.Background()
 	_, err := client.RequestDEK(ctx, req)
 	if err != ErrResourceAttributesRequired {
 		t.Errorf("RequestDEK() with missing attributes expected ErrResourceAttributesRequired, got: %v", err)
+	}
+}
+
+func TestKeyAccessClient_RequestDEK_MissingClientKey(t *testing.T) {
+	mockServer := &mockKeyAccessServer{}
+	client, cleanup := setupKeyAccessTest(t, mockServer)
+	defer cleanup()
+
+	req := &DEKRequest{
+		Resource:           "test-resource",
+		ResourceAttributes: map[string]string{"classification": "secret"},
+		Purpose:            "encryption",
+		DEK:                []byte("test-dek"),
+		Policy:             "test-policy",
+		ClientWrappedDEK:   []byte("wrapped"),
+	}
+
+	ctx := context.Background()
+	_, err := client.RequestDEK(ctx, req)
+	if err != ErrClientKeyRequired {
+		t.Errorf("RequestDEK() with missing client key expected ErrClientKeyRequired, got: %v", err)
+	}
+}
+
+func TestKeyAccessClient_RequestDEK_MissingClientWrap(t *testing.T) {
+	mockServer := &mockKeyAccessServer{}
+	client, cleanup := setupKeyAccessTest(t, mockServer)
+	defer cleanup()
+
+	req := &DEKRequest{
+		Resource:           "test-resource",
+		ResourceAttributes: map[string]string{"classification": "secret"},
+		Purpose:            "encryption",
+		DEK:                []byte("test-dek"),
+		Policy:             "test-policy",
+		ClientKeyID:        "client-key",
+	}
+
+	ctx := context.Background()
+	_, err := client.RequestDEK(ctx, req)
+	if err != ErrClientWrapRequired {
+		t.Errorf("RequestDEK() with missing client wrap expected ErrClientWrapRequired, got: %v", err)
 	}
 }
 
@@ -216,6 +264,8 @@ func TestKeyAccessClient_RequestDEK_AccessDenied(t *testing.T) {
 		Purpose:            "encryption",
 		DEK:                []byte("test-dek"),
 		Policy:             "test-policy",
+		ClientKeyID:        "client-key",
+		ClientWrappedDEK:   []byte("wrapped"),
 	}
 
 	ctx := context.Background()
@@ -238,6 +288,8 @@ func TestKeyAccessClient_RequestDEK_ServerError(t *testing.T) {
 		Purpose:            "encryption",
 		DEK:                []byte("test-dek"),
 		Policy:             "test-policy",
+		ClientKeyID:        "client-key",
+		ClientWrappedDEK:   []byte("wrapped"),
 	}
 
 	ctx := context.Background()

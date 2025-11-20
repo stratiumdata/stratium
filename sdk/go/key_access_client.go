@@ -29,6 +29,8 @@ type DEKRequest struct {
 	Context            map[string]string // Additional context
 	DEK                []byte            // DEK bytes
 	Policy             string            // Encoded Base64 Policy
+	ClientKeyID        string            // Registered client key identifier
+	ClientWrappedDEK   []byte            // DEK wrapped with client's private key
 }
 
 // DEKResponse contains the issued data encryption key.
@@ -100,13 +102,21 @@ func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (*DEK
 	}
 	defer cancel()
 
+	if req.ClientKeyID == "" {
+		return nil, ErrClientKeyRequired
+	}
+	if len(req.ClientWrappedDEK) == 0 {
+		return nil, ErrClientWrapRequired
+	}
+
 	// Call gRPC service to wrap DEK
 	resp, err := c.client.WrapDEK(ctx, &keyaccess.WrapDEKRequest{
-		Resource: req.Resource, // Use client ID as resource identifier
-		Dek:      req.DEK,
-		Action:   req.Purpose,
-		Context:  req.Context,
-		Policy:   req.Policy,
+		Resource:    req.Resource,
+		Dek:         req.ClientWrappedDEK,
+		Action:      req.Purpose,
+		Context:     req.Context,
+		Policy:      req.Policy,
+		ClientKeyId: req.ClientKeyID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to wrap DEK: %w", err)

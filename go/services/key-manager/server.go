@@ -2,7 +2,12 @@ package key_manager
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"math/big"
 	"stratium/config"
 	"stratium/pkg/auth"
 	"stratium/pkg/security/encryption"
@@ -611,6 +616,37 @@ func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (*UnwrapD
 	return response, nil
 }
 
+func (s *Server) RewrapClientDEK(ctx context.Context, req *RewrapClientDEKRequest) (*RewrapClientDEKResponse, error) {
+	if req.GetSubject() == "" {
+		return nil, status.Error(codes.InvalidArgument, "subject is required")
+	}
+	if req.GetClientKeyId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "client_key_id is required")
+	}
+	if len(req.GetClientWrappedDek()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "client_wrapped_dek is required")
+	}
+	if req.GetServiceKeyId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "service_key_id is required")
+	}
+
+	plaintext, err := s.decryptClientWrappedDEK(ctx, req.GetClientKeyId(), req.GetClientWrappedDek())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "failed to unwrap client DEK: %v", err)
+	}
+
+	serviceWrapped, err := s.wrapWithServiceKey(ctx, req.GetServiceKeyId(), plaintext)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to wrap DEK with service key: %v", err)
+	}
+
+	return &RewrapClientDEKResponse{
+		ServiceWrappedDek: serviceWrapped,
+		ServiceKeyId:      req.GetServiceKeyId(),
+		Timestamp:         timestamppb.Now(),
+	}, nil
+}
+
 // ListProviders lists available key providers
 func (s *Server) ListProviders(ctx context.Context, req *ListProvidersRequest) (*ListProvidersResponse, error) {
 	logger.Debug("ListProviders called - AvailableOnly: %t", req.AvailableOnly)
@@ -997,6 +1033,86 @@ func (s *Server) ListClients(ctx context.Context, req *ListClientsRequest) (*Lis
 		TotalCount:    int32(totalCount),
 		Timestamp:     timestamppb.Now(),
 	}, nil
+}
+
+func (s *Server) decryptClientWrappedDEK(ctx context.Context, clientKeyID string, encrypted []byte) ([]byte, error) {
+	key, err := s.clientKeyStore.GetKey(ctx, clientKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if key.PublicKeyPem == "" {
+		return nil, fmt.Errorf("client key %s missing public key PEM", clientKeyID)
+	}
+
+	block, _ := pem.Decode([]byte(key.PublicKeyPem))
+	if block == nil {
+		return nil, errors.New("failed to decode client public key PEM")
+	}
+
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse client public key: %w", err)
+	}
+
+	switch rsaKey := pub.(type) {
+	case *rsa.PublicKey:
+		return rsaPublicUnwrap(rsaKey, encrypted)
+	default:
+		return nil, fmt.Errorf("client key type %s is not supported for secure wrapping", key.KeyType.String())
+	}
+}
+
+func (s *Server) wrapWithServiceKey(ctx context.Context, serviceKeyID string, plaintext []byte) ([]byte, error) {
+	keyPair, err := s.keyStore.GetKeyPair(ctx, serviceKeyID)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, err := s.providerFactory.GetProvider(keyPair.ProviderType)
+	if err != nil {
+		return nil, err
+	}
+
+	return provider.Encrypt(ctx, serviceKeyID, plaintext)
+}
+
+func rsaPublicUnwrap(pub *rsa.PublicKey, ciphertext []byte) ([]byte, error) {
+	k := (pub.N.BitLen() + 7) / 8
+	if len(ciphertext) != k {
+		return nil, fmt.Errorf("invalid ciphertext length: expected %d, got %d", k, len(ciphertext))
+	}
+
+	c := new(big.Int).SetBytes(ciphertext)
+	if c.Sign() <= 0 || c.Cmp(pub.N) >= 0 {
+		return nil, errors.New("ciphertext representative out of range")
+	}
+
+	m := new(big.Int).Exp(c, big.NewInt(int64(pub.E)), pub.N)
+	em := m.Bytes()
+	if len(em) < k {
+		padded := make([]byte, k)
+		copy(padded[k-len(em):], em)
+		em = padded
+	}
+
+	if len(em) < 11 || em[0] != 0x00 || em[1] != 0x01 {
+		return nil, errors.New("invalid PKCS#1 padding")
+	}
+
+	index := 2
+	for index < len(em) && em[index] == 0xff {
+		index++
+	}
+	if index >= len(em) || em[index] != 0x00 {
+		return nil, errors.New("invalid PKCS#1 padding delimiter")
+	}
+
+	plain := em[index+1:]
+	if len(plain) == 0 {
+		return nil, errors.New("empty decrypted payload")
+	}
+
+	return plain, nil
 }
 
 // validateCreateKeyRequest validates the create key request

@@ -52,6 +52,7 @@ type Server struct {
 	authService      *auth.AuthService
 	authProvider     auth.AuthProvider
 	serviceKeyCache  *serviceKeyCache
+	rewrapClientDEK  func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error)
 }
 
 // SubjectKeyStore manages public keys for subjects
@@ -131,6 +132,9 @@ func NewServer(keyManagerAddr string, cfg *config.Config) (*Server, error) {
 		authService:      authService,
 		authProvider:     authProvider,
 		serviceKeyCache:  newServiceKeyCache(cacheTTL),
+	}
+	server.rewrapClientDEK = func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error) {
+		return server.keyManagerClient.RewrapClientDEK(ctx, req)
 	}
 
 	logger.Info("Key Access server initialized successfully")
@@ -217,12 +221,16 @@ func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (*WrapDEKResp
 		return s.createWrapDeniedResponse(req, fmt.Sprintf("failed to extract subject attributes: %v", err)), nil
 	}
 
-	subject := subjectAttributes["sub"]
+	subjectValue := subjectAttributes["sub"]
+	subject, _ := subjectValue.(string)
+	if subject == "" {
+		subject = fmt.Sprintf("%v", subjectValue)
+	}
 
 	// Use preferred_username for ABAC matching (falls back to sub if not available)
-	userIdentifier := subjectAttributes["preferred_username"]
-	if userIdentifier == "" {
-		userIdentifier = subject
+	userIdentifier := subject
+	if preferred, ok := subjectAttributes["preferred_username"].(string); ok && preferred != "" {
+		userIdentifier = preferred
 	}
 
 	logger.Info("WrapDEK called - User: %s (sub: %s), Resource: %s", userIdentifier, subject, req.Resource)
@@ -257,22 +265,22 @@ func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (*WrapDEKResp
 		}
 	}
 
-	// Step 5: Use the DEK directly
-	// Note: In production, the DEK would be encrypted with the user's private key
-	// and we would verify it here using their public key. For simplicity in this demo,
-	// we accept the DEK as-is.
-	plaintextDEK := req.Dek
-
-	// Step 6: Retrieve (and cache) the service public key used to encrypt the DEK
-	servicePublicKey, err := s.getServicePublicKey(ctx, keyID)
+	rewrapResp, err := s.rewrapClientDEK(ctx, &keyManager.RewrapClientDEKRequest{
+		Subject:          subject,
+		ClientKeyId:      req.ClientKeyId,
+		ClientWrappedDek: req.Dek,
+		ServiceKeyId:     keyID,
+		Resource:         req.Resource,
+	})
 	if err != nil {
-		return s.createWrapDeniedResponse(req, err.Error()), nil
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Failed to rewrap DEK: %v", err)), nil
 	}
 
-	wrappedDEK, err := s.encryptDEK(servicePublicKey, plaintextDEK)
-	if err != nil {
-		return s.createWrapDeniedResponse(req, fmt.Sprintf("Failed to wrap DEK with service key: %v", err)), nil
+	if rewrapResp.GetServiceKeyId() != "" {
+		keyID = rewrapResp.GetServiceKeyId()
 	}
+
+	wrappedDEK := rewrapResp.GetServiceWrappedDek()
 
 	logger.Info("DEK wrapped successfully for user %s", userIdentifier)
 
@@ -303,10 +311,14 @@ func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (*UnwrapD
 		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("failed to extract subject attributes: %v", err)), nil
 	}
 
-	subject := fmt.Sprintf("%s", subjectAttributes["sub"])
+	subjectValue := subjectAttributes["sub"]
+	subject, _ := subjectValue.(string)
+	if subject == "" {
+		subject = fmt.Sprintf("%v", subjectValue)
+	}
 
 	// Use preferred_username for ABAC matching (falls back to sub if not available)
-	userIdentifier := subjectAttributes["preferred_username"]
+	userIdentifier, _ := subjectAttributes["preferred_username"].(string)
 	if userIdentifier == "" {
 		userIdentifier = subject
 	}
@@ -372,6 +384,9 @@ func (s *Server) validateWrapRequest(req *WrapDEKRequest) error {
 	}
 	if len(req.Dek) == 0 {
 		return fmt.Errorf("DEK is required")
+	}
+	if req.ClientKeyId == "" {
+		return fmt.Errorf("client key ID is required")
 	}
 
 	if req.Action == "" {

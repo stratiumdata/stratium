@@ -18,10 +18,16 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
+	"fmt"
 	"log"
+	"os"
 	"time"
 
+	"stratium/pkg/ztdf"
 	keyAccess "stratium/services/key-access"
 
 	"google.golang.org/grpc"
@@ -30,12 +36,23 @@ import (
 )
 
 var (
-	addr  = flag.String("addr", "localhost:50053", "the address to connect to")
-	token = flag.String("token", "user-token", "JWT token for authentication (use 'user-token' or 'admin-token' for testing)")
+	addr         = flag.String("addr", "localhost:50053", "the address to connect to")
+	token        = flag.String("token", "user-token", "JWT token for authentication (use 'user-token' or 'admin-token' for testing)")
+	clientKeyID  = flag.String("client-key-id", "", "client key ID registered with the key manager")
+	clientKeyPEM = flag.String("client-key-file", "", "path to the client's RSA private key PEM file")
 )
 
 func main() {
 	flag.Parse()
+
+	if *clientKeyID == "" || *clientKeyPEM == "" {
+		log.Fatalf("client-key-id and client-key-file must be provided")
+	}
+
+	privateKey, err := loadRSAPrivateKey(*clientKeyPEM)
+	if err != nil {
+		log.Fatalf("failed to load client private key: %v", err)
+	}
 
 	// Set up a connection to the server
 	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -65,10 +82,16 @@ func main() {
 		log.Fatalf("Failed to generate mock DEK: %v", err)
 	}
 
+	clientWrapped, err := ztdf.WrapDEKWithPrivateKey(privateKey, mockDEK)
+	if err != nil {
+		log.Fatalf("failed to wrap DEK with client key: %v", err)
+	}
+
 	wrapReq := &keyAccess.WrapDEKRequest{
-		Resource: "test-resource",
-		Dek:      mockDEK,
-		Action:   "wrap_dek",
+		Resource:    "test-resource",
+		Dek:         clientWrapped,
+		Action:      "wrap_dek",
+		ClientKeyId: *clientKeyID,
 		Context: map[string]string{
 			"department":  "engineering",
 			"environment": "development",
@@ -121,10 +144,16 @@ func main() {
 	// Example 3: Test with unauthorized resource
 	log.Println("=== Testing WrapDEK with Unauthorized Resource ===")
 
+	unauthorizedWrapped, err := ztdf.WrapDEKWithPrivateKey(privateKey, mockDEK)
+	if err != nil {
+		log.Fatalf("failed to wrap DEK for unauthorized request: %v", err)
+	}
+
 	unauthorizedReq := &keyAccess.WrapDEKRequest{
-		Resource: "secret-resource",
-		Dek:      mockDEK,
-		Action:   "wrap_dek",
+		Resource:    "secret-resource",
+		Dek:         unauthorizedWrapped,
+		Action:      "wrap_dek",
+		ClientKeyId: *clientKeyID,
 		Context: map[string]string{
 			"department": "unknown",
 		},
@@ -143,10 +172,16 @@ func main() {
 	if *token == "admin-token" {
 		log.Println("Running as admin user (admin456)")
 
+		adminWrapped, err := ztdf.WrapDEKWithPrivateKey(privateKey, mockDEK)
+		if err != nil {
+			log.Fatalf("failed to wrap DEK for admin request: %v", err)
+		}
+
 		adminWrapReq := &keyAccess.WrapDEKRequest{
-			Resource: "admin-resource",
-			Dek:      mockDEK,
-			Action:   "wrap_dek",
+			Resource:    "admin-resource",
+			Dek:         adminWrapped,
+			Action:      "wrap_dek",
+			ClientKeyId: *clientKeyID,
 			Context: map[string]string{
 				"role":        "admin",
 				"environment": "production",
@@ -170,4 +205,20 @@ func main() {
 	log.Println("  -token=user-token   : Regular user (user123)")
 	log.Println("  -token=admin-token  : Admin user (admin456)")
 	log.Println("  -token=<custom>     : Custom user with ID matching the token")
+}
+
+func loadRSAPrivateKey(path string) (*rsa.PrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM file")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
 }

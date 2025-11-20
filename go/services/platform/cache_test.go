@@ -2,12 +2,14 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
 	"stratium/pkg/models"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 )
 
@@ -490,6 +492,67 @@ func TestCache_InMemoryPolicyCache_NilContext(t *testing.T) {
 			t.Errorf("Expected no error with nil context, got: %v", err)
 		}
 	})
+}
+
+func TestRedisPolicyCache_PrefixAndTTL(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+
+	cfg := RedisCacheConfig{
+		Addr:   s.Addr(),
+		Prefix: "custom:policy:",
+		TTL:    2 * time.Minute,
+	}
+
+	cache, err := NewRedisPolicyCache(cfg)
+	if err != nil {
+		t.Fatalf("NewRedisPolicyCache failed: %v", err)
+	}
+	defer cache.Close()
+
+	ctx := context.Background()
+	key := "policy-123"
+	policy := &models.Policy{
+		ID:          uuid.New(),
+		Name:        "redis-test-policy",
+		Description: "policy stored in redis",
+		Language:    models.PolicyLanguageJSON,
+	}
+
+	if err := cache.Set(ctx, key, policy, 0); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	fullKey := cfg.Prefix + key
+	if !s.Exists(fullKey) {
+		t.Fatalf("expected key %s to exist in redis", fullKey)
+	}
+
+	ttl := s.TTL(fullKey)
+	if ttl > cfg.TTL || ttl <= 0 {
+		t.Fatalf("expected TTL <= %v and > 0, got %v", cfg.TTL, ttl)
+	}
+
+	data, err := cache.client.Get(ctx, fullKey).Bytes()
+	if err != nil {
+		t.Fatalf("failed to read raw cache entry: %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("failed to unmarshal cached policy: %v", err)
+	}
+	if payload["name"] != policy.Name {
+		t.Fatalf("expected name %s, got %v", policy.Name, payload["name"])
+	}
+
+	customTTL := 5 * time.Second
+	if err := cache.Set(ctx, key, policy, customTTL); err != nil {
+		t.Fatalf("Set with custom TTL failed: %v", err)
+	}
+	ttl = s.TTL(fullKey)
+	if ttl > customTTL || ttl <= 0 {
+		t.Fatalf("expected TTL <= %v and >0, got %v", customTTL, ttl)
+	}
 }
 
 // Test InMemoryPolicyCache with different policy types

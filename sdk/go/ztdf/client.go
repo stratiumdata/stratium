@@ -135,8 +135,25 @@ func (c *Client) Wrap(ctx context.Context, plaintext []byte, opts *WrapOptions) 
 	// Step 4: Calculate policy binding
 	policyBindingHash := CalculatePolicyBinding(dek, policyBase64)
 
+	if opts.ClientKeyID == "" {
+		return nil, fmt.Errorf("%s: %s", ErrMsgFailedToWrapDEK, "client key ID is required")
+	}
+	if opts.ClientPrivateKeyPath == "" {
+		return nil, fmt.Errorf("%s: %s", ErrMsgFailedToWrapDEK, "client private key path is required")
+	}
+
+	privateKey, err := GetRSAPrivateKeyFromFile(opts.ClientPrivateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
+	}
+
+	clientWrappedDEK, err := WrapDEKWithRSAPrivateKey(privateKey, dek)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
+	}
+
 	// Step 5: Wrap DEK using Key Access Server
-	wrappedDEK, keyID, err := c.wrapDEK(ctx, opts.Resource, dek, opts.ResourceAttributes, policyBase64, opts.Context)
+	wrappedDEK, keyID, err := c.wrapDEK(ctx, opts.Resource, opts.ClientKeyID, clientWrappedDEK, dek, opts.ResourceAttributes, policyBase64, opts.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -305,9 +322,15 @@ func (c *Client) UnwrapFile(ctx context.Context, inputPath, outputPath string, o
 }
 
 // wrapDEK wraps a DEK using the Key Access Server
-func (c *Client) wrapDEK(ctx context.Context, resource string, dek []byte, resourceAttributes map[string]string, policy string, contextMap map[string]string) ([]byte, string, error) {
+func (c *Client) wrapDEK(ctx context.Context, resource, clientKeyID string, clientWrappedDEK, dek []byte, resourceAttributes map[string]string, policy string, contextMap map[string]string) ([]byte, string, error) {
 	if resource == "" {
 		return nil, "", fmt.Errorf("%s: %s", ErrMsgFailedToWrapDEK, "resource identifier cannot be empty")
+	}
+	if clientKeyID == "" {
+		return nil, "", fmt.Errorf("%s: %s", ErrMsgFailedToWrapDEK, "client key ID cannot be empty")
+	}
+	if len(clientWrappedDEK) == 0 {
+		return nil, "", fmt.Errorf("%s: %s", ErrMsgFailedToWrapDEK, "client wrapped DEK cannot be empty")
 	}
 
 	// Use injected keyAccess for testing, or stratiumClient.KeyAccess for production
@@ -323,6 +346,8 @@ func (c *Client) wrapDEK(ctx context.Context, resource string, dek []byte, resou
 		Context:            contextMap,
 		DEK:                dek,
 		Policy:             policy,
+		ClientKeyID:        clientKeyID,
+		ClientWrappedDEK:   clientWrappedDEK,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)

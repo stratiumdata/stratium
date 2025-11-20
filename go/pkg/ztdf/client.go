@@ -427,12 +427,26 @@ func (c *Client) wrapDEK(ctx context.Context, dek []byte, resource string, polic
 	// Add auth token to context
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", fmt.Sprintf("Bearer %s", authToken))
 
+	clientWrappedDEK, err := c.keyManager.WrapDEK(dek)
+	if err != nil {
+		return nil, "", err
+	}
+
+	clientKeyID := c.keyManager.GetKeyID()
+	if clientKeyID == "" {
+		return nil, "", &models.Error{
+			Code:    models.ErrCodeKeyNotFound,
+			Message: "client key ID not available",
+		}
+	}
+
 	// Call WrapDEK
 	resp, err := c.kasClient.WrapDEK(ctx, &keyAccess.WrapDEKRequest{
-		Resource: resource,
-		Dek:      dek,
-		Action:   "wrap_dek",
-		Policy:   policy,
+		Resource:    resource,
+		Dek:         clientWrappedDEK,
+		Action:      "wrap_dek",
+		Policy:      policy,
+		ClientKeyId: clientKeyID,
 	})
 	if err != nil {
 		return nil, "", &models.Error{

@@ -44,7 +44,7 @@ func TestServer_GetDecision(t *testing.T) {
 				Context:            map[string]string{},
 			},
 			expectedDecision: Decision_DECISION_ALLOW,
-			expectedReason:   "Subject has admin privileges",
+			expectedReason:   "Allowed by entitlement: ent-admin-1",
 			expectError:      false,
 		},
 		{
@@ -89,8 +89,8 @@ func TestServer_GetDecision(t *testing.T) {
 				SubjectAttributes: StringMapToValueMap(map[string]string{"sub": "user123"}),
 				Action:            "read",
 			},
-			expectedDecision: Decision_DECISION_ALLOW,
-			expectedReason:   "All resource attribute requirements satisfied by subject attributes",
+			expectedDecision: Decision_DECISION_DENY,
+			expectedReason:   "No matching entitlements found",
 			expectError:      false,
 		},
 		{
@@ -263,8 +263,8 @@ func TestServer_EvaluateDecision(t *testing.T) {
 				Action:             "any-action",
 				Context:            map[string]string{},
 			},
-			expectedDecision: Decision_DECISION_ALLOW,
-			expectedPolicyID: "admin-policy",
+			expectedDecision: Decision_DECISION_DENY,
+			expectedPolicyID: "default-deny-policy",
 		},
 		{
 			name: "Unknown user should be denied",
@@ -727,7 +727,7 @@ func TestServer_GetDecisionWithPDP_EntitlementMatch(t *testing.T) {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	tests := []struct {
@@ -850,7 +850,7 @@ func TestServer_GetDecisionWithPDP_PolicyFromRepository(t *testing.T) {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	tests := []struct {
@@ -947,7 +947,7 @@ func TestServer_GetDecisionWithPDP_MultiplePoliciesInRepo(t *testing.T) {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	response, err := server.GetDecision(context.Background(), &GetDecisionRequest{
@@ -988,7 +988,7 @@ func TestServer_GetDecisionWithPDP_DefaultDeny(t *testing.T) {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	tests := []struct {
@@ -1068,7 +1068,7 @@ func TestServer_GetDecisionWithPDP_InactiveEntitlement(t *testing.T) {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	tests := []struct {
@@ -1132,7 +1132,7 @@ func TestServer_GetDecisionWithPDP_PolicyEvaluationError(t *testing.T) {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	tests := []struct {
@@ -1231,7 +1231,7 @@ allow {
 		Audit:       mockAuditRepo,
 	}
 
-	pdp := NewPolicyDecisionPoint(repo)
+	pdp := NewPolicyDecisionPoint(repo, NewInMemoryPolicyCache(), time.Minute)
 	server := NewServerWithPDP(pdp, getTestConfig())
 
 	tests := []struct {

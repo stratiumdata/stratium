@@ -3,10 +3,11 @@ package platform
 import (
 	"context"
 	"encoding/json"
-	"stratium/pkg/extractors"
 	"strings"
 	"testing"
+	"time"
 
+	"stratium/pkg/extractors"
 	"stratium/pkg/models"
 	"stratium/pkg/policy_engine"
 	"stratium/pkg/repository"
@@ -361,7 +362,7 @@ allow if {
 	}
 
 	// Create PDP with OPA support
-	pdp := NewPolicyDecisionPoint(mockRepo)
+	pdp := NewPolicyDecisionPoint(mockRepo, NewInMemoryPolicyCache(), time.Minute)
 
 	tests := []struct {
 		name             string

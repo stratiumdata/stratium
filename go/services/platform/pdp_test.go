@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -815,7 +816,7 @@ func TestPDP_EvaluatePolicies_WithContext_Positive(t *testing.T) {
 				Audit:       &mockPDPAuditRepository{},
 			}
 
-			pdp := NewPolicyDecisionPoint(mockRepo)
+			pdp := NewPolicyDecisionPoint(mockRepo, NewInMemoryPolicyCache(), time.Minute)
 
 			result, err := pdp.evaluatePolicies(ctx, tt.request)
 			if err != nil {
@@ -1065,7 +1066,7 @@ func TestPDP_EvaluatePolicies_WithContext_Negative(t *testing.T) {
 				Audit:       &mockPDPAuditRepository{},
 			}
 
-			pdp := NewPolicyDecisionPoint(mockRepo)
+			pdp := NewPolicyDecisionPoint(mockRepo, NewInMemoryPolicyCache(), time.Minute)
 
 			result, err := pdp.evaluatePolicies(ctx, tt.request)
 			if err != nil {
@@ -1145,7 +1146,7 @@ func TestPDP_EvaluatePolicies_ContextOverride(t *testing.T) {
 		Audit:       &mockPDPAuditRepository{},
 	}
 
-	pdp := NewPolicyDecisionPoint(mockRepo)
+	pdp := NewPolicyDecisionPoint(mockRepo, NewInMemoryPolicyCache(), time.Minute)
 
 	result, err := pdp.evaluatePolicies(ctx, request)
 	if err != nil {
@@ -1245,7 +1246,7 @@ func TestPDP_EvaluatePolicies_ContextEdgeCases(t *testing.T) {
 				Audit:       &mockPDPAuditRepository{},
 			}
 
-			pdp := NewPolicyDecisionPoint(mockRepo)
+			pdp := NewPolicyDecisionPoint(mockRepo, NewInMemoryPolicyCache(), time.Minute)
 
 			// Should not error even with edge case values
 			_, err := pdp.evaluatePolicies(ctx, request)
@@ -1366,7 +1367,7 @@ func TestPDP_NewPolicyDecisionPointWithCache(t *testing.T) {
 			}
 
 			// Create PDP with custom cache
-			pdp := NewPolicyDecisionPointWithCache(mockRepo, cache)
+			pdp := NewPolicyDecisionPointWithCache(mockRepo, cache, time.Minute)
 
 			if tt.expectNotNil {
 				if pdp == nil {
@@ -1401,11 +1402,11 @@ func TestPDP_NewPolicyDecisionPointWithCache_CacheComparison(t *testing.T) {
 	}
 
 	// Create PDP with default cache
-	pdpDefault := NewPolicyDecisionPoint(mockRepo)
+	pdpDefault := NewPolicyDecisionPoint(mockRepo, NewInMemoryPolicyCache(), time.Minute)
 
 	// Create PDP with custom cache
 	customCache := newMockPolicyCache()
-	pdpCustom := NewPolicyDecisionPointWithCache(mockRepo, customCache)
+	pdpCustom := NewPolicyDecisionPointWithCache(mockRepo, customCache, time.Minute)
 
 	// Verify both have caches but they are different instances
 	if pdpDefault.cache == nil {
@@ -1455,7 +1456,7 @@ func TestPDP_NewPolicyDecisionPointWithCache_FunctionalTest(t *testing.T) {
 		Audit:       &mockPDPAuditRepository{},
 	}
 
-	pdp := NewPolicyDecisionPointWithCache(mockRepo, mockCache)
+	pdp := NewPolicyDecisionPointWithCache(mockRepo, mockCache, time.Minute)
 
 	request := &GetDecisionRequest{
 		SubjectAttributes:  StringMapToValueMap(map[string]string{"sub": "test-user"}),
@@ -1518,7 +1519,7 @@ func TestPDP_NewPolicyDecisionPointWithCache_MultipleCacheTypes(t *testing.T) {
 				Audit:       &mockPDPAuditRepository{},
 			}
 
-			pdp := NewPolicyDecisionPointWithCache(mockRepo, cache)
+			pdp := NewPolicyDecisionPointWithCache(mockRepo, cache, time.Minute)
 
 			if pdp == nil {
 				t.Fatal("Expected PDP to not be nil")
@@ -1586,7 +1587,7 @@ func TestPDP_NewPolicyDecisionPointWithCache_CacheUsage(t *testing.T) {
 		Audit:       &mockPDPAuditRepository{},
 	}
 
-	pdp := NewPolicyDecisionPointWithCache(mockRepo, mockCache)
+	pdp := NewPolicyDecisionPointWithCache(mockRepo, mockCache, time.Minute)
 
 	// Perform cache operations
 	policyID := uuid.New()
@@ -1667,7 +1668,7 @@ func TestPDP_NewPolicyDecisionPointWithCache_Initialization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pdp := NewPolicyDecisionPointWithCache(tt.repo, mockCache)
+			pdp := NewPolicyDecisionPointWithCache(tt.repo, mockCache, time.Minute)
 
 			if pdp == nil {
 				t.Fatal("Expected PDP to not be nil")
@@ -1707,7 +1708,7 @@ func TestPDP_NewPolicyDecisionPointWithCache_NilContext(t *testing.T) {
 		Audit:       &mockPDPAuditRepository{},
 	}
 
-	pdp := NewPolicyDecisionPointWithCache(mockRepo, mockCache)
+	pdp := NewPolicyDecisionPointWithCache(mockRepo, mockCache, time.Minute)
 
 	// Note: In real scenarios, context should never be nil, but we test the cache behavior
 	// The cache implementation should handle this gracefully
@@ -1736,5 +1737,82 @@ func TestPDP_NewPolicyDecisionPointWithCache_NilContext(t *testing.T) {
 	}
 	if retrieved == nil {
 		t.Error("Expected retrieved policy to not be nil")
+	}
+}
+
+type stubPolicyRepository struct {
+	policies []*models.Policy
+	mu       sync.Mutex
+	calls    int
+}
+
+func (s *stubPolicyRepository) Create(ctx context.Context, policy *models.Policy) error { return nil }
+func (s *stubPolicyRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Policy, error) {
+	return nil, nil
+}
+func (s *stubPolicyRepository) GetByName(ctx context.Context, name string) (*models.Policy, error) {
+	return nil, nil
+}
+func (s *stubPolicyRepository) List(ctx context.Context, req *models.ListPoliciesRequest) ([]*models.Policy, error) {
+	return s.policies, nil
+}
+func (s *stubPolicyRepository) Update(ctx context.Context, policy *models.Policy) error { return nil }
+func (s *stubPolicyRepository) Delete(ctx context.Context, id uuid.UUID) error          { return nil }
+func (s *stubPolicyRepository) Count(ctx context.Context, req *models.ListPoliciesRequest) (int, error) {
+	return len(s.policies), nil
+}
+func (s *stubPolicyRepository) ListEnabled(ctx context.Context) ([]*models.Policy, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return s.policies, nil
+}
+
+func TestPolicyDecisionPointPolicyCacheTTL(t *testing.T) {
+	policy := &models.Policy{
+		ID:       uuid.New(),
+		Name:     "policy-cache-ttl",
+		Priority: 1,
+		Effect:   models.PolicyEffectAllow,
+		Language: models.PolicyLanguageJSON,
+		Enabled:  true,
+	}
+
+	stubRepo := &stubPolicyRepository{
+		policies: []*models.Policy{policy},
+	}
+
+	repo := &repository.Repository{
+		Policy: stubRepo,
+	}
+
+	cache := NewInMemoryPolicyCache()
+
+	ttl := 50 * time.Millisecond
+	pdp := NewPolicyDecisionPoint(repo, cache, ttl)
+
+	ctx := context.Background()
+
+	if _, err := pdp.getEnabledPolicies(ctx); err != nil {
+		t.Fatalf("first getEnabledPolicies failed: %v", err)
+	}
+	if stubRepo.calls != 1 {
+		t.Fatalf("expected 1 repository call, got %d", stubRepo.calls)
+	}
+
+	if _, err := pdp.getEnabledPolicies(ctx); err != nil {
+		t.Fatalf("second getEnabledPolicies failed: %v", err)
+	}
+	if stubRepo.calls != 1 {
+		t.Fatalf("expected cache hit to avoid repository call")
+	}
+
+	time.Sleep(ttl + 10*time.Millisecond)
+
+	if _, err := pdp.getEnabledPolicies(ctx); err != nil {
+		t.Fatalf("third getEnabledPolicies failed: %v", err)
+	}
+	if stubRepo.calls != 2 {
+		t.Fatalf("expected repository to be called again after TTL expiry, got %d calls", stubRepo.calls)
 	}
 }

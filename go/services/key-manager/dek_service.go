@@ -3,8 +3,6 @@ package key_manager
 import (
 	"context"
 	"crypto"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
@@ -18,7 +16,6 @@ import (
 	"github.com/cloudflare/circl/kem/kyber/kyber1024"
 	"github.com/cloudflare/circl/kem/kyber/kyber512"
 	"github.com/cloudflare/circl/kem/kyber/kyber768"
-	"golang.org/x/crypto/hkdf"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -201,8 +198,7 @@ func (d *DEKUnwrappingService) encryptDEKForSubject(subjectPublicKey crypto.Publ
 		return encryptedDEK, fmt.Sprintf("subject-%s-rsa", subject), nil
 
 	case *ecdsa.PublicKey:
-		// For ECC, use ECIES (Elliptic Curve Integrated Encryption Scheme)
-		encryptedDEK, err := d.encryptWithECIES(pubKey, dekBytes)
+		encryptedDEK, err := encryptDEKWithECCPublicKey(pubKey, dekBytes)
 		if err != nil {
 			return nil, "", fmt.Errorf("ECDSA encryption failed: %w", err)
 		}
@@ -211,53 +207,6 @@ func (d *DEKUnwrappingService) encryptDEKForSubject(subjectPublicKey crypto.Publ
 	default:
 		return nil, "", fmt.Errorf("unsupported public key type for subject %s %v", subject, pubKey)
 	}
-}
-
-// encryptWithECIES encrypts data using ECIES (Elliptic Curve Integrated Encryption Scheme)
-func (d *DEKUnwrappingService) encryptWithECIES(publicKey *ecdsa.PublicKey, plaintext []byte) ([]byte, error) {
-	// Import crypto/aes and crypto/cipher at the top of the file
-	// Generate ephemeral key pair
-	ephemeralKey, err := ecdsa.GenerateKey(publicKey.Curve, rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
-	}
-
-	// Derive shared secret using ECDH
-	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemeralKey.D.Bytes())
-
-	// Derive encryption key using HKDF
-	// Import golang.org/x/crypto/hkdf at the top of the file
-	kdf := hkdf.New(sha256.New, sharedX.Bytes(), nil, []byte("key-manager-dek-wrap"))
-	encKey := make([]byte, 32) // AES-256
-	if _, err := kdf.Read(encKey); err != nil {
-		return nil, fmt.Errorf("failed to derive encryption key: %w", err)
-	}
-
-	// Encrypt DEK using AES-GCM
-	block, err := aes.NewCipher(encKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-
-	// Return: ephemeral public key || ciphertext
-	// Ephemeral public key is 64 bytes (32 bytes X + 32 bytes Y for P-256)
-	ephemeralPubKeyX := ephemeralKey.PublicKey.X.FillBytes(make([]byte, 32))
-	ephemeralPubKeyY := ephemeralKey.PublicKey.Y.FillBytes(make([]byte, 32))
-	ephemeralPubKey := append(ephemeralPubKeyX, ephemeralPubKeyY...)
-
-	return append(ephemeralPubKey, ciphertext...), nil
 }
 
 // createDeniedResponse creates a denied response

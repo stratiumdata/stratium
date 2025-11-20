@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,12 @@ type mockKeyAccessClient struct {
 func (m *mockKeyAccessClient) RequestDEK(ctx context.Context, req *stratium.DEKRequest) (*stratium.DEKResponse, error) {
 	if m.requestDEKFunc != nil {
 		return m.requestDEKFunc(ctx, req)
+	}
+	if req.ClientKeyID == "" {
+		return nil, fmt.Errorf("client key ID is required")
+	}
+	if len(req.ClientWrappedDEK) == 0 {
+		return nil, fmt.Errorf("client wrapped DEK is required")
 	}
 	// Default implementation
 	return &stratium.DEKResponse{
@@ -135,12 +142,15 @@ func TestNewClient_DefaultKeyAccessURL(t *testing.T) {
 // ===== Wrap Tests =====
 
 func TestClient_Wrap_MinimalOptions(t *testing.T) {
+	_, privateKeyPath, _ := generateTestKeyPair(t)
 	mockKeyAccess := &mockKeyAccessClient{}
 	client := createTestClient(mockKeyAccess)
 
 	plaintext := []byte("test data to encrypt")
 	opts := &WrapOptions{
-		Resource: "test-resource",
+		Resource:             "test-resource",
+		ClientKeyID:          "client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -168,12 +178,15 @@ func TestClient_Wrap_MinimalOptions(t *testing.T) {
 }
 
 func TestClient_Wrap_WithAttributes(t *testing.T) {
+	_, privateKeyPath, _ := generateTestKeyPair(t)
 	mockKeyAccess := &mockKeyAccessClient{}
 	client := createTestClient(mockKeyAccess)
 
 	plaintext := []byte("classified data")
 	opts := &WrapOptions{
-		Resource: "classified-document",
+		Resource:             "classified-document",
+		ClientKeyID:          "client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 		Attributes: []Attribute{
 			{
 				URI:         "http://example.com/attr/classification/value/secret",
@@ -205,6 +218,7 @@ func TestClient_Wrap_WithAttributes(t *testing.T) {
 }
 
 func TestClient_Wrap_WithCustomPolicy(t *testing.T) {
+	_, privateKeyPath, _ := generateTestKeyPair(t)
 	mockKeyAccess := &mockKeyAccessClient{}
 	client := createTestClient(mockKeyAccess)
 
@@ -218,8 +232,10 @@ func TestClient_Wrap_WithCustomPolicy(t *testing.T) {
 
 	plaintext := []byte("data with custom policy")
 	opts := &WrapOptions{
-		Resource: "custom-resource",
-		Policy:   customPolicy,
+		Resource:             "custom-resource",
+		Policy:               customPolicy,
+		ClientKeyID:          "client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -334,7 +350,9 @@ func TestClient_Unwrap_WithIntegrityVerification_Valid(t *testing.T) {
 	// Create a TDO by wrapping some data
 	plaintext := []byte("test data for integrity verification")
 	opts := &WrapOptions{
-		Resource: "test-document",
+		Resource:             "test-document",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -386,7 +404,9 @@ func TestClient_Unwrap_WithIntegrityVerification_Invalid(t *testing.T) {
 	// Create a TDO by wrapping some data
 	plaintext := []byte("test data for integrity verification")
 	opts := &WrapOptions{
-		Resource: "test-document",
+		Resource:             "test-document",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -441,7 +461,9 @@ func TestClient_Unwrap_WithIntegrityVerification_Disabled(t *testing.T) {
 	// Create a TDO by wrapping some data
 	plaintext := []byte("test data for integrity verification")
 	opts := &WrapOptions{
-		Resource: "test-document",
+		Resource:             "test-document",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -497,7 +519,9 @@ func TestClient_Unwrap_WithIntegrityVerification_NilIntegrityInfo(t *testing.T) 
 	// Create a TDO by wrapping some data
 	plaintext := []byte("test data for integrity verification")
 	opts := &WrapOptions{
-		Resource: "test-document",
+		Resource:             "test-document",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -553,7 +577,9 @@ func TestClient_Unwrap_WithIntegrityVerification_InvalidBase64(t *testing.T) {
 	// Create a TDO by wrapping some data
 	plaintext := []byte("test data for integrity verification")
 	opts := &WrapOptions{
-		Resource: "test-document",
+		Resource:             "test-document",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -601,6 +627,7 @@ func containsMiddle(s, substr string) bool {
 // ===== WrapFile Tests =====
 
 func TestClient_WrapFile(t *testing.T) {
+	_, privateKeyPath, _ := generateTestKeyPair(t)
 	mockKeyAccess := &mockKeyAccessClient{}
 	client := createTestClient(mockKeyAccess)
 
@@ -615,7 +642,9 @@ func TestClient_WrapFile(t *testing.T) {
 	}
 
 	opts := &WrapOptions{
-		Resource: "test-file",
+		Resource:             "test-file",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -632,11 +661,14 @@ func TestClient_WrapFile(t *testing.T) {
 }
 
 func TestClient_WrapFile_InputNotFound(t *testing.T) {
+	_, privateKeyPath, _ := generateTestKeyPair(t)
 	mockKeyAccess := &mockKeyAccessClient{}
 	client := createTestClient(mockKeyAccess)
 
 	opts := &WrapOptions{
-		Resource: "test-file",
+		Resource:             "test-file",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	tempDir := t.TempDir()
@@ -678,7 +710,9 @@ func TestClient_UnwrapFile(t *testing.T) {
 
 	plaintext := []byte("test data for unwrapping")
 	opts := &WrapOptions{
-		Resource: "test-document",
+		Resource:             "test-document",
+		ClientKeyID:          "mock-client-key",
+		ClientPrivateKeyPath: privateKeyPath,
 	}
 
 	ctx := context.Background()
@@ -772,7 +806,7 @@ func TestClient_wrapDEK_EmptyResource(t *testing.T) {
 	ctx := context.Background()
 	dek := make([]byte, 32)
 
-	_, _, err = client.wrapDEK(ctx, "", dek, nil, "test-policy", nil)
+	_, _, err = client.wrapDEK(ctx, "", "client-key", []byte("wrapped"), dek, nil, "test-policy", nil)
 
 	if err == nil {
 		t.Error("wrapDEK() with empty resource expected error, got nil")

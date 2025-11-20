@@ -403,6 +403,17 @@ func (km *LocalKeyManager) DecryptDEK(encryptedDEK []byte) ([]byte, error) {
 	return dek, nil
 }
 
+// WrapDEK encrypts a DEK with the client's private key
+func (km *LocalKeyManager) WrapDEK(dek []byte) ([]byte, error) {
+	if km.privateKey == nil {
+		return nil, &models.Error{
+			Code:    models.ErrCodeKeyNotFound,
+			Message: "private key not loaded",
+		}
+	}
+	return WrapDEKWithPrivateKey(km.privateKey, dek)
+}
+
 // GetKeyID returns the key identifier
 func (km *LocalKeyManager) GetKeyID() string {
 	return km.keyID

@@ -139,7 +139,7 @@ func (l *ExternalKeyLoader) Load(ctx context.Context) *ExternalKeyLoadReport {
 }
 
 func (l *ExternalKeyLoader) loadSource(ctx context.Context, source config.ExternalKeySourceConfig) ExternalKeySourceReport {
-	logger.Info("Loading external key source", source.Name)
+	logger.Info("Loading external key source %s", source.Name)
 
 	sourceType := strings.ToLower(strings.TrimSpace(source.Type))
 	if sourceType == "" {

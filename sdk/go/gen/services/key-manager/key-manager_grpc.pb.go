@@ -25,6 +25,7 @@ const (
 	KeyManagerService_DeleteKey_FullMethodName         = "/key_manager.KeyManagerService/DeleteKey"
 	KeyManagerService_RotateKey_FullMethodName         = "/key_manager.KeyManagerService/RotateKey"
 	KeyManagerService_UnwrapDEK_FullMethodName         = "/key_manager.KeyManagerService/UnwrapDEK"
+	KeyManagerService_RewrapClientDEK_FullMethodName   = "/key_manager.KeyManagerService/RewrapClientDEK"
 	KeyManagerService_ListProviders_FullMethodName     = "/key_manager.KeyManagerService/ListProviders"
 	KeyManagerService_GetProviderInfo_FullMethodName   = "/key_manager.KeyManagerService/GetProviderInfo"
 	KeyManagerService_RegisterClientKey_FullMethodName = "/key_manager.KeyManagerService/RegisterClientKey"
@@ -48,6 +49,7 @@ type KeyManagerServiceClient interface {
 	RotateKey(ctx context.Context, in *RotateKeyRequest, opts ...grpc.CallOption) (*RotateKeyResponse, error)
 	// DEK Unwrapping Operations
 	UnwrapDEK(ctx context.Context, in *UnwrapDEKRequest, opts ...grpc.CallOption) (*UnwrapDEKResponse, error)
+	RewrapClientDEK(ctx context.Context, in *RewrapClientDEKRequest, opts ...grpc.CallOption) (*RewrapClientDEKResponse, error)
 	// Key Provider Management
 	ListProviders(ctx context.Context, in *ListProvidersRequest, opts ...grpc.CallOption) (*ListProvidersResponse, error)
 	GetProviderInfo(ctx context.Context, in *GetProviderInfoRequest, opts ...grpc.CallOption) (*GetProviderInfoResponse, error)
@@ -121,6 +123,16 @@ func (c *keyManagerServiceClient) UnwrapDEK(ctx context.Context, in *UnwrapDEKRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UnwrapDEKResponse)
 	err := c.cc.Invoke(ctx, KeyManagerService_UnwrapDEK_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *keyManagerServiceClient) RewrapClientDEK(ctx context.Context, in *RewrapClientDEKRequest, opts ...grpc.CallOption) (*RewrapClientDEKResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RewrapClientDEKResponse)
+	err := c.cc.Invoke(ctx, KeyManagerService_RewrapClientDEK_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +223,7 @@ type KeyManagerServiceServer interface {
 	RotateKey(context.Context, *RotateKeyRequest) (*RotateKeyResponse, error)
 	// DEK Unwrapping Operations
 	UnwrapDEK(context.Context, *UnwrapDEKRequest) (*UnwrapDEKResponse, error)
+	RewrapClientDEK(context.Context, *RewrapClientDEKRequest) (*RewrapClientDEKResponse, error)
 	// Key Provider Management
 	ListProviders(context.Context, *ListProvidersRequest) (*ListProvidersResponse, error)
 	GetProviderInfo(context.Context, *GetProviderInfoRequest) (*GetProviderInfoResponse, error)
@@ -247,6 +260,9 @@ func (UnimplementedKeyManagerServiceServer) RotateKey(context.Context, *RotateKe
 }
 func (UnimplementedKeyManagerServiceServer) UnwrapDEK(context.Context, *UnwrapDEKRequest) (*UnwrapDEKResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UnwrapDEK not implemented")
+}
+func (UnimplementedKeyManagerServiceServer) RewrapClientDEK(context.Context, *RewrapClientDEKRequest) (*RewrapClientDEKResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RewrapClientDEK not implemented")
 }
 func (UnimplementedKeyManagerServiceServer) ListProviders(context.Context, *ListProvidersRequest) (*ListProvidersResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListProviders not implemented")
@@ -394,6 +410,24 @@ func _KeyManagerService_UnwrapDEK_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KeyManagerServiceServer).UnwrapDEK(ctx, req.(*UnwrapDEKRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _KeyManagerService_RewrapClientDEK_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RewrapClientDEKRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KeyManagerServiceServer).RewrapClientDEK(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KeyManagerService_RewrapClientDEK_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KeyManagerServiceServer).RewrapClientDEK(ctx, req.(*RewrapClientDEKRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -554,6 +588,10 @@ var KeyManagerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UnwrapDEK",
 			Handler:    _KeyManagerService_UnwrapDEK_Handler,
+		},
+		{
+			MethodName: "RewrapClientDEK",
+			Handler:    _KeyManagerService_RewrapClientDEK_Handler,
 		},
 		{
 			MethodName: "ListProviders",

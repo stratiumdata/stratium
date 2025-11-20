@@ -17,6 +17,7 @@ service KeyManagerService {
 
   // DEK Unwrapping Operations
   rpc UnwrapDEK(UnwrapDEKRequest) returns (UnwrapDEKResponse);
+  rpc RewrapClientDEK(RewrapClientDEKRequest) returns (RewrapClientDEKResponse);
 
   // Key Provider Management
   rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
@@ -91,6 +92,11 @@ message Key {
   int64 usage_count = 14;
   int64 max_usage_count = 15;
   map<string, string> metadata = 16;
+  bool externally_managed = 17;
+  string external_source = 18;
+  string external_manifest_path = 19;
+  string private_key_source = 20;
+  google.protobuf.Timestamp external_loaded_at = 21;
 }
 
 // Key Provider Information
@@ -381,4 +387,20 @@ message ListClientsResponse {
 
   // Timestamp of the operation
   google.protobuf.Timestamp timestamp = 4;
+}
+
+// RewrapClientDEKRequest represents a request to rewrap a client-provided DEK
+message RewrapClientDEKRequest {
+  string subject = 1;
+  string client_key_id = 2;
+  bytes client_wrapped_dek = 3;
+  string service_key_id = 4;
+  string resource = 5;
+}
+
+// RewrapClientDEKResponse represents the rewrapped DEK for the service key
+message RewrapClientDEKResponse {
+  bytes service_wrapped_dek = 1;
+  string service_key_id = 2;
+  google.protobuf.Timestamp timestamp = 3;
 }

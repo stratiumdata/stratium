@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
+	"math/big"
 	"stratium/pkg/models"
 )
 
@@ -114,6 +115,50 @@ func DecryptDEKWithPrivateKey(privateKey *rsa.PrivateKey, encryptedDEK []byte) (
 		}
 	}
 	return dek, nil
+}
+
+// WrapDEKWithPrivateKey wraps a DEK using the client's private RSA key (PKCS#1 v1.5 signing format)
+func WrapDEKWithPrivateKey(privateKey *rsa.PrivateKey, dek []byte) ([]byte, error) {
+	k := (privateKey.N.BitLen() + 7) / 8
+	if len(dek) > k-11 {
+		return nil, &models.Error{
+			Code:    models.ErrCodeEncryptionFailed,
+			Message: "DEK too large for client key",
+		}
+	}
+
+	em := make([]byte, k)
+	em[0] = 0x00
+	em[1] = 0x01
+	psLen := k - len(dek) - 3
+	for i := 0; i < psLen; i++ {
+		em[2+i] = 0xff
+	}
+	em[2+psLen] = 0x00
+	copy(em[3+psLen:], dek)
+
+	m := new(big.Int).SetBytes(em)
+	if m.Cmp(privateKey.N) >= 0 {
+		return nil, &models.Error{
+			Code:    models.ErrCodeEncryptionFailed,
+			Message: "message representative out of range",
+		}
+	}
+
+	var c *big.Int
+	if privateKey.Precomputed.Dp == nil {
+		c = new(big.Int).Exp(m, privateKey.D, privateKey.N)
+	} else {
+		c = new(big.Int).Exp(m, privateKey.D, privateKey.N)
+	}
+
+	out := c.Bytes()
+	if len(out) < k {
+		padded := make([]byte, k)
+		copy(padded[k-len(out):], out)
+		out = padded
+	}
+	return out, nil
 }
 
 // CalculatePolicyBinding computes HMAC-SHA256 of the policy using the DEK as the key

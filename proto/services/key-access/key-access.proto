@@ -36,6 +36,9 @@ message WrapDEKRequest {
   // The base64-encoded ZTDF policy from the manifest
   // Contains data attributes that must be matched against user's JWT claims
   string policy = 6;
+
+  // The client key ID referencing the registered public key
+  string client_key_id = 7;
 }
 
 // WrapDEKResponse represents the response from wrapping a DEK

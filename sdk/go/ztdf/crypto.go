@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 
@@ -302,6 +303,39 @@ func EncryptDEKWithRSAPublicKey(publicKey *rsa.PublicKey, dek []byte) ([]byte, e
 		return nil, fmt.Errorf("failed to encrypt DEK with public key: %w", err)
 	}
 	return encryptedDEK, nil
+}
+
+// WrapDEKWithRSAPrivateKey wraps a DEK using the client's private RSA key (PKCS#1 v1.5 padding).
+// This keeps the DEK opaque while it is in transit to the Key Access service.
+func WrapDEKWithRSAPrivateKey(privateKey *rsa.PrivateKey, dek []byte) ([]byte, error) {
+	k := (privateKey.N.BitLen() + 7) / 8
+	if len(dek) > k-11 {
+		return nil, fmt.Errorf("DEK too large for client key")
+	}
+
+	em := make([]byte, k)
+	em[0] = 0x00
+	em[1] = 0x01
+	psLen := k - len(dek) - 3
+	for i := 0; i < psLen; i++ {
+		em[2+i] = 0xff
+	}
+	em[2+psLen] = 0x00
+	copy(em[3+psLen:], dek)
+
+	m := new(big.Int).SetBytes(em)
+	if m.Cmp(privateKey.N) >= 0 {
+		return nil, fmt.Errorf("message representative out of range")
+	}
+
+	c := new(big.Int).Exp(m, privateKey.D, privateKey.N)
+	out := c.Bytes()
+	if len(out) < k {
+		padded := make([]byte, k)
+		copy(padded[k-len(out):], out)
+		out = padded
+	}
+	return out, nil
 }
 
 // DecryptDEKWithRSAPrivateKey decrypts a DEK using RSA-OAEP with SHA-256.

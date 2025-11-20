@@ -95,6 +95,8 @@ var (
 	ErrClientIDRequired           = NewValidationError("client_id", "is required")
 	ErrResourceRequired           = NewValidationError("resource", "is required")
 	ErrResourceAttributesRequired = NewValidationError("resource_attributes", "are required")
+	ErrClientKeyRequired          = NewValidationError("client_key_id", "is required")
+	ErrClientWrapRequired         = NewValidationError("client_wrapped_dek", "is required")
 	ErrActionRequired             = NewValidationError("action", "is required")
 	ErrSubjectAttributesRequired  = NewValidationError("subject_attributes", "are required")
 	ErrRequestNil                 = NewValidationError("request", "cannot be nil")
