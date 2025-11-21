@@ -184,13 +184,13 @@ Try building without cache:
 docker build --no-cache \
   --build-arg BUILD_MODE=demo \
   --build-arg BUILD_FEATURES=rate-limiting,short-timeouts \
-  -f deployment/Dockerfile .
+  -f deployment/docker/Dockerfile .
 ```
 
 Or use docker-compose:
 ```bash
-docker-compose -f deployment/docker-compose.yml \
-  -f deployment/docker-compose.demo.yml \
+docker-compose -f deployment/docker/docker-compose.yml \
+  -f deployment/docker/docker-compose.demo.yml \
   up --build --force-recreate
 ```
 

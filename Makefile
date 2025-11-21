@@ -172,12 +172,12 @@ clean: ## Clean build artifacts
 # Docker commands
 docker-build: ## Build all Docker images (production)
 	@echo "Building Docker images..."
-	docker-compose -f deployment/docker-compose.yml build
+	docker-compose -f deployment/docker/docker-compose.yml build
 	@echo "Docker images built!"
 
 docker-up: ## Start all services with Docker Compose
 	@echo "Starting all services with Docker Compose..."
-	docker-compose -f deployment/docker-compose.yml up -d
+	docker-compose -f deployment/docker/docker-compose.yml up -d
 	@echo "Services started!"
 	@echo ""
 	@echo "Enabling HTTPS on Keycloak"
@@ -194,19 +194,19 @@ docker-up: ## Start all services with Docker Compose
 
 docker-down: ## Stop all services
 	@echo "Stopping all services..."
-	docker-compose -f deployment/docker-compose.yml down
+	docker-compose -f deployment/docker/docker-compose.yml down
 	@echo "Services stopped!"
 
 docker-down-volumes: ## Stop all services and remove volumes
 	@echo "Stopping all services and removing volumes..."
-	docker-compose -f deployment/docker-compose.yml down -v
+	docker-compose -f deployment/docker/docker-compose.yml down -v
 	@echo "Services stopped and volumes removed!"
 
 docker-logs: ## View logs from all services
-	docker-compose -f deployment/docker-compose.yml logs -f
+	docker-compose -f deployment/docker/docker-compose.yml logs -f
 
 docker-ps: ## List all containers from the Stratium deployment
-	docker-compose -f deployment/docker-compose.yml ps
+	docker-compose -f deployment/docker/docker-compose.yml ps
 
 # Customer distribution builds (no proprietary features)
 PLATFORMS ?= linux/amd64,linux/arm64
@@ -241,7 +241,7 @@ build-customer-multiplatform-platform: ## Build and push platform (ARM64+AMD64)
 		-t stratiumdata/platform:customer \
 		-t stratiumdata/platform:eval \
 		-t stratiumdata/platform:$(CUSTOMER_VERSION) \
-		-f deployment/Dockerfile \
+		-f deployment/docker/Dockerfile \
 		--push \
 		.
 	@echo "✓ Multi-platform platform-server customer image built and pushed"
@@ -258,7 +258,7 @@ build-customer-multiplatform-key-manager: ## Build and push key-manager (ARM64+A
 		-t stratiumdata/key-manager:customer \
 		-t stratiumdata/key-manager:eval \
 		-t stratiumdata/key-manager:$(CUSTOMER_VERSION) \
-		-f deployment/Dockerfile \
+		-f deployment/docker/Dockerfile \
 		--push \
 		.
 	@echo "✓ Multi-platform key-manager-server customer image built and pushed"
@@ -275,7 +275,7 @@ build-customer-multiplatform-key-access: ## Build and push key-access (ARM64+AMD
 		-t stratiumdata/key-access:customer \
 		-t stratiumdata/key-access:eval \
 		-t stratiumdata/key-access:$(CUSTOMER_VERSION) \
-		-f deployment/Dockerfile \
+		-f deployment/docker/Dockerfile \
 		--push \
 		.
 	@echo "✓ Multi-platform key-access-server customer image built and pushed"
@@ -284,7 +284,7 @@ build-customer-multiplatform-postgres: ## Build and push postgres (ARM64+AMD64)
 	@echo "Building multi-platform postgres customer image..."
 	docker buildx build \
 		--platform $(PLATFORMS) \
-		-f deployment/Dockerfile.postgres \
+		-f deployment/docker/Dockerfile.postgres \
 		-t stratiumdata/postgres:customer \
 		-t stratiumdata/postgres:eval \
 		-t stratiumdata/postgres:$(CUSTOMER_VERSION) \

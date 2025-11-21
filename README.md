@@ -421,7 +421,7 @@ make docker-build
 make docker-push
 
 # Deploy with Docker Compose
-docker-compose -f deployment/docker-compose.yml up -d
+docker-compose -f deployment/docker/docker-compose.yml up -d
 ```
 
 ### Kubernetes Deployment

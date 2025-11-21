@@ -1,12 +1,12 @@
 # Building and Running Demo Images
 
-This guide explains how to build and run Stratium services in demo mode with feature flags.
+This guide explains how to build and run Stratium services in demo mode with feature flags. All commands assume you are in `deployment/docker`.
 
 ## Quick Start
 
 ### Build and Run Demo Services
 ```bash
-cd deployment
+cd deployment/docker
 docker-compose -f docker-compose.yml -f docker-compose.demo.yml up --build
 ```
 

@@ -61,7 +61,7 @@ make test-integration   # Run integration tests
 - Fixed Repository initialization to properly set `db` field
 - Changed from struct literal to constructor pattern
 
-**File: `deployment/docker-compose.yml`**
+**File: `deployment/docker/docker-compose.yml`**
 - Updated health check for PAP service
 - Configured OIDC environment (commented out for development)
 - Added `KC_HOSTNAME_STRICT_BACKCHANNEL: "false"` for Keycloak

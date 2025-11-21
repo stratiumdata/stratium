@@ -2,7 +2,7 @@
 # This builds a PostgreSQL container with databases pre-initialized during build
 #
 # Build:
-#   docker build -f deployment/Dockerfile.postgres -t stratium/postgres:latest .
+#   cd deployment/docker && docker build -f Dockerfile.postgres -t stratium/postgres:latest ..
 #
 # Run:
 #   docker run -d \

@@ -94,7 +94,7 @@ docker save stratium/key-access:customer | gzip > dist/stratium-eval-1.0.0/key-a
 docker save stratium/pap:customer | gzip > dist/stratium-eval-1.0.0/pap.tar.gz
 
 # Copy docker-compose file
-cp deployment/docker-compose.yml dist/stratium-eval-1.0.0/
+cp deployment/docker/docker-compose.yml dist/stratium-eval-1.0.0/
 
 # Create archive
 cd dist && tar -czf stratium-eval-1.0.0.tar.gz stratium-eval-1.0.0/

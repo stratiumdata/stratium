@@ -158,7 +158,7 @@ Flags:
 
 ### Docker Compose
 
-Redis service is automatically configured in `deployment/docker-compose.yml`:
+Redis service is automatically configured in `deployment/docker/docker-compose.yml`:
 
 ```yaml
 redis:

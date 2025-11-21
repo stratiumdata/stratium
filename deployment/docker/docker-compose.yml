@@ -11,9 +11,9 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/01-init-multiple-dbs.sql:/docker-entrypoint-initdb.d/01-init-multiple-dbs.sql:ro
-      - ./postgres/02-init.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
-      - ./postgres/03-init-keymanager.sql:/docker-entrypoint-initdb.d/03-init-keymanager.sql:ro
+      - ../postgres/01-init-multiple-dbs.sql:/docker-entrypoint-initdb.d/01-init-multiple-dbs.sql:ro
+      - ../postgres/02-init.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+      - ../postgres/03-init-keymanager.sql:/docker-entrypoint-initdb.d/03-init-keymanager.sql:ro
     networks:
       - stratium-network
     healthcheck:
@@ -88,8 +88,8 @@ services:
   # Platform Service
   platform:
     build:
-      context: ..
-      dockerfile: deployment/Dockerfile
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
       args:
         SERVICE_NAME: platform-server
         SERVICE_PORT: 50051
@@ -103,7 +103,7 @@ services:
       - STRATIUM_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
     volumes:
       # Mount configuration file
-      - ../config/examples/platform-server.yaml:/etc/stratium/stratium.yaml:ro
+      - ../../config/examples/platform-server.yaml:/etc/stratium/stratium.yaml:ro
     networks:
       - stratium-network
     depends_on:
@@ -121,8 +121,8 @@ services:
   # Key Manager Service
   key-manager:
     build:
-      context: ..
-      dockerfile: deployment/Dockerfile
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
       args:
         SERVICE_NAME: key-manager-server
         SERVICE_PORT: 50052
@@ -138,11 +138,11 @@ services:
       - STRATIUM_ADMIN_KEY=${STRATIUM_ADMIN_KEY:-}
     volumes:
       # Mount configuration file
-      - ../config/examples/key-manager.yaml:/etc/stratium/stratium.yaml:ro
+      - ../../config/examples/key-manager.yaml:/etc/stratium/stratium.yaml:ro
       # Mount volume for admin key persistence
       - /Users/benjaminparrish/.stratium/admin-key:/var/run/secrets/stratium/admin-key:ro
       # Mount seed data configuration
-      - ../config/examples/key-manager-seed-data.yaml:/etc/stratium/key-manager-seed.yaml:ro
+      - ../../config/examples/key-manager-seed-data.yaml:/etc/stratium/key-manager-seed.yaml:ro
     networks:
       - stratium-network
     depends_on:
@@ -160,8 +160,8 @@ services:
   # Key Access Service
   key-access:
     build:
-      context: ..
-      dockerfile: deployment/Dockerfile
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
       args:
         SERVICE_NAME: key-access-server
         SERVICE_PORT: 50053
@@ -173,7 +173,7 @@ services:
       - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_KEY_ACCESS_CLIENT_SECRET:-stratium-key-manager-secret}
     volumes:
       # Mount configuration file
-      - ../config/examples/key-access-server.yaml:/etc/stratium/stratium.yaml:ro
+      - ../../config/examples/key-access-server.yaml:/etc/stratium/stratium.yaml:ro
     networks:
       - stratium-network
     depends_on:
@@ -191,8 +191,8 @@ services:
   # PAP (Policy Administration Point) Service
   pap:
     build:
-      context: ..
-      dockerfile: deployment/Dockerfile.pap
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.pap
     container_name: stratium-pap
     ports:
       - "8090:8090"
@@ -205,7 +205,7 @@ services:
       - STRATIUM_OIDC_CLIENT_SECRET=${PAP_OIDC_CLIENT_SECRET:-stratium-pap-secret}
     volumes:
       # Mount configuration file
-      - ../config/examples/pap-server.yaml:/etc/stratium/stratium.yaml:ro
+      - ../../config/examples/pap-server.yaml:/etc/stratium/stratium.yaml:ro
     networks:
       - stratium-network
     depends_on:
@@ -231,7 +231,7 @@ services:
       - "8081:8081"  # gRPC-Web port
       - "9901:9901"  # Admin port
     volumes:
-      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - envoy.yaml:/etc/envoy/envoy.yaml:ro
     networks:
       - stratium-network
     command: /usr/local/bin/envoy -c /etc/envoy/envoy.yaml
@@ -239,7 +239,7 @@ services:
 
   pap-ui:
     build:
-      context: ../pap-ui
+      context: ../../pap-ui
       dockerfile: Dockerfile
     container_name: stratium-pap-ui
     ports:
