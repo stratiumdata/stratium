@@ -53,7 +53,7 @@ func NewServer(encryptionAlgo encryption.Algorithm, cfg *config.Config) (*Server
 	}
 	adminKeyConfig := cfg.Encryption.AdminKeyConfig
 	if adminKeyConfig == "" {
-		adminKeyConfig = "/var/run/secrets/stratium/admin-key"
+		adminKeyConfig = "/var/run/secrets/stratium/admin-key/admin.key"
 	}
 
 	// Create key store (PostgreSQL with encryption or in-memory fallback)
