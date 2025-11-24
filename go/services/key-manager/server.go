@@ -267,11 +267,6 @@ func createAuthServiceFromConfig(cfg *config.Config) (*auth.AuthService, error) 
 		return nil, nil // Return nil service for incomplete config in tests
 	}
 
-	if cfg.OIDC.RedirectURL == "" {
-		logger.Warn("OIDC configuration incomplete (redirect URL) - auth service will be nil")
-		return nil, nil // Return nil service for incomplete config in tests
-	}
-
 	// Set default scopes if not specified
 	if len(cfg.OIDC.Scopes) == 0 {
 		logger.Warn("OIDC configuration incomplete (scopes)")
