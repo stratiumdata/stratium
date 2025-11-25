@@ -378,6 +378,7 @@ func (km *LocalKeyManager) RegisterPublicKey(ctx context.Context, kmClient model
 	km.metadata.RegisteredAt = time.Now()
 	km.metadata.Client = resp.Key.ClientId
 	km.metadata.KeyID = resp.Key.KeyId
+	km.keyID = resp.Key.KeyId
 	if err := km.saveMetadata(); err != nil {
 		log.Printf("Warning: failed to save metadata after registration: %v", err)
 	}
