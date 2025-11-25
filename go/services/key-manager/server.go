@@ -695,7 +695,7 @@ func (s *Server) RegisterClientKey(ctx context.Context, req *RegisterClientKeyRe
 		}, nil
 	}
 
-	logger.Info("RegisterClientKey called - ClientID: %s", req.ClientId)
+	logger.Info("RegisterClientKey called - User: %s, ClientID: %s", userClaims.Sub, req.ClientId)
 
 	if userClaims.Sub == "" {
 		return &RegisterClientKeyResponse{
@@ -724,20 +724,29 @@ func (s *Server) RegisterClientKey(ctx context.Context, req *RegisterClientKeyRe
 	// Generate unique key ID
 	keyID := fmt.Sprintf("client-key-%s-%d", userClaims.Sub, time.Now().UnixNano())
 
+	// Preserve metadata and capture the calling client ID for auditing
+	metadata := make(map[string]string)
+	for k, v := range req.Metadata {
+		metadata[k] = v
+	}
+	if req.ClientId != "" {
+		metadata["client_application_id"] = req.ClientId
+	}
+
 	// Create integrity hashes using the server's integrity manager
 	keyHash := s.integrityMgr.CreateKeyIntegrityHash(req.PublicKeyPem, req.KeyType, userClaims)
 
 	// Create user public key record
 	userKey := &Key{
 		KeyId:            keyID,
-		ClientId:         req.ClientId,
+		ClientId:         userClaims.Sub,
 		PublicKeyPem:     req.PublicKeyPem,
 		KeyType:          req.KeyType,
 		Status:           KeyStatus_KEY_STATUS_ACTIVE,
 		CreatedAt:        timestamppb.Now(),
 		ExpiresAt:        req.ExpiresAt,
 		KeyIntegrityHash: keyHash,
-		Metadata:         req.Metadata,
+		Metadata:         metadata,
 	}
 
 	// Register the key
@@ -773,7 +782,7 @@ func (s *Server) GetClientKey(ctx context.Context, req *GetClientKeyRequest) (*G
 		}, nil
 	}
 
-	logger.Info("GetClientKey called - ClientID: %s, KeyID: %s", req.ClientId, req.KeyId)
+	logger.Info("GetClientKey called - User: %s, Requested ClientID: %s, KeyID: %s", userClaims.Sub, req.ClientId, req.KeyId)
 
 	// Validate request
 	if userClaims.Sub == "" {
@@ -798,7 +807,7 @@ func (s *Server) GetClientKey(ctx context.Context, req *GetClientKeyRequest) (*G
 		}
 
 		// Verify the key belongs to the requesting user
-		if key.ClientId != req.ClientId {
+		if key.ClientId != userClaims.Sub {
 			return &GetClientKeyResponse{
 				Found:        false,
 				ErrorMessage: "Key does not belong to authenticated user",
@@ -951,7 +960,7 @@ func (s *Server) RevokeClientKey(ctx context.Context, req *RevokeClientKeyReques
 	}
 
 	// Verify the key belongs to the requesting user
-	if key.ClientId != req.ClientId {
+	if key.ClientId != userClaims.Sub {
 		return &RevokeClientKeyResponse{
 			Success:      false,
 			ErrorMessage: "Key does not belong to authenticated user",
