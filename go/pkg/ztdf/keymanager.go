@@ -378,6 +378,7 @@ func (km *LocalKeyManager) RegisterPublicKey(ctx context.Context, kmClient model
 	km.metadata.RegisteredAt = time.Now()
 	km.metadata.Client = resp.Key.ClientId
 	km.metadata.KeyID = resp.Key.KeyId
+	km.keyID = resp.Key.KeyId
 	if err := km.saveMetadata(); err != nil {
 		log.Printf("Warning: failed to save metadata after registration: %v", err)
 	}
@@ -411,7 +412,20 @@ func (km *LocalKeyManager) WrapDEK(dek []byte) ([]byte, error) {
 			Message: "private key not loaded",
 		}
 	}
-	return WrapDEKWithPrivateKey(km.privateKey, dek)
+	wrapped, err := WrapDEKWithPrivateKey(km.privateKey, dek)
+	if err != nil {
+		return nil, err
+	}
+
+	expectedLen := km.privateKey.Size()
+	if len(wrapped) != expectedLen {
+		return nil, &models.Error{
+			Code:    models.ErrCodeEncryptionFailed,
+			Message: fmt.Sprintf("wrapped DEK length mismatch (expected %d, got %d)", expectedLen, len(wrapped)),
+		}
+	}
+
+	return wrapped, nil
 }
 
 // GetKeyID returns the key identifier

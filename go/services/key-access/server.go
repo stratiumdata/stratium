@@ -235,6 +235,11 @@ func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (*WrapDEKResp
 
 	logger.Info("WrapDEK called - User: %s (sub: %s), Resource: %s", userIdentifier, subject, req.Resource)
 
+	// Ensure client key ID is present (fallback to latest active key if omitted)
+	if err := s.ensureWrapClientKeyID(ctx, req, subject); err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
+	}
+
 	// Step 2: Validate input
 	if err := s.validateWrapRequest(req); err != nil {
 		return s.createWrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
@@ -325,6 +330,11 @@ func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (*UnwrapD
 
 	logger.Info("UnwrapDEK called - User: %s (sub: %s), Resource: %s", userIdentifier, subject, req.Resource)
 
+	// Ensure client key ID is present (fallback for backward compatibility)
+	if err := s.ensureUnwrapClientKeyID(ctx, req, subject); err != nil {
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
+	}
+
 	// Step 2: Validate input
 	if err := s.validateUnwrapRequest(req); err != nil {
 		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
@@ -410,6 +420,68 @@ func (s *Server) validateUnwrapRequest(req *UnwrapDEKRequest) error {
 		req.Action = "unwrap_dek" // Default action
 	}
 	return nil
+}
+
+func (s *Server) ensureWrapClientKeyID(ctx context.Context, req *WrapDEKRequest, subject string) error {
+	if req.ClientKeyId != "" {
+		return nil
+	}
+	keyID, err := s.lookupLatestClientKeyID(ctx, subject)
+	if err != nil {
+		return err
+	}
+	logger.Info("WrapDEK: no client_key_id provided, using latest active key %s for user %s", keyID, subject)
+	req.ClientKeyId = keyID
+	return nil
+}
+
+func (s *Server) ensureUnwrapClientKeyID(ctx context.Context, req *UnwrapDEKRequest, subject string) error {
+	if req.ClientKeyId != "" {
+		return nil
+	}
+	keyID, err := s.lookupLatestClientKeyID(ctx, subject)
+	if err != nil {
+		return err
+	}
+	logger.Info("UnwrapDEK: no client_key_id provided, using latest active key %s for user %s", keyID, subject)
+	req.ClientKeyId = keyID
+	return nil
+}
+
+func (s *Server) lookupLatestClientKeyID(ctx context.Context, subject string) (string, error) {
+	if subject == "" {
+		return "", fmt.Errorf("client key ID is required for anonymous subject")
+	}
+
+	resp, err := s.keyManagerClient.ListClientKeys(ctx, &keyManager.ListClientKeysRequest{
+		ClientId: subject,
+		PageSize: 50,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to list client keys: %w", err)
+	}
+
+	var latest *keyManager.Key
+	var latestTime time.Time
+	for _, key := range resp.Keys {
+		if key.GetStatus() != keyManager.KeyStatus_KEY_STATUS_ACTIVE {
+			continue
+		}
+		var createdAt time.Time
+		if ts := key.GetCreatedAt(); ts != nil {
+			createdAt = ts.AsTime()
+		}
+		if latest == nil || createdAt.After(latestTime) {
+			latest = key
+			latestTime = createdAt
+		}
+	}
+
+	if latest == nil {
+		return "", fmt.Errorf("no active client keys registered for user %s", subject)
+	}
+
+	return latest.GetKeyId(), nil
 }
 
 func (s *Server) getCurrentActiveKeyID(ctx context.Context) (string, error) {

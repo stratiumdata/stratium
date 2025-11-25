@@ -2,10 +2,8 @@ package key_manager
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,21 +36,13 @@ func NewAdminKeyManager(provider AdminKeyProvider) *AdminKeyManager {
 
 // GetOrCreateAdminKey retrieves the admin key or creates a new one if it doesn't exist
 func (m *AdminKeyManager) GetOrCreateAdminKey(ctx context.Context) ([]byte, error) {
-	// Try to retrieve existing key
 	key, err := m.provider.GetAdminKey(ctx)
-	if err == nil && len(key) == 32 { // AES-256 requires 32 bytes
-		return key, nil
+	if err != nil {
+		return nil, fmt.Errorf("failed to load admin key: %w", err)
 	}
 
-	// Generate new key
-	key = make([]byte, 32) // 256 bits for AES-256
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, fmt.Errorf("failed to generate admin key: %w", err)
-	}
-
-	// Save the key
-	if err := m.provider.SaveAdminKey(ctx, key); err != nil {
-		return nil, fmt.Errorf("failed to save admin key: %w", err)
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid admin key length: expected 32 bytes, got %d", len(key))
 	}
 
 	return key, nil
@@ -61,24 +51,7 @@ func (m *AdminKeyManager) GetOrCreateAdminKey(ctx context.Context) ([]byte, erro
 // RotateAdminKey generates a new admin key and returns both old and new keys
 // The caller is responsible for re-encrypting all key material with the new key
 func (m *AdminKeyManager) RotateAdminKey(ctx context.Context) (oldKey, newKey []byte, err error) {
-	// Get current key
-	oldKey, err = m.provider.GetAdminKey(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get current admin key: %w", err)
-	}
-
-	// Generate new key
-	newKey = make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate new admin key: %w", err)
-	}
-
-	// Save the new key
-	if err := m.provider.SaveAdminKey(ctx, newKey); err != nil {
-		return nil, nil, fmt.Errorf("failed to save new admin key: %w", err)
-	}
-
-	return oldKey, newKey, nil
+	return nil, nil, fmt.Errorf("admin key rotation is not supported; provide a new key via secret management")
 }
 
 // ===========================================================================================

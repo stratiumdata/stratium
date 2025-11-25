@@ -98,189 +98,46 @@ func TestAdminKeyManager_GetOrCreateAdminKey_CreateNew(t *testing.T) {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	var savedKey []byte
-	provider.saveAdminKeyFunc = func(ctx context.Context, key []byte) error {
-		savedKey = key
-		return nil
-	}
-
 	manager := NewAdminKeyManager(provider)
 	ctx := context.Background()
 
-	key, err := manager.GetOrCreateAdminKey(ctx)
-	if err != nil {
-		t.Fatalf("GetOrCreateAdminKey failed: %v", err)
-	}
-
-	if len(key) != 32 {
-		t.Errorf("Expected key length 32, got %d", len(key))
-	}
-
-	if savedKey == nil {
-		t.Error("SaveAdminKey was not called")
-	}
-
-	if len(savedKey) != 32 {
-		t.Errorf("Expected saved key length 32, got %d", len(savedKey))
-	}
-
-	// Verify the saved key matches returned key
-	for i := range key {
-		if key[i] != savedKey[i] {
-			t.Errorf("Key mismatch at index %d: expected %d, got %d", i, savedKey[i], key[i])
-		}
+	if _, err := manager.GetOrCreateAdminKey(ctx); err == nil {
+		t.Fatalf("expected error when admin key is missing")
 	}
 }
 
 func TestAdminKeyManager_GetOrCreateAdminKey_InvalidKeyLength(t *testing.T) {
 	provider := NewMockAdminKeyProvider()
 	provider.getAdminKeyFunc = func(ctx context.Context) ([]byte, error) {
-		return make([]byte, 16), nil // Wrong length
-	}
-
-	var savedKey []byte
-	provider.saveAdminKeyFunc = func(ctx context.Context, key []byte) error {
-		savedKey = key
-		return nil
+		return make([]byte, 16), nil
 	}
 
 	manager := NewAdminKeyManager(provider)
 	ctx := context.Background()
 
-	key, err := manager.GetOrCreateAdminKey(ctx)
-	if err != nil {
-		t.Fatalf("GetOrCreateAdminKey failed: %v", err)
-	}
-
-	// Should create new key with correct length
-	if len(key) != 32 {
-		t.Errorf("Expected key length 32, got %d", len(key))
-	}
-
-	if savedKey == nil {
-		t.Error("SaveAdminKey was not called")
-	}
-}
-
-func TestAdminKeyManager_GetOrCreateAdminKey_SaveError(t *testing.T) {
-	provider := NewMockAdminKeyProvider()
-	provider.getAdminKeyFunc = func(ctx context.Context) ([]byte, error) {
-		return nil, fmt.Errorf("key not found")
-	}
-	provider.saveAdminKeyFunc = func(ctx context.Context, key []byte) error {
-		return fmt.Errorf("save failed")
-	}
-
-	manager := NewAdminKeyManager(provider)
-	ctx := context.Background()
-
-	_, err := manager.GetOrCreateAdminKey(ctx)
-	if err == nil {
-		t.Error("Expected error when save fails")
-	}
-
-	if !strings.Contains(err.Error(), "failed to save admin key") {
-		t.Errorf("Unexpected error message: %v", err)
+	if _, err := manager.GetOrCreateAdminKey(ctx); err == nil {
+		t.Fatalf("expected error for invalid key length")
 	}
 }
 
 func TestAdminKeyManager_RotateAdminKey(t *testing.T) {
-	oldKey := make([]byte, 32)
-	for i := range oldKey {
-		oldKey[i] = byte(i)
-	}
-
-	provider := NewMockAdminKeyProvider()
-	provider.getAdminKeyFunc = func(ctx context.Context) ([]byte, error) {
-		return oldKey, nil
-	}
-
-	var savedKey []byte
-	provider.saveAdminKeyFunc = func(ctx context.Context, key []byte) error {
-		savedKey = key
-		return nil
-	}
-
-	manager := NewAdminKeyManager(provider)
-	ctx := context.Background()
-
-	returnedOld, newKey, err := manager.RotateAdminKey(ctx)
-	if err != nil {
-		t.Fatalf("RotateAdminKey failed: %v", err)
-	}
-
-	// Verify old key is returned correctly
-	if len(returnedOld) != 32 {
-		t.Errorf("Expected old key length 32, got %d", len(returnedOld))
-	}
-	for i := range returnedOld {
-		if returnedOld[i] != oldKey[i] {
-			t.Errorf("Old key mismatch at index %d", i)
-		}
-	}
-
-	// Verify new key is generated and saved
-	if len(newKey) != 32 {
-		t.Errorf("Expected new key length 32, got %d", len(newKey))
-	}
-
-	if savedKey == nil {
-		t.Error("SaveAdminKey was not called")
-	}
-
-	// Verify new key is different from old key
-	same := true
-	for i := range newKey {
-		if newKey[i] != oldKey[i] {
-			same = false
-			break
-		}
-	}
-	if same {
-		t.Error("New key should be different from old key")
+	manager := NewAdminKeyManager(NewMockAdminKeyProvider())
+	if _, _, err := manager.RotateAdminKey(context.Background()); err == nil {
+		t.Fatalf("expected rotation to be unsupported")
 	}
 }
 
 func TestAdminKeyManager_RotateAdminKey_GetError(t *testing.T) {
-	provider := NewMockAdminKeyProvider()
-	provider.getAdminKeyFunc = func(ctx context.Context) ([]byte, error) {
-		return nil, fmt.Errorf("get failed")
-	}
-
-	manager := NewAdminKeyManager(provider)
-	ctx := context.Background()
-
-	_, _, err := manager.RotateAdminKey(ctx)
-	if err == nil {
-		t.Error("Expected error when get fails")
-	}
-
-	if !strings.Contains(err.Error(), "failed to get current admin key") {
-		t.Errorf("Unexpected error message: %v", err)
+	manager := NewAdminKeyManager(NewMockAdminKeyProvider())
+	if _, _, err := manager.RotateAdminKey(context.Background()); err == nil {
+		t.Fatalf("expected rotation to be unsupported")
 	}
 }
 
 func TestAdminKeyManager_RotateAdminKey_SaveError(t *testing.T) {
-	oldKey := make([]byte, 32)
-
-	provider := NewMockAdminKeyProvider()
-	provider.getAdminKeyFunc = func(ctx context.Context) ([]byte, error) {
-		return oldKey, nil
-	}
-	provider.saveAdminKeyFunc = func(ctx context.Context, key []byte) error {
-		return fmt.Errorf("save failed")
-	}
-
-	manager := NewAdminKeyManager(provider)
-	ctx := context.Background()
-
-	_, _, err := manager.RotateAdminKey(ctx)
-	if err == nil {
-		t.Error("Expected error when save fails")
-	}
-
-	if !strings.Contains(err.Error(), "failed to save new admin key") {
-		t.Errorf("Unexpected error message: %v", err)
+	manager := NewAdminKeyManager(NewMockAdminKeyProvider())
+	if _, _, err := manager.RotateAdminKey(context.Background()); err == nil {
+		t.Fatalf("expected rotation to be unsupported")
 	}
 }
 

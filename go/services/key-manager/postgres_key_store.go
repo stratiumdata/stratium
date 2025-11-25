@@ -2,8 +2,12 @@ package key_manager
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -646,9 +650,40 @@ func parseKeyStatus(s string) KeyStatus {
 
 // parsePublicKeyFromPEM is a placeholder - real implementation would parse PEM
 func parsePublicKeyFromPEM(pemData string, keyType KeyType) (any, error) {
-	// This would normally parse the PEM data to extract the public key
-	// For now, we return nil since the public key is mainly used for display
-	return nil, nil
+	if pemData == "" {
+		return nil, fmt.Errorf("public key PEM is empty")
+	}
+
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode public key PEM")
+	}
+
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	switch keyType {
+	case KeyType_KEY_TYPE_RSA_2048,
+		KeyType_KEY_TYPE_RSA_3072,
+		KeyType_KEY_TYPE_RSA_4096:
+		rsaPub, ok := parsed.(*rsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("expected RSA public key, got %T", parsed)
+		}
+		return rsaPub, nil
+	case KeyType_KEY_TYPE_ECC_P256,
+		KeyType_KEY_TYPE_ECC_P384,
+		KeyType_KEY_TYPE_ECC_P521:
+		ecdsaPub, ok := parsed.(*ecdsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("expected ECDSA public key, got %T", parsed)
+		}
+		return ecdsaPub, nil
+	default:
+		return parsed, nil
+	}
 }
 
 // ===========================================================================================

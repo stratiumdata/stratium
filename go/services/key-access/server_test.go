@@ -185,8 +185,13 @@ func TestServer_WrapDEK_Integration(t *testing.T) {
 	clientKeyID := "client-key-id"
 	serviceKeyID := "service-key-id"
 
-	kmAddr, kmServer := startMockKeyManagerGRPCServer(t, map[string]*rsa.PublicKey{
-		clientKeyID: &clientPrivate.PublicKey,
+	kmAddr, kmServer := startMockKeyManagerGRPCServer(t, map[string]*mockClientKey{
+		clientKeyID: {
+			publicKey: &clientPrivate.PublicKey,
+			clientID:  "user123",
+			status:    keyManager.KeyStatus_KEY_STATUS_ACTIVE,
+			createdAt: time.Now(),
+		},
 	}, map[string]*rsa.PrivateKey{
 		serviceKeyID: servicePrivate,
 	})
@@ -272,14 +277,32 @@ func TestServer_WrapDEK_Integration(t *testing.T) {
 	if !bytes.Equal(kmServer.lastPlainDEK, dek) {
 		t.Fatalf("key manager rewrap received incorrect DEK")
 	}
+
+	// Verify fallback when client key ID is omitted
+	reqNoKey := *req
+	reqNoKey.ClientKeyId = ""
+	resp, err = server.WrapDEK(ctx, &reqNoKey)
+	if err != nil {
+		t.Fatalf("WrapDEK without client key ID failed: %v", err)
+	}
+	if !resp.AccessGranted {
+		t.Fatalf("expected access granted for fallback client key, got: %s", resp.AccessReason)
+	}
 }
 
 // --- Test helpers for integration scenario ---
 
+type mockClientKey struct {
+	publicKey *rsa.PublicKey
+	clientID  string
+	status    keyManager.KeyStatus
+	createdAt time.Time
+}
+
 type mockKeyManagerServer struct {
 	keyManager.UnimplementedKeyManagerServiceServer
 
-	clientKeys  map[string]*rsa.PublicKey
+	clientKeys  map[string]*mockClientKey
 	serviceKeys map[string]*rsa.PrivateKey
 
 	mu           sync.Mutex
@@ -294,12 +317,12 @@ func (m *mockKeyManagerServer) cleanup() {
 }
 
 func (m *mockKeyManagerServer) RewrapClientDEK(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error) {
-	pub := m.clientKeys[req.GetClientKeyId()]
-	if pub == nil {
+	clientKey := m.clientKeys[req.GetClientKeyId()]
+	if clientKey == nil {
 		return nil, fmt.Errorf("client key %s not registered", req.GetClientKeyId())
 	}
 
-	dek, err := recoverClientDEK(pub, req.GetClientWrappedDek())
+	dek, err := recoverClientDEK(clientKey.publicKey, req.GetClientWrappedDek())
 	if err != nil {
 		return nil, fmt.Errorf("failed to recover client DEK: %w", err)
 	}
@@ -322,6 +345,28 @@ func (m *mockKeyManagerServer) RewrapClientDEK(ctx context.Context, req *keyMana
 		ServiceWrappedDek: wrapped,
 		ServiceKeyId:      req.GetServiceKeyId(),
 		Timestamp:         timestamppb.Now(),
+	}, nil
+}
+
+func (m *mockKeyManagerServer) ListClientKeys(ctx context.Context, req *keyManager.ListClientKeysRequest) (*keyManager.ListClientKeysResponse, error) {
+	var keys []*keyManager.Key
+	for keyID, entry := range m.clientKeys {
+		if entry.clientID != req.GetClientId() {
+			continue
+		}
+		ts := timestamppb.New(entry.createdAt)
+		keys = append(keys, &keyManager.Key{
+			KeyId:     keyID,
+			ClientId:  entry.clientID,
+			Status:    entry.status,
+			CreatedAt: ts,
+		})
+	}
+
+	return &keyManager.ListClientKeysResponse{
+		Keys:        keys,
+		TotalCount:  int32(len(keys)),
+		Timestamp:   timestamppb.Now(),
 	}, nil
 }
 
@@ -370,7 +415,7 @@ func (m *mockPlatformServer) GetEntitlements(ctx context.Context, req *platform.
 	}, nil
 }
 
-func startMockKeyManagerGRPCServer(t *testing.T, clientKeys map[string]*rsa.PublicKey, serviceKeys map[string]*rsa.PrivateKey) (string, *mockKeyManagerServer) {
+func startMockKeyManagerGRPCServer(t *testing.T, clientKeys map[string]*mockClientKey, serviceKeys map[string]*rsa.PrivateKey) (string, *mockKeyManagerServer) {
 	t.Helper()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
