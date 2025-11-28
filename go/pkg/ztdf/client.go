@@ -2,11 +2,12 @@ package ztdf
 
 import (
 	"archive/zip"
-	"bytes"
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
 	"net"
@@ -626,10 +627,36 @@ func (c *Client) createManifest(wrappedDEK []byte, keyID, policyBase64, policyBi
 
 // SaveToFile saves a ZTDF to a ZIP file
 func SaveToFile(tdo *models.TrustedDataObject, outputPath string) error {
-	buf := &bytes.Buffer{}
-	zipWriter := zip.NewWriter(buf)
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return &models.Error{
+			Code:    "FILE_WRITE_FAILED",
+			Message: fmt.Sprintf("failed to create zip file: %s", outputPath),
+			Err:     err,
+		}
+	}
+	defer file.Close()
 
-	// Write manifest.json
+	bufferedWriter := bufio.NewWriter(file)
+	if err := writeTDOToZip(tdo, bufferedWriter); err != nil {
+		return err
+	}
+
+	if err := bufferedWriter.Flush(); err != nil {
+		return &models.Error{
+			Code:    "FILE_WRITE_FAILED",
+			Message: "failed to flush zip file",
+			Err:     err,
+		}
+	}
+
+	return nil
+}
+
+// writeTDOToZip writes the manifest and payload to a zip writer.
+func writeTDOToZip(tdo *models.TrustedDataObject, w io.Writer) error {
+	zipWriter := zip.NewWriter(w)
+
 	manifestJSON, err := protojson.MarshalOptions{
 		Indent: "  ",
 	}.Marshal(tdo.Manifest)
@@ -642,7 +669,11 @@ func SaveToFile(tdo *models.TrustedDataObject, outputPath string) error {
 		}
 	}
 
-	manifestWriter, err := zipWriter.Create("manifest.json")
+	manifestHeader := &zip.FileHeader{
+		Name:   "manifest.json",
+		Method: zip.Deflate,
+	}
+	manifestWriter, err := zipWriter.CreateHeader(manifestHeader)
 	if err != nil {
 		zipWriter.Close()
 		return &models.Error{
@@ -660,8 +691,14 @@ func SaveToFile(tdo *models.TrustedDataObject, outputPath string) error {
 		}
 	}
 
-	// Write payload
-	payloadWriter, err := zipWriter.Create("0.payload")
+	payloadHeader := &zip.FileHeader{
+		Name:   "0.payload",
+		Method: zip.Store,
+	}
+	payloadHeader.UncompressedSize64 = uint64(len(tdo.Payload.Data))
+	payloadHeader.CRC32 = crc32.ChecksumIEEE(tdo.Payload.Data)
+
+	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
 	if err != nil {
 		zipWriter.Close()
 		return &models.Error{
@@ -687,30 +724,12 @@ func SaveToFile(tdo *models.TrustedDataObject, outputPath string) error {
 		}
 	}
 
-	// Write to file
-	if err := os.WriteFile(outputPath, buf.Bytes(), 0644); err != nil {
-		return &models.Error{
-			Code:    "FILE_WRITE_FAILED",
-			Message: "failed to write zip file",
-			Err:     err,
-		}
-	}
-
 	return nil
 }
 
 // LoadFromFile loads a ZTDF from a ZIP file
 func LoadFromFile(zipPath string) (*models.TrustedDataObject, error) {
-	zipData, err := os.ReadFile(zipPath)
-	if err != nil {
-		return nil, &models.Error{
-			Code:    "FILE_READ_FAILED",
-			Message: "failed to read zip file",
-			Err:     err,
-		}
-	}
-
-	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return nil, &models.Error{
 			Code:    "ZIP_OPEN_FAILED",
@@ -718,6 +737,7 @@ func LoadFromFile(zipPath string) (*models.TrustedDataObject, error) {
 			Err:     err,
 		}
 	}
+	defer reader.Close()
 
 	tdo := &models.TrustedDataObject{}
 
