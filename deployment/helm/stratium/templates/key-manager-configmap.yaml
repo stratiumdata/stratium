@@ -1,4 +1,16 @@
 {{- if .Values.keyManager.enabled }}
+{{- $defaultStratiumSecret := include "stratium.stratiumSecretName" . }}
+{{- $hasInlineAdminKey := ne (default "" .Values.secrets.stratium.adminKey) "" }}
+{{- $hasCustomAdminKeySecret := ne (default "" .Values.keyManager.adminKey.secretName) "" }}
+{{- $useAdminKeySecret := or .Values.keyManager.adminKey.useSecret $hasInlineAdminKey $hasCustomAdminKeySecret }}
+{{- $adminKeyPath := .Values.keyManager.persistence.mountPath }}
+{{- if $useAdminKeySecret }}
+{{- $adminKeyPath = printf "%s/admin.key" $adminKeyPath }}
+{{- end }}
+{{- $adminKeyProvider := "composite" }}
+{{- if $useAdminKeySecret }}
+{{- $adminKeyProvider = "file" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -47,8 +59,8 @@ data:
     encryption:
       algorithm: RSA2048
       key_rotation: false
-      admin_key_provider: composite
-      admin_key_config: {{ printf "%s/admin.key" .Values.keyManager.persistence.mountPath | quote }}
+      admin_key_provider: {{ $adminKeyProvider }}
+      admin_key_config: {{ $adminKeyPath | quote }}
 
     externalKeys:
       enabled: {{ .Values.keyManager.config.externalKeysEnabled | default false }}

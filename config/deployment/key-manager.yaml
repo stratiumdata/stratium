@@ -37,6 +37,7 @@ encryption:
 oidc:
   enabled: true
   issuer_url: http://keycloak:8080/realms/stratium
+  redirect_url: http://localhost:8081/callback
   client_id: stratium-key-manager
   client_secret: stratium-key-manager-secret  # Override via STRATIUM_OIDC_CLIENT_SECRET
   scopes:

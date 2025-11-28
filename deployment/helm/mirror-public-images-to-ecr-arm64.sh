@@ -11,6 +11,7 @@ IMAGES=(
     "redis:7.4.1-alpine|redis"
     "quay.io/keycloak/keycloak:26.0.7|keycloak"
     "envoyproxy/envoy:v1.31.2|envoy"
+    "busybox:1.36|busybox"
 )
 
 echo "======================================================================"
@@ -50,10 +51,11 @@ echo ""
 for IMAGE_PAIR in "${IMAGES[@]}"; do
     PUBLIC_IMAGE=$(echo "$IMAGE_PAIR" | cut -d'|' -f1)
     ECR_REPO_NAME=$(echo "$IMAGE_PAIR" | cut -d'|' -f2)
-    ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPO_NAME}:latest"
+    SRC_TAG="${PUBLIC_IMAGE##*:}"
+    ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPO_NAME}:${SRC_TAG}"
 
     echo "======================================================================"
-    echo "Processing: ${PUBLIC_IMAGE} → ${ECR_REPO_NAME} (linux/arm64)"
+    echo "Processing: ${PUBLIC_IMAGE} → ${ECR_IMAGE} (linux/arm64)"
     echo "======================================================================"
 
     # Remove any cached versions
@@ -72,6 +74,12 @@ for IMAGE_PAIR in "${IMAGES[@]}"; do
         exit 1
     fi
 
+    # Ensure repository exists
+    if ! aws ecr describe-repositories --repository-names "${ECR_REPO_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+        echo "→ ECR repo ${ECR_REPO_NAME} missing; creating..."
+        aws ecr create-repository --repository-name "${ECR_REPO_NAME}" --region "${AWS_REGION}" >/dev/null
+    fi
+
     # Tag for ECR
     echo "→ Tagging image for ECR..."
     docker tag ${PUBLIC_IMAGE} ${ECR_IMAGE}
@@ -80,17 +88,10 @@ for IMAGE_PAIR in "${IMAGES[@]}"; do
     echo "→ Pushing to ECR: ${ECR_IMAGE}"
     docker push ${ECR_IMAGE}
 
-    echo "✓ Successfully pushed ${PUBLIC_IMAGE} (arm64)"
+    echo "✓ Successfully pushed ${PUBLIC_IMAGE} (arm64) as ${SRC_TAG}"
     echo ""
 done
 
 echo "======================================================================"
 echo "✓ All ARM64 images mirrored successfully!"
 echo "======================================================================"
-echo ""
-echo "Images are now available at:"
-echo "  - ${ECR_REGISTRY}/postgres:latest (ARM64)"
-echo "  - ${ECR_REGISTRY}/redis:latest (ARM64)"
-echo "  - ${ECR_REGISTRY}/keycloak:latest (ARM64)"
-echo "  - ${ECR_REGISTRY}/envoy:latest (ARM64)"
-echo ""

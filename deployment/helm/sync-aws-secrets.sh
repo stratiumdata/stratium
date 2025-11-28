@@ -53,6 +53,15 @@ apply_secret() {
   kubectl apply -n "${NAMESPACE}" -f -
 }
 
+ensure_namespace() {
+  if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+    echo "Creating namespace ${NAMESPACE}"
+    kubectl create namespace "${NAMESPACE}"
+  fi
+}
+
+ensure_namespace
+
 echo "Syncing Stratium application secret from ${STRATIUM_SECRET_ID}"
 stratium_json="$(fetch_secret "${STRATIUM_SECRET_ID}")"
 db_password="$(jq -r '."database-password"' <<<"${stratium_json}")"

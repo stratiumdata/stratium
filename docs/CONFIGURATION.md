@@ -220,7 +220,7 @@ oidc:
 - `issuer_url`: OIDC provider URL
 - `client_id`: OAuth2 client ID
 - `client_secret`: OAuth2 client secret (prefer environment variable)
-- `redirect_url`: OAuth2 redirect URL
+- `redirect_url`: OAuth2 redirect URL (optional for server-to-server services)
 - `scopes`: OAuth2 scopes to request
 
 ### Service Discovery

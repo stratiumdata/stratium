@@ -117,9 +117,11 @@ spec:
         - name: admin-key
           mountPath: {{ .Values.keyManager.persistence.mountPath }}
           readOnly: {{ ternary "true" "false" $useAdminKeySecret }}
+        {{- if .Values.keyManager.externalKeysSecret.enabled }}
         - name: external-keys
           mountPath: /var/run/stratium/external-keys
           readOnly: true
+        {{- end }}
       volumes:
       - name: config
         configMap:
@@ -137,16 +139,16 @@ spec:
         {{- else }}
         emptyDir: {}
         {{- end }}
+      {{- if .Values.keyManager.externalKeysSecret.enabled }}
       - name: external-keys
         secret:
-          secretName: external-keys
+          secretName: {{ .Values.keyManager.externalKeysSecret.secretName | default "external-keys" }}
           items:
-            - key: partner-a-manifest.json
-              path: partner-a/manifest.json
-            - key: partner-a-public.pem
-              path: partner-a/public.pem
-            - key: partner-a-private.pem
-              path: partner-a/private.pem
+            {{- range .Values.keyManager.externalKeysSecret.items }}
+            - key: {{ .key }}
+              path: {{ .path }}
+            {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

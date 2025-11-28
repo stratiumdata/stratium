@@ -265,6 +265,25 @@ Secret name helpers (support external/managed secrets)
 {{- end }}
 
 {{/*
+Shared external egress rule for network policies
+*/}}
+{{- define "stratium.networkPolicy.externalEgress" -}}
+{{- $np := .Values.security.networkPolicy }}
+{{- if and $np.externalEgress.enabled $np.externalEgress.cidrs }}
+- to:
+  {{- range $np.externalEgress.cidrs }}
+  - ipBlock:
+      cidr: {{ . }}
+  {{- end }}
+  ports:
+  {{- range $np.externalEgress.ports }}
+  - protocol: TCP
+    port: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Fully qualified hostname for the bundled PostgreSQL service
 */}}
 {{- define "stratium.postgresql.host" -}}
