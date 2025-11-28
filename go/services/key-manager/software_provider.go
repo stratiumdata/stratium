@@ -353,25 +353,23 @@ func (s *SoftwareKeyProvider) Encrypt(ctx context.Context, keyID string, plainte
 	case *ecdsa.PublicKey:
 		return encryptDEKWithECCPublicKey(publicKey, plaintext)
 	case *kyber512.PublicKey:
-		// Kyber uses KEM - encapsulate generates a shared secret and ciphertext
-		// Note: For actual data encryption, the shared secret should be used as a key for symmetric encryption
-		ciphertext, _, err := kyber512.Scheme().Encapsulate(publicKey)
+		ciphertext, sharedSecret, err := kyber512.Scheme().Encapsulate(publicKey)
 		if err != nil {
 			return nil, fmt.Errorf("KYBER-512 encapsulation failed: %w", err)
 		}
-		return ciphertext, nil
+		return s.encryptDEKWithSharedSecret(plaintext, sharedSecret, ciphertext)
 	case *kyber768.PublicKey:
-		ciphertext, _, err := kyber768.Scheme().Encapsulate(publicKey)
+		ciphertext, sharedSecret, err := kyber768.Scheme().Encapsulate(publicKey)
 		if err != nil {
 			return nil, fmt.Errorf("KYBER-768 encapsulation failed: %w", err)
 		}
-		return ciphertext, nil
+		return s.encryptDEKWithSharedSecret(plaintext, sharedSecret, ciphertext)
 	case *kyber1024.PublicKey:
-		ciphertext, _, err := kyber1024.Scheme().Encapsulate(publicKey)
+		ciphertext, sharedSecret, err := kyber1024.Scheme().Encapsulate(publicKey)
 		if err != nil {
 			return nil, fmt.Errorf("KYBER-1024 encapsulation failed: %w", err)
 		}
-		return ciphertext, nil
+		return s.encryptDEKWithSharedSecret(plaintext, sharedSecret, ciphertext)
 	default:
 		return nil, fmt.Errorf("unsupported public key type for encryption: %T", publicKey)
 	}
@@ -551,8 +549,38 @@ func (s *SoftwareKeyProvider) decryptWithKyber1024(privateKey *kyber1024.Private
 	return s.decryptDEKWithSharedSecret(encryptedDEK, sharedSecret)
 }
 
+// encryptDEKWithSharedSecret encrypts a DEK using a KEM shared secret
+func (s *SoftwareKeyProvider) encryptDEKWithSharedSecret(dek, sharedSecret, kemCiphertext []byte) ([]byte, error) {
+	if len(sharedSecret) < 32 {
+		return nil, fmt.Errorf("shared secret too short for AES-256 key derivation")
+	}
+
+	block, err := aes.NewCipher(sharedSecret[:32])
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	encryptedDEK := gcm.Seal(nonce, nonce, dek, nil)
+
+	return append(kemCiphertext, encryptedDEK...), nil
+}
+
 // decryptDEKWithSharedSecret decrypts a DEK using a KEM shared secret
 func (s *SoftwareKeyProvider) decryptDEKWithSharedSecret(encryptedDEK, sharedSecret []byte) ([]byte, error) {
+	if len(sharedSecret) < 32 {
+		return nil, fmt.Errorf("shared secret too short for AES-256 key derivation")
+	}
+
 	// Use the shared secret to decrypt the DEK with AES-256-GCM
 	aesBlock, err := aes.NewCipher(sharedSecret[:32]) // Use first 32 bytes for AES-256
 	if err != nil {

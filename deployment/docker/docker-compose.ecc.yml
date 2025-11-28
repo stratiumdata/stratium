@@ -1,7 +1,5 @@
 # Docker Compose configuration for testing Elliptic Curve Cryptography algorithms
 # Supports P256, P384, and P521
-version: '3.8'
-
 services:
   platform:
     extends:

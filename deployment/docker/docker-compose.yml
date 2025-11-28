@@ -56,7 +56,7 @@ services:
     ports:
       - "${KEYCLOAK_PORT:-8080}:8080"
     volumes:
-      - ../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - ../../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -231,7 +231,7 @@ services:
       - "8081:8081"  # gRPC-Web port
       - "9901:9901"  # Admin port
     volumes:
-      - envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
     networks:
       - stratium-network
     command: /usr/local/bin/envoy -c /etc/envoy/envoy.yaml

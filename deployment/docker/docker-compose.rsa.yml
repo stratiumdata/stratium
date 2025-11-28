@@ -1,7 +1,5 @@
 # Docker Compose configuration for testing RSA encryption algorithms
 # Supports RSA2048, RSA3072, and RSA4096
-version: '3.8'
-
 services:
   platform:
     extends:
