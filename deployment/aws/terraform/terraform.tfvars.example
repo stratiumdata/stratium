@@ -1,0 +1,7 @@
+# Example overrides for the Stratium demo cluster
+
+aws_region      = "us-east-2"
+cluster_name    = "stratium-demo"
+node_group_min  = 3
+node_group_max  = 6
+node_group_desired = 3

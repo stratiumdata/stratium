@@ -21,36 +21,36 @@ global:
 platform:
   image:
     registry: ""  # Uses global.imageRegistry
-    repository: stratiumdata-platform
-    tag: "v0.19.0"
+    repository: stratiumdata-platform-server
+    tag: "de1091c"
     pullPolicy: IfNotPresent
 
 keyManager:
   image:
     registry: ""  # Uses global.imageRegistry
-    repository: stratiumdata-key-manager
-    tag: "v0.19.0"
+    repository: stratiumdata-key-manager-server
+    tag: "a9dbd15"
     pullPolicy: IfNotPresent
 
 keyAccess:
   image:
     registry: ""  # Uses global.imageRegistry
-    repository: stratiumdata-key-access
-    tag: "v0.19.0"
+    repository: stratiumdata-key-access-server
+    tag: "de1091c"
     pullPolicy: IfNotPresent
 
 pap:
   image:
     registry: ""  # Uses global.imageRegistry
-    repository: stratiumdata-pap
-    tag: "v0.19.0"
+    repository: stratiumdata-pap-server
+    tag: "de1091c"
     pullPolicy: Always  # Force pull to get latest ARM64 image
 
 papUI:
   image:
     registry: ""  # Uses global.imageRegistry
     repository: stratiumdata-pap-ui
-    tag: "v0.19.0"
+    tag: "de1091c"
     pullPolicy: Always  # Force pull to get ARM64 image with port 8080 (no cache build)
   service:
     port: 8080  # Use non-privileged port for container security context
@@ -67,7 +67,7 @@ postgresql:
     tag: "latest"
     pullPolicy: Always  # Force pull to get ARM64 image
   persistence:
-    storageClass: "gp2-csi"
+    storageClass: gp3-auto
 
 redis:
   image:

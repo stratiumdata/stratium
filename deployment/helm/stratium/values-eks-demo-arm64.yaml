@@ -18,16 +18,25 @@ cluster:
   name: demo-arm64
   region: us-east-2
 
+awsSecretsManager:
+  enabled: true
+  region: us-east-2            # your AWS region
+  secretStoreRef:
+    name: stratium-aws-sm      # your (Cluster)SecretStore name
+    kind: ClusterSecretStore   # or SecretStore if namespaced
+
+  stratiumSecretId: stratium-aws-sm
+  keycloakSecretId: keycloak-aws-sm
+  postgresqlSecretId: postgresql-aws-sm
+  adminKeySecretId: stratium-admin-key
+
 secrets:
   stratium:
     create: false
-    name: stratium-aws-sm
   keycloak:
     create: false
-    name: keycloak-aws-sm
   postgresql:
     create: false
-    name: postgresql-aws-sm
 
 # =============================================================================
 # Public ingress (ALB, HTTP-only for now)
@@ -132,7 +141,11 @@ keyAccess:
 keyManager:
   config:
     environment: production
+  persistence:
+    enabled: false
   adminKey:
     useSecret: true
     secretName: stratium-admin-key
     secretKey: admin-key
+  externalKeysSecret:
+    enabled: false

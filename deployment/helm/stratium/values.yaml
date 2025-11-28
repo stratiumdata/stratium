@@ -32,6 +32,19 @@ secrets:
     create: true
     name: ""
 
+# Optional: pull secrets directly from AWS Secrets Manager via ExternalSecrets
+awsSecretsManager:
+  enabled: false
+  region: ""              # AWS region of the secrets
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ""              # Existing SecretStore/ClusterSecretStore (created by external-secrets)
+    kind: SecretStore
+  stratiumSecretId: stratium-aws-sm
+  keycloakSecretId: keycloak-aws-sm
+  postgresqlSecretId: postgresql-aws-sm
+  adminKeySecretId: stratium-admin-key
+
 # =============================================================================
 # PostgreSQL Database
 # =============================================================================
@@ -282,6 +295,17 @@ keyManager:
     useSecret: false         # When true, mount admin key from a Kubernetes Secret
     secretName: ""           # Defaults to secrets.stratium.name (or generated secret)
     secretKey: "admin-key"   # Key within the Secret containing the base64 admin key
+
+  externalKeysSecret:
+    enabled: true
+    secretName: external-keys
+    items:
+      - key: partner-a-manifest.json
+        path: partner-a/manifest.json
+      - key: partner-a-public.pem
+        path: partner-a/public.pem
+      - key: partner-a-private.pem
+        path: partner-a/private.pem
 
   resources:
     limits:
@@ -554,6 +578,13 @@ security:
     policyTypes:
       - Ingress
       - Egress
+    externalEgress:
+      enabled: true
+      cidrs:
+        - 0.0.0.0/0
+      ports:
+        - 80
+        - 443
 
 # =============================================================================
 # Monitoring and Observability

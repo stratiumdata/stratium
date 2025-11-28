@@ -12,7 +12,8 @@
 .PHONY: docker-customer-up docker-customer-down docker-customer-logs verify-customer
 .PHONY: push-customer push-customer-platform push-customer-key-manager push-customer-key-access push-customer-pap
 .PHONY: setup-buildx build-customer-multiplatform build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access
-.PHONY: build-postgres push-postgres
+.PHONY: build-postgres push-postgres fmt-all tests-unit tests-integration tests-e2e tests-all build-all docker-build-images docker-push-images \
+	docker-compose-up docker-compose-down docker-compose-logs helm-minikube helm-eks eks-create eks-delete aws-ecr-login
 
 # Default target
 help: ## Shows available Makefile commands with descriptions
@@ -32,6 +33,17 @@ CUSTOMER_VERSION ?= eval-1.0.3
 CUSTOMER_FEATURES := ## full-logging | metrics | observability | rate-limiting | caching | short-timeouts
 BUILD_MODE := ## production | development | demo
 BUILD_VERSION :=
+DOCKER_REGISTRY ?= $(DOCKER_HUB_ORG)
+DOCKER_VERSION ?= $(shell git rev-parse --short HEAD)
+DEPLOY_ENV ?= production
+COMPOSE_FILE ?= deployment/docker/docker-compose.yml
+DOCKER_SERVICES := platform-server:50051 key-manager-server:50052 key-access-server:50053 pap-server:8090
+AWS_REGION ?= us-east-2
+AWS_ACCOUNT_ID ?= 
+PUSH_TO_ECR ?= true
+EKS_CONFIG ?= deployment/aws/eks-cluster-arm.yaml
+HELM_RELEASE ?= stratium
+HELM_NAMESPACE ?= stratium
 
 build: build-platform build-key-manager build-key-access build-pap ## Build all binaries
 
@@ -72,6 +84,116 @@ install-pap-cli: build-pap-cli ## Install PAP CLI to system PATH
 	@sudo chmod +x /usr/local/bin/pap-cli
 	@echo "PAP CLI installed successfully!"
 	@echo "You can now run 'pap-cli' from anywhere."
+
+# ----------------------------------------------------------------------
+# Unified developer workflow targets
+# ----------------------------------------------------------------------
+
+fmt-all: fmt ## Format all source files
+
+tests-unit: ## Run unit tests (short mode)
+	@echo "Running unit tests..."
+	cd go && go test -short ./...
+
+tests-integration: ## Run integration tests for services and SDK
+	@echo "Running integration tests..."
+	cd go && go test ./services/... ./sdk/...
+
+tests-e2e: ## Run end-to-end shell-based tests
+	@echo "Running platform PDP e2e test..."
+	./scripts/test_platform_pdp.sh
+	@echo "Running PAP auth e2e test..."
+	./scripts/test_pap_auth.sh
+
+tests-all: tests-unit tests-integration tests-e2e ## Run unit, integration, and e2e tests
+
+build-all: build ## Build all services and clients
+
+docker-build-images: ## Build Docker images for Stratium services
+	@set -eu; \
+	for entry in $(DOCKER_SERVICES); do \
+		svc=$${entry%%:*}; port=$${entry##*:}; \
+		printf 'Building %s image (port %s)...\n' "$$svc" "$$port"; \
+		docker build \
+			--build-arg SERVICE_NAME=$$svc \
+			--build-arg SERVICE_PORT=$$port \
+			--build-arg BUILD_MODE=$(DEPLOY_ENV) \
+			--build-arg BUILD_VERSION=$(DOCKER_VERSION) \
+			-f deployment/docker/Dockerfile \
+			-t $(DOCKER_REGISTRY)/$$svc:$(DOCKER_VERSION) \
+			.; \
+	done; \
+	echo "Building pap-ui image..."; \
+	docker build \
+		-f pap-ui/Dockerfile \
+		-t $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) \
+		pap-ui
+
+aws-ecr-login: ## Authenticate Docker with AWS ECR
+	@AWS_REGION=$(AWS_REGION) AWS_ACCOUNT_ID=$(AWS_ACCOUNT_ID) ./deployment/aws/ecr/ecr_login.sh >/dev/null && echo "Logged into AWS ECR"
+
+docker-push-images: ## Push Docker images to registry/ECR
+	@set -eu; \
+	REGISTRY=$(DOCKER_REGISTRY); \
+	REPO_PREFIX=stratiumdata-; \
+	if [ "$(PUSH_TO_ECR)" = "true" ]; then \
+		REGISTRY=$$(AWS_REGION=$(AWS_REGION) AWS_ACCOUNT_ID=$(AWS_ACCOUNT_ID) ./deployment/aws/ecr/ecr_login.sh); \
+		echo \"Publishing images to $$REGISTRY\"; \
+	else \
+		echo \"Publishing images to $(DOCKER_REGISTRY)\"; \
+	fi; \
+	for entry in $(DOCKER_SERVICES); do \
+		svc=$${entry%%:*}; \
+		repo_name=$${REPO_PREFIX}$$svc; \
+		if [ "$(PUSH_TO_ECR)" = "true" ]; then \
+			if ! aws ecr describe-repositories --region $(AWS_REGION) --repository-name $$repo_name >/dev/null 2>&1; then \
+				echo \"Creating ECR repository $$repo_name\"; \
+				aws ecr create-repository --region $(AWS_REGION) --repository-name $$repo_name >/dev/null; \
+			fi; \
+		fi; \
+		docker tag $(DOCKER_REGISTRY)/$$svc:$(DOCKER_VERSION) $$REGISTRY/$$repo_name:$(DOCKER_VERSION); \
+		docker push $$REGISTRY/$$repo_name:$(DOCKER_VERSION); \
+	done; \
+	WEB_REPO=$${REPO_PREFIX}pap-ui; \
+	if [ "$(PUSH_TO_ECR)" = "true" ]; then \
+		if ! aws ecr describe-repositories --region $(AWS_REGION) --repository-name $$WEB_REPO >/dev/null 2>&1; then \
+			echo "Creating ECR repository $$WEB_REPO"; \
+			aws ecr create-repository --region $(AWS_REGION) --repository-name $$WEB_REPO >/dev/null; \
+		fi; \
+	fi; \
+	docker tag $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION); \
+	docker push $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION)
+
+docker-compose-up: ## Run Docker Compose locally
+	docker compose -f $(COMPOSE_FILE) up -d --build
+
+docker-compose-down: ## Stop Docker Compose services
+	docker compose -f $(COMPOSE_FILE) down
+
+docker-compose-logs: ## Tail Docker Compose logs
+	docker compose -f $(COMPOSE_FILE) logs -f
+
+helm-minikube: ## Install Stratium via Helm on Minikube
+	helm upgrade --install $(HELM_RELEASE) deployment/helm/stratium \
+		--namespace $(HELM_NAMESPACE) --create-namespace \
+		-f deployment/helm/stratium/values-local.yaml \
+		-f deployment/helm/stratium/values-local-ingress.yaml
+
+	deployment/helm/setup-minikube-ingress.sh
+
+helm-eks: ## Install Stratium via Helm on AWS EKS
+	helm upgrade --install $(HELM_RELEASE) deployment/helm/stratium \
+		--namespace $(HELM_NAMESPACE) --create-namespace \
+		-f deployment/helm/stratium/values.yaml \
+		-f deployment/helm/stratium/values-ecr.yaml \
+		-f deployment/helm/stratium/values-free-tier.yaml \
+		-f deployment/helm/stratium/values-eks-demo-arm64.yaml
+
+eks-create: ## Create AWS EKS cluster (VPC, networking, nodes)
+	AWS_REGION=$(AWS_REGION) ./scripts/eks_create.sh $(EKS_CONFIG)
+
+eks-delete: ## Delete AWS EKS cluster and related resources
+	AWS_REGION=$(AWS_REGION) ./scripts/eks_delete.sh $(EKS_CONFIG)
 
 test: test-platform test-key-manager test-key-access test-pap ## Run all tests
 

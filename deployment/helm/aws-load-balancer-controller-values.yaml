@@ -1,0 +1,13 @@
+serviceAccount:
+  create: false
+  name: aws-load-balancer-controller
+
+clusterName: stratium-demo
+
+region: us-east-2
+
+vpcId: ""
+
+enableCertManager: false
+
+logLevel: info

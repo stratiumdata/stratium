@@ -434,6 +434,7 @@
       "defaultClientScopes": [
         "web-origins",
         "acr",
+        "stratium-user-profile",
         "roles",
         "profile",
         "email"
@@ -591,6 +592,7 @@
       "defaultClientScopes": [
         "web-origins",
         "acr",
+        "stratium-user-profile",
         "roles",
         "profile",
         "email"
@@ -714,6 +716,20 @@
             "jsonType.label": "String"
           }
         }
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "stratium-user-profile",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
       ]
     },
     {
@@ -737,6 +753,20 @@
       "webOrigins": [
         "http://localhost:*",
         "http://127.0.0.1:*"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "stratium-user-profile",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
       ]
     },
     {
@@ -991,6 +1021,7 @@
         "acr",
         "roles",
         "profile",
+        "stratium-user-profile",
         "classification",
         "email",
         "stratium-key-manager-aud"
