@@ -2,8 +2,10 @@ package ztdf
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 
@@ -19,46 +21,19 @@ import (
 //	    log.Fatal(err)
 //	}
 func SaveToFile(tdo *TrustedDataObject, outputPath string) error {
-	buf := &bytes.Buffer{}
-	zipWriter := zip.NewWriter(buf)
-
-	// Write manifest.json
-	manifestJSON, err := protojson.MarshalOptions{
-		Indent: "  ",
-	}.Marshal(tdo.Manifest)
+	file, err := os.Create(outputPath)
 	if err != nil {
-		zipWriter.Close()
-		return fmt.Errorf("failed to marshal manifest: %w", err)
+		return fmt.Errorf("failed to create zip file: %w", err)
+	}
+	defer file.Close()
+
+	buffered := bufio.NewWriter(file)
+	if err := writeTrustedDataObject(tdo, buffered); err != nil {
+		return err
 	}
 
-	manifestWriter, err := zipWriter.Create(ManifestFileName)
-	if err != nil {
-		zipWriter.Close()
-		return fmt.Errorf("failed to create manifest entry: %w", err)
-	}
-	if _, err := manifestWriter.Write(manifestJSON); err != nil {
-		zipWriter.Close()
-		return fmt.Errorf("failed to write manifest: %w", err)
-	}
-
-	// Write payload
-	payloadWriter, err := zipWriter.Create(PayloadFileName)
-	if err != nil {
-		zipWriter.Close()
-		return fmt.Errorf("failed to create payload entry: %w", err)
-	}
-	if _, err := payloadWriter.Write(tdo.Payload.Data); err != nil {
-		zipWriter.Close()
-		return fmt.Errorf("failed to write payload: %w", err)
-	}
-
-	if err := zipWriter.Close(); err != nil {
-		return fmt.Errorf("failed to close zip writer: %w", err)
-	}
-
-	// Write to file
-	if err := os.WriteFile(outputPath, buf.Bytes(), DefaultFileMode); err != nil {
-		return fmt.Errorf("failed to write zip file: %w", err)
+	if err := buffered.Flush(); err != nil {
+		return fmt.Errorf("failed to flush zip file: %w", err)
 	}
 
 	return nil
@@ -73,12 +48,50 @@ func SaveToFile(tdo *TrustedDataObject, outputPath string) error {
 //	    log.Fatal(err)
 //	}
 func LoadFromFile(zipPath string) (*TrustedDataObject, error) {
-	zipData, err := os.ReadFile(zipPath)
+	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read zip file: %w", err)
+		return nil, fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer reader.Close()
+
+	tdo := &TrustedDataObject{}
+
+	for _, file := range reader.File {
+		if file.Name == ManifestFileName {
+			rc, err := file.Open()
+			if err != nil {
+				return nil, fmt.Errorf("failed to open manifest: %w", err)
+			}
+			manifestData, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read manifest: %w", err)
+			}
+
+			manifest := &models.Manifest{}
+			if err := protojson.Unmarshal(manifestData, manifest); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
+			}
+			tdo.Manifest = manifest
+		} else if file.Name == PayloadFileName {
+			rc, err := file.Open()
+			if err != nil {
+				return nil, fmt.Errorf("failed to open payload: %w", err)
+			}
+			payloadData, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read payload: %w", err)
+			}
+			tdo.Payload = &Payload{Data: payloadData}
+		}
 	}
 
-	return LoadFromBytes(zipData)
+	if tdo.Manifest == nil || tdo.Payload == nil {
+		return nil, fmt.Errorf("incomplete ZTDF: missing manifest or payload")
+	}
+
+	return tdo, nil
 }
 
 // LoadFromBytes loads a ZTDF from byte data.
@@ -145,43 +158,59 @@ func LoadFromBytes(zipData []byte) (*TrustedDataObject, error) {
 //	}
 func SaveToBytes(tdo *TrustedDataObject) ([]byte, error) {
 	buf := &bytes.Buffer{}
-	zipWriter := zip.NewWriter(buf)
+	if err := writeTrustedDataObject(tdo, buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
-	// Write manifest.json
+func writeTrustedDataObject(tdo *TrustedDataObject, w io.Writer) error {
+	zipWriter := zip.NewWriter(w)
+
 	manifestJSON, err := protojson.MarshalOptions{
 		Indent: "  ",
 	}.Marshal(tdo.Manifest)
 	if err != nil {
 		zipWriter.Close()
-		return nil, fmt.Errorf("failed to marshal manifest: %w", err)
+		return fmt.Errorf("failed to marshal manifest: %w", err)
 	}
 
-	manifestWriter, err := zipWriter.Create(ManifestFileName)
+	manifestHeader := &zip.FileHeader{
+		Name:   ManifestFileName,
+		Method: zip.Deflate,
+	}
+	manifestWriter, err := zipWriter.CreateHeader(manifestHeader)
 	if err != nil {
 		zipWriter.Close()
-		return nil, fmt.Errorf("failed to create manifest entry: %w", err)
+		return fmt.Errorf("failed to create manifest entry: %w", err)
 	}
 	if _, err := manifestWriter.Write(manifestJSON); err != nil {
 		zipWriter.Close()
-		return nil, fmt.Errorf("failed to write manifest: %w", err)
+		return fmt.Errorf("failed to write manifest: %w", err)
 	}
 
-	// Write payload
-	payloadWriter, err := zipWriter.Create(PayloadFileName)
+	payloadHeader := &zip.FileHeader{
+		Name:   PayloadFileName,
+		Method: zip.Store,
+	}
+	payloadHeader.UncompressedSize64 = uint64(len(tdo.Payload.Data))
+	payloadHeader.CRC32 = crc32.ChecksumIEEE(tdo.Payload.Data)
+
+	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
 	if err != nil {
 		zipWriter.Close()
-		return nil, fmt.Errorf("failed to create payload entry: %w", err)
+		return fmt.Errorf("failed to create payload entry: %w", err)
 	}
 	if _, err := payloadWriter.Write(tdo.Payload.Data); err != nil {
 		zipWriter.Close()
-		return nil, fmt.Errorf("failed to write payload: %w", err)
+		return fmt.Errorf("failed to write payload: %w", err)
 	}
 
 	if err := zipWriter.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close zip writer: %w", err)
+		return fmt.Errorf("failed to close zip writer: %w", err)
 	}
 
-	return buf.Bytes(), nil
+	return nil
 }
 
 // GetFileInfo extracts metadata about a ZTDF file without fully decrypting it.

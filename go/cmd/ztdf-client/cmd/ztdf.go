@@ -2,10 +2,11 @@ package cmd
 
 import (
 	"archive/zip"
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"stratium/pkg/auth"
@@ -109,21 +110,43 @@ func (z *ZTDFCreator) UnwrapZTDF(ctx context.Context, tdo *models.TrustedDataObj
 	return plaintext, nil
 }
 
-// SaveZTDFToZip saves a ZTDF to a zip file
-func SaveZTDFToZip(tdo *models.TrustedDataObject, outputPath string) error {
-	buf := &bytes.Buffer{}
-	zipWriter := zip.NewWriter(buf)
+// SaveProgressCallback allows callers to observe progress when a ZTDF is written to disk.
+type SaveProgressCallback func(written, total int64)
 
-	// Write manifest.json
+// SaveZTDFToZip saves a ZTDF to a zip file
+func SaveZTDFToZip(tdo *models.TrustedDataObject, outputPath string, progress SaveProgressCallback) error {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
+
 	manifestJSON, err := protojson.MarshalOptions{
 		Indent: "  ",
 	}.Marshal(tdo.Manifest)
 	if err != nil {
-		zipWriter.Close()
 		return fmt.Errorf("failed to marshal manifest: %w", err)
 	}
 
-	manifestWriter, err := zipWriter.Create("manifest.json")
+	total := int64(len(manifestJSON) + len(tdo.Payload.Data))
+
+	buffered := bufio.NewWriter(file)
+	var writer io.Writer = buffered
+	if progress != nil && total > 0 {
+		writer = &progressCountingWriter{
+			writer:   writer,
+			total:    total,
+			progress: progress,
+		}
+	}
+
+	zipWriter := zip.NewWriter(writer)
+
+	manifestHeader := &zip.FileHeader{
+		Name:   "manifest.json",
+		Method: zip.Deflate,
+	}
+	manifestWriter, err := zipWriter.CreateHeader(manifestHeader)
 	if err != nil {
 		zipWriter.Close()
 		return fmt.Errorf("failed to create manifest entry: %w", err)
@@ -133,8 +156,14 @@ func SaveZTDFToZip(tdo *models.TrustedDataObject, outputPath string) error {
 		return fmt.Errorf("failed to write manifest: %w", err)
 	}
 
-	// Write payload
-	payloadWriter, err := zipWriter.Create("0.payload")
+	payloadHeader := &zip.FileHeader{
+		Name:   "0.payload",
+		Method: zip.Store,
+	}
+	payloadHeader.UncompressedSize64 = uint64(len(tdo.Payload.Data))
+	payloadHeader.CRC32 = crc32.ChecksumIEEE(tdo.Payload.Data)
+
+	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
 	if err != nil {
 		zipWriter.Close()
 		return fmt.Errorf("failed to create payload entry: %w", err)
@@ -147,10 +176,12 @@ func SaveZTDFToZip(tdo *models.TrustedDataObject, outputPath string) error {
 	if err := zipWriter.Close(); err != nil {
 		return fmt.Errorf("failed to close zip writer: %w", err)
 	}
+	if err := buffered.Flush(); err != nil {
+		return fmt.Errorf("failed to flush zip file: %w", err)
+	}
 
-	// Write to file
-	if err := os.WriteFile(outputPath, buf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("failed to write zip file: %w", err)
+	if progress != nil && total > 0 {
+		progress(total, total)
 	}
 
 	return nil
@@ -158,20 +189,14 @@ func SaveZTDFToZip(tdo *models.TrustedDataObject, outputPath string) error {
 
 // LoadZTDFFromZip loads a ZTDF from a zip file
 func LoadZTDFFromZip(zipPath string) (*models.TrustedDataObject, error) {
-	// Read zip file
-	zipData, err := os.ReadFile(zipPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read zip file: %w", err)
-	}
-
-	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open zip: %w", err)
 	}
+	defer reader.Close()
 
 	tdo := &models.TrustedDataObject{}
 
-	// Read manifest
 	for _, file := range reader.File {
 		if file.Name == "manifest.json" {
 			rc, err := file.Open()
@@ -208,6 +233,28 @@ func LoadZTDFFromZip(zipPath string) (*models.TrustedDataObject, error) {
 	}
 
 	return tdo, nil
+}
+
+type progressCountingWriter struct {
+	writer   io.Writer
+	written  int64
+	total    int64
+	progress SaveProgressCallback
+}
+
+func (w *progressCountingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		w.written += int64(n)
+		if w.progress != nil && w.total > 0 {
+			if w.written > w.total {
+				w.progress(w.total, w.total)
+			} else {
+				w.progress(w.written, w.total)
+			}
+		}
+	}
+	return n, err
 }
 
 // Helper function to get policy from manifest for display purposes
