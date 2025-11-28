@@ -102,7 +102,7 @@ func runUnwrap(cmd *cobra.Command, args []string) error {
 		fmt.Printf("╰─────────────────────────────────────────╯\n")
 		fmt.Printf("\nPlaintext Content:\n")
 		fmt.Printf("─────────────────────────────────────────\n")
-		fmt.Printf("%s\n", string(plaintext))
+		fmt.Printf("%s", string(plaintext))
 		fmt.Printf("─────────────────────────────────────────\n")
 	} else {
 		fmt.Printf("\n✓ ZTDF unwrapped successfully!\n")

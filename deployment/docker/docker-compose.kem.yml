@@ -1,7 +1,5 @@
 # Docker Compose configuration for testing Post-Quantum KEM algorithms
 # Supports KYBER512, KYBER768, and KYBER1024
-version: '3.8'
-
 services:
   platform:
     extends:

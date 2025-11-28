@@ -29,7 +29,7 @@ help: ## Shows available Makefile commands with descriptions
 
 PLATFORMS ?= linux/amd64,linux/arm64
 DOCKER_HUB_ORG := stratiumdata
-CUSTOMER_VERSION ?= eval-1.0.3
+CUSTOMER_VERSION ?= eval-0.0.1
 CUSTOMER_FEATURES := ## full-logging | metrics | observability | rate-limiting | caching | short-timeouts
 BUILD_MODE := ## production | development | demo
 BUILD_VERSION :=
@@ -37,13 +37,15 @@ DOCKER_REGISTRY ?= $(DOCKER_HUB_ORG)
 DOCKER_VERSION ?= $(shell git rev-parse --short HEAD)
 DEPLOY_ENV ?= production
 COMPOSE_FILE ?= deployment/docker/docker-compose.yml
+COMPOSE_PROJECT_NAME ?= $(notdir $(CURDIR))
+COMPOSE_SERVICE_TAGS := platform:platform-server key-manager:key-manager-server key-access:key-access-server pap:pap-server pap-ui:pap-ui
 DOCKER_SERVICES := platform-server:50051 key-manager-server:50052 key-access-server:50053 pap-server:8090
 AWS_REGION ?= us-east-2
 AWS_ACCOUNT_ID ?= 
 PUSH_TO_ECR ?= true
-EKS_CONFIG ?= deployment/aws/eks-cluster-arm.yaml
 HELM_RELEASE ?= stratium
 HELM_NAMESPACE ?= stratium
+export COMPOSE_PROJECT_NAME
 
 build: build-platform build-key-manager build-key-access build-pap ## Build all binaries
 
@@ -85,31 +87,59 @@ install-pap-cli: build-pap-cli ## Install PAP CLI to system PATH
 	@echo "PAP CLI installed successfully!"
 	@echo "You can now run 'pap-cli' from anywhere."
 
-# ----------------------------------------------------------------------
-# Unified developer workflow targets
-# ----------------------------------------------------------------------
-
-fmt-all: fmt ## Format all source files
+tests-all: tests-unit tests-integration tests-e2e ## Run unit, integration, and e2e tests
 
 tests-unit: ## Run unit tests (short mode)
 	@echo "Running unit tests..."
 	cd go && go test -short ./...
 
+test-platform: ## Run platform service tests
+	@echo "Running platform service tests..."
+	cd go && go test -v ./services/platform
+
+test-key-manager: ## Run key manager service tests
+	@echo "Running key manager service tests..."
+	cd go && go test -v ./services/key-manager
+
+test-key-access: ## Run key access service tests
+	@echo "Running key access service tests..."
+	cd go && go test -v ./services/key-access
+
+test-pap: ## Run PAP service tests
+	@echo "Running PAP service tests..."
+	cd go && go test -v ./services/pap ./pkg/...
+
 tests-integration: ## Run integration tests for services and SDK
 	@echo "Running integration tests..."
 	cd go && go test ./services/... ./sdk/...
 
-tests-e2e: ## Run end-to-end shell-based tests
-	@echo "Running platform PDP e2e test..."
+tests-e2e: test-platform-pdp test-pap-auth ## Run end-to-end shell-based tests
+
+test-platform-pdp: ## Run PDP integration tests
+	@echo "Running platform PDP integration test..."
 	./scripts/test_platform_pdp.sh
-	@echo "Running PAP auth e2e test..."
+
+test-pap-auth: ## Run PAP authentication tests
+	@echo "Running PAP authentication test..."
 	./scripts/test_pap_auth.sh
 
-tests-all: tests-unit tests-integration tests-e2e ## Run unit, integration, and e2e tests
+full: generate build docker-down docker-build docker-up ## Rebuilds artifacts and docker images
+	@echo ""
+	@echo "✓ Rebuild complete!"
+	@echo ""
+	@echo "Waiting for services to be healthy..."
+	@sleep 10
+	@echo ""
+	@echo "You can now test the system!"
 
-build-all: build ## Build all services and clients
+bench: ## Run all benchmarks
+	@echo "Running platform benchmarks..."
+	cd go && go test -bench=. ./services/platform
+	@echo "Running key manager benchmarks..."
+	cd go && go test -bench=. ./services/key-manager
 
-docker-build-images: ## Build Docker images for Stratium services
+# Docker commands
+docker-build: ## Build all Docker images (production)
 	@set -eu; \
 	for entry in $(DOCKER_SERVICES); do \
 		svc=$${entry%%:*}; port=$${entry##*:}; \
@@ -129,10 +159,7 @@ docker-build-images: ## Build Docker images for Stratium services
 		-t $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) \
 		pap-ui
 
-aws-ecr-login: ## Authenticate Docker with AWS ECR
-	@AWS_REGION=$(AWS_REGION) AWS_ACCOUNT_ID=$(AWS_ACCOUNT_ID) ./deployment/aws/ecr/ecr_login.sh >/dev/null && echo "Logged into AWS ECR"
-
-docker-push-images: ## Push Docker images to registry/ECR
+docker-push: ## Push Docker images to registry/ECR
 	@set -eu; \
 	REGISTRY=$(DOCKER_REGISTRY); \
 	REPO_PREFIX=stratiumdata-; \
@@ -164,15 +191,40 @@ docker-push-images: ## Push Docker images to registry/ECR
 	docker tag $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION); \
 	docker push $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION)
 
-docker-compose-up: ## Run Docker Compose locally
-	docker compose -f $(COMPOSE_FILE) up -d --build
+docker-up: ## Start all services with Docker Compose
+	@echo "Starting all services with Docker Compose..."
+	docker-compose -f deployment/docker/docker-compose.yml up -d
+	@echo "Services started!"
+	@echo ""
+	@echo "Enabling HTTPS on Keycloak"
+	docker exec stratium-keycloak /opt/keycloak/bin/kcadm.sh update realms/master -s sslRequired=NONE --server http://localhost:8080 --realm master --user admin --password admin
+	@echo ""
+	@echo "Services available at:"
+	@echo "  Platform:     localhost:50051 (gRPC)"
+	@echo "  Key Manager:  localhost:50052 (gRPC)"
+	@echo "  Key Access:   localhost:50053 (gRPC)"
+	@echo "  PAP API:      http://localhost:8090"
+	@echo "  Keycloak:     http://localhost:8080"
+	@echo "  PostgreSQL:   localhost:5432"
+	@echo "  Redis:        localhost:6379"
 
-docker-compose-down: ## Stop Docker Compose services
-	docker compose -f $(COMPOSE_FILE) down
+docker-down: ## Stop all services
+	@echo "Stopping all services..."
+	docker-compose -f deployment/docker/docker-compose.yml down
+	@echo "Services stopped!"
 
-docker-compose-logs: ## Tail Docker Compose logs
-	docker compose -f $(COMPOSE_FILE) logs -f
+docker-down-volumes: ## Stop all services and remove volumes
+	@echo "Stopping all services and removing volumes..."
+	docker-compose -f deployment/docker/docker-compose.yml down -v
+	@echo "Services stopped and volumes removed!"
 
+docker-logs: ## View logs from all services
+	docker-compose -f deployment/docker/docker-compose.yml logs -f
+
+docker-ps: ## List all containers from the Stratium deployment
+	docker-compose -f deployment/docker/docker-compose.yml ps
+
+# Helm Deployment
 helm-minikube: ## Install Stratium via Helm on Minikube
 	helm upgrade --install $(HELM_RELEASE) deployment/helm/stratium \
 		--namespace $(HELM_NAMESPACE) --create-namespace \
@@ -181,78 +233,104 @@ helm-minikube: ## Install Stratium via Helm on Minikube
 
 	deployment/helm/setup-minikube-ingress.sh
 
-helm-eks: ## Install Stratium via Helm on AWS EKS
-	helm upgrade --install $(HELM_RELEASE) deployment/helm/stratium \
-		--namespace $(HELM_NAMESPACE) --create-namespace \
-		-f deployment/helm/stratium/values.yaml \
-		-f deployment/helm/stratium/values-ecr.yaml \
-		-f deployment/helm/stratium/values-free-tier.yaml \
-		-f deployment/helm/stratium/values-eks-demo-arm64.yaml
+# Multi-platform builds using buildx (for both ARM64 and AMD64)
+build-customer-multiplatform: setup-buildx build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access ## Build and push all images for ARM64+AMD64
+	@echo ""
+	@echo "✓ All multi-platform customer images built and pushed!"
+	@echo ""
+	@echo "Images support both:"
+	@echo "  - linux/amd64 (Windows, Linux x86_64)"
+	@echo "  - linux/arm64 (Mac Apple Silicon, ARM servers)"
 
-eks-create: ## Create AWS EKS cluster (VPC, networking, nodes)
-	AWS_REGION=$(AWS_REGION) ./scripts/eks_create.sh $(EKS_CONFIG)
+setup-buildx: ## Set up Docker Buildx for multi-platform
+	@echo "Setting up Docker Buildx for multi-platform builds..."
+	@docker buildx create --name multiplatform --use --bootstrap 2>/dev/null || docker buildx use multiplatform 2>/dev/null || echo "Buildx already configured"
+	@docker buildx inspect --bootstrap
+	@echo "✓ Buildx ready for multi-platform builds"
 
-eks-delete: ## Delete AWS EKS cluster and related resources
-	AWS_REGION=$(AWS_REGION) ./scripts/eks_delete.sh $(EKS_CONFIG)
+build-customer-multiplatform-platform: ## Build and push platform (ARM64+AMD64)
+	@echo "Building multi-platform platform-server customer image..."
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		--build-arg SERVICE_NAME=platform-server \
+		--build-arg SERVICE_PORT=50051 \
+		--build-arg BUILD_MODE=$(BUILD_MODE) \
+		--build-arg BUILD_FEATURES=$(CUSTOMER_FEATURES) \
+		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
+		-t stratiumdata/platform:customer \
+		-t stratiumdata/platform:eval \
+		-t stratiumdata/platform:$(CUSTOMER_VERSION) \
+		-f deployment/docker/Dockerfile \
+		--push \
+		.
+	@echo "✓ Multi-platform platform-server customer image built and pushed"
 
-test: test-platform test-key-manager test-key-access test-pap ## Run all tests
+build-customer-multiplatform-key-manager: ## Build and push key-manager (ARM64+AMD64)
+	@echo "Building multi-platform key-manager-server customer image..."
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		--build-arg SERVICE_NAME=key-manager-server \
+		--build-arg SERVICE_PORT=50052 \
+		--build-arg BUILD_MODE=$(BUILD_MODE) \
+		--build-arg BUILD_FEATURES=$(CUSTOMER_FEATURES) \
+		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
+		-t stratiumdata/key-manager:customer \
+		-t stratiumdata/key-manager:eval \
+		-t stratiumdata/key-manager:$(CUSTOMER_VERSION) \
+		-f deployment/docker/Dockerfile \
+		--push \
+		.
+	@echo "✓ Multi-platform key-manager-server customer image built and pushed"
 
-test-platform: ## Run platform service tests
-	@echo "Running platform service tests..."
-	cd go && go test -v ./services/platform
+build-customer-multiplatform-key-access: ## Build and push key-access (ARM64+AMD64)
+	@echo "Building multi-platform key-access-server customer image..."
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		--build-arg SERVICE_NAME=key-access-server \
+		--build-arg SERVICE_PORT=50053 \
+		--build-arg BUILD_MODE=$(BUILD_MODE) \
+		--build-arg BUILD_FEATURES=$(CUSTOMER_FEATURES) \
+		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
+		-t stratiumdata/key-access:customer \
+		-t stratiumdata/key-access:eval \
+		-t stratiumdata/key-access:$(CUSTOMER_VERSION) \
+		-f deployment/docker/Dockerfile \
+		--push \
+		.
+	@echo "✓ Multi-platform key-access-server customer image built and pushed"
 
-test-key-manager: ## Run key manager service tests
-	@echo "Running key manager service tests..."
-	cd go && go test -v ./services/key-manager
+# Quick start
+quickstart: docker-down docker-build docker-up ## Rebuilds and restarts docker containers
+	@echo ""
+	@echo "✓ Quickstart complete!"
+	@echo ""
+	@echo "Waiting for services to be healthy..."
+	@sleep 10
+	@echo ""
+	@echo "You can now test the system:"
+	@echo "  make test-platform-pdp"
+	@echo "  make test-pap-auth"
 
-test-key-access: ## Run key access service tests
-	@echo "Running key access service tests..."
-	cd go && go test -v ./services/key-access
+# Development helpers
+mod-tidy: ## Tidy up Go dependencies
+	@echo "Tidying dependencies..."
+	cd go && go mod tidy
+	@echo "Dependencies tidied!"
 
-test-pap: ## Run PAP service tests
-	@echo "Running PAP service tests..."
-	cd go && go test -v ./services/pap ./pkg/...
+mod-download: ## Download Go dependencies
+	@echo "Downloading dependencies..."
+	cd go && go mod download
+	@echo "Dependencies downloaded!"
 
-bench: ## Run all benchmarks
-	@echo "Running platform benchmarks..."
-	cd go && go test -bench=. ./services/platform
-	@echo "Running key manager benchmarks..."
-	cd go && go test -bench=. ./services/key-manager
+fmt: ## Format Go code files
+	@echo "Formatting code..."
+	cd go && go fmt ./...
+	@echo "Code formatted!"
 
-# Platform service commands
-run-platform-server: build-platform ## Start the platform gRPC server
-	@echo "Starting platform gRPC server on port 50051..."
-	./bin/platform-server
-
-run-platform-client: build-platform ## Run the platform example client
-	@echo "Running platform example client..."
-	./bin/platform-client
-
-# Key manager service commands
-run-key-manager-server: build-key-manager ## Start the key manager gRPC server
-	@echo "Starting key manager gRPC server on port 50052..."
-	./bin/key-manager-server
-
-run-key-manager-client: build-key-manager ## Start the key manager gRPC example client
-	@echo "Running key manager example client..."
-	./bin/key-manager-client
-
-# Key access service commands
-run-key-access-server: build-key-access ## Start the key access gRPC server
-	@echo "Starting key access gRPC server on port 50053..."
-	./bin/key-access-server
-
-run-key-access-client: build-key-access ## Start the key access gRPC example client
-	@echo "Running key access example client..."
-	./bin/key-access-client
-
-# PAP service commands
-run-pap-server: build-pap ## Start the PAP API server
-	@echo "Starting PAP API server on port 8090..."
-	@export DATABASE_URL="postgres://stratium:stratium@localhost:5432/stratium_pap?sslmode=disable" && \
-	export CACHE_TYPE="redis" && \
-	export REDIS_ADDR="localhost:6379" && \
-	./bin/pap-server
+vet: ## Vets all Go code
+	@echo "Running go vet..."
+	cd go && go vet ./...
+	@echo "Vet complete!"
 
 generate: ## Generate all protobuf code
 	@echo "Generating platform protobuf code..."
@@ -290,179 +368,3 @@ clean: ## Clean build artifacts
 	rm -f go/cmd/pap-server/pap-server
 	rm -f go/cmd/pap-cli/pap-cli
 	@echo "Clean complete!"
-
-# Docker commands
-docker-build: ## Build all Docker images (production)
-	@echo "Building Docker images..."
-	docker-compose -f deployment/docker/docker-compose.yml build
-	@echo "Docker images built!"
-
-docker-up: ## Start all services with Docker Compose
-	@echo "Starting all services with Docker Compose..."
-	docker-compose -f deployment/docker/docker-compose.yml up -d
-	@echo "Services started!"
-	@echo ""
-	@echo "Enabling HTTPS on Keycloak"
-	docker exec stratium-keycloak /opt/keycloak/bin/kcadm.sh update realms/master -s sslRequired=NONE --server http://localhost:8080 --realm master --user admin --password admin
-	@echo ""
-	@echo "Services available at:"
-	@echo "  Platform:     localhost:50051 (gRPC)"
-	@echo "  Key Manager:  localhost:50052 (gRPC)"
-	@echo "  Key Access:   localhost:50053 (gRPC)"
-	@echo "  PAP API:      http://localhost:8090"
-	@echo "  Keycloak:     http://localhost:8080"
-	@echo "  PostgreSQL:   localhost:5432"
-	@echo "  Redis:        localhost:6379"
-
-docker-down: ## Stop all services
-	@echo "Stopping all services..."
-	docker-compose -f deployment/docker/docker-compose.yml down
-	@echo "Services stopped!"
-
-docker-down-volumes: ## Stop all services and remove volumes
-	@echo "Stopping all services and removing volumes..."
-	docker-compose -f deployment/docker/docker-compose.yml down -v
-	@echo "Services stopped and volumes removed!"
-
-docker-logs: ## View logs from all services
-	docker-compose -f deployment/docker/docker-compose.yml logs -f
-
-docker-ps: ## List all containers from the Stratium deployment
-	docker-compose -f deployment/docker/docker-compose.yml ps
-
-# Customer distribution builds (no proprietary features)
-PLATFORMS ?= linux/amd64,linux/arm64
-DOCKER_HUB_ORG := stratiumdata
-CUSTOMER_VERSION ?= eval-1.0.3
-CUSTOMER_FEATURES :=
-
-# Multi-platform builds using buildx (for both ARM64 and AMD64)
-build-customer-multiplatform: setup-buildx build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access build-customer-multiplatform-postgres ## Build and push all images for ARM64+AMD64
-	@echo ""
-	@echo "✓ All multi-platform customer images built and pushed!"
-	@echo ""
-	@echo "Images support both:"
-	@echo "  - linux/amd64 (Windows, Linux x86_64)"
-	@echo "  - linux/arm64 (Mac Apple Silicon, ARM servers)"
-
-setup-buildx: ## Set up Docker Buildx for multi-platform
-	@echo "Setting up Docker Buildx for multi-platform builds..."
-	@docker buildx create --name multiplatform --use --bootstrap 2>/dev/null || docker buildx use multiplatform 2>/dev/null || echo "Buildx already configured"
-	@docker buildx inspect --bootstrap
-	@echo "✓ Buildx ready for multi-platform builds"
-
-build-customer-multiplatform-platform: ## Build and push platform (ARM64+AMD64)
-	@echo "Building multi-platform platform-server customer image..."
-	docker buildx build \
-		--platform $(PLATFORMS) \
-		--build-arg SERVICE_NAME=platform-server \
-		--build-arg SERVICE_PORT=50051 \
-		--build-arg BUILD_MODE=production \
-		--build-arg BUILD_FEATURES=$(CUSTOMER_FEATURES) \
-		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
-		-t stratiumdata/platform:customer \
-		-t stratiumdata/platform:eval \
-		-t stratiumdata/platform:$(CUSTOMER_VERSION) \
-		-f deployment/docker/Dockerfile \
-		--push \
-		.
-	@echo "✓ Multi-platform platform-server customer image built and pushed"
-
-build-customer-multiplatform-key-manager: ## Build and push key-manager (ARM64+AMD64)
-	@echo "Building multi-platform key-manager-server customer image..."
-	docker buildx build \
-		--platform $(PLATFORMS) \
-		--build-arg SERVICE_NAME=key-manager-server \
-		--build-arg SERVICE_PORT=50052 \
-		--build-arg BUILD_MODE=production \
-		--build-arg BUILD_FEATURES=$(CUSTOMER_FEATURES) \
-		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
-		-t stratiumdata/key-manager:customer \
-		-t stratiumdata/key-manager:eval \
-		-t stratiumdata/key-manager:$(CUSTOMER_VERSION) \
-		-f deployment/docker/Dockerfile \
-		--push \
-		.
-	@echo "✓ Multi-platform key-manager-server customer image built and pushed"
-
-build-customer-multiplatform-key-access: ## Build and push key-access (ARM64+AMD64)
-	@echo "Building multi-platform key-access-server customer image..."
-	docker buildx build \
-		--platform $(PLATFORMS) \
-		--build-arg SERVICE_NAME=key-access-server \
-		--build-arg SERVICE_PORT=50053 \
-		--build-arg BUILD_MODE=production \
-		--build-arg BUILD_FEATURES=$(CUSTOMER_FEATURES) \
-		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
-		-t stratiumdata/key-access:customer \
-		-t stratiumdata/key-access:eval \
-		-t stratiumdata/key-access:$(CUSTOMER_VERSION) \
-		-f deployment/docker/Dockerfile \
-		--push \
-		.
-	@echo "✓ Multi-platform key-access-server customer image built and pushed"
-
-build-customer-multiplatform-postgres: ## Build and push postgres (ARM64+AMD64)
-	@echo "Building multi-platform postgres customer image..."
-	docker buildx build \
-		--platform $(PLATFORMS) \
-		-f deployment/docker/Dockerfile.postgres \
-		-t stratiumdata/postgres:customer \
-		-t stratiumdata/postgres:eval \
-		-t stratiumdata/postgres:$(CUSTOMER_VERSION) \
-		--push \
-		.
-	@echo "✓ Multi-platform postgres customer image built and pushed"
-
-# Integration tests
-test-integration: test-platform-pdp test-pap-auth ## Run integration tests
-
-test-platform-pdp: ## Run PDP integration tests
-	@echo "Running platform PDP integration test..."
-	./scripts/test_platform_pdp.sh
-
-test-pap-auth: ## Run PAP authentication tests
-	@echo "Running PAP authentication test..."
-	./scripts/test_pap_auth.sh
-
-full: generate build docker-down docker-build docker-up ## Rebuilds artifacts and docker images
-	@echo ""
-	@echo "✓ Rebuild complete!"
-	@echo ""
-	@echo "Waiting for services to be healthy..."
-	@sleep 10
-	@echo ""
-	@echo "You can now test the system!"
-
-# Quick start
-quickstart: docker-down docker-build docker-up ## Rebuilds and restarts docker containers
-	@echo ""
-	@echo "✓ Quickstart complete!"
-	@echo ""
-	@echo "Waiting for services to be healthy..."
-	@sleep 10
-	@echo ""
-	@echo "You can now test the system:"
-	@echo "  make test-platform-pdp"
-	@echo "  make test-pap-auth"
-
-# Development helpers
-mod-tidy: ## Tidy up Go dependencies
-	@echo "Tidying dependencies..."
-	cd go && go mod tidy
-	@echo "Dependencies tidied!"
-
-mod-download: ## Download Go dependencies
-	@echo "Downloading dependencies..."
-	cd go && go mod download
-	@echo "Dependencies downloaded!"
-
-fmt: ## Format Go code files
-	@echo "Formatting code..."
-	cd go && go fmt ./...
-	@echo "Code formatted!"
-
-vet: ## Vets all Go code
-	@echo "Running go vet..."
-	cd go && go vet ./...
-	@echo "Vet complete!"
