@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 
@@ -193,8 +192,6 @@ func writeTrustedDataObject(tdo *TrustedDataObject, w io.Writer) error {
 		Name:   PayloadFileName,
 		Method: zip.Store,
 	}
-	payloadHeader.UncompressedSize64 = uint64(len(tdo.Payload.Data))
-	payloadHeader.CRC32 = crc32.ChecksumIEEE(tdo.Payload.Data)
 
 	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
 	if err != nil {

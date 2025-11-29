@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"stratium/pkg/ztdf"
 )
 
 var (
@@ -49,21 +51,16 @@ func runWrap(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot specify both --input and --text")
 	}
 
-	// Read plaintext
+	useStreaming := inputFile != ""
 	var plaintext []byte
+	var plaintextSize int64
+	var encryptedSize int64
+	var streamResult *ztdf.WrapStreamResult
 	var err error
-	var inputDuration time.Duration
 
-	if inputFile != "" {
-		readStart := time.Now()
-		plaintext, err = os.ReadFile(inputFile)
-		if err != nil {
-			return fmt.Errorf("failed to read input file: %w", err)
-		}
-		inputDuration = time.Since(readStart)
-		fmt.Printf("Read %d bytes from %s (%s)\n", len(plaintext), inputFile, formatDuration(inputDuration))
-	} else {
+	if !useStreaming {
 		plaintext = []byte(inputText)
+		plaintextSize = int64(len(plaintext))
 		fmt.Printf("Using %d bytes of text input\n", len(plaintext))
 	}
 
@@ -83,23 +80,6 @@ func runWrap(cmd *cobra.Command, args []string) error {
 	}
 	defer creator.Close()
 
-	// Create ZTDF
-	ctx := context.Background()
-	encryptProgress := newSpinner("Encrypting payload and wrapping DEK")
-	encryptStart := time.Now()
-	tdo, err := creator.CreateZTDF(ctx, plaintext, resourceName)
-	if err != nil {
-		encryptProgress.Stop("✗ Failed to encrypt payload and wrap DEK")
-		return fmt.Errorf("failed to create ZTDF: %w", err)
-	}
-	encryptProgress.Stop(fmt.Sprintf("✓ Encrypted payload (%d bytes) & wrapped DEK in %s",
-		len(tdo.Payload.Data), formatDuration(time.Since(encryptStart))))
-
-	if verbose {
-		fmt.Printf("✓ Encrypted payload: %d bytes\n", len(tdo.Payload.Data))
-		fmt.Printf("✓ Wrapped DEK with Key Access Server\n")
-	}
-
 	// Ensure output directory exists
 	outputDir := filepath.Dir(outputFile)
 	if outputDir != "" && outputDir != "." {
@@ -108,20 +88,68 @@ func runWrap(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Save ZTDF to zip file
-	saveMsg := fmt.Sprintf("Saving ZTDF to %s", outputFile)
-	saveProgress := newProgressTracker(saveMsg)
-	saveStart := time.Now()
-	if err := SaveZTDFToZip(tdo, outputFile, func(written, total int64) {
-		if total == 0 {
-			return
+	// Create ZTDF
+	ctx := context.Background()
+	if useStreaming {
+		file, err := os.Open(inputFile)
+		if err != nil {
+			return fmt.Errorf("failed to open input file: %w", err)
 		}
-		saveProgress.Update(float64(written) / float64(total))
-	}); err != nil {
-		saveProgress.Stop("✗ Failed to save ZTDF")
-		return fmt.Errorf("failed to save ZTDF: %w", err)
+		defer file.Close()
+
+		if info, err := file.Stat(); err == nil {
+			fmt.Printf("Streaming %d bytes from %s\n", info.Size(), inputFile)
+		} else {
+			fmt.Printf("Streaming data from %s\n", inputFile)
+		}
+
+		encryptProgress := newSpinner("Encrypting payload and streaming to ZTDF")
+		encryptStart := time.Now()
+		streamResult, err = creator.CreateZTDFStream(ctx, file, resourceName, outputFile)
+		if err != nil {
+			encryptProgress.Stop("✗ Failed to encrypt payload and wrap DEK")
+			return fmt.Errorf("failed to create ZTDF: %w", err)
+		}
+		encryptProgress.Stop(fmt.Sprintf("✓ Encrypted payload (%d bytes) & wrapped DEK in %s",
+			streamResult.CiphertextSize, formatDuration(time.Since(encryptStart))))
+
+		plaintextSize = streamResult.PlaintextSize
+		encryptedSize = streamResult.CiphertextSize
+	} else {
+		encryptProgress := newSpinner("Encrypting payload and wrapping DEK")
+		encryptStart := time.Now()
+		tdo, err := creator.CreateZTDF(ctx, plaintext, resourceName)
+		if err != nil {
+			encryptProgress.Stop("✗ Failed to encrypt payload and wrap DEK")
+			return fmt.Errorf("failed to create ZTDF: %w", err)
+		}
+		encryptProgress.Stop(fmt.Sprintf("✓ Encrypted payload (%d bytes) & wrapped DEK in %s",
+			len(tdo.Payload.Data), formatDuration(time.Since(encryptStart))))
+
+		if verbose {
+			fmt.Printf("✓ Encrypted payload: %d bytes\n", len(tdo.Payload.Data))
+			fmt.Printf("✓ Wrapped DEK with Key Access Server\n")
+		}
+
+		saveMsg := fmt.Sprintf("Saving ZTDF to %s", outputFile)
+		saveProgress := newProgressTracker(saveMsg)
+		saveStart := time.Now()
+		if err := SaveZTDFToZip(tdo, outputFile, func(written, total int64) {
+			if total == 0 {
+				return
+			}
+			saveProgress.Update(float64(written) / float64(total))
+		}); err != nil {
+			saveProgress.Stop("✗ Failed to save ZTDF")
+			return fmt.Errorf("failed to save ZTDF: %w", err)
+		}
+		saveProgress.Stop(fmt.Sprintf("✓ Saved ZTDF in %s", formatDuration(time.Since(saveStart))))
+
+		if plaintextSize == 0 {
+			plaintextSize = int64(len(plaintext))
+		}
+		encryptedSize = int64(len(tdo.Payload.Data))
 	}
-	saveProgress.Stop(fmt.Sprintf("✓ Saved ZTDF in %s", formatDuration(time.Since(saveStart))))
 
 	// Get file size
 	fileInfo, err := os.Stat(outputFile)
@@ -136,8 +164,8 @@ func runWrap(cmd *cobra.Command, args []string) error {
 	fmt.Printf("╰─────────────────────────────────────────╯\n")
 	fmt.Printf("\nFile: %s\n", outputFile)
 	fmt.Printf("Resource: %s\n", resourceName)
-	fmt.Printf("Plaintext size: %d bytes\n", len(plaintext))
-	fmt.Printf("Encrypted size: %d bytes\n", len(tdo.Payload.Data))
+	fmt.Printf("Plaintext size: %d bytes\n", plaintextSize)
+	fmt.Printf("Encrypted size: %d bytes\n", encryptedSize)
 	fmt.Printf("Total processing time: %s\n", formatDuration(time.Since(overallStart)))
 
 	return nil

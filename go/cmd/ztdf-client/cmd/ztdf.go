@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"stratium/pkg/auth"
@@ -89,6 +88,31 @@ func (z *ZTDFCreator) CreateZTDF(ctx context.Context, plaintext []byte, resource
 	return tdo, nil
 }
 
+// CreateZTDFStream encrypts data from reader and writes the streamed ZTDF to outputPath.
+func (z *ZTDFCreator) CreateZTDFStream(ctx context.Context, reader io.Reader, resource, outputPath string) (*ztdf.WrapStreamResult, error) {
+	opts := &models.WrapOptions{
+		Resource: resource,
+		Attributes: []models.Attribute{
+			{
+				URI:         "http://example.com/attr/classification/value/confidential",
+				DisplayName: "Classification",
+				IsDefault:   true,
+			},
+		},
+		IntegrityCheck: true,
+		Context: map[string]string{
+			"action": "wrap_dek",
+		},
+	}
+
+	result, err := z.client.WrapReaderToZip(ctx, reader, opts, outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream ZTDF: %w", err)
+	}
+
+	return result, nil
+}
+
 // UnwrapZTDF decrypts a ZTDF and returns the plaintext
 func (z *ZTDFCreator) UnwrapZTDF(ctx context.Context, tdo *models.TrustedDataObject, resource string) ([]byte, error) {
 	// Configure unwrap options
@@ -160,8 +184,6 @@ func SaveZTDFToZip(tdo *models.TrustedDataObject, outputPath string, progress Sa
 		Name:   "0.payload",
 		Method: zip.Store,
 	}
-	payloadHeader.UncompressedSize64 = uint64(len(tdo.Payload.Data))
-	payloadHeader.CRC32 = crc32.ChecksumIEEE(tdo.Payload.Data)
 
 	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
 	if err != nil {

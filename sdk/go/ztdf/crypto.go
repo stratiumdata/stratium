@@ -1,6 +1,7 @@
 package ztdf
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -11,6 +12,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -19,8 +21,24 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/stratiumdata/go-sdk/gen/models"
 	"golang.org/x/crypto/hkdf"
 )
+
+const (
+	payloadChunkSize      = 64 * 1024 * 1024
+	nonceCounterBytes     = 4
+	defaultSegmentHashAlg = "SHA256"
+)
+
+type payloadEncryptionResult struct {
+	Ciphertext     []byte
+	BaseNonce      []byte
+	Segments       []*models.EncryptionInformation_IntegrityInformation_Segment
+	PayloadHash    []byte
+	PlaintextSize  int64
+	CiphertextSize int64
+}
 
 // GenerateRSAKeyPair generates an RSA key pair for the client
 func GenerateRSAKeyPair(bits int) (*rsa.PrivateKey, error) {
@@ -242,23 +260,83 @@ func GenerateDEK() ([]byte, error) {
 //	    log.Fatal(err)
 //	}
 func EncryptPayload(plaintext, dek []byte) (ciphertext, iv []byte, err error) {
+	result, err := encryptPayloadStream(bytes.NewReader(plaintext), dek)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result.Ciphertext, result.BaseNonce, nil
+}
+
+func encryptPayloadStream(reader io.Reader, dek []byte) (*payloadEncryptionResult, error) {
 	block, err := aes.NewCipher(dek)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create AES cipher: %w", err)
+		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create GCM mode: %w", err)
+		return nil, fmt.Errorf("failed to create GCM mode: %w", err)
 	}
 
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate nonce: %w", err)
+	baseNonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(baseNonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	ciphertext = gcm.Seal(nil, nonce, plaintext, nil)
-	return ciphertext, nonce, nil
+	result := &payloadEncryptionResult{
+		BaseNonce: baseNonce,
+	}
+
+	rootHasher := sha256.New()
+	buffer := bytes.NewBuffer(nil)
+	buf := make([]byte, payloadChunkSize)
+
+	var chunkIndex uint32
+	for {
+		n, readErr := reader.Read(buf)
+		if n > 0 {
+			nonceForChunk := deriveChunkNonce(baseNonce, chunkIndex)
+			chunkCipher := gcm.Seal(nil, nonceForChunk, buf[:n], nil)
+			buffer.Write(chunkCipher)
+			rootHasher.Write(chunkCipher)
+
+			chunkHash := sha256.Sum256(chunkCipher)
+			result.Segments = append(result.Segments, &models.EncryptionInformation_IntegrityInformation_Segment{
+				Hash:                 base64.StdEncoding.EncodeToString(chunkHash[:]),
+				SegmentSize:          int32(n),
+				EncryptedSegmentSize: int32(len(chunkCipher)),
+			})
+			result.PlaintextSize += int64(n)
+			result.CiphertextSize += int64(len(chunkCipher))
+			chunkIndex++
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read plaintext: %w", readErr)
+		}
+	}
+
+	if len(result.Segments) == 0 {
+		nonceForChunk := deriveChunkNonce(baseNonce, 0)
+		chunkCipher := gcm.Seal(nil, nonceForChunk, []byte{}, nil)
+		buffer.Write(chunkCipher)
+		rootHasher.Write(chunkCipher)
+		chunkHash := sha256.Sum256(chunkCipher)
+		result.Segments = append(result.Segments, &models.EncryptionInformation_IntegrityInformation_Segment{
+			Hash:                 base64.StdEncoding.EncodeToString(chunkHash[:]),
+			SegmentSize:          0,
+			EncryptedSegmentSize: int32(len(chunkCipher)),
+		})
+		result.CiphertextSize += int64(len(chunkCipher))
+		chunkIndex++
+	}
+
+	result.Ciphertext = buffer.Bytes()
+	result.PayloadHash = rootHasher.Sum(nil)
+	return result, nil
 }
 
 // DecryptPayload decrypts ciphertext with AES-256-GCM using the provided DEK and IV.
@@ -270,6 +348,16 @@ func EncryptPayload(plaintext, dek []byte) (ciphertext, iv []byte, err error) {
 //	    log.Fatal(err)
 //	}
 func DecryptPayload(ciphertext, dek, iv []byte) ([]byte, error) {
+	chunkHash := sha256.Sum256(ciphertext)
+	segment := &models.EncryptionInformation_IntegrityInformation_Segment{
+		Hash:                 base64.StdEncoding.EncodeToString(chunkHash[:]),
+		SegmentSize:          int32(len(ciphertext)),
+		EncryptedSegmentSize: int32(len(ciphertext)),
+	}
+	return decryptPayloadWithSegments(ciphertext, dek, iv, []*models.EncryptionInformation_IntegrityInformation_Segment{segment}, nil)
+}
+
+func decryptPayloadWithSegments(ciphertext, dek, iv []byte, segments []*models.EncryptionInformation_IntegrityInformation_Segment, expectedRootHash []byte) ([]byte, error) {
 	block, err := aes.NewCipher(dek)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
@@ -280,12 +368,55 @@ func DecryptPayload(ciphertext, dek, iv []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create GCM mode: %w", err)
 	}
 
-	plaintext, err := gcm.Open(nil, iv, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("decryption failed: %w", err)
+	if len(segments) == 0 {
+		return nil, errors.New("missing integrity segments for payload decryption")
 	}
 
-	return plaintext, nil
+	reader := bytes.NewReader(ciphertext)
+	var plaintext bytes.Buffer
+	rootHasher := sha256.New()
+
+	for idx, segment := range segments {
+		chunkSize := int(segment.GetEncryptedSegmentSize())
+		if chunkSize <= 0 {
+			return nil, fmt.Errorf("invalid encrypted segment size (%d)", chunkSize)
+		}
+
+		chunkCipher := make([]byte, chunkSize)
+		if _, err := io.ReadFull(reader, chunkCipher); err != nil {
+			return nil, fmt.Errorf("failed to read encrypted payload segment: %w", err)
+		}
+
+		expectedChunkHash, err := base64.StdEncoding.DecodeString(segment.GetHash())
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode segment hash: %w", err)
+		}
+		actualChunkHash := sha256.Sum256(chunkCipher)
+		if !hmac.Equal(actualChunkHash[:], expectedChunkHash) {
+			return nil, errors.New("segment hash mismatch")
+		}
+
+		nonceForChunk := deriveChunkNonce(iv, uint32(idx))
+		chunkPlaintext, err := gcm.Open(nil, nonceForChunk, chunkCipher, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt payload segment: %w", err)
+		}
+
+		rootHasher.Write(chunkCipher)
+		plaintext.Write(chunkPlaintext)
+	}
+
+	if reader.Len() != 0 {
+		return nil, errors.New("encrypted payload has extra bytes beyond declared segments")
+	}
+
+	if len(expectedRootHash) > 0 {
+		if !hmac.Equal(rootHasher.Sum(nil), expectedRootHash) {
+			return nil, errors.New("payload hash mismatch")
+		}
+	}
+
+	return plaintext.Bytes(), nil
 }
 
 // EncryptDEKWithRSAPublicKey encrypts a DEK using RSA-OAEP with SHA-256.
@@ -537,4 +668,15 @@ func VerifyPayloadHash(payload []byte, expectedHash []byte) error {
 		return fmt.Errorf("payload integrity verification failed: hash mismatch")
 	}
 	return nil
+}
+
+func deriveChunkNonce(base []byte, counter uint32) []byte {
+	nonce := make([]byte, len(base))
+	copy(nonce, base)
+	if len(nonce) < nonceCounterBytes {
+		return nonce
+	}
+	offset := len(nonce) - nonceCounterBytes
+	binary.BigEndian.PutUint32(nonce[offset:], counter)
+	return nonce
 }

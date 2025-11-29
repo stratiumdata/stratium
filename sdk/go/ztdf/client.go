@@ -37,9 +37,11 @@
 package ztdf
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -105,23 +107,28 @@ func NewClient(stratiumClient *stratium.Client) *Client {
 //	    IntegrityCheck: true,
 //	})
 func (c *Client) Wrap(ctx context.Context, plaintext []byte, opts *WrapOptions) (*TrustedDataObject, error) {
+	return c.wrapStream(ctx, bytes.NewReader(plaintext), opts)
+}
+
+func (c *Client) wrapStream(ctx context.Context, reader io.Reader, opts *WrapOptions) (*TrustedDataObject, error) {
+	if opts == nil {
+		opts = &WrapOptions{}
+	}
+
 	if len(opts.ResourceAttributes) == 0 {
 		opts.ResourceAttributes = map[string]string{"name": DefaultResourceName}
 	}
 
-	// Step 1: Generate DEK
 	dek, err := GenerateDEK()
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 2: Encrypt payload with DEK
-	encryptedPayload, iv, err := EncryptPayload(plaintext, dek)
+	encryptionResult, err := encryptPayloadStream(reader, dek)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: Create policy
 	policy := opts.Policy
 	if policy == nil {
 		policy = CreatePolicy(c.keyAccessURL, opts.Attributes)
@@ -132,7 +139,6 @@ func (c *Client) Wrap(ctx context.Context, plaintext []byte, opts *WrapOptions) 
 		return nil, err
 	}
 
-	// Step 4: Calculate policy binding
 	policyBindingHash := CalculatePolicyBinding(dek, policyBase64)
 
 	if opts.ClientKeyID == "" {
@@ -152,33 +158,24 @@ func (c *Client) Wrap(ctx context.Context, plaintext []byte, opts *WrapOptions) 
 		return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
 	}
 
-	// Step 5: Wrap DEK using Key Access Server
 	wrappedDEK, keyID, err := c.wrapDEK(ctx, opts.Resource, opts.ClientKeyID, clientWrappedDEK, dek, opts.ResourceAttributes, policyBase64, opts.Context)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 6: Calculate payload hash
-	payloadHash := CalculatePayloadHash(encryptedPayload)
-
-	// Step 7: Create manifest
 	manifest := c.createManifest(
 		opts.Manifest,
 		wrappedDEK,
 		keyID,
 		policyBase64,
 		policyBindingHash,
-		iv,
-		encryptedPayload,
-		plaintext,
-		payloadHash,
+		encryptionResult,
 	)
 
-	// Step 8: Create TDO
 	tdo := &TrustedDataObject{
 		Manifest: manifest,
 		Payload: &Payload{
-			Data: encryptedPayload,
+			Data: encryptionResult.Ciphertext,
 		},
 	}
 
@@ -246,9 +243,14 @@ func (c *Client) Unwrap(ctx context.Context, tdo *TrustedDataObject, opts *Unwra
 		}
 	}
 
-	// Step 5: Decrypt payload
 	if tdo.Payload == nil {
 		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, ErrMsgMissingPayload)
+	}
+	if encInfo.Method == nil || encInfo.IntegrityInformation == nil {
+		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "missing encryption method or integrity information")
+	}
+	if len(encInfo.IntegrityInformation.Segments) == 0 {
+		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "no integrity segments found")
 	}
 
 	ivBase64 := encInfo.Method.Iv
@@ -257,19 +259,17 @@ func (c *Client) Unwrap(ctx context.Context, tdo *TrustedDataObject, opts *Unwra
 		return nil, fmt.Errorf("failed to decode IV: %w", err)
 	}
 
-	plaintext, err := DecryptPayload(tdo.Payload.Data, dek, iv)
-	if err != nil {
-		return nil, err
+	var expectedRoot []byte
+	if opts.VerifyIntegrity && encInfo.IntegrityInformation.RootSignature != nil {
+		expectedRoot, err = base64.StdEncoding.DecodeString(encInfo.IntegrityInformation.RootSignature.Sig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode payload root signature: %w", err)
+		}
 	}
 
-	// Step 6: Verify payload integrity (if requested)
-	if opts.VerifyIntegrity && encInfo.IntegrityInformation != nil && encInfo.IntegrityInformation.RootSignature != nil {
-		expectedHash, err := base64.StdEncoding.DecodeString(encInfo.IntegrityInformation.RootSignature.Sig)
-		if err == nil {
-			if err := VerifyPayloadHash(tdo.Payload.Data, expectedHash); err != nil {
-				return nil, fmt.Errorf("%s: %w", ErrMsgIntegrityVerificationFailed, err)
-			}
-		}
+	plaintext, err := decryptPayloadWithSegments(tdo.Payload.Data, dek, iv, encInfo.IntegrityInformation.Segments, expectedRoot)
+	if err != nil {
+		return nil, err
 	}
 
 	return plaintext, nil
@@ -283,12 +283,13 @@ func (c *Client) Unwrap(ctx context.Context, tdo *TrustedDataObject, opts *Unwra
 //	    Resource: "my-document",
 //	})
 func (c *Client) WrapFile(ctx context.Context, inputPath, outputPath string, opts *WrapOptions) error {
-	plaintext, err := os.ReadFile(inputPath)
+	file, err := os.Open(inputPath)
 	if err != nil {
-		return fmt.Errorf("failed to read input file: %w", err)
+		return fmt.Errorf("failed to open input file: %w", err)
 	}
+	defer file.Close()
 
-	tdo, err := c.Wrap(ctx, plaintext, opts)
+	tdo, err := c.wrapStream(ctx, file, opts)
 	if err != nil {
 		return err
 	}
@@ -377,7 +378,7 @@ func (c *Client) unwrapDEK(ctx context.Context, cfg *UnwrapOptions, kid string, 
 }
 
 // createManifest creates a ZTDF manifest
-func (c *Client) createManifest(baseline *models.Manifest, wrappedDEK []byte, keyID, policyBase64, policyBindingHash string, iv, encryptedPayload, plaintext, payloadHash []byte) *models.Manifest {
+func (c *Client) createManifest(baseline *models.Manifest, wrappedDEK []byte, keyID, policyBase64, policyBindingHash string, encResult *payloadEncryptionResult) *models.Manifest {
 	if baseline == nil {
 		baseline = &models.Manifest{
 			Assertions: []*models.Assertion{
@@ -418,24 +419,18 @@ func (c *Client) createManifest(baseline *models.Manifest, wrappedDEK []byte, ke
 				},
 				Method: &models.EncryptionInformation_Method{
 					Algorithm:    AlgorithmAES256GCM,
-					IsStreamable: false,
-					Iv:           base64.StdEncoding.EncodeToString(iv),
+					IsStreamable: true,
+					Iv:           base64.StdEncoding.EncodeToString(encResult.BaseNonce),
 				},
 				IntegrityInformation: &models.EncryptionInformation_IntegrityInformation{
 					RootSignature: &models.EncryptionInformation_IntegrityInformation_RootSignature{
 						Alg: AlgorithmHS256,
-						Sig: base64.StdEncoding.EncodeToString(payloadHash),
+						Sig: base64.StdEncoding.EncodeToString(encResult.PayloadHash),
 					},
-					SegmentHashAlg:              AlgorithmGMAC,
-					SegmentSizeDefault:          int32(len(encryptedPayload)),
-					EncryptedSegmentSizeDefault: int32(len(encryptedPayload)),
-					Segments: []*models.EncryptionInformation_IntegrityInformation_Segment{
-						{
-							Hash:                 base64.StdEncoding.EncodeToString(payloadHash),
-							SegmentSize:          int32(len(plaintext)),
-							EncryptedSegmentSize: int32(len(encryptedPayload)),
-						},
-					},
+					SegmentHashAlg:              defaultSegmentHashAlg,
+					SegmentSizeDefault:          0,
+					EncryptedSegmentSizeDefault: 0,
+					Segments:                    encResult.Segments,
 				},
 				Policy: policyBase64,
 			},
@@ -455,14 +450,15 @@ func (c *Client) createManifest(baseline *models.Manifest, wrappedDEK []byte, ke
 		keyAccess.PolicyBinding.Hash = policyBindingHash
 	}
 
-	baseline.EncryptionInformation.Method.Iv = base64.StdEncoding.EncodeToString(iv)
-	baseline.EncryptionInformation.IntegrityInformation.RootSignature.Sig = base64.StdEncoding.EncodeToString(payloadHash)
-
-	for _, segment := range baseline.EncryptionInformation.IntegrityInformation.Segments {
-		segment.Hash = base64.StdEncoding.EncodeToString(payloadHash)
-		segment.SegmentSize = int32(len(plaintext))
-		segment.EncryptedSegmentSize = int32(len(encryptedPayload))
+	if len(encResult.Segments) > 0 {
+		baseline.EncryptionInformation.IntegrityInformation.SegmentSizeDefault = encResult.Segments[0].GetSegmentSize()
+		baseline.EncryptionInformation.IntegrityInformation.EncryptedSegmentSizeDefault = encResult.Segments[0].GetEncryptedSegmentSize()
 	}
+
+	baseline.EncryptionInformation.Method.Iv = base64.StdEncoding.EncodeToString(encResult.BaseNonce)
+	baseline.EncryptionInformation.IntegrityInformation.RootSignature.Sig = base64.StdEncoding.EncodeToString(encResult.PayloadHash)
+	baseline.EncryptionInformation.IntegrityInformation.SegmentHashAlg = defaultSegmentHashAlg
+	baseline.EncryptionInformation.IntegrityInformation.Segments = encResult.Segments
 
 	return baseline
 }
