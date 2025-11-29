@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -431,8 +432,9 @@ func TestClient_Unwrap_WithIntegrityVerification_Invalid(t *testing.T) {
 		t.Error("Unwrap() with invalid integrity expected error, got nil")
 	}
 
-	if err != nil && !contains(err.Error(), ErrMsgIntegrityVerificationFailed) {
-		t.Errorf("Unwrap() error = %v, want error containing %s", err, ErrMsgIntegrityVerificationFailed)
+	expectedErr := "payload hash mismatch"
+	if err != nil && !contains(err.Error(), expectedErr) {
+		t.Errorf("Unwrap() error = %v, want error containing %s", err, expectedErr)
 	}
 }
 
@@ -541,14 +543,13 @@ func TestClient_Unwrap_WithIntegrityVerification_NilIntegrityInfo(t *testing.T) 
 		VerifyIntegrity:      true, // Enable integrity verification
 	}
 
-	decrypted, err := client.Unwrap(ctx, tdo, unwrapOpts)
-	if err != nil {
-		t.Fatalf("Unwrap() with nil integrity info error: %v", err)
+	_, err = client.Unwrap(ctx, tdo, unwrapOpts)
+	if err == nil {
+		t.Fatal("Unwrap() with nil integrity info expected error, got nil")
 	}
-
-	// Should succeed because the condition checks for nil IntegrityInformation
-	if string(decrypted) != string(plaintext) {
-		t.Errorf("Unwrap() decrypted = %v, want %v", string(decrypted), string(plaintext))
+	expectedErr := "missing encryption method or integrity information"
+	if !contains(err.Error(), expectedErr) {
+		t.Errorf("Unwrap() with nil integrity info error = %v, want %s", err, expectedErr)
 	}
 }
 
@@ -599,14 +600,13 @@ func TestClient_Unwrap_WithIntegrityVerification_InvalidBase64(t *testing.T) {
 		VerifyIntegrity:      true, // Enable integrity verification
 	}
 
-	decrypted, err := client.Unwrap(ctx, tdo, unwrapOpts)
-	if err != nil {
-		t.Fatalf("Unwrap() with invalid base64 signature error: %v", err)
+	_, err = client.Unwrap(ctx, tdo, unwrapOpts)
+	if err == nil {
+		t.Fatal("Unwrap() with invalid base64 signature expected error, got nil")
 	}
-
-	// Should succeed because base64 decode error is silently ignored (if err == nil)
-	if string(decrypted) != string(plaintext) {
-		t.Errorf("Unwrap() decrypted = %v, want %v", string(decrypted), string(plaintext))
+	expectedErr := "failed to decode payload root signature"
+	if !contains(err.Error(), expectedErr) {
+		t.Errorf("Unwrap() with invalid base64 signature error = %v, want %s", err, expectedErr)
 	}
 }
 
@@ -867,16 +867,27 @@ func TestClient_createManifest_NilBaseline(t *testing.T) {
 	plaintext := []byte("plaintext")
 	payloadHash := make([]byte, 32)
 
+	segmentHash := base64.StdEncoding.EncodeToString(payloadHash)
+	encryptionResult := &payloadEncryptionResult{
+		Ciphertext:  encryptedPayload,
+		BaseNonce:   iv,
+		PayloadHash: payloadHash,
+		Segments: []*models.EncryptionInformation_IntegrityInformation_Segment{
+			{
+				Hash:                 segmentHash,
+				SegmentSize:          int32(len(plaintext)),
+				EncryptedSegmentSize: int32(len(encryptedPayload)),
+			},
+		},
+	}
+
 	manifest := client.createManifest(
 		nil, // nil baseline
 		wrappedDEK,
 		keyID,
 		policyBase64,
 		policyBindingHash,
-		iv,
-		encryptedPayload,
-		plaintext,
-		payloadHash,
+		encryptionResult,
 	)
 
 	if manifest == nil {
@@ -940,16 +951,27 @@ func TestClient_createManifest_WithBaseline(t *testing.T) {
 	plaintext := []byte("plaintext")
 	payloadHash := make([]byte, 32)
 
+	segmentHash := base64.StdEncoding.EncodeToString(payloadHash)
+	encryptionResult := &payloadEncryptionResult{
+		Ciphertext:  encryptedPayload,
+		BaseNonce:   iv,
+		PayloadHash: payloadHash,
+		Segments: []*models.EncryptionInformation_IntegrityInformation_Segment{
+			{
+				Hash:                 segmentHash,
+				SegmentSize:          int32(len(plaintext)),
+				EncryptedSegmentSize: int32(len(encryptedPayload)),
+			},
+		},
+	}
+
 	manifest := client.createManifest(
 		baseline,
 		wrappedDEK,
 		keyID,
 		policyBase64,
 		policyBindingHash,
-		iv,
-		encryptedPayload,
-		plaintext,
-		payloadHash,
+		encryptionResult,
 	)
 
 	if manifest == nil {

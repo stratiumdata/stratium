@@ -3,11 +3,11 @@ package ztdf
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"log"
 	"net"
@@ -36,6 +36,13 @@ type Client struct {
 	keyManager    models.KeyManager
 	authProvider  auth.AuthProvider
 	authConfig    *auth.AuthConfig
+}
+
+// WrapStreamResult contains metadata from a streaming wrap operation.
+type WrapStreamResult struct {
+	Manifest       *models.Manifest
+	PlaintextSize  int64
+	CiphertextSize int64
 }
 
 type ZtdfClientConfig struct {
@@ -180,28 +187,28 @@ func (c *Client) Initialize(ctx context.Context) error {
 
 // Wrap encrypts plaintext and creates a ZTDF
 func (c *Client) Wrap(ctx context.Context, plaintext []byte, opts *models.WrapOptions) (*models.TrustedDataObject, error) {
+	return c.wrapStream(ctx, bytes.NewReader(plaintext), opts)
+}
+
+func (c *Client) wrapStream(ctx context.Context, reader io.Reader, opts *models.WrapOptions) (*models.TrustedDataObject, error) {
 	if opts == nil {
 		opts = &models.WrapOptions{}
 	}
 
-	// Ensure client is initialized
 	if err := c.ensureInitialized(ctx); err != nil {
 		return nil, err
 	}
 
-	// Step 1: Generate DEK
 	dek, err := GenerateDEK()
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 2: Encrypt payload with DEK
-	encryptedPayload, iv, err := EncryptPayload(plaintext, dek)
+	encryptionResult, err := encryptPayloadBuffered(reader, dek)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: Create policy
 	policy := c.createPolicy(opts)
 	policyJSON, err := protojson.Marshal(policy)
 	if err != nil {
@@ -212,31 +219,158 @@ func (c *Client) Wrap(ctx context.Context, plaintext []byte, opts *models.WrapOp
 		}
 	}
 	policyBase64 := base64.StdEncoding.EncodeToString(policyJSON)
-
-	// Step 4: Calculate policy binding
 	policyBindingHash := CalculatePolicyBinding(dek, policyBase64)
 
-	// Step 5: Wrap DEK using KAS
 	wrappedDEK, keyID, err := c.wrapDEK(ctx, dek, opts.Resource, policyBase64)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 6: Calculate payload hash
-	payloadHash := CalculatePayloadHash(encryptedPayload)
+	manifest := c.createManifest(wrappedDEK, keyID, policyBase64, policyBindingHash, encryptionResult)
 
-	// Step 7: Create manifest
-	manifest := c.createManifest(wrappedDEK, keyID, policyBase64, policyBindingHash, iv, encryptedPayload, plaintext, payloadHash)
-
-	// Step 8: Create TDO
 	tdo := &models.TrustedDataObject{
 		Manifest: manifest,
 		Payload: &models.Payload{
-			Data: encryptedPayload,
+			Data: encryptionResult.Ciphertext,
 		},
 	}
 
 	return tdo, nil
+}
+
+// WrapToWriter encrypts data from reader and writes the encrypted payload directly to payloadWriter.
+// It returns the manifest and size metadata needed to finalize the ZTDF container.
+func (c *Client) WrapToWriter(ctx context.Context, reader io.Reader, opts *models.WrapOptions, payloadWriter io.Writer) (*WrapStreamResult, error) {
+	if opts == nil {
+		opts = &models.WrapOptions{}
+	}
+
+	if err := c.ensureInitialized(ctx); err != nil {
+		return nil, err
+	}
+
+	dek, err := GenerateDEK()
+	if err != nil {
+		return nil, err
+	}
+
+	encryptionResult, err := encryptPayloadToWriter(reader, dek, payloadWriter)
+	if err != nil {
+		return nil, err
+	}
+
+	policy := c.createPolicy(opts)
+	policyJSON, err := protojson.Marshal(policy)
+	if err != nil {
+		return nil, &models.Error{
+			Code:    models.ErrCodeInvalidPolicy,
+			Message: "failed to marshal policy",
+			Err:     err,
+		}
+	}
+	policyBase64 := base64.StdEncoding.EncodeToString(policyJSON)
+	policyBindingHash := CalculatePolicyBinding(dek, policyBase64)
+
+	wrappedDEK, keyID, err := c.wrapDEK(ctx, dek, opts.Resource, policyBase64)
+	if err != nil {
+		return nil, err
+	}
+
+	manifest := c.createManifest(wrappedDEK, keyID, policyBase64, policyBindingHash, encryptionResult)
+
+	return &WrapStreamResult{
+		Manifest:       manifest,
+		PlaintextSize:  encryptionResult.PlaintextSize,
+		CiphertextSize: encryptionResult.CiphertextSize,
+	}, nil
+}
+
+// WrapReaderToZip encrypts data from reader and writes a complete ZTDF zip file to outputPath.
+func (c *Client) WrapReaderToZip(ctx context.Context, reader io.Reader, opts *models.WrapOptions, outputPath string) (*WrapStreamResult, error) {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return nil, &models.Error{
+			Code:    "FILE_WRITE_FAILED",
+			Message: fmt.Sprintf("failed to create zip file: %s", outputPath),
+			Err:     err,
+		}
+	}
+	defer file.Close()
+
+	bufferedWriter := bufio.NewWriter(file)
+	zipWriter := zip.NewWriter(bufferedWriter)
+
+	payloadHeader := &zip.FileHeader{
+		Name:   "0.payload",
+		Method: zip.Store,
+	}
+	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
+	if err != nil {
+		zipWriter.Close()
+		return nil, &models.Error{
+			Code:    "ZIP_CREATE_FAILED",
+			Message: "failed to create payload entry",
+			Err:     err,
+		}
+	}
+
+	streamResult, err := c.WrapToWriter(ctx, reader, opts, payloadWriter)
+	if err != nil {
+		zipWriter.Close()
+		return nil, err
+	}
+
+	manifestJSON, err := protojson.MarshalOptions{
+		Indent: "  ",
+	}.Marshal(streamResult.Manifest)
+	if err != nil {
+		zipWriter.Close()
+		return nil, &models.Error{
+			Code:    "MARSHAL_FAILED",
+			Message: "failed to marshal manifest",
+			Err:     err,
+		}
+	}
+
+	manifestHeader := &zip.FileHeader{
+		Name:   "manifest.json",
+		Method: zip.Deflate,
+	}
+	manifestWriter, err := zipWriter.CreateHeader(manifestHeader)
+	if err != nil {
+		zipWriter.Close()
+		return nil, &models.Error{
+			Code:    "ZIP_CREATE_FAILED",
+			Message: "failed to create manifest entry",
+			Err:     err,
+		}
+	}
+	if _, err := manifestWriter.Write(manifestJSON); err != nil {
+		zipWriter.Close()
+		return nil, &models.Error{
+			Code:    "ZIP_WRITE_FAILED",
+			Message: "failed to write manifest",
+			Err:     err,
+		}
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		return nil, &models.Error{
+			Code:    "ZIP_CLOSE_FAILED",
+			Message: "failed to close zip writer",
+			Err:     err,
+		}
+	}
+
+	if err := bufferedWriter.Flush(); err != nil {
+		return nil, &models.Error{
+			Code:    "FILE_WRITE_FAILED",
+			Message: "failed to flush zip file",
+			Err:     err,
+		}
+	}
+
+	return streamResult, nil
 }
 
 // Unwrap decrypts a ZTDF and returns plaintext
@@ -312,6 +446,20 @@ func (c *Client) Unwrap(ctx context.Context, tdo *models.TrustedDataObject, opts
 		}
 	}
 
+	if encInfo.Method == nil || encInfo.IntegrityInformation == nil {
+		return nil, &models.Error{
+			Code:    models.ErrCodeInvalidManifest,
+			Message: "invalid ZTDF: missing method or integrity information",
+		}
+	}
+
+	if len(encInfo.IntegrityInformation.Segments) == 0 {
+		return nil, &models.Error{
+			Code:    models.ErrCodeInvalidManifest,
+			Message: "invalid ZTDF: no integrity segments",
+		}
+	}
+
 	ivBase64 := encInfo.Method.Iv
 	iv, err := base64.StdEncoding.DecodeString(ivBase64)
 	if err != nil {
@@ -322,41 +470,42 @@ func (c *Client) Unwrap(ctx context.Context, tdo *models.TrustedDataObject, opts
 		}
 	}
 
-	plaintext, err := DecryptPayload(tdo.Payload.Data, dek, iv)
+	var expectedRoot []byte
+	if opts.VerifyIntegrity && encInfo.IntegrityInformation.RootSignature != nil {
+		expectedRoot, err = base64.StdEncoding.DecodeString(encInfo.IntegrityInformation.RootSignature.Sig)
+		if err != nil {
+			return nil, &models.Error{
+				Code:    models.ErrCodeInvalidManifest,
+				Message: "failed to decode payload root signature",
+				Err:     err,
+			}
+		}
+	}
+
+	plaintext, err := decryptPayloadWithSegments(tdo.Payload.Data, dek, iv, encInfo.IntegrityInformation.Segments, expectedRoot)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 7: Verify payload integrity (if requested)
-	if opts.VerifyIntegrity && encInfo.IntegrityInformation != nil && encInfo.IntegrityInformation.RootSignature != nil {
-		expectedHash, err := base64.StdEncoding.DecodeString(encInfo.IntegrityInformation.RootSignature.Sig)
-		if err == nil {
-			if err := VerifyPayloadHash(tdo.Payload.Data, expectedHash); err != nil {
-				return nil, err
-			}
-		}
-	}
+	// Step 7: (integrity verified during decryption when enabled)
 
 	return plaintext, nil
 }
 
 // WrapFile encrypts a file and creates a ZTDF
 func (c *Client) WrapFile(ctx context.Context, inputPath, outputPath string, opts *models.WrapOptions) error {
-	plaintext, err := os.ReadFile(inputPath)
+	file, err := os.Open(inputPath)
 	if err != nil {
 		return &models.Error{
 			Code:    "FILE_READ_FAILED",
-			Message: fmt.Sprintf("failed to read input file: %s", inputPath),
+			Message: fmt.Sprintf("failed to open input file: %s", inputPath),
 			Err:     err,
 		}
 	}
+	defer file.Close()
 
-	tdo, err := c.Wrap(ctx, plaintext, opts)
-	if err != nil {
-		return err
-	}
-
-	return SaveToFile(tdo, outputPath)
+	_, err = c.WrapReaderToZip(ctx, file, opts, outputPath)
+	return err
 }
 
 // UnwrapFile decrypts a ZTDF file
@@ -553,7 +702,21 @@ func (c *Client) createPolicy(opts *models.WrapOptions) *models.ZtdfPolicy {
 }
 
 // createManifest creates a ZTDF manifest
-func (c *Client) createManifest(wrappedDEK []byte, keyID, policyBase64, policyBindingHash string, iv, encryptedPayload, plaintext, payloadHash []byte) *models.Manifest {
+func (c *Client) createManifest(wrappedDEK []byte, keyID, policyBase64, policyBindingHash string, encResult *payloadEncryptionResult) *models.Manifest {
+	ivBase64 := base64.StdEncoding.EncodeToString(encResult.BaseNonce)
+
+	var segmentSizeDefault int32
+	var encryptedSegmentSizeDefault int32
+	if len(encResult.Segments) > 0 {
+		segmentSizeDefault = encResult.Segments[0].GetSegmentSize()
+		encryptedSegmentSizeDefault = encResult.Segments[0].GetEncryptedSegmentSize()
+	}
+
+	rootSignature := &models.EncryptionInformation_IntegrityInformation_RootSignature{
+		Alg: defaultSegmentHashAlg,
+		Sig: base64.StdEncoding.EncodeToString(encResult.PayloadHash),
+	}
+
 	return &models.Manifest{
 		Assertions: []*models.Assertion{
 			{
@@ -593,24 +756,15 @@ func (c *Client) createManifest(wrappedDEK []byte, keyID, policyBase64, policyBi
 			},
 			Method: &models.EncryptionInformation_Method{
 				Algorithm:    "AES-256-GCM",
-				IsStreamable: false,
-				Iv:           base64.StdEncoding.EncodeToString(iv),
+				IsStreamable: true,
+				Iv:           ivBase64,
 			},
 			IntegrityInformation: &models.EncryptionInformation_IntegrityInformation{
-				RootSignature: &models.EncryptionInformation_IntegrityInformation_RootSignature{
-					Alg: "HS256",
-					Sig: base64.StdEncoding.EncodeToString(payloadHash),
-				},
-				SegmentHashAlg:              "GMAC",
-				SegmentSizeDefault:          int32(len(encryptedPayload)),
-				EncryptedSegmentSizeDefault: int32(len(encryptedPayload)),
-				Segments: []*models.EncryptionInformation_IntegrityInformation_Segment{
-					{
-						Hash:                 base64.StdEncoding.EncodeToString(payloadHash),
-						SegmentSize:          int32(len(plaintext)),
-						EncryptedSegmentSize: int32(len(encryptedPayload)),
-					},
-				},
+				RootSignature:               rootSignature,
+				SegmentHashAlg:              defaultSegmentHashAlg,
+				SegmentSizeDefault:          segmentSizeDefault,
+				EncryptedSegmentSizeDefault: encryptedSegmentSizeDefault,
+				Segments:                    encResult.Segments,
 			},
 			Policy: policyBase64,
 		},
@@ -695,8 +849,6 @@ func writeTDOToZip(tdo *models.TrustedDataObject, w io.Writer) error {
 		Name:   "0.payload",
 		Method: zip.Store,
 	}
-	payloadHeader.UncompressedSize64 = uint64(len(tdo.Payload.Data))
-	payloadHeader.CRC32 = crc32.ChecksumIEEE(tdo.Payload.Data)
 
 	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)
 	if err != nil {
