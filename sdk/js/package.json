@@ -1,6 +1,6 @@
 {
   "name": "@stratiumdata/sdk",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "type": "module",
   "description": "JavaScript SDK for Stratium platform with browser and Node.js support",
   "main": "dist/index.js",

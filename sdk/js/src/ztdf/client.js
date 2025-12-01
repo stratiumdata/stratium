@@ -233,8 +233,7 @@ export class ZtdfClient {
 
     const integrityInfo = encInfo?.integrityInformation;
     const segments = Array.isArray(integrityInfo?.segments) ? integrityInfo.segments : [];
-    const hasMultipleSegments = segments.length > 1;
-    const isSegmented = Boolean(method?.isStreamable && hasMultipleSegments);
+    const isSegmented = Boolean(method?.isStreamable && segments.length > 0);
 
     this._log('Decrypting payload...');
     let decrypted;

@@ -403,8 +403,7 @@ export class ZtdfClient {
     const method = encInfo.method;
     const integrityInfo = encInfo.integrityInformation;
     const segments = Array.isArray(integrityInfo?.segments) ? integrityInfo.segments : [];
-    const hasMultipleSegments = segments.length > 1;
-    const isSegmented = Boolean(method?.isStreamable && hasMultipleSegments);
+    const isSegmented = Boolean(method?.isStreamable && segments.length > 0);
 
     let plaintext;
     if (isSegmented && segments.length > 0) {
