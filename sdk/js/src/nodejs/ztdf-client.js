@@ -6,7 +6,15 @@
  * Handles complete workflow: key generation, registration, file storage, and file encryption/decryption.
  */
 
+import path from 'path';
 import JSZip from 'jszip';
+import Yazl from 'yazl';
+import yauzl from 'yauzl';
+import { PassThrough } from 'stream';
+import { finished } from 'stream/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { readFile, stat as statFile } from 'fs/promises';
+import { createHash, createCipheriv, createDecipheriv } from 'crypto';
 import { createKeyAccessGrpcClient } from '../grpc/key-access-grpc.js';
 import { createAuthenticatedTransport } from './grpc-transport.js';
 import { generateClientKeyPair } from './key-generation.js';
@@ -18,6 +26,7 @@ import {
   generateIV,
   encryptPayload,
   decryptPayload,
+  decryptSegmentedPayload,
   calculatePayloadHash,
   calculatePolicyBinding,
   verifyPolicyBinding,
@@ -26,7 +35,6 @@ import {
 import { bytesToBase64, base64ToBytes } from '../utils/helpers.js';
 import { parseZtdfFile } from '../ztdf/parser.js';
 import { Manifest } from '../generated/models/ztdf_pb.js';
-import { readFile } from 'fs/promises';
 
 /**
  * ZTDF Client for Node.js-based file encryption/decryption
@@ -55,6 +63,9 @@ import { readFile } from 'fs/promises';
  * const result = await client.unwrap('/path/to/file.ztdf');
  * console.log('Decrypted:', result.content);
  */
+const STREAM_CHUNK_SIZE = 64 * 1024 * 1024; // 64MB
+const GCM_AUTH_TAG_LENGTH = 16;
+
 export class ZtdfClient {
   /**
    * @param {Object} config - Client configuration
@@ -249,6 +260,105 @@ export class ZtdfClient {
   }
 
   /**
+   * Stream a file into ZTDF format and write directly to disk.
+   *
+   * @param {string} inputPath - Path to the plaintext file
+   * @param {string} outputPath - Path where the ZTDF file should be written
+   * @param {Object} options - Encryption options (same as wrap)
+   * @returns {Promise<{outputPath: string, plaintextSize: number, encryptedSize: number}>}
+   */
+  async wrapFile(inputPath, outputPath, options = {}) {
+    if (!this.currentKeyPair) {
+      throw new Error('Client not initialized. Call initialize() first.');
+    }
+
+    const stats = await statFile(inputPath);
+    const resource = options.resource || 'encrypted-file';
+    const resourceAttributes = options.resourceAttributes || {};
+    const filename = options.filename || path.basename(inputPath);
+    const contentType = options.contentType || 'application/octet-stream';
+    const integrityCheck = options.integrityCheck !== false;
+    const context = options.context || {};
+
+    const dek = generateDEK();
+    const iv = generateIV();
+
+    const zip = new Yazl.ZipFile();
+    const output = createWriteStream(outputPath);
+    const zipDone = finished(zip.outputStream.pipe(output));
+    let zipClosed = false;
+    const closeZip = () => {
+      if (!zipClosed) {
+        zip.end();
+        zipClosed = true;
+      }
+    };
+
+    const payloadStream = new PassThrough();
+    zip.addReadStream(payloadStream, '0.payload', { compress: false });
+
+    let ciphertextSize;
+    let payloadHash;
+    try {
+      const streamResult = await this._encryptFileToStream({
+        inputPath,
+        payloadStream,
+        dek,
+        iv,
+        integrityCheck,
+      });
+      ciphertextSize = streamResult.ciphertextSize;
+      payloadHash = streamResult.payloadHash;
+    } catch (error) {
+      payloadStream.destroy(error);
+      closeZip();
+      output.destroy();
+      throw error;
+    }
+
+    const wrapResult = await this._requestWrappedDEK(
+      dek, resource, resourceAttributes, options.policy, context
+    );
+
+    let policyBinding = null;
+    if (wrapResult.policy) {
+      policyBinding = await calculatePolicyBinding(dek, wrapResult.policy);
+    }
+
+    const integrityInfo = payloadHash ? this._buildIntegrityInfo(
+      bytesToBase64(payloadHash),
+      stats.size,
+      ciphertextSize
+    ) : undefined;
+
+    const manifest = this._createManifest({
+      filename,
+      contentType,
+      payloadSize: stats.size,
+      encryptedSize: ciphertextSize,
+      iv: bytesToBase64(iv),
+      keyId: wrapResult.keyId,
+      wrappedKey: bytesToBase64(wrapResult.wrappedDek),
+      policy: wrapResult.policy,
+      policyBinding,
+      payloadHash: payloadHash ? bytesToBase64(payloadHash) : null,
+      integrityInfo,
+      isStreamable: true,
+    });
+
+    zip.addBuffer(Buffer.from(manifest.toJsonString()), 'manifest.json', { compress: true });
+    closeZip();
+    await zipDone;
+
+    this._log(`File encrypted successfully (${ciphertextSize} bytes written)`);
+    return {
+      outputPath,
+      plaintextSize: stats.size,
+      encryptedSize: ciphertextSize,
+    };
+  }
+
+  /**
    * Decrypt a ZTDF file
    *
    * @param {string|Buffer|Uint8Array} ztdfFile - Path to ZTDF file, Buffer, or Uint8Array
@@ -290,18 +400,34 @@ export class ZtdfClient {
     // Decrypt DEK
     const dek = await decryptDEK(this.currentKeyPair.privateKey, wrappedKey);
 
-    // Decrypt payload
-    const iv = base64ToBytes(encInfo.method.iv);
-    const plaintext = await decryptPayload(payload, dek, iv);
+    const method = encInfo.method;
+    const integrityInfo = encInfo.integrityInformation;
+    const segments = Array.isArray(integrityInfo?.segments) ? integrityInfo.segments : [];
+    const hasMultipleSegments = segments.length > 1;
+    const isSegmented = Boolean(method?.isStreamable && hasMultipleSegments);
 
-    // Verify integrity if provided
-    if (encInfo.integrityInformation && options.verifyIntegrity !== false) {
-      const payloadHash = base64ToBytes(manifest.payloadHash);
-      const isValid = await verifyPayloadHash(plaintext, payloadHash);
-      if (!isValid) {
-        throw new Error('Payload integrity check failed');
+    let plaintext;
+    if (isSegmented && segments.length > 0) {
+      const baseNonce = base64ToBytes(method.iv);
+      plaintext = await decryptSegmentedPayload(
+        payload,
+        dek,
+        baseNonce,
+        segments,
+        integrityInfo?.rootSignature?.sig
+      );
+    } else {
+      const iv = base64ToBytes(method.iv);
+      plaintext = await decryptPayload(payload, dek, iv);
+
+      if (integrityInfo && options.verifyIntegrity !== false && manifest.payloadHash) {
+        const payloadHash = base64ToBytes(manifest.payloadHash);
+        const isValid = await verifyPayloadHash(plaintext, payloadHash);
+        if (!isValid) {
+          throw new Error('Payload integrity check failed');
+        }
+        this._log('Payload integrity verified');
       }
-      this._log('Payload integrity verified');
     }
 
     // Verify policy binding if provided
@@ -323,6 +449,58 @@ export class ZtdfClient {
       accessReason: 'Key access granted',
       appliedRules: [],
       timestamp: new Date(),
+    };
+  }
+
+  /**
+   * Stream a ZTDF file to disk without loading it into memory.
+   *
+   * @param {string} ztdfPath - Path to the ZTDF file
+   * @param {string} outputPath - Path to write decrypted plaintext
+   * @param {Object} [options={}] - Decryption options
+   * @returns {Promise<{outputPath: string, filename: string, contentType: string}>}
+   */
+  async unwrapFile(ztdfPath, outputPath, options = {}) {
+    if (!this.currentKeyPair) {
+      throw new Error('Client not initialized. Call initialize() first.');
+    }
+
+    const manifestBuffer = await this._readZipEntryBuffer(ztdfPath, 'manifest.json');
+    const manifest = Manifest.fromJsonString(manifestBuffer.toString('utf8'));
+    const encInfo = manifest.encryptionInformation;
+    const keyAccess = encInfo.keyAccess[0];
+
+    const wrappedKey = keyAccess.wrappedKey;
+    const dek = await decryptDEK(this.currentKeyPair.privateKey, wrappedKey);
+
+    if (keyAccess.policyBinding && options.verifyPolicy !== false && encInfo.policy) {
+      const isValid = await verifyPolicyBinding(dek, encInfo.policy, keyAccess.policyBinding);
+      if (!isValid) {
+        throw new Error('Policy binding verification failed');
+      }
+      this._log('Policy binding verified');
+    }
+
+    const payloadStream = await this._openZipEntryStream(ztdfPath, '0.payload');
+    const verifyIntegrity = options.verifyIntegrity !== false && encInfo.integrityInformation;
+    const expectedHash = verifyIntegrity && !encInfo.method?.isStreamable && manifest.payloadHash
+      ? base64ToBytes(manifest.payloadHash)
+      : null;
+
+    await this._decryptPayloadStream({
+      payloadStream,
+      dek,
+      iv: base64ToBytes(encInfo.method.iv),
+      outputPath,
+      expectedHash,
+    });
+
+    this._log(`File decrypted successfully to ${outputPath}`);
+
+    return {
+      outputPath,
+      filename: manifest.filename,
+      contentType: manifest.contentType,
     };
   }
 
@@ -368,25 +546,247 @@ export class ZtdfClient {
         method: {
           algorithm: 'AES-256-GCM',
           iv: opts.iv,
-          isStreamable: false,
+          isStreamable: Boolean(opts.isStreamable),
         },
-        integrityInformation: opts.payloadHash ? {
-          rootSignature: {
-            algorithm: 'SHA-256',
-            value: opts.payloadHash,
-          },
-          segmentHashAlg: 'SHA-256',
-          segments: [{
-            hash: opts.payloadHash,
-            segmentSize: opts.payloadSize.toString(),
-          }],
-        } : undefined,
+        integrityInformation: opts.integrityInfo || (opts.payloadHash ? this._buildIntegrityInfo(
+          opts.payloadHash,
+          opts.payloadSize,
+          opts.encryptedSize
+        ) : undefined),
         policy: opts.policy || '',
       },
       payloadHash: opts.payloadHash || '',
     });
 
     return manifest;
+  }
+
+  _buildIntegrityInfo(payloadHashBase64, payloadSize, encryptedSize) {
+    if (!payloadHashBase64) {
+      return undefined;
+    }
+    return {
+      rootSignature: {
+        algorithm: 'SHA-256',
+        value: payloadHashBase64,
+      },
+      segmentHashAlg: 'SHA-256',
+      segments: [{
+        hash: payloadHashBase64,
+        segmentSize: payloadSize != null ? payloadSize.toString() : '0',
+        encryptedSegmentSize: encryptedSize != null ? encryptedSize.toString() : undefined,
+      }],
+    };
+  }
+
+  async _encryptFileToStream({ inputPath, payloadStream, dek, iv, integrityCheck }) {
+    const dekBuffer = Buffer.from(dek);
+    const ivBuffer = Buffer.from(iv);
+    const cipher = createCipheriv('aes-256-gcm', dekBuffer, ivBuffer);
+    const readStream = createReadStream(inputPath, { highWaterMark: STREAM_CHUNK_SIZE });
+    const hash = integrityCheck ? createHash('sha256') : null;
+
+    return new Promise((resolve, reject) => {
+      let ciphertextSize = 0;
+      const handleError = (err) => {
+        readStream.destroy();
+        cipher.destroy();
+        payloadStream.destroy();
+        reject(err);
+      };
+
+      cipher.on('data', (chunk) => {
+        ciphertextSize += chunk.length;
+        if (!payloadStream.write(chunk)) {
+          cipher.pause();
+          payloadStream.once('drain', () => cipher.resume());
+        }
+      });
+
+      cipher.on('end', () => {
+        const authTag = cipher.getAuthTag();
+        ciphertextSize += authTag.length;
+        payloadStream.end(authTag);
+      });
+
+      cipher.on('error', handleError);
+      payloadStream.on('error', handleError);
+
+      readStream.on('data', (chunk) => {
+        if (hash) {
+          hash.update(chunk);
+        }
+        if (!cipher.write(chunk)) {
+          readStream.pause();
+          cipher.once('drain', () => readStream.resume());
+        }
+      });
+
+      readStream.on('end', () => {
+        cipher.end();
+      });
+
+      readStream.on('error', handleError);
+
+      payloadStream.on('finish', () => {
+        resolve({
+          ciphertextSize,
+          payloadHash: hash ? hash.digest() : null,
+        });
+      });
+    });
+  }
+
+  async _readZipEntryBuffer(zipPath, entryName) {
+    return new Promise((resolve, reject) => {
+      yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
+        if (err) {
+          return reject(err);
+        }
+        let settled = false;
+        const finish = (error, buffer) => {
+          if (!settled) {
+            settled = true;
+            zipfile.close();
+            if (error) {
+              reject(error);
+            } else {
+              resolve(buffer);
+            }
+          }
+        };
+        zipfile.on('entry', (entry) => {
+          if (entry.fileName === entryName) {
+            zipfile.openReadStream(entry, (streamErr, stream) => {
+              if (streamErr) {
+                return finish(streamErr);
+              }
+              streamToBuffer(stream)
+                .then((buffer) => finish(null, buffer))
+                .catch((streamError) => finish(streamError));
+            });
+          } else {
+            zipfile.readEntry();
+          }
+        });
+        zipfile.on('error', (error) => finish(error));
+        zipfile.on('end', () => finish(new Error(`${entryName} not found in ZTDF file`)));
+        zipfile.readEntry();
+      });
+    });
+  }
+
+  async _openZipEntryStream(zipPath, entryName) {
+    return new Promise((resolve, reject) => {
+      yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
+        if (err) {
+          return reject(err);
+        }
+        let settled = false;
+        const fail = (error) => {
+          if (!settled) {
+            settled = true;
+            zipfile.close();
+            reject(error);
+          }
+        };
+        zipfile.on('entry', (entry) => {
+          if (entry.fileName === entryName) {
+            zipfile.openReadStream(entry, (streamErr, stream) => {
+              if (streamErr) {
+                return fail(streamErr);
+              }
+              settled = true;
+              stream.on('end', () => zipfile.close());
+              stream.on('error', () => zipfile.close());
+              resolve(stream);
+            });
+          } else {
+            zipfile.readEntry();
+          }
+        });
+        zipfile.on('error', (error) => fail(error));
+        zipfile.on('end', () => fail(new Error(`${entryName} not found in ZTDF file`)));
+        zipfile.readEntry();
+      });
+    });
+  }
+
+  async _decryptPayloadStream({ payloadStream, dek, iv, outputPath, expectedHash }) {
+    const dekBuffer = Buffer.from(dek);
+    const ivBuffer = Buffer.from(iv);
+    const decipher = createDecipheriv('aes-256-gcm', dekBuffer, ivBuffer);
+    const output = createWriteStream(outputPath);
+    const hash = expectedHash ? createHash('sha256') : null;
+
+    return new Promise((resolve, reject) => {
+      let tail = Buffer.alloc(0);
+      const handleError = (err) => {
+        payloadStream.destroy();
+        decipher.destroy();
+        output.destroy();
+        reject(err);
+      };
+
+      payloadStream.on('data', (chunk) => {
+        const combined = Buffer.concat([tail, chunk]);
+        if (combined.length <= GCM_AUTH_TAG_LENGTH) {
+          tail = combined;
+          return;
+        }
+        const dataLen = combined.length - GCM_AUTH_TAG_LENGTH;
+        const data = combined.slice(0, dataLen);
+        tail = combined.slice(dataLen);
+        if (!decipher.write(data)) {
+          payloadStream.pause();
+          decipher.once('drain', () => payloadStream.resume());
+        }
+      });
+
+      payloadStream.on('end', () => {
+        if (tail.length !== GCM_AUTH_TAG_LENGTH) {
+          handleError(new Error('Invalid payload: missing authentication tag'));
+          return;
+        }
+        try {
+          decipher.setAuthTag(tail);
+        } catch (err) {
+          handleError(err);
+          return;
+        }
+        decipher.end();
+      });
+
+      payloadStream.on('error', handleError);
+
+      decipher.on('data', (chunk) => {
+        if (hash) {
+          hash.update(chunk);
+        }
+        if (!output.write(chunk)) {
+          decipher.pause();
+          output.once('drain', () => decipher.resume());
+        }
+      });
+
+      decipher.on('end', () => {
+        output.end();
+      });
+
+      decipher.on('error', handleError);
+      output.on('error', handleError);
+
+      output.on('finish', () => {
+        if (expectedHash) {
+          const actual = hash.digest();
+          const expectedBuffer = Buffer.from(expectedHash);
+          if (!actual.equals(expectedBuffer)) {
+            return reject(new Error('Payload integrity check failed'));
+          }
+        }
+        resolve();
+      });
+    });
   }
 
   /**
@@ -406,4 +806,13 @@ export class ZtdfClient {
 
     return buffer;
   }
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  return new Promise((resolve, reject) => {
+    stream.on('data', (chunk) => chunks.push(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+  });
 }

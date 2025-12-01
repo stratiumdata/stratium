@@ -27,7 +27,7 @@ database:
   conn_max_idle_time: 10m
 
 encryption:
-  algorithm: KYBER768
+  algorithm: RSA2048
   key_rotation: false
   admin_key_provider: composite
   admin_key_config: /var/run/secrets/stratium/admin-key
@@ -37,6 +37,7 @@ encryption:
 oidc:
   enabled: true
   issuer_url: http://keycloak:8080/realms/stratium
+  allow_insecure_issuer: true
   client_id: stratium-key-manager
   client_secret: stratium-key-manager-secret  # Override via STRATIUM_OIDC_CLIENT_SECRET
   redirect_url: http://localhost:8081/callback

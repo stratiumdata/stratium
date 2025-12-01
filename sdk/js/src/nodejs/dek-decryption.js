@@ -11,6 +11,14 @@ import { base64ToBytes } from '../utils/helpers.js';
 
 const { subtle } = webcrypto;
 
+function base64UrlEncode(bytes) {
+  return Buffer.from(bytes)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}
+
 /**
  * Decrypt a wrapped DEK using ECIES
  *
@@ -35,74 +43,71 @@ const { subtle } = webcrypto;
 export async function decryptDEK(privateKey, wrappedKeyBase64) {
   const wrappedKey = base64ToBytes(wrappedKeyBase64);
 
-  // Parse wrapped DEK format
-  if (wrappedKey.length < 1) {
-    throw new Error('Wrapped DEK too short');
-  }
-
-  // Extract ephemeral public key
-  const ephemeralPublicKeyLen = wrappedKey[0];
-  if (wrappedKey.length < 1 + ephemeralPublicKeyLen + 12) {
+  const coordSize = 32; // P-256
+  const headerSize = coordSize * 2;
+  if (wrappedKey.length <= headerSize + 12) {
     throw new Error('Wrapped DEK format invalid');
   }
 
-  const ephemeralPublicKeyBytes = wrappedKey.slice(1, 1 + ephemeralPublicKeyLen);
-  const nonceStart = 1 + ephemeralPublicKeyLen;
-  const nonce = wrappedKey.slice(nonceStart, nonceStart + 12);
-  const ciphertext = wrappedKey.slice(nonceStart + 12);
+  const ephemeralBytes = wrappedKey.slice(0, headerSize);
+  const ephemeralX = ephemeralBytes.slice(0, coordSize);
+  const ephemeralY = ephemeralBytes.slice(coordSize, headerSize);
 
-  // Import ephemeral public key
+  const ephemeralKeyJwk = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: base64UrlEncode(ephemeralX),
+    y: base64UrlEncode(ephemeralY),
+  };
+
   const ephemeralPublicKey = await subtle.importKey(
-    'raw',
-    ephemeralPublicKeyBytes,
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256',
-    },
+    'jwk',
+    ephemeralKeyJwk,
+    { name: 'ECDH', namedCurve: 'P-256' },
     false,
     []
   );
 
-  // Perform ECDH to get shared secret
   const sharedSecretBits = await subtle.deriveBits(
     {
       name: 'ECDH',
       public: ephemeralPublicKey,
     },
     privateKey,
-    256 // 256 bits
+    256
   );
 
-  const sharedSecret = new Uint8Array(sharedSecretBits);
-
-  // Derive AES key using HKDF-SHA256
   const hkdfKey = await subtle.importKey(
     'raw',
-    sharedSecret,
-    {
-      name: 'HKDF',
-    },
+    new Uint8Array(sharedSecretBits),
+    { name: 'HKDF' },
     false,
-    ['deriveBits', 'deriveKey']
+    ['deriveBits']
   );
 
-  const aesKey = await subtle.deriveKey(
+  const derivedKeyMaterial = await subtle.deriveBits(
     {
       name: 'HKDF',
       hash: 'SHA-256',
       salt: new Uint8Array(0),
-      info: new TextEncoder().encode('ztdf-ecies-v1'),
+      info: new TextEncoder().encode('key-manager-ecc-dek'),
     },
     hkdfKey,
-    {
-      name: 'AES-GCM',
-      length: 256,
-    },
+    256
+  );
+
+  const aesKey = await subtle.importKey(
+    'raw',
+    derivedKeyMaterial,
+    { name: 'AES-GCM' },
     false,
     ['decrypt']
   );
 
-  // Decrypt DEK
+  const ciphertextWithNonce = wrappedKey.slice(headerSize);
+  const nonce = ciphertextWithNonce.slice(0, 12);
+  const ciphertext = ciphertextWithNonce.slice(12);
+
   const dekBuffer = await subtle.decrypt(
     {
       name: 'AES-GCM',

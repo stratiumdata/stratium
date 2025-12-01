@@ -18,6 +18,7 @@ import {
   generateIV,
   encryptPayload,
   decryptPayload,
+  decryptSegmentedPayload,
   calculatePayloadHash,
   calculatePolicyBinding,
   verifyPolicyBinding,
@@ -214,45 +215,51 @@ export class ZtdfClient {
       this._log('Policy binding verified');
     }
 
-    // Decrypt payload
-    this._log('Decrypting payload...');
-    this._log('DEK length:', unwrapResult.dek.length);
-    this._log('Payload length:', parsed.payload.length);
-
-    // Extract IV from encryptionInformation.method.iv
-    const method = parsed.manifest.encryptionInformation?.method;
-    this._log('Method:', method);
-
+    // Prepare encryption metadata
+    const encInfo = parsed.manifest.encryptionInformation;
+    const method = encInfo?.method;
     if (!method?.iv) {
       throw new Error('Missing IV in ZTDF manifest (encryptionInformation.method.iv)');
     }
 
-    // Check if IV is a string (base64) or already a Uint8Array
-    let iv;
+    let baseNonce;
     if (typeof method.iv === 'string') {
-      this._log('IV is string (base64), decoding...');
-      iv = base64ToBytes(method.iv);
+      baseNonce = base64ToBytes(method.iv);
     } else if (method.iv instanceof Uint8Array) {
-      this._log('IV is already Uint8Array');
-      iv = method.iv;
+      baseNonce = method.iv;
     } else {
       throw new Error(`Unexpected IV type: ${typeof method.iv}`);
     }
 
-    this._log('IV from method:', iv);
-    this._log('IV length:', iv.length);
+    const integrityInfo = encInfo?.integrityInformation;
+    const segments = Array.isArray(integrityInfo?.segments) ? integrityInfo.segments : [];
+    const hasMultipleSegments = segments.length > 1;
+    const isSegmented = Boolean(method?.isStreamable && hasMultipleSegments);
 
-    const decrypted = await decryptPayload(parsed.payload, unwrapResult.dek, iv);
+    this._log('Decrypting payload...');
+    let decrypted;
+    if (isSegmented && segments.length > 0) {
+      this._log('Segmented payload detected; decrypting per segment');
+      decrypted = await decryptSegmentedPayload(
+        parsed.payload,
+        unwrapResult.dek,
+        baseNonce,
+        segments,
+        integrityInfo?.rootSignature?.sig
+      );
+    } else {
+      this._log('Single-segment payload detected; decrypting directly');
+      decrypted = await decryptPayload(parsed.payload, unwrapResult.dek, baseNonce);
 
-    // Verify payload integrity if hash is present
-    if (parsed.manifest.payloadHash && parsed.manifest.payloadHash.length > 0) {
-      this._log('Verifying payload integrity...');
-      const hashValid = await verifyPayloadHash(decrypted, parsed.manifest.payloadHash);
-
-      if (!hashValid) {
-        throw new Error('Payload integrity verification failed');
+      if (parsed.manifest.payloadHash && parsed.manifest.payloadHash.length > 0) {
+        this._log('Verifying payload integrity...');
+        const payloadHashBytes = base64ToBytes(parsed.manifest.payloadHash);
+        const hashValid = await verifyPayloadHash(decrypted, payloadHashBytes);
+        if (!hashValid) {
+          throw new Error('Payload integrity verification failed');
+        }
+        this._log('Payload integrity verified');
       }
-      this._log('Payload integrity verified');
     }
 
     this._log('ZTDF file decrypted successfully');
