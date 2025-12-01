@@ -59,6 +59,20 @@ const ztdfBuffer = await client.wrap(plaintext, {
 await writeFile('/path/to/document.pdf.ztdf', ztdfBuffer);
 ```
 
+### Stream Large Files
+
+```javascript
+// Stream a large file directly to disk without buffering
+await client.wrapFile('/data/video.mov', '/data/video.mov.ztdf', {
+  filename: 'video.mov',
+  contentType: 'video/quicktime',
+  resource: 'media-archive'
+});
+
+// Later decrypt the file back to disk
+await client.unwrapFile('/data/video.mov.ztdf', '/data/video.mov');
+```
+
 ### Decrypt Data (Unwrap)
 
 ```javascript

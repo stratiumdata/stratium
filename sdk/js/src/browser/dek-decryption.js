@@ -95,7 +95,7 @@ export async function decryptDEK(encryptedDEK, privateKey) {
         name: 'HKDF',
         hash: 'SHA-256',
         salt: new Uint8Array(0),
-        info: new TextEncoder().encode('key-manager-dek-wrap'),
+        info: new TextEncoder().encode('key-manager-ecc-dek'),
       },
       hkdfKey,
       256 // 256 bits for AES-256
