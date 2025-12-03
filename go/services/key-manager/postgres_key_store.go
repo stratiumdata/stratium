@@ -172,13 +172,13 @@ func (s *PostgresKeyStore) ListKeys(ctx context.Context, filters map[string]inte
 	// Apply filters
 	if providerType, ok := filters["provider_type"].(KeyProviderType); ok {
 		query += fmt.Sprintf(" AND provider_type = $%d", argCounter)
-		args = append(args, providerType.String())
+		args = append(args, providerTypeToString(providerType))
 		argCounter++
 	}
 
 	if status, ok := filters["status"].(KeyStatus); ok {
 		query += fmt.Sprintf(" AND status = $%d", argCounter)
-		args = append(args, status.String())
+		args = append(args, keyStatusToDBString(status))
 		argCounter++
 	}
 
@@ -285,15 +285,23 @@ func (s *PostgresKeyStore) UpdateKey(ctx context.Context, key *Key) error {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
+	statusValue := keyStatusToDBString(key.Status)
+	logger.Debug("PostgresKeyStore.UpdateKey: key_id=%s proto_status=%s normalized_status=%s metadata_entries=%d",
+		key.KeyId, key.Status.String(), statusValue, len(key.Metadata))
 	query := `
 		UPDATE key_pairs
-		SET status = $1, metadata = $2, updated_at = NOW()
+		SET status = CASE
+			WHEN $1 IN ('active', 'inactive', 'expired', 'revoked', 'compromised') THEN $1
+			ELSE 'active'
+		END,
+		metadata = $2,
+		updated_at = NOW()
 		WHERE key_id = $3
 	`
 
-	result, err := s.db.ExecContext(ctx, query, key.Status.String(), string(metadataJSON), key.KeyId)
+	result, err := s.db.ExecContext(ctx, query, statusValue, string(metadataJSON), key.KeyId)
 	if err != nil {
-		return fmt.Errorf("failed to update key: %w", err)
+		return fmt.Errorf("failed to update key (status=%s): %w", statusValue, err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -302,12 +310,14 @@ func (s *PostgresKeyStore) UpdateKey(ctx context.Context, key *Key) error {
 	}
 
 	if rowsAffected == 0 {
+		logger.Warn("PostgresKeyStore.UpdateKey: no rows affected for key_id=%s", key.KeyId)
 		return fmt.Errorf("key with ID %s not found", key.KeyId)
 	}
 
 	if cached := cloneKey(key); cached != nil {
 		s.keyCache.Set(key.KeyId, cached)
 	}
+	logger.Debug("PostgresKeyStore.UpdateKey: key_id=%s updated successfully", key.KeyId)
 	return nil
 }
 
@@ -370,6 +380,17 @@ func (s *PostgresKeyStore) StoreKeyPair(ctx context.Context, keyPair *KeyPair) e
 		maxUsageCount = sql.NullInt64{Int64: keyPair.MaxUsageCount, Valid: true}
 	}
 
+	statusValue := "active"
+	logger.Debug("PostgresKeyStore.StoreKeyPair: key_id=%s type=%s provider=%s status=%s external=%t expires_at=%v last_rotated=%v metadata_entries=%d",
+		keyPair.KeyID,
+		keyPair.KeyType.String(),
+		keyPair.ProviderType.String(),
+		statusValue,
+		keyPair.ExternallyManaged,
+		expiresAt,
+		lastRotated,
+		len(keyPair.Metadata))
+
 	// Insert into database
 	query := `
 		INSERT INTO key_pairs (
@@ -401,7 +422,7 @@ func (s *PostgresKeyStore) StoreKeyPair(ctx context.Context, keyPair *KeyPair) e
 		encryptedData.Algorithm,
 		s.adminKeyID,
 		encryptedData.Nonce,
-		"active",
+		statusValue,
 		expiresAt,
 		lastRotated,
 		keyPair.UsageCount,
@@ -410,8 +431,11 @@ func (s *PostgresKeyStore) StoreKeyPair(ctx context.Context, keyPair *KeyPair) e
 	)
 
 	if err != nil {
+		logger.Warn("PostgresKeyStore.StoreKeyPair: failed for key_id=%s status=%s: %v", keyPair.KeyID, statusValue, err)
 		return fmt.Errorf("failed to store key pair: %w", err)
 	}
+
+	logger.Debug("PostgresKeyStore.StoreKeyPair: key_id=%s stored/updated successfully with status=%s", keyPair.KeyID, statusValue)
 
 	// Audit log
 	s.auditLog(ctx, keyPair.KeyID, "create", "system", "success", nil)
@@ -645,6 +669,32 @@ func parseKeyStatus(s string) KeyStatus {
 		return KeyStatus_KEY_STATUS_COMPROMISED
 	default:
 		return KeyStatus_KEY_STATUS_ACTIVE
+	}
+}
+
+// keyStatusToDBString normalizes protobuf key status values into the
+// lowercase strings enforced by the key_pairs.status check constraint.
+func keyStatusToDBString(status KeyStatus) string {
+	switch status {
+	case KeyStatus_KEY_STATUS_ACTIVE:
+		return "active"
+	case KeyStatus_KEY_STATUS_INACTIVE:
+		return "inactive"
+	case KeyStatus_KEY_STATUS_DEPRECATED:
+		return "inactive"
+	case KeyStatus_KEY_STATUS_COMPROMISED:
+		return "compromised"
+	case KeyStatus_KEY_STATUS_REVOKED:
+		return "revoked"
+	case KeyStatus_KEY_STATUS_PENDING_ROTATION:
+		logger.Info("keyStatusToDBString: normalizing pending rotation status to 'active'")
+		return "active"
+	case KeyStatus_KEY_STATUS_UNSPECIFIED:
+		logger.Info("keyStatusToDBString: normalizing unspecified status to 'active'")
+		return "active"
+	default:
+		logger.Warn("keyStatusToDBString: received unexpected status %v; coercing to 'active'", status)
+		return "active"
 	}
 }
 
