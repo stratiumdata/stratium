@@ -256,6 +256,7 @@ func (rm *DefaultKeyRotationManager) PerformRotation(ctx context.Context, keyID 
 	if oldKey.ExternallyManaged {
 		return nil, fmt.Errorf("key %s is externally managed and cannot be rotated", keyID)
 	}
+	logger.Debug("RotationManager.PerformRotation: key_id=%s old_key_status=%s usage_count=%d", keyID, oldKey.Status.String(), oldKey.UsageCount)
 
 	// Get appropriate provider (use cached instance)
 	provider, err := rm.providerFactory.GetProvider(oldKey.ProviderType)
@@ -273,8 +274,10 @@ func (rm *DefaultKeyRotationManager) PerformRotation(ctx context.Context, keyID 
 
 	// Convert KeyPair to Key message
 	newKey := rm.keyPairToKey(newKeyPair)
+	logger.Debug("RotationManager.PerformRotation: key_id=%s new_key_status=%s metadata_entries=%d", keyID, newKey.Status.String(), len(newKey.Metadata))
 
 	// Update key in store
+	logger.Debug("RotationManager.PerformRotation: updating key store entry for key_id=%s", keyID)
 	err = rm.keyStore.UpdateKey(ctx, newKey)
 	if err != nil {
 		rm.handleRotationError(keyID, fmt.Errorf("failed to update key in store: %w", err))
