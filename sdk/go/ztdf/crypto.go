@@ -374,7 +374,8 @@ func decryptPayloadWithSegments(ciphertext, dek, iv []byte, segments []*models.E
 
 	reader := bytes.NewReader(ciphertext)
 	var plaintext bytes.Buffer
-	rootHasher := sha256.New()
+	cipherRootHasher := sha256.New()
+	plainRootHasher := sha256.New()
 
 	for idx, segment := range segments {
 		chunkSize := int(segment.GetEncryptedSegmentSize())
@@ -387,22 +388,28 @@ func decryptPayloadWithSegments(ciphertext, dek, iv []byte, segments []*models.E
 			return nil, fmt.Errorf("failed to read encrypted payload segment: %w", err)
 		}
 
-		expectedChunkHash, err := base64.StdEncoding.DecodeString(segment.GetHash())
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode segment hash: %w", err)
-		}
-		actualChunkHash := sha256.Sum256(chunkCipher)
-		if !hmac.Equal(actualChunkHash[:], expectedChunkHash) {
-			return nil, errors.New("segment hash mismatch")
-		}
-
 		nonceForChunk := deriveChunkNonce(iv, uint32(idx))
 		chunkPlaintext, err := gcm.Open(nil, nonceForChunk, chunkCipher, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt payload segment: %w", err)
 		}
 
-		rootHasher.Write(chunkCipher)
+		cipherRootHasher.Write(chunkCipher)
+		plainRootHasher.Write(chunkPlaintext)
+
+		if segment.GetHash() != "" {
+			expectedChunkHash, err := base64.StdEncoding.DecodeString(segment.GetHash())
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode segment hash: %w", err)
+			}
+			cipherChunkHash := sha256.Sum256(chunkCipher)
+			if !hmac.Equal(cipherChunkHash[:], expectedChunkHash) {
+				plainChunkHash := sha256.Sum256(chunkPlaintext)
+				if !hmac.Equal(plainChunkHash[:], expectedChunkHash) {
+					return nil, errors.New("segment hash mismatch")
+				}
+			}
+		}
 		plaintext.Write(chunkPlaintext)
 	}
 
@@ -411,12 +418,33 @@ func decryptPayloadWithSegments(ciphertext, dek, iv []byte, segments []*models.E
 	}
 
 	if len(expectedRootHash) > 0 {
-		if !hmac.Equal(rootHasher.Sum(nil), expectedRootHash) {
+		cipherRoot := cipherRootHasher.Sum(nil)
+		plainRoot := plainRootHasher.Sum(nil)
+		if !hmac.Equal(cipherRoot, expectedRootHash) && !hmac.Equal(plainRoot, expectedRootHash) {
 			return nil, errors.New("payload hash mismatch")
 		}
 	}
 
 	return plaintext.Bytes(), nil
+}
+
+func decryptSinglePayload(ciphertext, dek, iv []byte) ([]byte, error) {
+	block, err := aes.NewCipher(dek)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM mode: %w", err)
+	}
+
+	plaintext, err := gcm.Open(nil, iv, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt payload: %w", err)
+	}
+
+	return plaintext, nil
 }
 
 // EncryptDEKWithRSAPublicKey encrypts a DEK using RSA-OAEP with SHA-256.

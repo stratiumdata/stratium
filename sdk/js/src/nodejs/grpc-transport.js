@@ -7,6 +7,9 @@
  *
  * Note: Requires @connectrpc/connect and @connectrpc/connect-node packages to be installed.
  */
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 /**
  * Create an authenticated gRPC transport for Node.js

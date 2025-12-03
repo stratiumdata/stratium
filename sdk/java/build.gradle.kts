@@ -67,6 +67,14 @@ tasks.test {
     useJUnitPlatform()
 }
 
+tasks.register<JavaExec>("runCrossSdkTool") {
+    group = "integration"
+    description = "Runs the cross-SDK crypto helper CLI"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.stratium.sdk.integration.CrossSdkTool")
+    standardInput = System.`in`
+}
+
 publishing {
     publications {
         create<MavenPublication>("maven") {

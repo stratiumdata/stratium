@@ -68,7 +68,9 @@ func LoadFromFile(zipPath string) (*TrustedDataObject, error) {
 			}
 
 			manifest := &models.Manifest{}
-			if err := protojson.Unmarshal(manifestData, manifest); err != nil {
+			if err := (protojson.UnmarshalOptions{
+				DiscardUnknown: true,
+			}).Unmarshal(manifestData, manifest); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
 			}
 			tdo.Manifest = manifest
@@ -122,7 +124,9 @@ func LoadFromBytes(zipData []byte) (*TrustedDataObject, error) {
 			}
 
 			manifest := &models.Manifest{}
-			if err := protojson.Unmarshal(manifestData, manifest); err != nil {
+			if err := (protojson.UnmarshalOptions{
+				DiscardUnknown: true,
+			}).Unmarshal(manifestData, manifest); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
 			}
 			tdo.Manifest = manifest
@@ -190,7 +194,7 @@ func writeTrustedDataObject(tdo *TrustedDataObject, w io.Writer) error {
 
 	payloadHeader := &zip.FileHeader{
 		Name:   PayloadFileName,
-		Method: zip.Store,
+		Method: zip.Deflate,
 	}
 
 	payloadWriter, err := zipWriter.CreateHeader(payloadHeader)

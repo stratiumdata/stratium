@@ -47,6 +47,8 @@ type Config struct {
 
 	// Authentication
 	OIDC *OIDCConfig // OIDC configuration for authentication
+	// BearerToken allows callers to provide a pre-fetched token instead of using OIDC flows.
+	BearerToken string
 
 	// Connection options
 	Timeout       time.Duration // Default timeout for requests (default: 30s)

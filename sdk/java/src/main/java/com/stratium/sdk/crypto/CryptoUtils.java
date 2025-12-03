@@ -144,12 +144,12 @@ public final class CryptoUtils {
         if (!(privateKey instanceof RSAPrivateKey rsaPrivateKey)) {
             throw new CryptoException("decrypt", "Client key must be RSA for DEK decryption", null);
         }
-        System.out.println("[CryptoUtils] private key algo=" + rsaPrivateKey.getAlgorithm()
+        System.err.println("[CryptoUtils] private key algo=" + rsaPrivateKey.getAlgorithm()
                 + ", size=" + rsaPrivateKey.getModulus().bitLength());
         String cipherPreview = Base64.getEncoder().encodeToString(
                 Arrays.copyOf(encryptedDek, Math.min(encryptedDek.length, 48))
         );
-        System.out.println("[CryptoUtils] ciphertext preview=" + cipherPreview);
+        System.err.println("[CryptoUtils] ciphertext preview=" + cipherPreview);
         GeneralSecurityException lastError = null;
         DecryptAttempt attempt = tryOaep(rsaPrivateKey, encryptedDek, "SHA-256", "SHA-256");
         if (attempt.result() != null) {
@@ -167,12 +167,12 @@ public final class CryptoUtils {
         }
         lastError = attempt.error();
         try {
-            System.out.println("[CryptoUtils] Attempting RSA decrypt using RSA/ECB/PKCS1Padding");
+            System.err.println("[CryptoUtils] Attempting RSA decrypt using RSA/ECB/PKCS1Padding");
             Cipher cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
             cipher.init(Cipher.DECRYPT_MODE, rsaPrivateKey);
             return cipher.doFinal(encryptedDek);
         } catch (GeneralSecurityException e) {
-            System.out.println("[CryptoUtils] RSA/ECB/PKCS1Padding failed: " + e.getMessage());
+            System.err.println("[CryptoUtils] RSA/ECB/PKCS1Padding failed: " + e.getMessage());
             lastError = e;
         }
         throw new CryptoException("decrypt", "Failed to decrypt DEK", lastError);
@@ -183,7 +183,7 @@ public final class CryptoUtils {
     private static DecryptAttempt tryOaep(RSAPrivateKey privateKey, byte[] ciphertext,
                                           String digest, String mgfDigest) {
         try {
-            System.out.println("[CryptoUtils] Attempting RSA decrypt using OAEP digest=" + digest + ", mgf=" + mgfDigest);
+            System.err.println("[CryptoUtils] Attempting RSA decrypt using OAEP digest=" + digest + ", mgf=" + mgfDigest);
             Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
             OAEPParameterSpec spec = new OAEPParameterSpec(
                     digest,
@@ -194,7 +194,7 @@ public final class CryptoUtils {
             cipher.init(Cipher.DECRYPT_MODE, privateKey, spec);
             return new DecryptAttempt(cipher.doFinal(ciphertext), null);
         } catch (GeneralSecurityException e) {
-            System.out.println("[CryptoUtils] OAEP digest=" + digest + ", mgf=" + mgfDigest + " failed: " + e.getMessage());
+            System.err.println("[CryptoUtils] OAEP digest=" + digest + ", mgf=" + mgfDigest + " failed: " + e.getMessage());
             return new DecryptAttempt(null, e);
         }
     }

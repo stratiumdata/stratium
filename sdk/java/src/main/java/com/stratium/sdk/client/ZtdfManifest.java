@@ -22,7 +22,7 @@ public record ZtdfManifest(
             String type,
             String kid,
             @JsonProperty("wrappedKey") String wrappedKey,
-            @JsonProperty("policyBinding") String policyBinding,
+            @JsonProperty("policyBinding") PolicyBinding policyBinding,
             String url,
             String protocol
     ) {}
@@ -43,4 +43,6 @@ public record ZtdfManifest(
     public record Segment(String hash,
                           @JsonProperty("segmentSize") int segmentSize,
                           @JsonProperty("encryptedSegmentSize") int encryptedSegmentSize) {}
+
+    public record PolicyBinding(String alg, String hash) {}
 }

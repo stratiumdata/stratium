@@ -36,7 +36,9 @@ export async function parseZtdfFile(file) {
     const manifestText = await manifestFile.async('text');
 
     // Convert JSON to Manifest proto
-    const manifest = Manifest.fromJsonString(manifestText);
+    const manifest = Manifest.fromJsonString(manifestText, {
+      ignoreUnknownFields: true,
+    });
 
     // Extract payload
     const payloadFile = zip.file('0.payload');
