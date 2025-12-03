@@ -2,13 +2,12 @@
  * @fileoverview File-based Storage for Client Keys (Node.js)
  * @module nodejs/key-storage
  *
- * Stores CryptoKey JWK representations and metadata in the file system.
+ * Stores PEM-encoded RSA key pairs and metadata on disk for reuse.
  * This allows keys to persist across Node.js application restarts.
  */
 
 import fs from 'fs/promises';
 import path from 'path';
-import { exportPublicKey, exportPrivateKey, importPublicKey, importPrivateKey } from './key-generation.js';
 
 /**
  * Key metadata
@@ -93,15 +92,11 @@ function getKeyPath(keyId) {
 export async function storeKeyPair(keyPair, metadata) {
   await ensureStorageDir();
 
-  // Export keys to JWK
-  const publicKeyJwk = await exportPublicKey(keyPair.publicKey);
-  const privateKeyJwk = await exportPrivateKey(keyPair.privateKey);
-
   const data = {
     keyId: metadata.keyId,
     metadata: metadata,
-    publicKeyJwk: publicKeyJwk,
-    privateKeyJwk: privateKeyJwk,
+    publicKeyPem: keyPair.publicKey,
+    privateKeyPem: keyPair.privateKey,
   };
 
   const filePath = getKeyPath(metadata.keyId);
@@ -126,15 +121,11 @@ export async function getKeyPair(keyId) {
     const content = await fs.readFile(filePath, 'utf8');
     const data = JSON.parse(content);
 
-    // Import keys from JWK
-    const publicKey = await importPublicKey(data.publicKeyJwk);
-    const privateKey = await importPrivateKey(data.privateKeyJwk);
-
     return {
       keyId: data.keyId,
       metadata: data.metadata,
-      publicKey: publicKey,
-      privateKey: privateKey,
+      publicKey: data.publicKeyPem,
+      privateKey: data.privateKeyPem,
     };
   } catch (err) {
     if (err.code === 'ENOENT') {

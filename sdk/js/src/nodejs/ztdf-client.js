@@ -14,7 +14,7 @@ import { PassThrough } from 'stream';
 import { finished } from 'stream/promises';
 import { createReadStream, createWriteStream } from 'fs';
 import { readFile, stat as statFile } from 'fs/promises';
-import { createHash, createCipheriv, createDecipheriv } from 'crypto';
+import { createHash, createCipheriv, createDecipheriv, privateEncrypt, constants as cryptoConstants } from 'crypto';
 import { createKeyAccessGrpcClient } from '../grpc/key-access-grpc.js';
 import { createAuthenticatedTransport } from './grpc-transport.js';
 import { generateClientKeyPair } from './key-generation.js';
@@ -34,7 +34,12 @@ import {
 } from '../ztdf/crypto.js';
 import { bytesToBase64, base64ToBytes } from '../utils/helpers.js';
 import { parseZtdfFile } from '../ztdf/parser.js';
-import { Manifest } from '../generated/models/ztdf_pb.js';
+import {
+  Manifest,
+  EncryptionInformation_KeyAccessObject_KeyAccessObjectType,
+  EncryptionInformation_KeyAccessObject_KeyAccessObjectProtocol,
+  EncryptionInformation_EncryptionInformationType,
+} from '../generated/models/ztdf_pb.js';
 
 /**
  * ZTDF Client for Node.js-based file encryption/decryption
@@ -65,6 +70,7 @@ import { Manifest } from '../generated/models/ztdf_pb.js';
  */
 const STREAM_CHUNK_SIZE = 64 * 1024 * 1024; // 64MB
 const GCM_AUTH_TAG_LENGTH = 16;
+const POLICY_BINDING_ALG = 'HS256';
 
 export class ZtdfClient {
   /**
@@ -395,10 +401,17 @@ export class ZtdfClient {
     // Extract encryption info
     const encInfo = manifest.encryptionInformation;
     const keyAccess = encInfo.keyAccess[0];
-    const wrappedKey = keyAccess.wrappedKey;
+    const context = options.context || {};
 
-    // Decrypt DEK
-    const dek = await decryptDEK(this.currentKeyPair.privateKey, wrappedKey);
+    const encryptedForSubjectBase64 = await this._unwrapDekFromKas({
+      resource: manifest.filename || options.resource || 'encrypted-file',
+      wrappedKeyBase64: keyAccess.wrappedKey,
+      keyId: keyAccess.kid || '',
+      policy: encInfo.policy || '',
+      context,
+    });
+
+    const dek = await decryptDEK(this.currentKeyPair.privateKey, encryptedForSubjectBase64);
 
     const method = encInfo.method;
     const integrityInfo = encInfo.integrityInformation;
@@ -430,8 +443,13 @@ export class ZtdfClient {
     }
 
     // Verify policy binding if provided
-    if (keyAccess.policyBinding && options.verifyPolicy !== false) {
-      const isValid = await verifyPolicyBinding(dek, encInfo.policy, keyAccess.policyBinding);
+    const policyBindingValue = keyAccess.policyBinding
+      ? (typeof keyAccess.policyBinding === 'string'
+        ? keyAccess.policyBinding
+        : keyAccess.policyBinding.hash)
+      : null;
+    if (policyBindingValue && options.verifyPolicy !== false) {
+      const isValid = await verifyPolicyBinding(dek, encInfo.policy, policyBindingValue);
       if (!isValid) {
         throw new Error('Policy binding verification failed');
       }
@@ -508,20 +526,48 @@ export class ZtdfClient {
    * @private
    */
   async _requestWrappedDEK(dek, resource, resourceAttributes, policy, context) {
-    const response = await this.kasClient.requestDEK({
+    const combinedContext = {
+      ...normalizeStringMap(resourceAttributes),
+      ...normalizeStringMap(context),
+    };
+
+    const clientWrappedDek = wrapDekWithPrivateKey(this.currentKeyPair.privateKey, dek);
+    const response = await this.kasClient.wrapDEK({
       resource,
-      dek,
+      dek: clientWrappedDek,
+      action: 'encrypt',
+      context: combinedContext,
       policy: policy || '',
-      resourceAttributes,
-      context,
       clientKeyId: this.currentKeyPair.metadata.keyId,
     });
 
+    if (!response.accessGranted) {
+      throw new Error(`Key Access denied: ${response.accessReason || 'wrap denied'}`);
+    }
+
     return {
-      wrappedDek: response.dekForSubject,
+      wrappedDek: response.wrappedDek,
       keyId: response.keyId || 'default-key',
-      policy: response.policy || policy || '',
+      policy: policy || '',
     };
+  }
+
+  async _unwrapDekFromKas({ resource, wrappedKeyBase64, keyId, policy, context }) {
+    const response = await this.kasClient.unwrapDEK({
+      resource,
+      wrappedDek: base64ToBytes(wrappedKeyBase64),
+      keyId: keyId || '',
+      clientKeyId: this.currentKeyPair.metadata.keyId,
+      action: 'decrypt',
+      context: normalizeStringMap(context),
+      policy: policy || '',
+    });
+
+    if (!response.accessGranted) {
+      throw new Error(`Key Access denied: ${response.accessReason || 'unwrap denied'}`);
+    }
+
+    return bytesToBase64(response.dekForSubject);
   }
 
   /**
@@ -533,14 +579,16 @@ export class ZtdfClient {
       filename: opts.filename,
       contentType: opts.contentType,
       encryptionInformation: {
-        type: 'split',
+        type: EncryptionInformation_EncryptionInformationType.SPLIT,
         keyAccess: [{
-          type: 'wrapped',
+          type: EncryptionInformation_KeyAccessObject_KeyAccessObjectType.WRAPPED,
           kid: opts.keyId,
           wrappedKey: opts.wrappedKey,
-          policyBinding: opts.policyBinding || '',
+          policyBinding: opts.policyBinding
+            ? { alg: POLICY_BINDING_ALG, hash: opts.policyBinding }
+            : undefined,
           url: this.config.keyAccessUrl,
-          protocol: 'kas',
+          protocol: EncryptionInformation_KeyAccessObject_KeyAccessObjectProtocol.KAS,
         }],
         method: {
           algorithm: 'AES-256-GCM',
@@ -566,14 +614,14 @@ export class ZtdfClient {
     }
     return {
       rootSignature: {
-        algorithm: 'SHA-256',
-        value: payloadHashBase64,
+        alg: 'SHA256',
+        sig: payloadHashBase64,
       },
-      segmentHashAlg: 'SHA-256',
+      segmentHashAlg: 'SHA256',
       segments: [{
         hash: payloadHashBase64,
-        segmentSize: payloadSize != null ? payloadSize.toString() : '0',
-        encryptedSegmentSize: encryptedSize != null ? encryptedSize.toString() : undefined,
+        segmentSize: payloadSize != null ? Number(payloadSize) : 0,
+        encryptedSegmentSize: encryptedSize != null ? Number(encryptedSize) : undefined,
       }],
     };
   }
@@ -807,6 +855,20 @@ export class ZtdfClient {
   }
 }
 
+function normalizeStringMap(source) {
+  if (!source || typeof source !== 'object') {
+    return {};
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    result[key] = String(value);
+  }
+  return result;
+}
+
 async function streamToBuffer(stream) {
   const chunks = [];
   return new Promise((resolve, reject) => {
@@ -814,4 +876,15 @@ async function streamToBuffer(stream) {
     stream.on('error', reject);
     stream.on('end', () => resolve(Buffer.concat(chunks)));
   });
+}
+function wrapDekWithPrivateKey(privateKeyPem, dek) {
+  const buffer = Buffer.isBuffer(dek) ? dek : Buffer.from(dek);
+  const wrapped = privateEncrypt(
+    {
+      key: privateKeyPem,
+      padding: cryptoConstants.RSA_PKCS1_PADDING,
+    },
+    buffer
+  );
+  return new Uint8Array(wrapped);
 }

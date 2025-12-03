@@ -5,7 +5,6 @@
  * Node.js-specific helpers for registering client keys with the Key Manager Service using gRPC.
  */
 
-import { exportPublicKey, jwkToPem } from './key-generation.js';
 import { Timestamp } from '@bufbuild/protobuf';
 import { KeyType } from '../generated/services/key-manager/key-manager_pb.js';
 import { createKeyManagerGrpcClient } from '../grpc/key-manager-grpc.js';
@@ -37,7 +36,7 @@ import { createAuthenticatedTransport } from './grpc-transport.js';
  */
 export async function registerClientKey(
   clientId,
-  publicKey,
+  publicKeyPem,
   baseUrl,
   expiresIn = 24 * 60 * 60 * 1000,
   getToken
@@ -45,12 +44,6 @@ export async function registerClientKey(
   if (!clientId || clientId.trim() === '') {
     throw new Error('client ID cannot be empty');
   }
-
-  // Export public key as JWK first
-  const jwk = await exportPublicKey(publicKey);
-
-  // Convert JWK to PEM format
-  const pem = jwkToPem(jwk);
 
   // Create Key Manager gRPC client
   const transport = createAuthenticatedTransport(baseUrl, getToken);
@@ -60,23 +53,11 @@ export async function registerClientKey(
   const expiresAt = new Date(Date.now() + expiresIn);
   const expiresAtTimestamp = Timestamp.fromDate(expiresAt);
 
-  // Determine key type from JWK
-  let keyType;
-  if (jwk.kty === 'EC' && jwk.crv === 'P-256') {
-    keyType = KeyType.ECC_P256;
-  } else if (jwk.kty === 'EC' && jwk.crv === 'P-384') {
-    keyType = KeyType.ECC_P384;
-  } else if (jwk.kty === 'RSA') {
-    keyType = KeyType.RSA_2048;
-  } else {
-    throw new Error(`Unsupported key type: ${jwk.kty} ${jwk.crv || ''}`);
-  }
-
   // Register key
   const response = await client.registerClientKey({
     clientId: clientId,
-    publicKeyPem: pem,
-    keyType: keyType,
+    publicKeyPem,
+    keyType: KeyType.RSA_2048,
     expiresAt: expiresAtTimestamp,
   });
 

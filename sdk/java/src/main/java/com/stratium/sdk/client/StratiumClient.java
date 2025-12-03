@@ -38,6 +38,7 @@ import java.util.zip.ZipOutputStream;
 public final class StratiumClient {
     private static final ObjectMapper MANIFEST_MAPPER = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.NON_NULL);
+    private static final String POLICY_BINDING_ALG = "HS256";
     private final StratiumClientConfig config;
     private final KeyStore keyStore;
     private final TokenProvider tokenProvider;
@@ -123,6 +124,9 @@ public final class StratiumClient {
         ZtdfFile ztdfFile = ZtdfParser.parse(ztdfBlob);
         ZtdfManifest manifest = ztdfFile.manifest();
         String resource = manifest.filename();
+        if (resource == null || resource.isBlank()) {
+            resource = "encrypted-file";
+        }
         String action = "decrypt";
         Map<String, String> context = Map.of();
 
@@ -145,16 +149,17 @@ public final class StratiumClient {
         String dekPreview = Base64.getEncoder().encodeToString(
                 Arrays.copyOf(encryptedForSubject, Math.min(48, encryptedForSubject.length))
         );
-        System.out.println("[StratiumClient] encrypted DEK for subject length=" + encryptedForSubject.length
+        System.err.println("[StratiumClient] encrypted DEK for subject length=" + encryptedForSubject.length
                 + ", clientKeyId=" + currentKeyPair.getMetadata().getKeyId()
                 + ", preview=" + dekPreview);
         byte[] dek = CryptoUtils.decryptDek(encryptedForSubject, currentKeyPair.getPrivateKey());
 
-        if (keyAccess.policyBinding() != null && !keyAccess.policyBinding().isBlank()
+        ZtdfManifest.PolicyBinding policyBinding = keyAccess.policyBinding();
+        if (policyBinding != null && policyBinding.hash() != null && !policyBinding.hash().isBlank()
                 && manifest.encryptionInformation().policy() != null) {
             boolean valid = CryptoUtils.verifyPolicyBinding(dek,
                     manifest.encryptionInformation().policy(),
-                    keyAccess.policyBinding());
+                    policyBinding.hash());
             if (!valid) {
                 throw new IllegalStateException("Policy binding verification failed");
             }
@@ -203,7 +208,12 @@ public final class StratiumClient {
             keyAccessEntry.put("type", "wrapped");
             keyAccessEntry.put("kid", wrapResult.keyId());
             keyAccessEntry.put("wrappedKey", Base64.getEncoder().encodeToString(wrapResult.wrappedDek()));
-            keyAccessEntry.put("policyBinding", policyBindingBase64 == null ? "" : policyBindingBase64);
+            if (policyBindingBase64 != null && !policyBindingBase64.isBlank()) {
+                Map<String, Object> policyBinding = new LinkedHashMap<>();
+                policyBinding.put("alg", POLICY_BINDING_ALG);
+                policyBinding.put("hash", policyBindingBase64);
+                keyAccessEntry.put("policyBinding", policyBinding);
+            }
             keyAccessEntry.put("url", config.getKeyAccessUri().toString());
             keyAccessEntry.put("protocol", "kas");
 
@@ -302,7 +312,7 @@ public final class StratiumClient {
     }
 
     private StoredKeyPair registerNewKeyPair() {
-        System.out.println("[StratiumClient] Registering new client key with Key Manager...");
+        System.err.println("[StratiumClient] Registering new client key with Key Manager...");
         try {
             KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
             generator.initialize(2048);

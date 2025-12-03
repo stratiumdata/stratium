@@ -18,7 +18,7 @@ public final class KeyManagerClient {
     }
 
     public KeyMetadata registerKey(String clientId, byte[] publicKeyPem, Instant expiresAt) {
-        System.out.println("[KeyManagerClient] registerKey request for clientId=" + clientId + ", expires=" + expiresAt);
+        System.err.println("[KeyManagerClient] registerKey request for clientId=" + clientId + ", expires=" + expiresAt);
         KeyManager.RegisterClientKeyRequest request = KeyManager.RegisterClientKeyRequest.newBuilder()
                 .setClientId(clientId)
                 .setPublicKeyPem(new String(publicKeyPem, StandardCharsets.US_ASCII))
@@ -29,7 +29,7 @@ public final class KeyManagerClient {
                         .build())
                 .build();
         KeyManager.RegisterClientKeyResponse response = stub.registerClientKey(request);
-        System.out.println("[KeyManagerClient] registerKey response keyId=" + response.getKey().getKeyId());
+        System.err.println("[KeyManagerClient] registerKey response keyId=" + response.getKey().getKeyId());
         return new KeyMetadata(
                 response.getKey().getKeyId(),
                 Instant.now(),

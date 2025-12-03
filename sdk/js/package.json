@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "build": "npm run proto:gen && rollup -c && npm run patch:types",
-    "proto:gen": "protoc --plugin=protoc-gen-es=node_modules/.bin/protoc-gen-es --plugin=protoc-gen-connect-es=node_modules/.bin/protoc-gen-connect-es --es_out=src/generated --es_opt=target=ts --connect-es_out=src/generated --connect-es_opt=target=ts --proto_path=proto proto/services/key-access/key-access.proto proto/services/key-manager/key-manager.proto proto/services/platform/platform.proto proto/models/ztdf.proto proto/models/stanag4774.proto",
+    "proto:gen": "protoc --plugin=protoc-gen-es=node_modules/.bin/protoc-gen-es --plugin=protoc-gen-connect-es=node_modules/.bin/protoc-gen-connect-es --es_out=src/generated --es_opt=target=js+dts --connect-es_out=src/generated --connect-es_opt=target=js+dts --proto_path=proto proto/services/key-access/key-access.proto proto/services/key-manager/key-manager.proto proto/services/platform/platform.proto proto/models/ztdf.proto proto/models/stanag4774.proto",
     "patch:types": "node scripts/patch-types.js",
     "test": "jest",
     "lint": "eslint src/**/*.js",

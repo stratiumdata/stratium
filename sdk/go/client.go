@@ -19,7 +19,7 @@ type Client struct {
 	//PAP        *PAPClient
 
 	// Authentication
-	auth *authManager
+	auth tokenProvider
 
 	// Internal connections
 	platformConn   *grpc.ClientConn
@@ -67,8 +67,11 @@ func NewClient(config *Config) (*Client, error) {
 		config: config,
 	}
 
-	// Initialize authentication if OIDC is configured
-	if config.OIDC != nil {
+	// Initialize authentication based on provided configuration
+	switch {
+	case config.BearerToken != "":
+		client.auth = newStaticTokenProvider(config.BearerToken)
+	case config.OIDC != nil:
 		auth, err := newAuthManager(config.OIDC)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize authentication: %w", err)
@@ -185,7 +188,11 @@ func (c *Client) RefreshToken(ctx context.Context) error {
 	if c.auth == nil {
 		return fmt.Errorf("authentication not configured")
 	}
-	return c.auth.RefreshToken(ctx)
+
+	if am, ok := c.auth.(*authManager); ok {
+		return am.RefreshToken(ctx)
+	}
+	return fmt.Errorf("authentication refresh not supported for static tokens")
 }
 
 // Config returns the client's configuration.

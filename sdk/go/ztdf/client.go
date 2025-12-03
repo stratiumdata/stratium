@@ -246,11 +246,8 @@ func (c *Client) Unwrap(ctx context.Context, tdo *TrustedDataObject, opts *Unwra
 	if tdo.Payload == nil {
 		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, ErrMsgMissingPayload)
 	}
-	if encInfo.Method == nil || encInfo.IntegrityInformation == nil {
-		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "missing encryption method or integrity information")
-	}
-	if len(encInfo.IntegrityInformation.Segments) == 0 {
-		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "no integrity segments found")
+	if encInfo.Method == nil {
+		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "missing encryption method")
 	}
 
 	ivBase64 := encInfo.Method.Iv
@@ -259,17 +256,27 @@ func (c *Client) Unwrap(ctx context.Context, tdo *TrustedDataObject, opts *Unwra
 		return nil, fmt.Errorf("failed to decode IV: %w", err)
 	}
 
-	var expectedRoot []byte
-	if opts.VerifyIntegrity && encInfo.IntegrityInformation.RootSignature != nil {
-		expectedRoot, err = base64.StdEncoding.DecodeString(encInfo.IntegrityInformation.RootSignature.Sig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode payload root signature: %w", err)
-		}
-	}
+	hasIntegrity := encInfo.IntegrityInformation != nil && len(encInfo.IntegrityInformation.Segments) > 0
+	isSegmented := encInfo.Method.GetIsStreamable() && hasIntegrity
 
-	plaintext, err := decryptPayloadWithSegments(tdo.Payload.Data, dek, iv, encInfo.IntegrityInformation.Segments, expectedRoot)
-	if err != nil {
-		return nil, err
+	var plaintext []byte
+	if isSegmented {
+		var expectedRoot []byte
+		if opts.VerifyIntegrity && encInfo.IntegrityInformation.RootSignature != nil {
+			expectedRoot, err = base64.StdEncoding.DecodeString(encInfo.IntegrityInformation.RootSignature.Sig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode payload root signature: %w", err)
+			}
+		}
+		plaintext, err = decryptPayloadWithSegments(tdo.Payload.Data, dek, iv, encInfo.IntegrityInformation.Segments, expectedRoot)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		plaintext, err = decryptSinglePayload(tdo.Payload.Data, dek, iv)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return plaintext, nil

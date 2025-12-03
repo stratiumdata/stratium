@@ -131,22 +131,15 @@ console.log(`Deleted ${deleted} expired keys`);
 ### Manual Key Generation
 
 ```javascript
-import {
-  generateClientKeyPair,
-  exportPublicKey,
-  exportPrivateKey
-} from '@stratiumdata/sdk/nodejs';
+import { generateClientKeyPair } from '@stratiumdata/sdk/nodejs';
+import { writeFile } from 'fs/promises';
 
 // Generate key pair
 const keyPair = await generateClientKeyPair();
 
-// Export keys
-const publicKeyJwk = await exportPublicKey(keyPair.publicKey);
-const privateKeyJwk = await exportPrivateKey(keyPair.privateKey);
-
 // Save to file
-await writeFile('public-key.json', JSON.stringify(publicKeyJwk));
-await writeFile('private-key.json', JSON.stringify(privateKeyJwk));
+await writeFile('public-key.pem', keyPair.publicKey);
+await writeFile('private-key.pem', keyPair.privateKey, { mode: 0o600 });
 ```
 
 ### Direct Crypto Operations
