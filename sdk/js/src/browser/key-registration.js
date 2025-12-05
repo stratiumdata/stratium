@@ -61,16 +61,7 @@ export async function registerClientKey(
   const expiresAtTimestamp = Timestamp.fromDate(expiresAt);
 
   // Determine key type from JWK
-  let keyType;
-  if (jwk.kty === 'EC' && jwk.crv === 'P-256') {
-    keyType = KeyType.ECC_P256;
-  } else if (jwk.kty === 'EC' && jwk.crv === 'P-384') {
-    keyType = KeyType.ECC_P384;
-  } else if (jwk.kty === 'RSA') {
-    keyType = KeyType.RSA_2048;
-  } else {
-    throw new Error(`Unsupported key type: ${jwk.kty} ${jwk.crv || ''}`);
-  }
+  const keyType = inferKeyTypeFromJwk(jwk);
 
   // Register key
   const response = await client.registerClientKey({
@@ -92,4 +83,39 @@ export async function registerClientKey(
     keyId: response.key.keyId,
     expiresAt: responseExpiresAt,
   };
+}
+
+function inferKeyTypeFromJwk(jwk) {
+  if (jwk.kty === 'EC' && jwk.crv === 'P-256') {
+    return KeyType.ECC_P256;
+  }
+  if (jwk.kty === 'EC' && jwk.crv === 'P-384') {
+    return KeyType.ECC_P384;
+  }
+  if (jwk.kty === 'RSA') {
+    const modulusBytes = base64UrlToUint8Array(jwk.n);
+    const bits = modulusBytes.length * 8;
+    switch (bits) {
+      case 2048:
+        return KeyType.RSA_2048;
+      case 3072:
+        return KeyType.RSA_3072;
+      case 4096:
+        return KeyType.RSA_4096;
+      default:
+        throw new Error(`Unsupported RSA key size: ${bits}`);
+    }
+  }
+  throw new Error(`Unsupported key type: ${jwk.kty} ${jwk.crv || ''}`);
+}
+
+function base64UrlToUint8Array(base64url) {
+  const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
+  const base64 = (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    output[i] = raw.charCodeAt(i);
+  }
+  return output;
 }

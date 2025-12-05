@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: Stratium
+    orgId: 1
+    folder: Stratium
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

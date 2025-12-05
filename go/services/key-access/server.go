@@ -27,6 +27,8 @@ import (
 	"github.com/cloudflare/circl/kem/kyber/kyber1024"
 	"github.com/cloudflare/circl/kem/kyber/kyber512"
 	"github.com/cloudflare/circl/kem/kyber/kyber768"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/crypto/hkdf"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -84,7 +86,11 @@ type InMemorySubjectKeyStore struct {
 // NewServer creates a new key access server
 func NewServer(keyManagerAddr string, cfg *config.Config) (*Server, error) {
 	// Connect to key manager service
-	conn, err := grpc.NewClient(keyManagerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		keyManagerAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to key manager: %w", err)
 	}
@@ -205,7 +211,30 @@ func (s *Server) GetAuthService() *auth.AuthService {
 }
 
 // WrapDEK wraps a Data Encryption Key using the current encryption key
-func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (*WrapDEKResponse, error) {
+func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (resp *WrapDEKResponse, err error) {
+	initKeyAccessTelemetry()
+
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.WrapDEK",
+		attribute.String("resource", req.GetResource()),
+		attribute.String("action", req.GetAction()),
+	)
+	start := time.Now()
+	defer func() {
+		granted := false
+		if resp != nil {
+			granted = resp.AccessGranted
+			span.SetAttributes(attribute.Bool("access_granted", granted))
+			if !resp.AccessGranted && resp.AccessReason != "" {
+				span.SetAttributes(attribute.String("access_reason", resp.AccessReason))
+			}
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		recordWrapTelemetry(ctx, time.Since(start), granted, err)
+		span.End()
+	}()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -270,6 +299,11 @@ func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (*WrapDEKResp
 		}
 	}
 
+	// Ensure the service key metadata is cached for latency tracking and validation
+	if _, err := s.getServicePublicKey(ctx, keyID); err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Failed to load service key: %v", err)), nil
+	}
+
 	rewrapResp, err := s.rewrapClientDEK(ctx, &keyManager.RewrapClientDEKRequest{
 		Subject:          subject,
 		ClientKeyId:      req.ClientKeyId,
@@ -300,7 +334,30 @@ func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (*WrapDEKResp
 }
 
 // UnwrapDEK unwraps a Data Encryption Key with ABAC verification
-func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (*UnwrapDEKResponse, error) {
+func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (resp *UnwrapDEKResponse, err error) {
+	initKeyAccessTelemetry()
+
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.UnwrapDEK",
+		attribute.String("resource", req.GetResource()),
+		attribute.String("action", req.GetAction()),
+	)
+	start := time.Now()
+	defer func() {
+		granted := false
+		if resp != nil {
+			granted = resp.AccessGranted
+			span.SetAttributes(attribute.Bool("access_granted", granted))
+			if !resp.AccessGranted && resp.AccessReason != "" {
+				span.SetAttributes(attribute.String("access_reason", resp.AccessReason))
+			}
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		recordUnwrapTelemetry(ctx, time.Since(start), granted, err)
+		span.End()
+	}()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -650,6 +707,11 @@ func (s *Server) encryptDEKWithSharedSecret(dek, sharedSecret, kemCiphertext []b
 
 // getServicePublicKey returns the cached service public key for the given key ID, fetching and parsing it if needed.
 func (s *Server) getServicePublicKey(ctx context.Context, keyID string) (crypto.PublicKey, error) {
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.getServicePublicKey",
+		attribute.String("key_id", keyID),
+	)
+	defer span.End()
+
 	if pub, ok := s.serviceKeyCache.Get(keyID); ok {
 		return pub, nil
 	}
@@ -659,11 +721,13 @@ func (s *Server) getServicePublicKey(ctx context.Context, keyID string) (crypto.
 		IncludePublicKey: true,
 	})
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("failed to get service key: %w", err)
 	}
 
 	publicKey, err := s.parsePublicKeyPEM(getKeyResp.Key.PublicKeyPem, getKeyResp.Key.KeyType)
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("failed to parse service public key: %w", err)
 	}
 
@@ -694,6 +758,7 @@ func (c *serviceKeyCache) Get(keyID string) (crypto.PublicKey, bool) {
 	entry, ok := c.key[keyID]
 	c.mu.RUnlock()
 	if !ok || time.Now().After(entry.expires) {
+		recordServiceKeyCacheEvent(false)
 		if ok {
 			c.mu.Lock()
 			// Remove expired entry to avoid repeated expiration checks under read lock.
@@ -702,6 +767,7 @@ func (c *serviceKeyCache) Get(keyID string) (crypto.PublicKey, bool) {
 		}
 		return nil, false
 	}
+	recordServiceKeyCacheEvent(true)
 	return entry.publicKey, true
 }
 

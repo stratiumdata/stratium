@@ -8,6 +8,8 @@ import (
 
 	platform "stratium/services/platform"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -26,7 +28,11 @@ func NewGRPCPlatformClient(platformAddr string) (*GRPCPlatformClient, error) {
 	}
 
 	// Connect to Platform service
-	conn, err := grpc.NewClient(platformAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		platformAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to platform service: %w", err)
 	}
@@ -43,8 +49,15 @@ func NewGRPCPlatformClient(platformAddr string) (*GRPCPlatformClient, error) {
 
 // EvaluateAccess calls the Platform service's PDP to evaluate access
 func (p *GRPCPlatformClient) EvaluateAccess(ctx context.Context, resourceAttributes map[string]string, action string, context map[string]string) (*AccessDecision, error) {
+	initKeyAccessTelemetry()
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.PlatformEvaluate",
+		attribute.String("action", action),
+	)
+	defer span.End()
+
 	tokenString, err := auth.ExtractTokenFromMetadata(ctx)
 	if err != nil {
+		span.RecordError(err)
 		return &AccessDecision{
 			Granted:      false,
 			Reason:       "failed to extract token from metadata",
@@ -55,6 +68,7 @@ func (p *GRPCPlatformClient) EvaluateAccess(ctx context.Context, resourceAttribu
 	jwtExtractor := &extractors.JWTClaimsExtractor{}
 	subjectAttributes, err := jwtExtractor.ExtractSubjectAttributes(tokenString)
 	if err != nil {
+		span.RecordError(err)
 		return &AccessDecision{
 			Granted:      false,
 			Reason:       "failed to extract token attributes",
@@ -83,6 +97,7 @@ func (p *GRPCPlatformClient) EvaluateAccess(ctx context.Context, resourceAttribu
 		Context:            context,
 	})
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("platform PDP evaluation failed: %w", err)
 	}
 
@@ -103,6 +118,13 @@ func (p *GRPCPlatformClient) EvaluateAccess(ctx context.Context, resourceAttribu
 		logger.Info("Platform PDP: Access granted for %s to %s (policy: %s)", subject, resourceAttributes["hash"], resp.EvaluatedPolicy)
 	} else {
 		logger.Info("Platform PDP: Access denied for %s to %s - %s", subject, resourceAttributes["hash"], resp.Reason)
+	}
+	span.SetAttributes(
+		attribute.Bool("access_granted", decision.Granted),
+		attribute.String("evaluated_policy", resp.EvaluatedPolicy),
+	)
+	if !decision.Granted && resp.Reason != "" {
+		span.SetAttributes(attribute.String("access_reason", resp.Reason))
 	}
 
 	return decision, nil

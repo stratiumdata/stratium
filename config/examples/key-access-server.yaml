@@ -44,3 +44,8 @@ observability:
     enabled: true
     address: ":9093"
     path: /metrics
+  tracing:
+    enabled: true
+    provider: otlp
+    endpoint: otel-collector:4317
+    service_name: key-access-server

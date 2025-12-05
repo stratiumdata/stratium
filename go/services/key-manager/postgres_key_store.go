@@ -31,8 +31,8 @@ func NewPostgresKeyStore(db *sqlx.DB, keyEncryption *KeyEncryption, adminKeyID s
 		db:            db,
 		keyEncryption: keyEncryption,
 		adminKeyID:    adminKeyID,
-		keyCache:      newTTLCache[*Key](cacheTTL),
-		keyPairCache:  newTTLCache[*KeyPair](cacheTTL),
+		keyCache:      newTTLCache[*Key]("key_pairs_by_id", cacheTTL),
+		keyPairCache:  newTTLCache[*KeyPair]("key_pairs_material", cacheTTL),
 	}
 }
 
@@ -125,7 +125,9 @@ func (s *PostgresKeyStore) GetKey(ctx context.Context, keyID string) (*Key, erro
 		Metadata     string       `db:"metadata"`
 	}
 
+	start := time.Now()
 	err := s.db.GetContext(ctx, &dbKey, query, keyID)
+	recordKeyManagerDBQuery(ctx, "key_pairs", "select", time.Since(start), err)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("key with ID %s not found", keyID)
@@ -184,7 +186,9 @@ func (s *PostgresKeyStore) ListKeys(ctx context.Context, filters map[string]inte
 
 	query += " ORDER BY created_at DESC"
 
+	start := time.Now()
 	rows, err := s.db.QueryContext(ctx, query, args...)
+	recordKeyManagerDBQuery(ctx, "key_pairs", "select", time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list keys: %w", err)
 	}
@@ -252,7 +256,9 @@ func (s *PostgresKeyStore) DeleteKey(ctx context.Context, keyID string) error {
 	}
 
 	query := `DELETE FROM key_pairs WHERE key_id = $1`
+	start := time.Now()
 	result, err := s.db.ExecContext(ctx, query, keyID)
+	recordKeyManagerDBQuery(ctx, "key_pairs", "delete", time.Since(start), err)
 	if err != nil {
 		return fmt.Errorf("failed to delete key: %w", err)
 	}
@@ -299,7 +305,9 @@ func (s *PostgresKeyStore) UpdateKey(ctx context.Context, key *Key) error {
 		WHERE key_id = $3
 	`
 
+	start := time.Now()
 	result, err := s.db.ExecContext(ctx, query, statusValue, string(metadataJSON), key.KeyId)
+	recordKeyManagerDBQuery(ctx, "key_pairs", "update", time.Since(start), err)
 	if err != nil {
 		return fmt.Errorf("failed to update key (status=%s): %w", statusValue, err)
 	}
@@ -413,6 +421,7 @@ func (s *PostgresKeyStore) StoreKeyPair(ctx context.Context, keyPair *KeyPair) e
 			updated_at = NOW()
 	`
 
+	start := time.Now()
 	_, err = s.db.ExecContext(ctx, query,
 		keyPair.KeyID,
 		keyTypeToString(keyPair.KeyType),
@@ -430,6 +439,7 @@ func (s *PostgresKeyStore) StoreKeyPair(ctx context.Context, keyPair *KeyPair) e
 		string(metadataJSON),
 	)
 
+	recordKeyManagerDBQuery(ctx, "key_pairs", "insert", time.Since(start), err)
 	if err != nil {
 		logger.Warn("PostgresKeyStore.StoreKeyPair: failed for key_id=%s status=%s: %v", keyPair.KeyID, statusValue, err)
 		return fmt.Errorf("failed to store key pair: %w", err)
@@ -753,8 +763,8 @@ func NewPostgresClientKeyStore(db *sqlx.DB, integrityMgr *KeyIntegrityManager, c
 	return &PostgresClientKeyStore{
 		db:                db,
 		integrityMgr:      integrityMgr,
-		keyCache:          newTTLCache[*Key](cacheTTL),
-		activeClientCache: newTTLCache[*Key](cacheTTL),
+		keyCache:          newTTLCache[*Key]("client_keys_by_id", cacheTTL),
+		activeClientCache: newTTLCache[*Key]("client_keys_active_by_subject", cacheTTL),
 	}
 }
 
@@ -781,7 +791,9 @@ func (s *PostgresClientKeyStore) RegisterKey(ctx context.Context, key *Key) erro
 		KeyID  string `db:"key_id"`
 		Status string `db:"status"`
 	}
+	lookupStart := time.Now()
 	err := s.db.GetContext(ctx, &existingKey, checkQuery, key.ClientId, key.PublicKeyPem)
+	recordKeyManagerDBQuery(ctx, "client_keys", "select", time.Since(lookupStart), err)
 
 	// If an identical key already exists, update its key_id in the input and update the record
 	if err == nil {
@@ -806,7 +818,9 @@ func (s *PostgresClientKeyStore) RegisterKey(ctx context.Context, key *Key) erro
 			SET status = $1, expires_at = $2, metadata = $3, key_integrity_hash = $4
 			WHERE key_id = $5
 		`
+		updateStart := time.Now()
 		_, err = s.db.ExecContext(ctx, updateQuery, "active", expiresAt, string(metadataJSON), key.KeyIntegrityHash, existingKey.KeyID)
+		recordKeyManagerDBQuery(ctx, "client_keys", "update", time.Since(updateStart), err)
 		if err != nil {
 			return fmt.Errorf("failed to update existing client key: %w", err)
 		}
@@ -840,6 +854,7 @@ func (s *PostgresClientKeyStore) RegisterKey(ctx context.Context, key *Key) erro
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
+	insertStart := time.Now()
 	_, err = s.db.ExecContext(ctx, query,
 		key.ClientId,
 		key.KeyId,
@@ -851,6 +866,7 @@ func (s *PostgresClientKeyStore) RegisterKey(ctx context.Context, key *Key) erro
 		string(metadataJSON),
 	)
 
+	recordKeyManagerDBQuery(ctx, "client_keys", "insert", time.Since(insertStart), err)
 	if err != nil {
 		return fmt.Errorf("failed to register client key: %w", err)
 	}
@@ -960,7 +976,9 @@ func (s *PostgresClientKeyStore) GetActiveKeyForClient(ctx context.Context, clie
 		Metadata         string       `db:"metadata"`
 	}
 
+	start := time.Now()
 	err := s.db.GetContext(ctx, &dbKey, query, clientID)
+	recordKeyManagerDBQuery(ctx, "client_keys", "select", time.Since(start), err)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("no active key found for client %s", clientID)
@@ -1016,7 +1034,9 @@ func (s *PostgresClientKeyStore) ListKeysForClient(ctx context.Context, clientID
 
 	query += " ORDER BY created_at DESC"
 
+	start := time.Now()
 	rows, err := s.db.QueryContext(ctx, query, clientID)
+	recordKeyManagerDBQuery(ctx, "client_keys", "select", time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list client keys: %w", err)
 	}
@@ -1092,7 +1112,9 @@ func (s *PostgresClientKeyStore) RevokeKey(ctx context.Context, keyID, reason st
 	`
 
 	var subjectID string
+	start := time.Now()
 	err := s.db.QueryRowContext(ctx, query, keyID).Scan(&subjectID)
+	recordKeyManagerDBQuery(ctx, "client_keys", "select", time.Since(start), err)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("client key with ID %s not found", keyID)
@@ -1116,7 +1138,9 @@ func (s *PostgresClientKeyStore) ListClients(ctx context.Context) ([]string, err
 		ORDER BY subject_id
 	`
 
+	start := time.Now()
 	rows, err := s.db.QueryContext(ctx, query)
+	recordKeyManagerDBQuery(ctx, "client_keys", "select", time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list clients: %w", err)
 	}

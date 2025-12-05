@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
@@ -83,10 +85,16 @@ func TestServer_WrapDEK(t *testing.T) {
 			ServiceKeyId:      req.ServiceKeyId,
 		}, nil
 	}
+	serviceKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("Failed to generate mock service key: %v", err)
+	}
+	server.serviceKeyCache = newServiceKeyCache(time.Minute)
+	server.serviceKeyCache.Set("service-key", &serviceKey.PublicKey)
 
 	// Generate a mock DEK
 	mockDEK := make([]byte, 32)
-	_, err := rand.Read(mockDEK)
+	_, err = rand.Read(mockDEK)
 	if err != nil {
 		t.Fatalf("Failed to generate mock DEK: %v", err)
 	}
@@ -345,6 +353,29 @@ func (m *mockKeyManagerServer) RewrapClientDEK(ctx context.Context, req *keyMana
 		ServiceWrappedDek: wrapped,
 		ServiceKeyId:      req.GetServiceKeyId(),
 		Timestamp:         timestamppb.Now(),
+	}, nil
+}
+
+func (m *mockKeyManagerServer) GetKey(ctx context.Context, req *keyManager.GetKeyRequest) (*keyManager.GetKeyResponse, error) {
+	priv := m.serviceKeys[req.GetKeyId()]
+	if priv == nil {
+		return nil, fmt.Errorf("service key %s not registered", req.GetKeyId())
+	}
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+	}
+
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+	return &keyManager.GetKeyResponse{
+		Key: &keyManager.Key{
+			KeyId:        req.GetKeyId(),
+			KeyType:      keyManager.KeyType_KEY_TYPE_RSA_2048,
+			ProviderType: keyManager.KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+			PublicKeyPem: string(pubPEM),
+			Status:       keyManager.KeyStatus_KEY_STATUS_ACTIVE,
+		},
 	}, nil
 }
 

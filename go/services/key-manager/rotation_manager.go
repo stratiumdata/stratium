@@ -155,6 +155,7 @@ func (rm *DefaultKeyRotationManager) ScheduleRotation(keyID string, policy Rotat
 	}
 
 	rm.rotationJobs[keyID] = job
+	adjustRotationJobGauge(1)
 
 	logger.Info("Scheduled rotation for key %s using policy %v, next rotation: %v",
 		keyID, policy, nextRotation)
@@ -184,6 +185,7 @@ func (rm *DefaultKeyRotationManager) CancelRotation(keyID string) error {
 	}
 
 	delete(rm.rotationJobs, keyID)
+	adjustRotationJobGauge(-1)
 
 	logger.Info("Cancelled rotation for key %s", keyID)
 
@@ -228,7 +230,11 @@ func (rm *DefaultKeyRotationManager) CheckRotationNeeded(key *Key) bool {
 }
 
 // PerformRotation performs key rotation
-func (rm *DefaultKeyRotationManager) PerformRotation(ctx context.Context, keyID string) (*RotateKeyResponse, error) {
+func (rm *DefaultKeyRotationManager) PerformRotation(ctx context.Context, keyID string) (resp *RotateKeyResponse, err error) {
+	start := time.Now()
+	defer func() {
+		recordKeyRotationLatency(ctx, time.Since(start), err == nil)
+	}()
 	rm.mu.Lock()
 	_, exists := rm.rotationJobs[keyID]
 	if !exists {
@@ -296,7 +302,7 @@ func (rm *DefaultKeyRotationManager) PerformRotation(ctx context.Context, keyID 
 	logger.Info("Successfully rotated key %s", keyID)
 
 	// Create response
-	response := &RotateKeyResponse{
+	resp = &RotateKeyResponse{
 		OldKey:    oldKey,
 		NewKey:    newKey,
 		Timestamp: timestamppb.Now(),
@@ -312,7 +318,7 @@ func (rm *DefaultKeyRotationManager) PerformRotation(ctx context.Context, keyID 
 		NewKey:    newKey,
 	})
 
-	return response, nil
+	return resp, nil
 }
 
 // AddNotificationChannel adds a channel to receive rotation events

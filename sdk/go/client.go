@@ -28,6 +28,8 @@ type Client struct {
 
 	mu     sync.RWMutex
 	closed bool
+
+	telemetry *telemetryProvider
 }
 
 // NewClient creates a new Stratium SDK client with the given configuration.
@@ -65,6 +67,14 @@ func NewClient(config *Config) (*Client, error) {
 
 	client := &Client{
 		config: config,
+	}
+
+	if config.Telemetry != nil && config.Telemetry.Enabled {
+		provider, err := enableTelemetry(context.Background(), config.Telemetry)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize telemetry: %w", err)
+		}
+		client.telemetry = provider
 	}
 
 	// Initialize authentication based on provided configuration
@@ -158,6 +168,10 @@ func (c *Client) Close() error {
 	}
 
 	c.closed = true
+
+	if c.telemetry != nil {
+		_ = c.telemetry.Shutdown(context.Background())
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing connections: %v", errs)

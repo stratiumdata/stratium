@@ -2,6 +2,7 @@ package key_manager
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -713,12 +714,22 @@ func (s *Server) RegisterClientKey(ctx context.Context, req *RegisterClientKeyRe
 		}, nil
 	}
 
-	if req.KeyType == KeyType_KEY_TYPE_UNSPECIFIED {
-		return &RegisterClientKeyResponse{
-			Success:      false,
-			ErrorMessage: "Key type is required",
-			Timestamp:    timestamppb.Now(),
-		}, nil
+	keyType := req.KeyType
+	if keyType == KeyType_KEY_TYPE_UNSPECIFIED {
+		inferred, err := inferKeyTypeFromPEM(req.PublicKeyPem)
+		if err != nil {
+			return &RegisterClientKeyResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("Unable to infer key type: %v", err),
+				Timestamp:    timestamppb.Now(),
+			}, nil
+		}
+		keyType = inferred
+	} else {
+		if inferred, err := inferKeyTypeFromPEM(req.PublicKeyPem); err == nil && inferred != KeyType_KEY_TYPE_UNSPECIFIED && inferred != keyType {
+			logger.Warn("Key type mismatch for client %s: request=%s, inferred=%s. Using inferred type.", userClaims.Sub, keyType, inferred)
+			keyType = inferred
+		}
 	}
 
 	// Generate unique key ID
@@ -734,14 +745,14 @@ func (s *Server) RegisterClientKey(ctx context.Context, req *RegisterClientKeyRe
 	}
 
 	// Create integrity hashes using the server's integrity manager
-	keyHash := s.integrityMgr.CreateKeyIntegrityHash(req.PublicKeyPem, req.KeyType, userClaims)
+	keyHash := s.integrityMgr.CreateKeyIntegrityHash(req.PublicKeyPem, keyType, userClaims)
 
 	// Create user public key record
 	userKey := &Key{
 		KeyId:            keyID,
 		ClientId:         userClaims.Sub,
 		PublicKeyPem:     req.PublicKeyPem,
-		KeyType:          req.KeyType,
+		KeyType:          keyType,
 		Status:           KeyStatus_KEY_STATUS_ACTIVE,
 		CreatedAt:        timestamppb.Now(),
 		ExpiresAt:        req.ExpiresAt,
@@ -1117,6 +1128,46 @@ func rsaPublicUnwrap(pub *rsa.PublicKey, ciphertext []byte) ([]byte, error) {
 	}
 
 	return plain, nil
+}
+
+func inferKeyTypeFromPEM(pemData string) (KeyType, error) {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return KeyType_KEY_TYPE_UNSPECIFIED, errors.New("failed to decode public key PEM")
+	}
+
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	switch key := pub.(type) {
+	case *rsa.PublicKey:
+		bits := key.N.BitLen()
+		switch bits {
+		case 2048:
+			return KeyType_KEY_TYPE_RSA_2048, nil
+		case 3072:
+			return KeyType_KEY_TYPE_RSA_3072, nil
+		case 4096:
+			return KeyType_KEY_TYPE_RSA_4096, nil
+		default:
+			return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported RSA key size: %d", bits)
+		}
+	case *ecdsa.PublicKey:
+		switch key.Curve.Params().Name {
+		case "P-256":
+			return KeyType_KEY_TYPE_ECC_P256, nil
+		case "P-384":
+			return KeyType_KEY_TYPE_ECC_P384, nil
+		case "P-521":
+			return KeyType_KEY_TYPE_ECC_P521, nil
+		default:
+			return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported ECC curve: %s", key.Curve.Params().Name)
+		}
+	default:
+		return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported key type %T", pub)
+	}
 }
 
 // validateCreateKeyRequest validates the create key request

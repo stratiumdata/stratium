@@ -16,9 +16,11 @@ import (
 	"stratium/config"
 	"stratium/logging"
 	"stratium/middleware"
+	"stratium/observability"
 	"stratium/pkg/repository/postgres"
 	"stratium/services/platform"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -40,6 +42,7 @@ func main() {
 
 	// Initialize logger
 	logger := logging.GetLogger()
+	ctx := context.Background()
 	startPprofServer(*pprofAddr, logger)
 
 	// Print version and exit if requested
@@ -67,6 +70,15 @@ func main() {
 
 	// Log configuration (with sensitive data masked)
 	logConfiguration(cfg, logger)
+
+	// Initialize observability exporters once config is available
+	telemetryProvider, err := observability.Init(ctx, cfg, logger, ServiceName, ServiceVersion)
+	if err != nil {
+		logger.Warn("Observability initialization had warnings: %v", err)
+	}
+	if telemetryProvider != nil {
+		defer telemetryProvider.Shutdown(context.Background())
+	}
 
 	// Create PostgreSQL repository
 	logger.Startup("Connecting to database: %s", maskDBPassword(cfg.GetDatabaseURL()))
@@ -129,14 +141,18 @@ func main() {
 	rateLimiter := middleware.NewRateLimiter(cfg)
 	rateLimiter.PrintRateLimitInfo(ServiceName)
 
-	// Create gRPC server with rate limiting interceptors
+	// Create gRPC server with observability + rate limiting interceptors
+	unaryInterceptors := []grpc.UnaryServerInterceptor{
+		rateLimiter.UnaryServerInterceptor(),
+	}
+	streamInterceptors := []grpc.StreamServerInterceptor{
+		rateLimiter.StreamServerInterceptor(),
+	}
+
 	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			rateLimiter.UnaryServerInterceptor(),
-		),
-		grpc.ChainStreamInterceptor(
-			rateLimiter.StreamServerInterceptor(),
-		),
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(unaryInterceptors...),
+		grpc.ChainStreamInterceptor(streamInterceptors...),
 	)
 
 	// Register the platform service

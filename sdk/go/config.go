@@ -30,8 +30,10 @@ package stratium
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -57,6 +59,18 @@ type Config struct {
 
 	// Advanced options
 	DialOptions []grpc.DialOption // Additional gRPC dial options
+
+	// Telemetry
+	Telemetry *TelemetryConfig
+}
+
+// TelemetryConfig controls SDK OpenTelemetry exporters.
+type TelemetryConfig struct {
+	Enabled     bool              // Enable telemetry exporters
+	Endpoint    string            // OTLP gRPC endpoint (host:port)
+	Insecure    bool              // Use insecure transport for OTLP
+	ServiceName string            // Service identity reported to the collector
+	Headers     map[string]string // Additional OTLP headers
 }
 
 // OIDCConfig holds OIDC authentication configuration.
@@ -88,6 +102,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Telemetry != nil && c.Telemetry.Enabled {
+		if strings.TrimSpace(c.Telemetry.Endpoint) == "" {
+			return fmt.Errorf("telemetry endpoint is required when telemetry is enabled")
+		}
+		if c.Telemetry.ServiceName == "" {
+			c.Telemetry.ServiceName = "stratium-sdk"
+		}
+	}
+
 	return nil
 }
 
@@ -102,6 +125,14 @@ func (c *Config) SetDefaults() {
 	if c.OIDC != nil && len(c.OIDC.Scopes) == 0 {
 		c.OIDC.Scopes = DefaultOIDCScopes
 	}
+	if c.Telemetry != nil {
+		if c.Telemetry.ServiceName == "" {
+			c.Telemetry.ServiceName = "stratium-sdk"
+		}
+		if c.Telemetry.Endpoint == "" {
+			c.Telemetry.Endpoint = "localhost:4317"
+		}
+	}
 }
 
 // dialOptions returns the gRPC dial options based on configuration.
@@ -114,6 +145,11 @@ func (c *Config) dialOptions() []grpc.DialOption {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	// Add telemetry interceptors when enabled
+	if c.Telemetry != nil && c.Telemetry.Enabled {
+		opts = append(opts, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	}
 
 	// Add custom dial options

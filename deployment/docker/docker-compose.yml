@@ -93,9 +93,12 @@ services:
       args:
         SERVICE_NAME: platform-server
         SERVICE_PORT: 50051
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting
+    image: stratium-platform:latest
     container_name: stratium-platform
     ports:
       - "50051:50051"
+      - "9090:9090"
     environment:
       # Database password (override via config)
       - STRATIUM_DATABASE_PASSWORD=stratium
@@ -111,6 +114,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50051"]
       interval: 10s
@@ -126,6 +131,8 @@ services:
       args:
         SERVICE_NAME: key-manager-server
         SERVICE_PORT: 50052
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting
+    image: stratium-key-manager:latest
     container_name: stratium-key-manager
     ports:
       - "50052:50052"
@@ -150,6 +157,8 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50052"]
       interval: 10s
@@ -165,9 +174,12 @@ services:
       args:
         SERVICE_NAME: key-access-server
         SERVICE_PORT: 50053
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting
+    image: stratium-key-access:latest
     container_name: stratium-key-access
     ports:
       - "50053:50053"
+      - "9093:9093"
     environment:
       # OIDC client secret
       - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_KEY_ACCESS_CLIENT_SECRET:-stratium-key-manager-secret}
@@ -181,11 +193,68 @@ services:
         condition: service_healthy
       key-manager:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50053"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  # Prometheus scraping Stratium services
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: stratium-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    ports:
+      - "9095:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on:
+      platform:
+        condition: service_started
+      key-access:
+        condition: service_started
+    networks:
+      - stratium-network
+    restart: unless-stopped
+
+  # Grafana dashboards for PDP / Key Access telemetry
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: stratium-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - stratium-network
+    restart: unless-stopped
+
+  # OpenTelemetry Collector for traces
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: stratium-otel-collector
+    command:
+      - "--config=/etc/otel/config.yaml"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    networks:
+      - stratium-network
     restart: unless-stopped
 
   # PAP (Policy Administration Point) Service

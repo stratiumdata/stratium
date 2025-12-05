@@ -3,9 +3,11 @@ package stratium
 import (
 	"context"
 	"fmt"
+	"time"
 
 	keyaccess "github.com/stratiumdata/go-sdk/gen/services/key-access"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
 
@@ -83,7 +85,7 @@ func (c *KeyAccessClient) helper() *authHelper {
 //
 //	// Use dek.DEK to encrypt data
 //	// Store dek.WrappedDEK alongside encrypted data
-func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (*DEKResponse, error) {
+func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (resp *DEKResponse, err error) {
 	// Validate request
 	if req == nil {
 		return nil, ErrRequestNil
@@ -102,6 +104,22 @@ func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (*DEK
 	}
 	defer cancel()
 
+	ctx, span := startSDKSpan(ctx, "SDK.KeyAccess.RequestDEK",
+		attribute.String("resource", req.Resource),
+		attribute.String("purpose", req.Purpose),
+	)
+	start := time.Now()
+	defer func() {
+		recordSDKRequestMetrics(ctx, "key_access.request_dek", time.Since(start), err)
+		if err != nil {
+			span.RecordError(err)
+		}
+		if resp != nil {
+			span.SetAttributes(attribute.Bool("access_granted", resp.Metadata["access_granted"] == "true"))
+		}
+		span.End()
+	}()
+
 	if req.ClientKeyID == "" {
 		return nil, ErrClientKeyRequired
 	}
@@ -110,7 +128,7 @@ func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (*DEK
 	}
 
 	// Call gRPC service to wrap DEK
-	resp, err := c.client.WrapDEK(ctx, &keyaccess.WrapDEKRequest{
+	rpcResp, rpcErr := c.client.WrapDEK(ctx, &keyaccess.WrapDEKRequest{
 		Resource:    req.Resource,
 		Dek:         req.ClientWrappedDEK,
 		Action:      req.Purpose,
@@ -118,25 +136,29 @@ func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (*DEK
 		Policy:      req.Policy,
 		ClientKeyId: req.ClientKeyID,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to wrap DEK: %w", err)
+	if rpcErr != nil {
+		err = fmt.Errorf("failed to wrap DEK: %w", rpcErr)
+		return nil, err
 	}
 
-	if !resp.AccessGranted {
-		return nil, fmt.Errorf("access denied: %s", resp.AccessReason)
+	if !rpcResp.AccessGranted {
+		err = fmt.Errorf("access denied: %s", rpcResp.AccessReason)
+		return nil, err
 	}
 
-	return &DEKResponse{
+	resp = &DEKResponse{
 		DEK:             []byte{}, // Server doesn't return plaintext DEK for security
-		WrappedDEK:      resp.WrappedDek,
-		KeyID:           resp.KeyId,
+		WrappedDEK:      rpcResp.WrappedDek,
+		KeyID:           rpcResp.KeyId,
 		Algorithm:       "AES-256-GCM", // Default algorithm
-		ExpiresAt:       resp.Timestamp.AsTime().Format("2006-01-02T15:04:05Z07:00"),
-		PolicyEvaluated: resp.AccessReason,
+		ExpiresAt:       rpcResp.Timestamp.AsTime().Format("2006-01-02T15:04:05Z07:00"),
+		PolicyEvaluated: rpcResp.AccessReason,
 		Metadata: map[string]string{
-			"access_granted": fmt.Sprintf("%t", resp.AccessGranted),
+			"access_granted": fmt.Sprintf("%t", rpcResp.AccessGranted),
 		},
-	}, nil
+	}
+
+	return resp, nil
 }
 
 // UnwrapDEK unwraps a previously issued DEK using the client's private key.
@@ -148,7 +170,7 @@ func (c *KeyAccessClient) RequestDEK(ctx context.Context, req *DEKRequest) (*DEK
 // Example:
 //
 //	dek, err := client.KeyAccess.UnwrapDEK(ctx, "my-app", wrappedDEK)
-func (c *KeyAccessClient) UnwrapDEK(ctx context.Context, resource, clientKid, kid string, wrappedDEK []byte, policy string) ([]byte, error) {
+func (c *KeyAccessClient) UnwrapDEK(ctx context.Context, resource, clientKid, kid string, wrappedDEK []byte, policy string) (dek []byte, err error) {
 	// Validate request
 	if resource == "" {
 		return nil, ErrResourceRequired
@@ -164,8 +186,20 @@ func (c *KeyAccessClient) UnwrapDEK(ctx context.Context, resource, clientKid, ki
 	}
 	defer cancel()
 
+	ctx, span := startSDKSpan(ctx, "SDK.KeyAccess.UnwrapDEK",
+		attribute.String("resource", resource),
+	)
+	start := time.Now()
+	defer func() {
+		recordSDKRequestMetrics(ctx, "key_access.unwrap_dek", time.Since(start), err)
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}()
+
 	// Call gRPC service to unwrap DEK
-	resp, err := c.client.UnwrapDEK(ctx, &keyaccess.UnwrapDEKRequest{
+	rpcResp, rpcErr := c.client.UnwrapDEK(ctx, &keyaccess.UnwrapDEKRequest{
 		Resource:    resource,
 		WrappedDek:  wrappedDEK,
 		KeyId:       kid,
@@ -173,13 +207,15 @@ func (c *KeyAccessClient) UnwrapDEK(ctx context.Context, resource, clientKid, ki
 		Action:      "unwrap_dek",
 		Policy:      policy,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to unwrap DEK: %w", err)
+	if rpcErr != nil {
+		err = fmt.Errorf("failed to unwrap DEK: %w", rpcErr)
+		return nil, err
 	}
 
-	if !resp.AccessGranted {
-		return nil, fmt.Errorf("access denied: %s", resp.AccessReason)
+	if !rpcResp.AccessGranted {
+		err = fmt.Errorf("access denied: %s", rpcResp.AccessReason)
+		return nil, err
 	}
 
-	return resp.DekForSubject, nil
+	return rpcResp.DekForSubject, nil
 }

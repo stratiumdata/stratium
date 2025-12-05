@@ -124,24 +124,11 @@ Run the suite from the Go SDK directory:
 cd sdk/go
 go test ./integration -run TestCrossSdkPayloadCompatibility
 ```
-or use the helper script (recommended) that loads an env file and runs the suite automatically:
-
-```bash
-cp scripts/cross-sdk.env.example scripts/cross-sdk.env
-# edit scripts/cross-sdk.env with your local endpoints/credentials
-scripts/run-cross-sdk-tests.sh   # optionally pass a different env file path
-```
 
 The test run requires:
 - A working Go toolchain (already needed for the SDK)
 - JDK 21+ so `sdk/java/gradlew runCrossSdkTool` can compile and execute the Java helper
 - Node.js 18+ so `node sdk/js/scripts/cross-sdk-tool.mjs` can process payloads (install `sdk/js` dependencies if they are not already fetched)
-- An operational Stratium stack (Key Access, Key Manager, Keycloak/OIDC) reachable at the endpoints defined by your environment variables. Provide a bearer token via `STRATIUM_BEARER_TOKEN` (required for these tests), plus service URLs (`STRATIUM_KEY_ACCESS_URL`, `STRATIUM_KEY_MANAGER_URL`, `STRATIUM_KEYCLOAK_URL`, `STRATIUM_KEYCLOAK_REALM`). Client credentials (`STRATIUM_CLIENT_ID`, `STRATIUM_CLIENT_SECRET`, etc.) are optional and only used if you omit the bearer token.
-- A base64-encoded policy supplied through `STRATIUM_POLICY_BASE64`. This is embedded in every generated ZTDF payload so access decisions reflect real policy enforcement.
-- Optional helpers:
-  - `STRATIUM_BEARER_TOKEN` if you prefer to prefetch a token manually (avoids Keycloak password/client credential flows for all SDKs).
-  - `STRATIUM_SUBJECT_ID` to tell the Java SDK which subject ID to use when tokens are issued via client credentials (those tokens don't include a `sub` claim).
-- The test now writes plaintext, decrypted plaintext, and the actual `.ztdf` payload produced by each encryptor into `artifacts/cross-sdk`, allowing you to inspect complete manifests produced by the SDKs.
 
 ## Usage Examples
 

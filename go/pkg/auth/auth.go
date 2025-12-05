@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"stratium/config"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
@@ -50,6 +52,7 @@ type AuthService struct {
 	verifier     *oidc.IDTokenVerifier
 	config       *config.OIDCConfig
 	oauth2Config *oauth2.Config
+	httpClient   *http.Client
 }
 
 // AuthConfig holds authentication configuration
@@ -84,9 +87,15 @@ func NewAuthService(config *config.OIDCConfig) (*AuthService, error) {
 		return nil, fmt.Errorf("OIDC config is required")
 	}
 
+	httpClient := &http.Client{
+		Transport: newInstrumentedTransport(nil),
+		Timeout:   10 * time.Second,
+	}
+
 	// Create OIDC provider with insecure issuer skip for Docker/development
 	// In production with proper DNS, this won't be needed
 	ctx := context.Background()
+	ctx = oidc.ClientContext(ctx, httpClient)
 	if config.AllowInsecureIssuer {
 		ctx = oidc.InsecureIssuerURLContext(ctx, config.IssuerURL)
 	}
@@ -116,6 +125,7 @@ func NewAuthService(config *config.OIDCConfig) (*AuthService, error) {
 		verifier:     verifier,
 		config:       config,
 		oauth2Config: oauth2Config,
+		httpClient:   httpClient,
 	}, nil
 }
 
@@ -123,15 +133,26 @@ func NewAuthService(config *config.OIDCConfig) (*AuthService, error) {
 func (a *AuthService) ValidateToken(ctx context.Context, tokenString string) (*UserClaims, error) {
 	// Use insecure issuer context for token verification to handle Docker hostname mismatch
 	verifyCtx := ctx
+	if verifyCtx == nil {
+		verifyCtx = context.Background()
+	}
+	if a.httpClient != nil {
+		verifyCtx = oidc.ClientContext(verifyCtx, a.httpClient)
+	}
 	if a.config.AllowInsecureIssuer {
-		verifyCtx = oidc.InsecureIssuerURLContext(ctx, a.config.IssuerURL)
+		verifyCtx = oidc.InsecureIssuerURLContext(verifyCtx, a.config.IssuerURL)
 	}
 
 	// Verify the token
+	start := time.Now()
 	idToken, err := a.verifier.Verify(verifyCtx, tokenString)
+	result := "success"
 	if err != nil {
+		result = "error"
+		recordTokenValidation(verifyCtx, time.Since(start), result, err)
 		return nil, fmt.Errorf("failed to verify token: %w", err)
 	}
+	recordTokenValidation(verifyCtx, time.Since(start), result, nil)
 
 	// Extract custom claims
 	var claims UserClaims
@@ -141,16 +162,21 @@ func (a *AuthService) ValidateToken(ctx context.Context, tokenString string) (*U
 
 	// Validate required claims
 	if claims.Sub == "" {
-		switch {
-		case claims.PreferredUsername != "":
-			claims.Sub = claims.PreferredUsername
-		case claims.Email != "":
-			claims.Sub = claims.Email
-		case claims.ClientID != "":
-			claims.Sub = claims.ClientID
-		case claims.AuthorizedParty != "":
-			claims.Sub = claims.AuthorizedParty
-		default:
+		allowFallback := a.config != nil && a.config.AllowInsecureIssuer
+		if allowFallback {
+			switch {
+			case claims.PreferredUsername != "":
+				claims.Sub = claims.PreferredUsername
+			case claims.Email != "":
+				claims.Sub = claims.Email
+			case claims.ClientID != "":
+				claims.Sub = claims.ClientID
+			case claims.AuthorizedParty != "":
+				claims.Sub = claims.AuthorizedParty
+			}
+		}
+
+		if claims.Sub == "" {
 			return nil, fmt.Errorf("missing subject claim")
 		}
 	}

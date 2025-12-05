@@ -5,6 +5,7 @@
  * Node.js-specific helpers for registering client keys with the Key Manager Service using gRPC.
  */
 
+import crypto from 'crypto';
 import { Timestamp } from '@bufbuild/protobuf';
 import { KeyType } from '../generated/services/key-manager/key-manager_pb.js';
 import { createKeyManagerGrpcClient } from '../grpc/key-manager-grpc.js';
@@ -53,11 +54,13 @@ export async function registerClientKey(
   const expiresAt = new Date(Date.now() + expiresIn);
   const expiresAtTimestamp = Timestamp.fromDate(expiresAt);
 
+  const keyType = inferKeyTypeFromPem(publicKeyPem);
+
   // Register key
   const response = await client.registerClientKey({
     clientId: clientId,
     publicKeyPem,
-    keyType: KeyType.RSA_2048,
+    keyType,
     expiresAt: expiresAtTimestamp,
   });
 
@@ -73,4 +76,32 @@ export async function registerClientKey(
     keyId: response.key.keyId,
     expiresAt: responseExpiresAt,
   };
+}
+
+function inferKeyTypeFromPem(pem) {
+  let keyObject;
+  try {
+    keyObject = crypto.createPublicKey(pem);
+  } catch (err) {
+    throw new Error(`Failed to parse public key: ${err.message}`);
+  }
+
+  if (keyObject.asymmetricKeyType === 'rsa') {
+    const bits = keyObject.asymmetricKeyDetails?.modulusLength;
+    if (!bits) {
+      throw new Error('Unable to determine RSA modulus length');
+    }
+    switch (bits) {
+      case 2048:
+        return KeyType.RSA_2048;
+      case 3072:
+        return KeyType.RSA_3072;
+      case 4096:
+        return KeyType.RSA_4096;
+      default:
+        throw new Error(`Unsupported RSA key size: ${bits}`);
+    }
+  }
+
+  throw new Error(`Unsupported key type: ${keyObject.asymmetricKeyType}`);
 }

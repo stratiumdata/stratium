@@ -11,6 +11,7 @@ import (
 type ttlCache[T any] struct {
 	mu   sync.RWMutex
 	ttl  time.Duration
+	name string
 	data map[string]cacheEntry[T]
 }
 
@@ -19,12 +20,13 @@ type cacheEntry[T any] struct {
 	expiresAt time.Time
 }
 
-func newTTLCache[T any](ttl time.Duration) *ttlCache[T] {
+func newTTLCache[T any](name string, ttl time.Duration) *ttlCache[T] {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
 	return &ttlCache[T]{
 		ttl:  ttl,
+		name: name,
 		data: make(map[string]cacheEntry[T]),
 	}
 }
@@ -39,6 +41,7 @@ func (c *ttlCache[T]) Get(key string) (T, bool) {
 	entry, ok := c.data[key]
 	c.mu.RUnlock()
 	if !ok {
+		recordKeyManagerCacheEvent(c.name, "miss")
 		return zero, false
 	}
 
@@ -46,9 +49,11 @@ func (c *ttlCache[T]) Get(key string) (T, bool) {
 		c.mu.Lock()
 		delete(c.data, key)
 		c.mu.Unlock()
+		recordKeyManagerCacheEvent(c.name, "expired")
 		return zero, false
 	}
 
+	recordKeyManagerCacheEvent(c.name, "hit")
 	return entry.value, true
 }
 
