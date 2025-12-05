@@ -6,6 +6,7 @@ import (
 	"time"
 
 	keymanager "github.com/stratiumdata/go-sdk/gen/services/key-manager"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -108,7 +109,7 @@ func (c *KeyManagerClient) helper() *authHelper {
 //	    PublicKeyPEM: publicKeyPEM,
 //	    KeyType:      stratium.KeyTypeRSA4096,
 //	})
-func (c *KeyManagerClient) RegisterKey(ctx context.Context, req *RegisterKeyRequest) (*ClientKey, error) {
+func (c *KeyManagerClient) RegisterKey(ctx context.Context, req *RegisterKeyRequest) (resp *ClientKey, err error) {
 	// Validate request
 	if req == nil {
 		return nil, ErrRequestNil
@@ -127,6 +128,18 @@ func (c *KeyManagerClient) RegisterKey(ctx context.Context, req *RegisterKeyRequ
 	}
 	defer cancel()
 
+	ctx, span := startSDKSpan(ctx, "SDK.KeyManager.RegisterKey",
+		attribute.String("client_id", req.ClientID),
+	)
+	start := time.Now()
+	defer func() {
+		recordSDKRequestMetrics(ctx, "key_manager.register_key", time.Since(start), err)
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}()
+
 	// Parse expiration time if provided
 	var expiresAt *timestamppb.Timestamp
 	if req.ExpiresAt != "" {
@@ -138,31 +151,34 @@ func (c *KeyManagerClient) RegisterKey(ctx context.Context, req *RegisterKeyRequ
 	}
 
 	// Call gRPC service
-	resp, err := c.client.RegisterClientKey(ctx, &keymanager.RegisterClientKeyRequest{
+	rpcResp, rpcErr := c.client.RegisterClientKey(ctx, &keymanager.RegisterClientKeyRequest{
 		ClientId:     req.ClientID,
 		PublicKeyPem: req.PublicKeyPEM,
 		KeyType:      keymanager.KeyType(req.KeyType),
 		ExpiresAt:    expiresAt,
 		Metadata:     req.Metadata,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to register key: %w", err)
+	if rpcErr != nil {
+		err = fmt.Errorf("failed to register key: %w", rpcErr)
+		return nil, err
 	}
 
-	if !resp.Success {
-		return nil, fmt.Errorf("key registration failed: %s", resp.ErrorMessage)
+	if !rpcResp.Success {
+		err = fmt.Errorf("key registration failed: %s", rpcResp.ErrorMessage)
+		return nil, err
 	}
 
-	return &ClientKey{
-		KeyID:        resp.Key.KeyId,
-		ClientID:     resp.Key.ClientId,
-		KeyType:      KeyType(resp.Key.KeyType),
-		PublicKeyPEM: resp.Key.PublicKeyPem,
-		Status:       resp.Key.Status.String(),
-		CreatedAt:    resp.Key.CreatedAt.AsTime().Format(time.RFC3339),
-		ExpiresAt:    formatTimestamp(resp.Key.ExpiresAt),
-		Metadata:     resp.Key.Metadata,
-	}, nil
+	resp = &ClientKey{
+		KeyID:        rpcResp.Key.KeyId,
+		ClientID:     rpcResp.Key.ClientId,
+		KeyType:      KeyType(rpcResp.Key.KeyType),
+		PublicKeyPEM: rpcResp.Key.PublicKeyPem,
+		Status:       rpcResp.Key.Status.String(),
+		CreatedAt:    rpcResp.Key.CreatedAt.AsTime().Format(time.RFC3339),
+		ExpiresAt:    formatTimestamp(rpcResp.Key.ExpiresAt),
+		Metadata:     rpcResp.Key.Metadata,
+	}
+	return resp, nil
 }
 
 // GetKey retrieves a registered client key by ID.
@@ -173,7 +189,7 @@ func (c *KeyManagerClient) RegisterKey(ctx context.Context, req *RegisterKeyRequ
 //	    ClientID: "my-app",
 //	    KeyID:    "key-12345",
 //	})
-func (c *KeyManagerClient) GetKey(ctx context.Context, req *GetKeyRequest) (*ClientKey, error) {
+func (c *KeyManagerClient) GetKey(ctx context.Context, req *GetKeyRequest) (resp *ClientKey, err error) {
 	// Validate request
 	if req == nil {
 		return nil, ErrRequestNil
@@ -192,29 +208,43 @@ func (c *KeyManagerClient) GetKey(ctx context.Context, req *GetKeyRequest) (*Cli
 	}
 	defer cancel()
 
-	// Call gRPC service
-	resp, err := c.client.GetClientKey(ctx, &keymanager.GetClientKeyRequest{
+	ctx, span := startSDKSpan(ctx, "SDK.KeyManager.GetKey",
+		attribute.String("client_id", req.ClientID),
+	)
+	start := time.Now()
+	defer func() {
+		recordSDKRequestMetrics(ctx, "key_manager.get_key", time.Since(start), err)
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}()
+
+	rpcResp, rpcErr := c.client.GetClientKey(ctx, &keymanager.GetClientKeyRequest{
 		ClientId: req.ClientID,
 		KeyId:    req.KeyID,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get key: %w", err)
+	if rpcErr != nil {
+		err = fmt.Errorf("failed to get key: %w", rpcErr)
+		return nil, err
 	}
 
-	if !resp.Found {
-		return nil, fmt.Errorf("key not found: %s", resp.ErrorMessage)
+	if !rpcResp.Found {
+		err = fmt.Errorf("key not found: %s", rpcResp.ErrorMessage)
+		return nil, err
 	}
 
-	return &ClientKey{
-		KeyID:        resp.Key.KeyId,
-		ClientID:     resp.Key.ClientId,
-		KeyType:      KeyType(resp.Key.KeyType),
-		PublicKeyPEM: resp.Key.PublicKeyPem,
-		Status:       resp.Key.Status.String(),
-		CreatedAt:    resp.Key.CreatedAt.AsTime().Format(time.RFC3339),
-		ExpiresAt:    formatTimestamp(resp.Key.ExpiresAt),
-		Metadata:     resp.Key.Metadata,
-	}, nil
+	resp = &ClientKey{
+		KeyID:        rpcResp.Key.KeyId,
+		ClientID:     rpcResp.Key.ClientId,
+		KeyType:      KeyType(rpcResp.Key.KeyType),
+		PublicKeyPEM: rpcResp.Key.PublicKeyPem,
+		Status:       rpcResp.Key.Status.String(),
+		CreatedAt:    rpcResp.Key.CreatedAt.AsTime().Format(time.RFC3339),
+		ExpiresAt:    formatTimestamp(rpcResp.Key.ExpiresAt),
+		Metadata:     rpcResp.Key.Metadata,
+	}
+	return resp, nil
 }
 
 // EncryptData encrypts data using a generated DEK, wrapped with the client's public key.
@@ -305,7 +335,7 @@ func (c *KeyManagerClient) DecryptData(ctx context.Context, req *DecryptionReque
 // Example:
 //
 //	keys, err := client.KeyManager.ListKeys(ctx, "my-app", false)
-func (c *KeyManagerClient) ListKeys(ctx context.Context, clientID string, includeRevoked bool) ([]*ClientKey, error) {
+func (c *KeyManagerClient) ListKeys(ctx context.Context, clientID string, includeRevoked bool) (keys []*ClientKey, err error) {
 	// Validate request
 	if clientID == "" {
 		return nil, ErrClientIDRequired
@@ -318,16 +348,28 @@ func (c *KeyManagerClient) ListKeys(ctx context.Context, clientID string, includ
 	}
 	defer cancel()
 
-	// Call gRPC service
-	resp, err := c.client.ListClientKeys(ctx, &keymanager.ListClientKeysRequest{
+	ctx, span := startSDKSpan(ctx, "SDK.KeyManager.ListKeys",
+		attribute.String("client_id", clientID),
+	)
+	start := time.Now()
+	defer func() {
+		recordSDKRequestMetrics(ctx, "key_manager.list_keys", time.Since(start), err)
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}()
+
+	resp, rpcErr := c.client.ListClientKeys(ctx, &keymanager.ListClientKeysRequest{
 		ClientId:       clientID,
 		IncludeRevoked: includeRevoked,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list keys: %w", err)
+	if rpcErr != nil {
+		err = fmt.Errorf("failed to list keys: %w", rpcErr)
+		return nil, err
 	}
 
-	keys := make([]*ClientKey, len(resp.Keys))
+	keys = make([]*ClientKey, len(resp.Keys))
 	for i, key := range resp.Keys {
 		keys[i] = &ClientKey{
 			KeyID:        key.KeyId,

@@ -73,12 +73,12 @@ func IsDemoMode() bool {
 
 // IsProductionMode returns true if the build is in production mode
 func IsProductionMode() bool {
-	return strings.ToLower(BuildMode) == "production"
+	return strings.ToLower(BuildMode) == "production" || strings.ToLower(BuildMode) == "prod"
 }
 
 // IsDevelopmentMode returns true if the build is in development mode
 func IsDevelopmentMode() bool {
-	return strings.ToLower(BuildMode) == "development"
+	return strings.ToLower(BuildMode) == "development" || strings.ToLower(BuildMode) == "dev"
 }
 
 // GetEnabledFeatures returns a slice of all enabled features

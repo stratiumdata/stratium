@@ -11,6 +11,7 @@ import (
 	"stratium/pkg/repository"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -60,25 +61,45 @@ func NewPolicyDecisionPointWithCache(repo *repository.Repository, cache PolicyCa
 }
 
 // EvaluateDecision evaluates a decision request against policies and entitlements
-func (pdp *PolicyDecisionPoint) EvaluateDecision(ctx context.Context, req *GetDecisionRequest) (*DecisionResult, error) {
+func (pdp *PolicyDecisionPoint) EvaluateDecision(ctx context.Context, req *GetDecisionRequest) (result *DecisionResult, err error) {
 	logger.Info("PDP: Evaluating decision for subject_attributes=%v, resource_attributes=%v, action=%s",
 		req.SubjectAttributes, req.ResourceAttributes, req.Action)
 
+	ctx, span := startPDPSpan(ctx, "PDP.EvaluateDecision",
+		attribute.String("action", req.Action),
+		attribute.Int("subject_attr_count", len(req.SubjectAttributes)),
+		attribute.Int("resource_attr_count", len(req.ResourceAttributes)),
+	)
+	start := time.Now()
+	defer func() {
+		decision := "unknown"
+		if result != nil {
+			decision = result.Decision.String()
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.SetAttributes(attribute.String("decision", decision))
+		recordPDPDecisionTelemetry(ctx, time.Since(start), decision, err)
+		span.End()
+	}()
+
 	// Step 1: Check entitlements first (more specific)
-	entitlementDecision, err := pdp.evaluateEntitlements(ctx, req)
-	if err != nil {
-		logger.Info("PDP: Entitlement evaluation error: %v", err)
-		// Continue to policy evaluation even if entitlement check fails
+	entitlementDecision, evalErr := pdp.evaluateEntitlements(ctx, req)
+	if evalErr != nil {
+		logger.Info("PDP: Entitlement evaluation error: %v", evalErr)
 	} else if entitlementDecision != nil {
 		logger.Info("PDP: Entitlement match found: %s", entitlementDecision.Reason)
 		return entitlementDecision, nil
 	}
 
 	// Step 2: Evaluate policies (more general rules)
-	policyDecision, err := pdp.evaluatePolicies(ctx, req)
+	var policyDecision *DecisionResult
+	policyDecision, err = pdp.evaluatePolicies(ctx, req)
 	if err != nil {
 		logger.Info("PDP: Policy evaluation error: %v", err)
-		return pdp.defaultDenyDecision(req, fmt.Sprintf("Policy evaluation failed: %v", err)), nil
+		result = pdp.defaultDenyDecision(req, fmt.Sprintf("Policy evaluation failed: %v", err))
+		return result, nil
 	}
 
 	if policyDecision != nil {
@@ -86,11 +107,17 @@ func (pdp *PolicyDecisionPoint) EvaluateDecision(ctx context.Context, req *GetDe
 	}
 
 	// Step 3: Default deny
+	recordPDPDefaultDeny(ctx)
 	return pdp.defaultDenyDecision(req, "No matching policies or entitlements found"), nil
 }
 
 // evaluateEntitlements checks if the request matches any entitlements
 func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *GetDecisionRequest) (*DecisionResult, error) {
+	ctx, span := startPDPSpan(ctx, "PDP.evaluateEntitlements",
+		attribute.String("action", req.Action),
+	)
+	defer span.End()
+
 	// Build subject attributes from request subject_attributes map
 	subjectAttrs := make(map[string]interface{})
 	for k, v := range req.SubjectAttributes {
@@ -111,6 +138,8 @@ func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *G
 
 	entitlements, err := pdp.repo.Entitlement.FindMatching(ctx, matchReq)
 	if err != nil {
+		span.RecordError(err)
+		recordPDPEntitlementEvaluation(ctx, 0, "error")
 		return nil, fmt.Errorf("failed to find matching entitlements: %w", err)
 	}
 
@@ -125,7 +154,9 @@ func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *G
 	}
 
 	// Check each entitlement
+	evaluated := 0
 	for _, ent := range entitlements {
+		evaluated++
 		// Verify entitlement is active
 		if !ent.IsActive() {
 			logger.Info("PDP: Skipping expired/disabled entitlement: %s", ent.Name)
@@ -145,6 +176,8 @@ func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *G
 		// Create audit log entry
 		pdp.logDecision(ctx, models.EntityTypeEntitlement, &ent.ID, req, true, "Entitlement match")
 
+		span.SetAttributes(attribute.String("entitlement_id", ent.ID.String()))
+		recordPDPEntitlementEvaluation(ctx, evaluated, "match")
 		return &DecisionResult{
 			Decision: Decision_DECISION_ALLOW,
 			Reason:   fmt.Sprintf("Access granted by entitlement: %s", ent.Name),
@@ -156,14 +189,22 @@ func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *G
 		}, nil
 	}
 
+	recordPDPEntitlementEvaluation(ctx, evaluated, "no_match")
 	return nil, nil
 }
 
 // evaluatePolicies evaluates all enabled policies
 
 func (pdp *PolicyDecisionPoint) evaluatePolicies(ctx context.Context, req *GetDecisionRequest) (*DecisionResult, error) {
+	ctx, span := startPDPSpan(ctx, "PDP.evaluatePolicies",
+		attribute.String("action", req.Action),
+	)
+	defer span.End()
+
 	policies, err := pdp.getEnabledPolicies(ctx)
 	if err != nil {
+		span.RecordError(err)
+		recordPDPPolicyEvaluation(ctx, 0, "error", "", "")
 		return nil, fmt.Errorf("failed to list policies: %w", err)
 	}
 
@@ -196,10 +237,13 @@ func (pdp *PolicyDecisionPoint) evaluatePolicies(ctx context.Context, req *GetDe
 	}
 
 	// Evaluate policies in priority order (highest first)
+	policiesEvaluated := 0
 	for _, policy := range policies {
+		policiesEvaluated++
 		engine, err := pdp.engineFactory.GetEngine(policy.Language)
 		if err != nil {
 			logger.Info("PDP: Unsupported policy language %s for policy %s", policy.Language, policy.Name)
+			span.RecordError(err)
 			continue
 		}
 
@@ -221,6 +265,7 @@ func (pdp *PolicyDecisionPoint) evaluatePolicies(ctx context.Context, req *GetDe
 			pdp.logDecision(ctx, models.EntityTypePolicy, &policy.ID, req, true, result.Reason)
 
 			pdp.releaseEvalInput(evalInput)
+			recordPDPPolicyEvaluation(ctx, policiesEvaluated, "allow_match", string(policy.Language), string(policy.Effect))
 			return &DecisionResult{
 				Decision: Decision_DECISION_ALLOW,
 				Reason:   fmt.Sprintf("Access granted by policy: %s", policy.Name),
@@ -239,6 +284,7 @@ func (pdp *PolicyDecisionPoint) evaluatePolicies(ctx context.Context, req *GetDe
 			pdp.logDecision(ctx, models.EntityTypePolicy, &policy.ID, req, false, result.Reason)
 
 			pdp.releaseEvalInput(evalInput)
+			recordPDPPolicyEvaluation(ctx, policiesEvaluated, "deny_match", string(policy.Language), string(policy.Effect))
 			return &DecisionResult{
 				Decision: Decision_DECISION_DENY,
 				Reason:   fmt.Sprintf("Access denied by policy: %s", policy.Name),
@@ -253,6 +299,7 @@ func (pdp *PolicyDecisionPoint) evaluatePolicies(ctx context.Context, req *GetDe
 	}
 
 	pdp.releaseEvalInput(evalInput)
+	recordPDPPolicyEvaluation(ctx, policiesEvaluated, "no_match", "", "")
 	return nil, nil
 }
 
@@ -262,6 +309,7 @@ func (pdp *PolicyDecisionPoint) getEnabledPolicies(ctx context.Context) ([]*mode
 	if pdp.cachedPolicies != nil && now.Before(pdp.policiesExpiry) {
 		policies := pdp.cachedPolicies
 		pdp.policiesMu.RUnlock()
+		recordPDPPolicyCacheEvent(ctx, true)
 		return policies, nil
 	}
 	pdp.policiesMu.RUnlock()
@@ -270,6 +318,7 @@ func (pdp *PolicyDecisionPoint) getEnabledPolicies(ctx context.Context) ([]*mode
 	if err != nil {
 		return nil, err
 	}
+	recordPDPPolicyCacheEvent(ctx, false)
 
 	pdp.policiesMu.Lock()
 	pdp.cachedPolicies = policies

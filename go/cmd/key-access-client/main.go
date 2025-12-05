@@ -40,6 +40,7 @@ var (
 	token        = flag.String("token", "user-token", "JWT token for authentication (use 'user-token' or 'admin-token' for testing)")
 	clientKeyID  = flag.String("client-key-id", "", "client key ID registered with the key manager")
 	clientKeyPEM = flag.String("client-key-file", "", "path to the client's RSA private key PEM file")
+	policyB64    = flag.String("policy", "", "base64-encoded ZTDF policy (optional)")
 )
 
 func main() {
@@ -92,6 +93,7 @@ func main() {
 		Dek:         clientWrapped,
 		Action:      "wrap_dek",
 		ClientKeyId: *clientKeyID,
+		Policy:      *policyB64,
 		Context: map[string]string{
 			"department":  "engineering",
 			"environment": "development",
@@ -120,6 +122,7 @@ func main() {
 			Resource:   "test-resource",
 			WrappedDek: wrapResp.WrappedDek,
 			KeyId:      wrapResp.KeyId,
+			Policy:     *policyB64,
 			Action:     "unwrap_dek",
 			Context: map[string]string{
 				"department":  "engineering",
@@ -154,6 +157,7 @@ func main() {
 		Dek:         unauthorizedWrapped,
 		Action:      "wrap_dek",
 		ClientKeyId: *clientKeyID,
+		Policy:      *policyB64,
 		Context: map[string]string{
 			"department": "unknown",
 		},
@@ -182,6 +186,7 @@ func main() {
 			Dek:         adminWrapped,
 			Action:      "wrap_dek",
 			ClientKeyId: *clientKeyID,
+			Policy:      *policyB64,
 			Context: map[string]string{
 				"role":        "admin",
 				"environment": "production",
@@ -216,9 +221,16 @@ func loadRSAPrivateKey(path string) (*rsa.PrivateKey, error) {
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode PEM file")
 	}
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, err
 	}
-	return key, nil
+	rsaKey, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("parsed PKCS#8 key is %T, want *rsa.PrivateKey", parsed)
+	}
+	return rsaKey, nil
 }

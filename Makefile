@@ -207,6 +207,8 @@ docker-up: ## Start all services with Docker Compose
 	@echo "  Keycloak:     http://localhost:8080"
 	@echo "  PostgreSQL:   localhost:5432"
 	@echo "  Redis:        localhost:6379"
+	@echo "  Prometheus:   http://localhost:9095"
+	@echo "  Grafana:      http://localhost:3001"
 
 docker-down: ## Stop all services
 	@echo "Stopping all services..."

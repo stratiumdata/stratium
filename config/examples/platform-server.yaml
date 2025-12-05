@@ -48,6 +48,11 @@ observability:
     enabled: true
     address: ":9090"
     path: /metrics
+  tracing:
+    enabled: true
+    provider: otlp
+    endpoint: otel-collector:4317
+    service_name: platform-server
 
 platform:
   seed_sample_data: true

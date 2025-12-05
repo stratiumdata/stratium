@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,8 +15,10 @@ import (
 	"stratium/config"
 	"stratium/logging"
 	"stratium/middleware"
+	"stratium/observability"
 	keyAccess "stratium/services/key-access"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -37,6 +40,7 @@ func main() {
 
 	// Initialize logger
 	logger := logging.GetLogger()
+	ctx := context.Background()
 	startPprofServer(*pprofAddr, logger)
 
 	// Print version and exit if requested
@@ -80,6 +84,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize observability
+	telemetryProvider, err := observability.Init(ctx, cfg, logger, ServiceName, ServiceVersion)
+	if err != nil {
+		logger.Warn("Observability initialization had warnings: %v", err)
+	}
+	if telemetryProvider != nil {
+		defer telemetryProvider.Shutdown(context.Background())
+	}
+
 	// Create key access server
 	logger.Startup("Connecting to Key Manager at: %s", keyManagerAddr)
 	keyAccessServer, err := keyAccess.NewServer(keyManagerAddr, cfg)
@@ -103,7 +116,7 @@ func main() {
 	rateLimiter := middleware.NewRateLimiter(cfg)
 	rateLimiter.PrintRateLimitInfo(ServiceName)
 
-	// Create gRPC server with auth and rate limiting interceptors
+	// Create gRPC server with auth, observability, and rate limiting interceptors
 	var unaryInterceptors []grpc.UnaryServerInterceptor
 	unaryInterceptors = append(unaryInterceptors, rateLimiter.UnaryServerInterceptor())
 
@@ -113,6 +126,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 		grpc.ChainStreamInterceptor(
 			rateLimiter.StreamServerInterceptor(),

@@ -79,7 +79,12 @@ func NewLogger() *Logger {
 func (l *Logger) SetLevel(level LogLevel) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.minLevel = level
+	// If not in full logging mode (i.e., demo mode), only show startup messages
+	if !features.ShouldEnableFullLogging() {
+		l.minLevel = LevelStartup
+	} else {
+		l.minLevel = level
+	}
 }
 
 // Debug logs a debug message (only in full logging mode)

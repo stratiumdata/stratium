@@ -1,0 +1,40 @@
+groups:
+  - name: stratium-telemetry
+    rules:
+      - alert: PDPHighLatency95th
+        expr: histogram_quantile(0.95, sum(rate(stratium_platform_pdp_decision_duration_ms_bucket[5m])) by (le)) > 200
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PDP p95 latency exceeded 200ms"
+          description: "Check platform service logs and database latency."
+
+      - alert: KeyAccessWrapLatency95th
+        expr: histogram_quantile(0.95, sum(rate(stratium_key_access_wrap_duration_ms_bucket[5m])) by (le)) > 250
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Key Access wrap latency exceeded 250ms"
+          description: "Investigate PDP or Key Manager dependencies."
+
+      - alert: PolicyCacheMissSpike
+        expr: (sum(rate(stratium_platform_pdp_policy_cache_events_total{result="miss"}[5m])) /
+          sum(rate(stratium_platform_pdp_policy_cache_events_total[5m]))) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PDP policy cache miss rate above 20%"
+          description: "Verify Redis availability or TTL sizing."
+
+      - alert: ServiceKeyCacheMissSpike
+        expr: (sum(rate(stratium_key_access_service_key_cache_events_total{result="miss"}[5m])) /
+          sum(rate(stratium_key_access_service_key_cache_events_total[5m]))) > 0.3
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Key Access service-key cache hit rate dropped below 70%"
+          description: "Look for key churn or TTL misconfiguration."

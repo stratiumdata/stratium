@@ -1,13 +1,29 @@
 import crypto from 'crypto';
 
+const SUPPORTED_RSA_SIZES = [2048, 3072, 4096];
 const DEFAULT_RSA_BITS = 2048;
 
+function resolveRsaSize() {
+  const override = process.env.STRATIUM_JS_RSA_BITS || process.env.STRATIUM_RSA_BITS;
+  if (!override) {
+    return DEFAULT_RSA_BITS;
+  }
+  const parsed = Number.parseInt(override, 10);
+  if (Number.isNaN(parsed) || !SUPPORTED_RSA_SIZES.includes(parsed)) {
+    throw new Error(
+      `Invalid STRATIUM_JS_RSA_BITS value "${override}". Supported sizes: ${SUPPORTED_RSA_SIZES.join(', ')}`
+    );
+  }
+  return parsed;
+}
+
 export async function generateClientKeyPair() {
+  const modulusLength = resolveRsaSize();
   return await new Promise((resolve, reject) => {
     crypto.generateKeyPair(
       'rsa',
       {
-        modulusLength: DEFAULT_RSA_BITS,
+        modulusLength,
         publicKeyEncoding: { type: 'spki', format: 'pem' },
         privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       },

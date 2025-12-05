@@ -51,5 +51,5 @@ export STRATIUM_JS_KEY_DIR="$JS_KEY_DIR"
 
 pushd "$REPO_ROOT/sdk/go" > /dev/null
 echo "Running cross-SDK integration tests..."
-go test ./integration
+go test -count=1 ./integration
 popd > /dev/null

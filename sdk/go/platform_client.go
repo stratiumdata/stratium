@@ -3,8 +3,10 @@ package stratium
 import (
 	"context"
 	"fmt"
+	"time"
 
 	platform "github.com/stratiumdata/go-sdk/gen/services/platform"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -29,6 +31,21 @@ const (
 	DecisionDeny        Decision = 2
 	DecisionConditional Decision = 3
 )
+
+func (d Decision) String() string {
+	switch d {
+	case DecisionAllow:
+		return "ALLOW"
+	case DecisionDeny:
+		return "DENY"
+	case DecisionConditional:
+		return "CONDITIONAL"
+	case DecisionUnspecified:
+		return "UNSPECIFIED"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", int32(d))
+	}
+}
 
 // AuthorizationRequest contains the parameters for an authorization decision.
 type AuthorizationRequest struct {
@@ -120,7 +137,7 @@ func (c *PlatformClient) helper() *authHelper {
 //	    // Deny access
 //	    log.Printf("Access denied: %s", decision.Reason)
 //	}
-func (c *PlatformClient) GetDecision(ctx context.Context, req *AuthorizationRequest) (*AuthorizationResponse, error) {
+func (c *PlatformClient) GetDecision(ctx context.Context, req *AuthorizationRequest) (resp *AuthorizationResponse, err error) {
 	// Validate request
 	if req == nil {
 		return nil, ErrRequestNil
@@ -144,6 +161,21 @@ func (c *PlatformClient) GetDecision(ctx context.Context, req *AuthorizationRequ
 	}
 	defer cancel()
 
+	ctx, span := startSDKSpan(ctx, "SDK.Platform.GetDecision",
+		attribute.String("action", req.Action),
+	)
+	start := time.Now()
+	defer func() {
+		recordSDKRequestMetrics(ctx, "platform.get_decision", time.Since(start), err)
+		if err != nil {
+			span.RecordError(err)
+		}
+		if resp != nil {
+			span.SetAttributes(attribute.String("decision", resp.Decision.String()))
+		}
+		span.End()
+	}()
+
 	// Convert subject attributes to structpb.Value map
 	subjectAttrs, err := stringMapToStructMap(req.SubjectAttributes)
 	if err != nil {
@@ -151,26 +183,27 @@ func (c *PlatformClient) GetDecision(ctx context.Context, req *AuthorizationRequ
 	}
 
 	// Call gRPC service
-	resp, err := c.client.GetDecision(ctx, &platform.GetDecisionRequest{
+	rpcResp, rpcErr := c.client.GetDecision(ctx, &platform.GetDecisionRequest{
 		SubjectAttributes:  subjectAttrs,
 		ResourceAttributes: req.ResourceAttributes,
 		Action:             req.Action,
 		Context:            req.Context,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get decision: %w", err)
+	if rpcErr != nil {
+		err = fmt.Errorf("failed to get decision: %w", rpcErr)
+		return nil, err
 	}
 
 	// Convert proto decision to SDK decision
-	decision := Decision(resp.Decision)
-
-	return &AuthorizationResponse{
+	decision := Decision(rpcResp.Decision)
+	resp = &AuthorizationResponse{
 		Decision:        decision,
-		Reason:          resp.Reason,
-		EvaluatedPolicy: resp.EvaluatedPolicy,
-		Details:         resp.Details,
-		Timestamp:       resp.Timestamp.AsTime().Format("2006-01-02T15:04:05Z07:00"),
-	}, nil
+		Reason:          rpcResp.Reason,
+		EvaluatedPolicy: rpcResp.EvaluatedPolicy,
+		Details:         rpcResp.Details,
+		Timestamp:       rpcResp.Timestamp.AsTime().Format("2006-01-02T15:04:05Z07:00"),
+	}
+	return resp, nil
 }
 
 // GetEntitlements retrieves all entitlements for a subject.
