@@ -10,6 +10,7 @@ import (
 
 	"stratium/config"
 	"stratium/logging"
+	"stratium/middleware"
 	"stratium/pkg/cache"
 	"stratium/pkg/repository/postgres"
 	"stratium/services/pap"
@@ -51,6 +52,17 @@ func main() {
 
 	// Apply service-specific rate limits
 	config.ApplyServiceSpecificRateLimits(cfg, ServiceName)
+
+	licenseEnforcer, err := middleware.NewLicenseEnforcer(cfg, ServiceName)
+	if err != nil {
+		logger.Error("Failed to initialize license enforcement: %v", err)
+		os.Exit(1)
+	}
+	if err := licenseEnforcer.Check(); err != nil {
+		logger.Error("License validation failed: %v", err)
+		os.Exit(1)
+	}
+	licenseEnforcer.LogStatus()
 
 	// Print build and feature flag information
 	logger.PrintBuildInfo(ServiceName, ServiceVersion)
@@ -124,7 +136,7 @@ func main() {
 	}
 
 	// Create PAP server with cache invalidator
-	server := pap.NewServerWithCacheInvalidator(repo, authService, cacheInvalidator, cfg.Security.CORS)
+	server := pap.NewServerWithCacheInvalidator(repo, authService, cacheInvalidator, cfg.Security.CORS, licenseEnforcer)
 
 	// Determine server address
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

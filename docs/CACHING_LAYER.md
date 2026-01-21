@@ -115,10 +115,10 @@ pdp := platform.NewPolicyDecisionPointWithCache(repo, cache)
 **Server Constructors:**
 ```go
 // Default: no-op cache invalidator
-server := pap.NewServer(repo, authService)
+server := pap.NewServer(repo, authService, corsConfig, nil)
 
 // With cache invalidator
-server := pap.NewServerWithCacheInvalidator(repo, authService, cacheInvalidator)
+server := pap.NewServerWithCacheInvalidator(repo, authService, cacheInvalidator, corsConfig, nil)
 ```
 
 ## Configuration

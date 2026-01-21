@@ -39,9 +39,8 @@ services:
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycloak_password}
       # Hostname configuration for dual access (localhost + Docker network)
-      # Use localhost as the canonical hostname so tokens work from both internal and external
-      KC_HOSTNAME: ${KC_HOSTNAME:-localhost}
-      KC_HOSTNAME_PORT: ${KC_HOSTNAME_PORT:-8080}
+      # Let Keycloak mirror the incoming Host header so browsers keep using localhost
+      # while backend services call it via the Docker service name (keycloak).
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
@@ -310,9 +309,11 @@ services:
     build:
       context: ../../pap-ui
       dockerfile: Dockerfile
+      args:
+        VITE_MODE: docker
     container_name: stratium-pap-ui
     ports:
-      - "3000:80"
+      - "3000:8080"
     networks:
       - stratium-network
     depends_on:
@@ -321,7 +322,7 @@ services:
       keycloak:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1/"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/"]
       interval: 10s
       timeout: 5s
       retries: 5

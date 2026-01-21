@@ -1,0 +1,8 @@
+cryptography>=42.0.0
+googleapis-common-protos>=1.62.0
+grpcio>=1.62.0
+protobuf>=4.25.0
+requests>=2.31.0
+
+[dev]
+pytest>=7.0.0

@@ -45,6 +45,9 @@ type Config struct {
 	// Observability configuration
 	Observability ObservabilityConfig `mapstructure:"observability"`
 
+	// License configuration
+	License LicenseConfig `mapstructure:"license"`
+
 	// External key loading configuration
 	ExternalKeys ExternalKeysConfig `mapstructure:"externalKeys"`
 
@@ -187,6 +190,15 @@ type ObservabilityConfig struct {
 	Tracing TracingConfig `mapstructure:"tracing"`
 }
 
+// LicenseConfig holds offline license enforcement settings
+type LicenseConfig struct {
+	Enabled         bool          `mapstructure:"enabled"`
+	File            string        `mapstructure:"file"`
+	PublicKeyFile   string        `mapstructure:"public_key_file"`
+	DeploymentID    string        `mapstructure:"deployment_id"`
+	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
+}
+
 // PlatformConfig holds platform-service specific settings
 type PlatformConfig struct {
 	SeedSampleData bool   `mapstructure:"seed_sample_data"`
@@ -293,6 +305,12 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// Record runtime toggles so feature helpers can respect configuration
+	features.SetRateLimitingConfig(cfg.Security.RateLimiting.Enabled)
+	features.SetMetricsConfig(cfg.Observability.Metrics.Enabled)
+	features.SetObservabilityConfig(cfg.Observability.Tracing.Enabled)
+	features.SetCachingConfig(cfg.Cache.Type != "none")
+
 	// Apply feature flag overrides
 	applyFeatureFlags(&cfg)
 
@@ -386,6 +404,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("observability.metrics.path", "/metrics")
 	v.SetDefault("observability.tracing.enabled", false)
 
+	// License defaults
+	v.SetDefault("license.enabled", false)
+	v.SetDefault("license.file", "")
+	v.SetDefault("license.public_key_file", "")
+	v.SetDefault("license.deployment_id", "")
+	v.SetDefault("license.refresh_interval", "5m")
+
 	// External key loading defaults
 	v.SetDefault("externalKeys.enabled", false)
 	v.SetDefault("externalKeys.emergencyDisable", false)
@@ -464,6 +489,19 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
+	// Validate license configuration
+	if cfg.License.Enabled {
+		if cfg.License.File == "" {
+			return fmt.Errorf("license.file is required when license is enabled")
+		}
+		if cfg.License.PublicKeyFile == "" {
+			return fmt.Errorf("license.public_key_file is required when license is enabled")
+		}
+		if cfg.License.RefreshInterval <= 0 {
+			return fmt.Errorf("license.refresh_interval must be greater than zero")
+		}
+	}
+
 	return nil
 }
 
@@ -523,6 +561,12 @@ func fileExists(path string) bool {
 
 // applyFeatureFlags applies build-time feature flags to override configuration
 func applyFeatureFlags(cfg *Config) {
+	// Make runtime toggle visible to feature helpers even when called directly
+	features.SetRateLimitingConfig(cfg.Security.RateLimiting.Enabled)
+	features.SetMetricsConfig(cfg.Observability.Metrics.Enabled)
+	features.SetObservabilityConfig(cfg.Observability.Tracing.Enabled)
+	features.SetCachingConfig(cfg.Cache.Type != "none")
+
 	// Disable metrics if not enabled via feature flag
 	if !features.ShouldEnableMetrics() {
 		cfg.Observability.Metrics.Enabled = false
@@ -548,10 +592,8 @@ func applyFeatureFlags(cfg *Config) {
 		cfg.Services.PAP.Timeout = 3 * time.Second
 	}
 
-	// Apply rate limiting if enabled
-	if features.ShouldEnableRateLimiting() {
-		cfg.Security.RateLimiting.Enabled = true
-	}
+	// Respect both config and feature flag for rate limiting
+	cfg.Security.RateLimiting.Enabled = cfg.Security.RateLimiting.Enabled && features.ShouldEnableRateLimiting()
 
 	// Disable caching unless feature flag is enabled
 	if !features.ShouldEnableCaching() {
@@ -566,6 +608,11 @@ func applyFeatureFlags(cfg *Config) {
 // ApplyServiceSpecificRateLimits applies service-specific rate limit overrides
 // This should be called by each service with its service name
 func ApplyServiceSpecificRateLimits(cfg *Config, serviceName string) {
+	// Respect explicit configuration first
+	if !cfg.Security.RateLimiting.Enabled {
+		return
+	}
+
 	if !features.ShouldEnableRateLimiting() {
 		return
 	}

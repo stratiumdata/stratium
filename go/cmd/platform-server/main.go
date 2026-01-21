@@ -65,6 +65,17 @@ func main() {
 	// Apply service-specific rate limits
 	config.ApplyServiceSpecificRateLimits(cfg, ServiceName)
 
+	licenseEnforcer, err := middleware.NewLicenseEnforcer(cfg, ServiceName)
+	if err != nil {
+		logger.Error("Failed to initialize license enforcement: %v", err)
+		os.Exit(1)
+	}
+	if err := licenseEnforcer.Check(); err != nil {
+		logger.Error("License validation failed: %v", err)
+		os.Exit(1)
+	}
+	licenseEnforcer.LogStatus()
+
 	// Print build and feature flag information
 	logger.PrintBuildInfo(ServiceName, ServiceVersion)
 
@@ -143,9 +154,11 @@ func main() {
 
 	// Create gRPC server with observability + rate limiting interceptors
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
+		licenseEnforcer.UnaryServerInterceptor(),
 		rateLimiter.UnaryServerInterceptor(),
 	}
 	streamInterceptors := []grpc.StreamServerInterceptor{
+		licenseEnforcer.StreamServerInterceptor(),
 		rateLimiter.StreamServerInterceptor(),
 	}
 

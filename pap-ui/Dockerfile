@@ -12,8 +12,9 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build the application (Vite automatically uses .env.production for production builds)
-RUN npm run build
+# Build the application (use .env.docker by default)
+ARG VITE_MODE=docker
+RUN npm run build -- --mode ${VITE_MODE}
 
 # Production stage
 FROM nginx:alpine

@@ -24,17 +24,31 @@ var (
 
 // Feature names
 const (
-	FeatureFullLogging     = "full-logging"
-	FeatureMetrics         = "metrics"
-	FeatureObservability   = "observability"
-	FeatureRateLimiting    = "rate-limiting"
-	FeatureShortTimeouts   = "short-timeouts"
-	FeatureCaching         = "caching"
+	FeatureFullLogging   = "full-logging"
+	FeatureMetrics       = "metrics"
+	FeatureObservability = "observability"
+	FeatureRateLimiting  = "rate-limiting"
+	FeatureShortTimeouts = "short-timeouts"
+	FeatureCaching       = "caching"
 )
 
 var (
 	featureCache = make(map[string]bool)
 	cacheMux     sync.RWMutex
+
+	// rateLimitingConfigEnabled tracks whether the runtime config explicitly
+	// disables rate limiting. It is intentionally kept outside the cached
+	// feature map so a config override can disable the feature even when the
+	// build flag is present.
+	rateLimitingConfigEnabled = true
+	rateLimitingConfigSet     = false
+
+	metricsConfigEnabled              = true
+	metricsConfigSet                  = false
+	observabilityTracingConfigEnabled = true
+	observabilityConfigSet            = false
+	cachingConfigEnabled              = true
+	cachingConfigSet                  = false
 )
 
 // IsEnabled checks if a feature is enabled based on build-time flags
@@ -107,16 +121,30 @@ func ShouldEnableFullLogging() bool {
 
 // ShouldEnableMetrics returns true if metrics should be enabled
 func ShouldEnableMetrics() bool {
+	if metricsConfigSet && !metricsConfigEnabled {
+		return false
+	}
+
 	return IsEnabled(FeatureMetrics)
 }
 
 // ShouldEnableObservability returns true if observability should be enabled
 func ShouldEnableObservability() bool {
+	if observabilityConfigSet && !observabilityTracingConfigEnabled {
+		return false
+	}
+
 	return IsEnabled(FeatureObservability)
 }
 
 // ShouldEnableRateLimiting returns true if rate limiting should be enabled
 func ShouldEnableRateLimiting() bool {
+	// If configuration has explicitly disabled rate limiting, respect it even
+	// when the build flag is present.
+	if rateLimitingConfigSet && !rateLimitingConfigEnabled {
+		return false
+	}
+
 	return IsEnabled(FeatureRateLimiting)
 }
 
@@ -127,15 +155,52 @@ func ShouldUseShortTimeouts() bool {
 
 // ShouldEnableCaching returns true if advanced caching should be enabled
 func ShouldEnableCaching() bool {
+	if cachingConfigSet && !cachingConfigEnabled {
+		return false
+	}
+
 	return IsEnabled(FeatureCaching)
 }
 
 // GetBuildInfo returns build information as a map
 func GetBuildInfo() map[string]string {
 	return map[string]string{
-		"mode":     BuildMode,
-		"version":  BuildVersion,
+		"mode":      BuildMode,
+		"version":   BuildVersion,
 		"buildTime": BuildTime,
-		"features": BuildFeatures,
+		"features":  BuildFeatures,
 	}
+}
+
+// SetRateLimitingConfig records the runtime configuration toggle for rate
+// limiting so ShouldEnableRateLimiting can honor user configuration.
+func SetRateLimitingConfig(enabled bool) {
+	cacheMux.Lock()
+	rateLimitingConfigEnabled = enabled
+	rateLimitingConfigSet = true
+	cacheMux.Unlock()
+}
+
+// SetMetricsConfig records the runtime configuration toggle for metrics.
+func SetMetricsConfig(enabled bool) {
+	cacheMux.Lock()
+	metricsConfigEnabled = enabled
+	metricsConfigSet = true
+	cacheMux.Unlock()
+}
+
+// SetObservabilityConfig records the runtime configuration toggle for tracing/observability.
+func SetObservabilityConfig(tracingEnabled bool) {
+	cacheMux.Lock()
+	observabilityTracingConfigEnabled = tracingEnabled
+	observabilityConfigSet = true
+	cacheMux.Unlock()
+}
+
+// SetCachingConfig records the runtime configuration toggle for caching.
+func SetCachingConfig(enabled bool) {
+	cacheMux.Lock()
+	cachingConfigEnabled = enabled
+	cachingConfigSet = true
+	cacheMux.Unlock()
 }

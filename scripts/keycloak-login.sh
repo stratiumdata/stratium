@@ -8,6 +8,7 @@ REALM="${KEYCLOAK_REALM:-stratium}"
 CLIENT_ID="${KEYCLOAK_CLIENT_ID:-stratium-cli}"
 USERNAME="$1"
 PASSWORD="$2"
+SCOPES="$3"
 
 if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
     echo "Usage: $0 <username> <password>"
@@ -35,7 +36,7 @@ RESPONSE=$(curl -s -X POST "$KEYCLOAK_URL/realms/$REALM/protocol/openid-connect/
   -d "username=$USERNAME" \
   -d "password=$PASSWORD" \
   -d "grant_type=password" \
-  -d "scope=openid profile email")
+  -d "scope=$SCOPES")
 
 # Check if we got an error
 ERROR=$(echo $RESPONSE | jq -r '.error // empty')

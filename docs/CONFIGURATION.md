@@ -69,6 +69,7 @@ services:         # Service discovery/connections
 logging:          # Logging configuration
 security:         # Security settings (rate limiting, CORS)
 observability:    # Metrics and tracing
+license:          # Offline license enforcement
 ```
 
 ## Service Configuration
@@ -331,6 +332,66 @@ observability:
 - `tracing.endpoint`: Tracing backend endpoint
 - `tracing.service_name`: Service name for tracing
 
+### License Configuration
+
+```yaml
+license:
+  enabled: true
+  file: /etc/stratium/license.jwt
+  public_key_file: /etc/stratium/license-public.pem
+  deployment_id: customer-prod
+  refresh_interval: 5m
+```
+
+**Settings:**
+- `enabled`: Enable offline license enforcement
+- `file`: Path to the signed license token (JWT)
+- `public_key_file`: Path to the license public key (PEM)
+- `deployment_id`: Deployment identifier that must match the license claim
+- `refresh_interval`: How often to re-read the license file for updates
+
+**Token Claims (JWT):**
+- `customer_id`, `customer_name`: Customer metadata (optional)
+- `key_id`: Unique key identifier for tracking (also used as JWT `kid` header)
+- `deployment_id`: Must match `license.deployment_id` when set
+- `allowed_services`: List of service names allowed (empty means all services)
+- Standard JWT timing claims (`exp`, `nbf`, `iat`) are honored
+
+### License Signer CLI
+
+Build the signer:
+
+```bash
+make build-license-signer
+```
+
+Example usage:
+
+```bash
+./bin/license-signer \\
+  --generate-key \\
+  --private-key-out /secure/license-private.pem \\
+  --public-key-out /etc/stratium/license-public.pem \\
+  --output /etc/stratium/license.jwt \\
+  --bundle-dir /tmp/customer-license \\
+  --customer-id acme-001 \\
+  --customer-name \"Acme Corp\" \\
+  --deployment-id customer-prod \\
+  --allowed-services \"platform-server,key-manager-server,pap-server,key-access-server\" \\
+  --expires-in 720h
+```
+
+If you omit `--private-key`, the signer generates a new RSA key pair and writes it to `license-private.pem` and `license-public.pem` alongside the license output (or the paths you provide). Use `--bundle-dir` or `--bundle-zip` to package the license JWT, public key, and a README for delivery. Use `--key-id` to override the generated key identifier.
+
+Pipeline helper:
+
+```bash
+LICENSE_CUSTOMER_ID=acme-001 \\
+LICENSE_DEPLOYMENT_ID=customer-prod \\
+LICENSE_EXPIRES_IN=720h \\
+make generate-license-bundle
+```
+
 ## Environment Variables
 
 All configuration values can be set via environment variables using the prefix `STRATIUM_` and replacing dots with underscores.
@@ -345,6 +406,8 @@ All configuration values can be set via environment variables using the prefix `
 | `oidc.client_secret` | `STRATIUM_OIDC_CLIENT_SECRET` |
 | `cache.redis.password` | `STRATIUM_CACHE_REDIS_PASSWORD` |
 | `logging.level` | `STRATIUM_LOGGING_LEVEL` |
+| `license.file` | `STRATIUM_LICENSE_FILE` |
+| `license.public_key_file` | `STRATIUM_LICENSE_PUBLIC_KEY_FILE` |
 
 ### Setting Environment Variables
 

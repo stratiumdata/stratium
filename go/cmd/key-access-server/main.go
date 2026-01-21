@@ -63,6 +63,17 @@ func main() {
 	// Apply service-specific rate limits for key-access-server (4 calls/min)
 	config.ApplyServiceSpecificRateLimits(cfg, ServiceName)
 
+	licenseEnforcer, err := middleware.NewLicenseEnforcer(cfg, ServiceName)
+	if err != nil {
+		logger.Error("Failed to initialize license enforcement: %v", err)
+		os.Exit(1)
+	}
+	if err := licenseEnforcer.Check(); err != nil {
+		logger.Error("License validation failed: %v", err)
+		os.Exit(1)
+	}
+	licenseEnforcer.LogStatus()
+
 	// Print build and feature flag information
 	logger.PrintBuildInfo(ServiceName, ServiceVersion)
 
@@ -118,6 +129,7 @@ func main() {
 
 	// Create gRPC server with auth, observability, and rate limiting interceptors
 	var unaryInterceptors []grpc.UnaryServerInterceptor
+	unaryInterceptors = append(unaryInterceptors, licenseEnforcer.UnaryServerInterceptor())
 	unaryInterceptors = append(unaryInterceptors, rateLimiter.UnaryServerInterceptor())
 
 	// Only add auth interceptor if auth service is configured
@@ -129,6 +141,7 @@ func main() {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 		grpc.ChainStreamInterceptor(
+			licenseEnforcer.StreamServerInterceptor(),
 			rateLimiter.StreamServerInterceptor(),
 		),
 	)

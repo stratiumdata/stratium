@@ -34,6 +34,19 @@ cache:
     db: 0
     prefix: "stratium:policy:"
 
+security:
+  rate_limiting:
+    enabled: false
+    requests_per_min: 1000
+    burst: 500
+
+license:
+  enabled: false
+  file: /etc/stratium/license.jwt
+  public_key_file: /etc/stratium/license-public.pem
+  deployment_id: ""
+  refresh_interval: 5m
+
 encryption:
   algorithm: RSA2048
   key_rotation: false

@@ -116,7 +116,7 @@ Services will be available at:
 
 ## Cross-SDK Integration Tests
 
-The repository now includes automated tests that ensure payloads encrypted by one SDK can be decrypted by the others (Java, Go, and JavaScript). The tests drive small CLI helpers inside each SDK and cover every encrypt/decrypt combination.
+The repository now includes automated tests that ensure payloads encrypted by one SDK can be decrypted by the others (Go, Java, and JavaScript). The tests drive small CLI helpers inside each SDK and cover every encrypt/decrypt combination.
 
 Run the suite from the Go SDK directory:
 
@@ -129,6 +129,16 @@ The test run requires:
 - A working Go toolchain (already needed for the SDK)
 - JDK 21+ so `sdk/java/gradlew runCrossSdkTool` can compile and execute the Java helper
 - Node.js 18+ so `node sdk/js/scripts/cross-sdk-tool.mjs` can process payloads (install `sdk/js` dependencies if they are not already fetched)
+
+## Python SDK
+
+The new Python SDK under `sdk/python` mirrors the Go, Java, and JavaScript feature set:
+
+- `StratiumClient` with automatic OIDC token management and a persistent key store for training pipelines
+- gRPC clients for the Platform, Key Manager, and Key Access services generated from the shared protobuf definitions
+- End-to-end ZTDF helpers so AI/ML workloads can decrypt or encrypt manifests in memory without shelling out
+
+See `sdk/python/README.md` for installation instructions, examples, and the protobuf regeneration commands.
 
 ## Usage Examples
 

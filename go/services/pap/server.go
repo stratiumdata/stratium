@@ -7,6 +7,7 @@ import (
 	"stratium/config"
 	"time"
 
+	"stratium/middleware"
 	"stratium/pkg/cache"
 	"stratium/pkg/models"
 	"stratium/pkg/policy_engine"
@@ -24,16 +25,18 @@ type Server struct {
 	engineFactory    *policy_engine.EngineFactory
 	authService      *AuthService
 	cacheInvalidator cache.CacheInvalidator
+	licenseEnforcer  *middleware.LicenseEnforcer
 }
 
 // NewServer creates a new PAP server instance
-func NewServer(repo *repository.Repository, authService *AuthService, corsConfig config.CORSConfig) *Server {
+func NewServer(repo *repository.Repository, authService *AuthService, corsConfig config.CORSConfig, licenseEnforcer *middleware.LicenseEnforcer) *Server {
 	s := &Server{
 		router:           gin.Default(),
 		repo:             repo,
 		engineFactory:    policy_engine.NewEngineFactory(),
 		authService:      authService,
 		cacheInvalidator: cache.NewNoOpCacheInvalidator(), // Default to no-op
+		licenseEnforcer:  licenseEnforcer,
 	}
 
 	s.setupRoutes(corsConfig)
@@ -41,13 +44,14 @@ func NewServer(repo *repository.Repository, authService *AuthService, corsConfig
 }
 
 // NewServerWithCacheInvalidator creates a new PAP server instance with cache invalidation
-func NewServerWithCacheInvalidator(repo *repository.Repository, authService *AuthService, cacheInvalidator cache.CacheInvalidator, corsConfig config.CORSConfig) *Server {
+func NewServerWithCacheInvalidator(repo *repository.Repository, authService *AuthService, cacheInvalidator cache.CacheInvalidator, corsConfig config.CORSConfig, licenseEnforcer *middleware.LicenseEnforcer) *Server {
 	s := &Server{
 		router:           gin.Default(),
 		repo:             repo,
 		engineFactory:    policy_engine.NewEngineFactory(),
 		authService:      authService,
 		cacheInvalidator: cacheInvalidator,
+		licenseEnforcer:  licenseEnforcer,
 	}
 
 	s.setupRoutes(corsConfig)
@@ -84,6 +88,10 @@ func (s *Server) setupRoutes(config config.CORSConfig) {
 	v1 := s.router.Group("/api/v1")
 
 	{
+		if s.licenseEnforcer != nil && s.licenseEnforcer.Enabled() {
+			v1.Use(s.licenseEnforcer.GinMiddleware())
+		}
+
 		// Apply authentication middleware to all routes except OPTIONS
 		// Use mock auth if in mock mode
 		if s.authService.IsMock() {

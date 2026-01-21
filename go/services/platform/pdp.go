@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -111,6 +112,32 @@ func (pdp *PolicyDecisionPoint) EvaluateDecision(ctx context.Context, req *GetDe
 	return pdp.defaultDenyDecision(req, "No matching policies or entitlements found"), nil
 }
 
+// pbValueToInterface converts a protobuf Value to a Go interface while preserving lists/objects.
+func pbValueToInterface(val *structpb.Value) interface{} {
+	switch v := val.GetKind().(type) {
+	case *structpb.Value_StringValue:
+		return v.StringValue
+	case *structpb.Value_NumberValue:
+		return v.NumberValue
+	case *structpb.Value_BoolValue:
+		return v.BoolValue
+	case *structpb.Value_ListValue:
+		out := make([]interface{}, 0, len(v.ListValue.Values))
+		for _, item := range v.ListValue.Values {
+			out = append(out, pbValueToInterface(item))
+		}
+		return out
+	case *structpb.Value_StructValue:
+		m := make(map[string]interface{}, len(v.StructValue.Fields))
+		for key, fieldVal := range v.StructValue.Fields {
+			m[key] = pbValueToInterface(fieldVal)
+		}
+		return m
+	default:
+		return nil
+	}
+}
+
 // evaluateEntitlements checks if the request matches any entitlements
 func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *GetDecisionRequest) (*DecisionResult, error) {
 	ctx, span := startPDPSpan(ctx, "PDP.evaluateEntitlements",
@@ -121,8 +148,7 @@ func (pdp *PolicyDecisionPoint) evaluateEntitlements(ctx context.Context, req *G
 	// Build subject attributes from request subject_attributes map
 	subjectAttrs := make(map[string]interface{})
 	for k, v := range req.SubjectAttributes {
-		// Extract actual string value from protobuf Value
-		subjectAttrs[k] = v.GetStringValue()
+		subjectAttrs[k] = pbValueToInterface(v)
 	}
 
 	// Merge context attributes into subject attributes
@@ -216,8 +242,7 @@ func (pdp *PolicyDecisionPoint) evaluatePolicies(ctx context.Context, req *GetDe
 
 	// Copy subject attributes from request
 	for k, v := range req.SubjectAttributes {
-		// Extract actual string value from protobuf Value
-		evalInput.Subject[k] = v.GetStringValue()
+		evalInput.Subject[k] = pbValueToInterface(v)
 	}
 
 	// Merge context attributes into subject attributes
@@ -367,16 +392,16 @@ func (pdp *PolicyDecisionPoint) defaultDenyDecision(req *GetDecisionRequest, rea
 	// Extract subject ID for details
 	subjectID := ""
 	if val, ok := req.SubjectAttributes["sub"]; ok {
-		subjectID = val.GetStringValue()
+		subjectID = fmt.Sprint(pbValueToInterface(val))
 	}
 	if subjectID == "" {
 		if val, ok := req.SubjectAttributes["user_id"]; ok {
-			subjectID = val.GetStringValue()
+			subjectID = fmt.Sprint(pbValueToInterface(val))
 		}
 	}
 	if subjectID == "" {
 		if val, ok := req.SubjectAttributes["id"]; ok {
-			subjectID = val.GetStringValue()
+			subjectID = fmt.Sprint(pbValueToInterface(val))
 		}
 	}
 
@@ -411,13 +436,7 @@ func (pdp *PolicyDecisionPoint) GetEntitlementsForSubject(ctx context.Context, r
 	subjectAttrs := make(map[string]interface{})
 	for k, v := range req.Subject {
 		// Extract actual value from protobuf Value
-		if strVal := v.GetStringValue(); strVal != "" {
-			subjectAttrs[k] = strVal
-		} else if numVal := v.GetNumberValue(); numVal != 0 {
-			subjectAttrs[k] = numVal
-		} else if boolVal := v.GetBoolValue(); boolVal {
-			subjectAttrs[k] = boolVal
-		}
+		subjectAttrs[k] = pbValueToInterface(v)
 	}
 
 	// Build match request

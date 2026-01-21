@@ -34,6 +34,19 @@ encryption:
   admin_keys:
     - admin
 
+security:
+  rate_limiting:
+    enabled: false
+    requests_per_min: 1000
+    burst: 500
+
+license:
+  enabled: false
+  file: /etc/stratium/license.jwt
+  public_key_file: /etc/stratium/license-public.pem
+  deployment_id: ""
+  refresh_interval: 5m
+
 oidc:
   enabled: true
   issuer_url: http://keycloak:8080/realms/stratium

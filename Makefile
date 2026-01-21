@@ -1,7 +1,7 @@
 # Stratium Platform gRPC Services Makefile
 
 .PHONY: help build test run-server run-client generate clean
-.PHONY: build-platform test-platform run-platform-server run-platform-client
+.PHONY: build-platform test-platform run-platform-server run-platform-client build-license-signer generate-license-bundle
 .PHONY: build-key-manager test-key-manager run-key-manager-server run-key-manager-client
 .PHONY: build-key-access test-key-access run-key-access-server run-key-access-client
 .PHONY: build-pap test-pap run-pap-server build-pap-cli install-pap-cli
@@ -79,6 +79,14 @@ build-pap-cli: ## Build PAP CLI client
 	@echo "Building PAP CLI client..."
 	cd go && go build -o ../bin/pap-cli ./cmd/pap-cli
 	@echo "PAP CLI build complete!"
+
+build-license-signer: ## Build license signer CLI
+	@echo "Building license signer CLI..."
+	cd go && go build -o ../bin/license-signer ./cmd/license-signer
+	@echo "License signer CLI build complete!"
+
+generate-license-bundle: build-license-signer ## Generate a customer license bundle (uses scripts/generate-license-bundle.sh)
+	@./scripts/generate-license-bundle.sh
 
 install-pap-cli: build-pap-cli ## Install PAP CLI to system PATH
 	@echo "Installing PAP CLI to /usr/local/bin..."

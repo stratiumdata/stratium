@@ -236,12 +236,16 @@ func TestGetEnabledFeatures(t *testing.T) {
 func TestShouldEnableCaching(t *testing.T) {
 	// Save original values
 	originalFeatures := BuildFeatures
-	defer func() { BuildFeatures = originalFeatures }()
+	defer func() {
+		BuildFeatures = originalFeatures
+		SetCachingConfig(true)
+	}()
 
 	tests := []struct {
-		name           string
-		buildFeatures  string
-		expectedResult bool
+		name              string
+		buildFeatures     string
+		configEnabledFlag *bool
+		expectedResult    bool
 	}{
 		{
 			name:           "caching disabled by default",
@@ -263,6 +267,12 @@ func TestShouldEnableCaching(t *testing.T) {
 			buildFeatures:  "metrics,observability",
 			expectedResult: false,
 		},
+		{
+			name:              "config override disables even when feature enabled",
+			buildFeatures:     "caching",
+			configEnabledFlag: ptrBool(false),
+			expectedResult:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -271,6 +281,12 @@ func TestShouldEnableCaching(t *testing.T) {
 			cacheMux.Lock()
 			featureCache = make(map[string]bool)
 			cacheMux.Unlock()
+
+			if tt.configEnabledFlag != nil {
+				SetCachingConfig(*tt.configEnabledFlag)
+			} else {
+				SetCachingConfig(true)
+			}
 
 			BuildFeatures = tt.buildFeatures
 			result := ShouldEnableCaching()
@@ -285,12 +301,16 @@ func TestShouldEnableCaching(t *testing.T) {
 func TestShouldEnableMetrics(t *testing.T) {
 	// Save original values
 	originalFeatures := BuildFeatures
-	defer func() { BuildFeatures = originalFeatures }()
+	defer func() {
+		BuildFeatures = originalFeatures
+		SetMetricsConfig(true)
+	}()
 
 	tests := []struct {
-		name           string
-		buildFeatures  string
-		expectedResult bool
+		name              string
+		buildFeatures     string
+		configEnabledFlag *bool
+		expectedResult    bool
 	}{
 		{
 			name:           "metrics disabled by default",
@@ -317,6 +337,12 @@ func TestShouldEnableMetrics(t *testing.T) {
 			buildFeatures:  "observability, metrics, rate-limiting",
 			expectedResult: true,
 		},
+		{
+			name:              "config override disables even when feature enabled",
+			buildFeatures:     "metrics",
+			configEnabledFlag: ptrBool(false),
+			expectedResult:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -325,6 +351,12 @@ func TestShouldEnableMetrics(t *testing.T) {
 			cacheMux.Lock()
 			featureCache = make(map[string]bool)
 			cacheMux.Unlock()
+
+			if tt.configEnabledFlag != nil {
+				SetMetricsConfig(*tt.configEnabledFlag)
+			} else {
+				SetMetricsConfig(true)
+			}
 
 			BuildFeatures = tt.buildFeatures
 			result := ShouldEnableMetrics()
@@ -339,12 +371,16 @@ func TestShouldEnableMetrics(t *testing.T) {
 func TestShouldEnableObservability(t *testing.T) {
 	// Save original values
 	originalFeatures := BuildFeatures
-	defer func() { BuildFeatures = originalFeatures }()
+	defer func() {
+		BuildFeatures = originalFeatures
+		SetObservabilityConfig(true)
+	}()
 
 	tests := []struct {
-		name           string
-		buildFeatures  string
-		expectedResult bool
+		name              string
+		buildFeatures     string
+		configEnabledFlag *bool
+		expectedResult    bool
 	}{
 		{
 			name:           "observability disabled by default",
@@ -371,6 +407,12 @@ func TestShouldEnableObservability(t *testing.T) {
 			buildFeatures:  "metrics, observability, rate-limiting",
 			expectedResult: true,
 		},
+		{
+			name:              "config override disables even when feature enabled",
+			buildFeatures:     "observability",
+			configEnabledFlag: ptrBool(false),
+			expectedResult:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -379,6 +421,12 @@ func TestShouldEnableObservability(t *testing.T) {
 			cacheMux.Lock()
 			featureCache = make(map[string]bool)
 			cacheMux.Unlock()
+
+			if tt.configEnabledFlag != nil {
+				SetObservabilityConfig(*tt.configEnabledFlag)
+			} else {
+				SetObservabilityConfig(true)
+			}
 
 			BuildFeatures = tt.buildFeatures
 			result := ShouldEnableObservability()
@@ -393,12 +441,16 @@ func TestShouldEnableObservability(t *testing.T) {
 func TestShouldEnableRateLimiting(t *testing.T) {
 	// Save original values
 	originalFeatures := BuildFeatures
-	defer func() { BuildFeatures = originalFeatures }()
+	defer func() {
+		BuildFeatures = originalFeatures
+		SetRateLimitingConfig(true)
+	}()
 
 	tests := []struct {
-		name           string
-		buildFeatures  string
-		expectedResult bool
+		name              string
+		buildFeatures     string
+		configEnabledFlag *bool
+		expectedResult    bool
 	}{
 		{
 			name:           "rate limiting disabled by default",
@@ -425,6 +477,12 @@ func TestShouldEnableRateLimiting(t *testing.T) {
 			buildFeatures:  "metrics, observability, rate-limiting",
 			expectedResult: true,
 		},
+		{
+			name:              "config override disables even when feature enabled",
+			buildFeatures:     "rate-limiting",
+			configEnabledFlag: ptrBool(false),
+			expectedResult:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -433,6 +491,13 @@ func TestShouldEnableRateLimiting(t *testing.T) {
 			cacheMux.Lock()
 			featureCache = make(map[string]bool)
 			cacheMux.Unlock()
+
+			// Respect any config override for this scenario
+			if tt.configEnabledFlag != nil {
+				SetRateLimitingConfig(*tt.configEnabledFlag)
+			} else {
+				SetRateLimitingConfig(true)
+			}
 
 			BuildFeatures = tt.buildFeatures
 			result := ShouldEnableRateLimiting()
@@ -673,4 +738,8 @@ func TestConcurrentFeatureAccess(t *testing.T) {
 	if !featureCache[FeatureCaching] {
 		t.Error("Cache should have caching=true")
 	}
+}
+
+func ptrBool(v bool) *bool {
+	return &v
 }
