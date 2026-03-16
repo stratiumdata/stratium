@@ -2,13 +2,7 @@ package key_manager
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
-	"errors"
 	"fmt"
-	"math/big"
 	"stratium/config"
 	"stratium/pkg/auth"
 	"stratium/pkg/security/encryption"
@@ -33,6 +27,19 @@ type Server struct {
 	dekService      *DEKUnwrappingService
 	integrityMgr    *KeyIntegrityManager
 	authService     *auth.AuthService
+	fipsEnabled     bool
+}
+
+const (
+	clientKeyProviderMetadataKey   = "client_key_provider"
+	clientKeyProviderYubiKey       = "yubikey"
+	yubiKeyEnvelopeVersionSignedV1 = "yubikey-signed-dek-v1"
+)
+
+type yubiKeySignedDEKEnvelope struct {
+	Version   string `json:"version"`
+	DEK       string `json:"dek"`
+	Signature string `json:"signature"`
 }
 
 // NewServer creates a new key manager server
@@ -97,7 +104,7 @@ func NewServer(encryptionAlgo encryption.Algorithm, cfg *config.Config) (*Server
 	rotationManager := NewDefaultKeyRotationManager(keyStore, providerFactory)
 
 	// Create DEK service with client key store (for subject public key lookups)
-	dekService := NewDEKUnwrappingService(keyStore, providerFactory, clientKeyStore)
+	dekService := NewDEKUnwrappingService(keyStore, providerFactory, clientKeyStore, cfg.Security.FIPS.Enabled)
 	logger.Info("DEK service initialized with client key store")
 
 	// Create auth service from config (nil is acceptable for tests)
@@ -121,6 +128,7 @@ func NewServer(encryptionAlgo encryption.Algorithm, cfg *config.Config) (*Server
 		clientKeyStore:  clientKeyStore,
 		integrityMgr:    integrityMgr,
 		authService:     authService,
+		fipsEnabled:     cfg.Security.FIPS.Enabled,
 	}
 
 	// Start rotation manager
@@ -626,9 +634,26 @@ func (s *Server) RewrapClientDEK(ctx context.Context, req *RewrapClientDEKReques
 		return nil, status.Error(codes.InvalidArgument, "service_key_id is required")
 	}
 
-	plaintext, err := s.decryptClientWrappedDEK(ctx, req.GetClientKeyId(), req.GetClientWrappedDek())
+	clientKey, err := s.clientKeyStore.GetKey(ctx, req.GetClientKeyId())
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "failed to unwrap client DEK: %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "client key not found: %v", err)
+	}
+
+	var plaintext []byte
+	if isYubiKeyClientKey(clientKey) {
+		if recovered, recErr := recoverYubiKeySignedDEK(clientKey, req.GetClientWrappedDek()); recErr == nil {
+			plaintext = recovered
+		} else if shouldAllowYubiKeyPlainClientEnvelope(clientKey) {
+			// Plain passthrough is restricted to explicitly touch-required YubiKey registrations.
+			plaintext = req.GetClientWrappedDek()
+		} else {
+			return nil, status.Errorf(codes.InvalidArgument, "failed to unwrap client DEK: %v", recErr)
+		}
+	} else {
+		plaintext, err = decryptClientWrappedDEKWithKey(clientKey, req.GetClientWrappedDek())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "failed to unwrap client DEK: %v", err)
+		}
 	}
 
 	serviceWrapped, err := s.wrapWithServiceKey(ctx, req.GetServiceKeyId(), plaintext)
@@ -648,6 +673,18 @@ func (s *Server) ListProviders(ctx context.Context, req *ListProvidersRequest) (
 	logger.Debug("ListProviders called - AvailableOnly: %t", req.AvailableOnly)
 
 	providers := s.providerFactory.GetProviderInfo()
+
+	if s.fipsEnabled {
+		fipsProviders := make([]*KeyProvider, 0, len(providers))
+		for _, provider := range providers {
+			provider.SupportedKeyTypes = filterFIPSKeyTypes(provider.SupportedKeyTypes)
+			if len(provider.SupportedKeyTypes) == 0 {
+				continue
+			}
+			fipsProviders = append(fipsProviders, provider)
+		}
+		providers = fipsProviders
+	}
 
 	// Filter by availability if requested
 	if req.AvailableOnly {
@@ -673,6 +710,12 @@ func (s *Server) GetProviderInfo(ctx context.Context, req *GetProviderInfoReques
 	providers := s.providerFactory.GetProviderInfo()
 	for _, provider := range providers {
 		if provider.Type == req.ProviderType {
+			if s.fipsEnabled {
+				provider.SupportedKeyTypes = filterFIPSKeyTypes(provider.SupportedKeyTypes)
+				if len(provider.SupportedKeyTypes) == 0 {
+					return nil, status.Errorf(codes.NotFound, "Provider type not found: %v", req.ProviderType)
+				}
+			}
 			return &GetProviderInfoResponse{
 				Provider:  provider,
 				Timestamp: timestamppb.Now(),
@@ -681,547 +724,4 @@ func (s *Server) GetProviderInfo(ctx context.Context, req *GetProviderInfoReques
 	}
 
 	return nil, status.Errorf(codes.NotFound, "Provider type not found: %v", req.ProviderType)
-}
-
-// RegisterClientKey registers a client's public key for DEK unwrapping
-func (s *Server) RegisterClientKey(ctx context.Context, req *RegisterClientKeyRequest) (*RegisterClientKeyResponse, error) {
-	// Extract user claims from OIDC token
-	userClaims, err := auth.GetUserFromContext(ctx)
-	if err != nil {
-		// For testing, try mock token validation
-		return &RegisterClientKeyResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("Authentication required: %v", err),
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("RegisterClientKey called - User: %s, ClientID: %s", userClaims.Sub, req.ClientId)
-
-	if userClaims.Sub == "" {
-		return &RegisterClientKeyResponse{
-			Success:      false,
-			ErrorMessage: "User ID (sub claim) is required",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	if req.PublicKeyPem == "" {
-		return &RegisterClientKeyResponse{
-			Success:      false,
-			ErrorMessage: "Public key PEM is required",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	keyType := req.KeyType
-	if keyType == KeyType_KEY_TYPE_UNSPECIFIED {
-		inferred, err := inferKeyTypeFromPEM(req.PublicKeyPem)
-		if err != nil {
-			return &RegisterClientKeyResponse{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("Unable to infer key type: %v", err),
-				Timestamp:    timestamppb.Now(),
-			}, nil
-		}
-		keyType = inferred
-	} else {
-		if inferred, err := inferKeyTypeFromPEM(req.PublicKeyPem); err == nil && inferred != KeyType_KEY_TYPE_UNSPECIFIED && inferred != keyType {
-			logger.Warn("Key type mismatch for client %s: request=%s, inferred=%s. Using inferred type.", userClaims.Sub, keyType, inferred)
-			keyType = inferred
-		}
-	}
-
-	// Generate unique key ID
-	keyID := fmt.Sprintf("client-key-%s-%d", userClaims.Sub, time.Now().UnixNano())
-
-	// Preserve metadata and capture the calling client ID for auditing
-	metadata := make(map[string]string)
-	for k, v := range req.Metadata {
-		metadata[k] = v
-	}
-	if req.ClientId != "" {
-		metadata["client_application_id"] = req.ClientId
-	}
-
-	// Create integrity hashes using the server's integrity manager
-	keyHash := s.integrityMgr.CreateKeyIntegrityHash(req.PublicKeyPem, keyType, userClaims)
-
-	// Create user public key record
-	userKey := &Key{
-		KeyId:            keyID,
-		ClientId:         userClaims.Sub,
-		PublicKeyPem:     req.PublicKeyPem,
-		KeyType:          keyType,
-		Status:           KeyStatus_KEY_STATUS_ACTIVE,
-		CreatedAt:        timestamppb.Now(),
-		ExpiresAt:        req.ExpiresAt,
-		KeyIntegrityHash: keyHash,
-		Metadata:         metadata,
-	}
-
-	// Register the key
-	err = s.clientKeyStore.RegisterKey(ctx, userKey)
-	if err != nil {
-		logger.Error("failed to register client key: %v", err)
-		return &RegisterClientKeyResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("Failed to register key: %v", err),
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("Registered client key %s for user %s", keyID, userClaims.Sub)
-
-	return &RegisterClientKeyResponse{
-		Key:       userKey,
-		Success:   true,
-		Timestamp: timestamppb.Now(),
-	}, nil
-}
-
-// GetClientKey retrieves a specific client key
-func (s *Server) GetClientKey(ctx context.Context, req *GetClientKeyRequest) (*GetClientKeyResponse, error) {
-	// Extract user claims from OIDC token
-	userClaims, err := auth.GetUserFromContext(ctx)
-	if err != nil {
-		// For testing, try mock token validation
-		return &GetClientKeyResponse{
-			Found:        false,
-			ErrorMessage: fmt.Sprintf("Authentication required: %v", err),
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("GetClientKey called - User: %s, Requested ClientID: %s, KeyID: %s", userClaims.Sub, req.ClientId, req.KeyId)
-
-	// Validate request
-	if userClaims.Sub == "" {
-		return &GetClientKeyResponse{
-			Found:        false,
-			ErrorMessage: "User claims are required",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	var key *Key
-
-	// If key ID is specified, get that specific key
-	if req.KeyId != "" {
-		key, err = s.clientKeyStore.GetKey(ctx, req.KeyId)
-		if err != nil {
-			return &GetClientKeyResponse{
-				Found:        false,
-				ErrorMessage: fmt.Sprintf("Key not found: %v", err),
-				Timestamp:    timestamppb.Now(),
-			}, nil
-		}
-
-		// Verify the key belongs to the requesting user
-		if key.ClientId != userClaims.Sub {
-			return &GetClientKeyResponse{
-				Found:        false,
-				ErrorMessage: "Key does not belong to authenticated user",
-				Timestamp:    timestamppb.Now(),
-			}, nil
-		}
-	} else {
-		// Get the active key for the user
-		key, err = s.clientKeyStore.GetActiveKeyForClient(ctx, userClaims.Sub)
-		if err != nil {
-			return &GetClientKeyResponse{
-				Found:        false,
-				ErrorMessage: fmt.Sprintf("No active key found: %v", err),
-				Timestamp:    timestamppb.Now(),
-			}, nil
-		}
-	}
-
-	// Verify key integrity using the server's integrity manager
-	if err := s.integrityMgr.VerifyKeyIntegrity(key, userClaims); err != nil {
-		logger.Error("key integrity verification failed: %v", err)
-		return &GetClientKeyResponse{
-			Found:        false,
-			ErrorMessage: "Key integrity verification failed",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("Retrieved key %s for user %s", key.KeyId, userClaims.Sub)
-
-	return &GetClientKeyResponse{
-		Key:       key,
-		Found:     true,
-		Timestamp: timestamppb.Now(),
-	}, nil
-}
-
-// ListClientKeys lists all keys for a user
-func (s *Server) ListClientKeys(ctx context.Context, req *ListClientKeysRequest) (*ListClientKeysResponse, error) {
-	// Extract user claims from OIDC token
-	userClaims, err := auth.GetUserFromContext(ctx)
-	if err != nil {
-		// For testing, try mock token validation
-		return &ListClientKeysResponse{
-			Keys:      []*Key{},
-			Timestamp: timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("ListClientKeys called - User: %s, IncludeRevoked: %t", userClaims.Sub, req.IncludeRevoked)
-
-	// Validate request
-	if userClaims == nil || userClaims.Sub == "" {
-		return &ListClientKeysResponse{
-			Keys:      []*Key{},
-			Timestamp: timestamppb.Now(),
-		}, nil
-	}
-
-	// Get keys for the user
-	keys, err := s.clientKeyStore.ListKeysForClient(ctx, userClaims.Sub, req.IncludeRevoked)
-	if err != nil {
-		logger.Error("failed to list keys: %v", err)
-		return &ListClientKeysResponse{
-			Keys:      []*Key{},
-			Timestamp: timestamppb.Now(),
-		}, nil
-	}
-
-	// Apply pagination
-	pageSize := int(req.PageSize)
-	if pageSize == 0 {
-		pageSize = 50 // Default page size
-	}
-
-	totalCount := len(keys)
-	startIndex := 0
-	// Simple pagination - in production, use proper token encoding
-	if req.PageToken != "" {
-		// For simplicity, using index as token
-		fmt.Sscanf(req.PageToken, "%d", &startIndex)
-	}
-
-	endIndex := startIndex + pageSize
-	if endIndex > totalCount {
-		endIndex = totalCount
-	}
-
-	var paginatedKeys []*Key
-	var nextPageToken string
-
-	if startIndex < totalCount {
-		paginatedKeys = keys[startIndex:endIndex]
-		if endIndex < totalCount {
-			nextPageToken = fmt.Sprintf("%d", endIndex)
-		}
-	}
-
-	logger.Info("Returning %d keys for user %s (total: %d)", len(paginatedKeys), userClaims.Sub, totalCount)
-
-	return &ListClientKeysResponse{
-		Keys:          paginatedKeys,
-		NextPageToken: nextPageToken,
-		TotalCount:    int32(totalCount),
-		Timestamp:     timestamppb.Now(),
-	}, nil
-}
-
-// RevokeClientKey revokes a client key
-func (s *Server) RevokeClientKey(ctx context.Context, req *RevokeClientKeyRequest) (*RevokeClientKeyResponse, error) {
-	// Extract user claims from OIDC token
-	userClaims, err := auth.GetUserFromContext(ctx)
-	if err != nil {
-		// For testing, try mock token validation
-		return &RevokeClientKeyResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("Authentication required: %v", err),
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("RevokeClientKey called - User: %s, KeyID: %s, Reason: %s",
-		userClaims.Sub, req.KeyId, req.Reason)
-
-	// Validate request
-	if userClaims == nil || userClaims.Sub == "" {
-		return &RevokeClientKeyResponse{
-			Success:      false,
-			ErrorMessage: "User claims are required",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	if req.KeyId == "" {
-		return &RevokeClientKeyResponse{
-			Success:      false,
-			ErrorMessage: "Key ID is required",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	// Get the key to verify ownership
-	key, err := s.clientKeyStore.GetKey(ctx, req.KeyId)
-	if err != nil {
-		return &RevokeClientKeyResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("Key not found: %v", err),
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	// Verify the key belongs to the requesting user
-	if key.ClientId != userClaims.Sub {
-		return &RevokeClientKeyResponse{
-			Success:      false,
-			ErrorMessage: "Key does not belong to authenticated user",
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	// Revoke the key
-	err = s.clientKeyStore.RevokeKey(ctx, req.KeyId, req.Reason)
-	if err != nil {
-		logger.Error("failed to revoke key: %v", err)
-		return &RevokeClientKeyResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("Failed to revoke key: %v", err),
-			Timestamp:    timestamppb.Now(),
-		}, nil
-	}
-
-	logger.Info("Revoked key %s for user %s", req.KeyId, userClaims.Sub)
-
-	return &RevokeClientKeyResponse{
-		Success:   true,
-		Timestamp: timestamppb.Now(),
-	}, nil
-}
-
-// ListClients lists all subjects that have registered keys (admin operation)
-func (s *Server) ListClients(ctx context.Context, req *ListClientsRequest) (*ListClientsResponse, error) {
-	logger.Debug("ListClients called")
-
-	// Get all clients
-	clients, err := s.clientKeyStore.ListClients(ctx)
-	if err != nil {
-		logger.Info("Failed to list subjects: %v", err)
-		return &ListClientsResponse{
-			Clients:   []string{},
-			Timestamp: timestamppb.Now(),
-		}, nil
-	}
-
-	// Apply pagination
-	pageSize := int(req.PageSize)
-	if pageSize == 0 {
-		pageSize = 100 // Default page size
-	}
-
-	totalCount := len(clients)
-	startIndex := 0
-	// Simple pagination
-	if req.PageToken != "" {
-		fmt.Sscanf(req.PageToken, "%d", &startIndex)
-	}
-
-	endIndex := startIndex + pageSize
-	if endIndex > totalCount {
-		endIndex = totalCount
-	}
-
-	var paginatedClients []string
-	var nextPageToken string
-
-	if startIndex < totalCount {
-		paginatedClients = clients[startIndex:endIndex]
-		if endIndex < totalCount {
-			nextPageToken = fmt.Sprintf("%d", endIndex)
-		}
-	}
-
-	logger.Info("Returning %d subjects (total: %d)", len(paginatedClients), totalCount)
-
-	return &ListClientsResponse{
-		Clients:       paginatedClients,
-		NextPageToken: nextPageToken,
-		TotalCount:    int32(totalCount),
-		Timestamp:     timestamppb.Now(),
-	}, nil
-}
-
-func (s *Server) decryptClientWrappedDEK(ctx context.Context, clientKeyID string, encrypted []byte) ([]byte, error) {
-	key, err := s.clientKeyStore.GetKey(ctx, clientKeyID)
-	if err != nil {
-		return nil, err
-	}
-	if key.PublicKeyPem == "" {
-		return nil, fmt.Errorf("client key %s missing public key PEM", clientKeyID)
-	}
-
-	block, _ := pem.Decode([]byte(key.PublicKeyPem))
-	if block == nil {
-		return nil, errors.New("failed to decode client public key PEM")
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse client public key: %w", err)
-	}
-
-	switch rsaKey := pub.(type) {
-	case *rsa.PublicKey:
-		return rsaPublicUnwrap(rsaKey, encrypted)
-	default:
-		return nil, fmt.Errorf("client key type %s is not supported for secure wrapping", key.KeyType.String())
-	}
-}
-
-func (s *Server) wrapWithServiceKey(ctx context.Context, serviceKeyID string, plaintext []byte) ([]byte, error) {
-	keyPair, err := s.keyStore.GetKeyPair(ctx, serviceKeyID)
-	if err != nil {
-		return nil, err
-	}
-
-	provider, err := s.providerFactory.GetProvider(keyPair.ProviderType)
-	if err != nil {
-		return nil, err
-	}
-
-	return provider.Encrypt(ctx, serviceKeyID, plaintext)
-}
-
-func rsaPublicUnwrap(pub *rsa.PublicKey, ciphertext []byte) ([]byte, error) {
-	k := (pub.N.BitLen() + 7) / 8
-	if len(ciphertext) != k {
-		return nil, fmt.Errorf("invalid ciphertext length: expected %d, got %d", k, len(ciphertext))
-	}
-
-	c := new(big.Int).SetBytes(ciphertext)
-	if c.Sign() <= 0 || c.Cmp(pub.N) >= 0 {
-		return nil, errors.New("ciphertext representative out of range")
-	}
-
-	m := new(big.Int).Exp(c, big.NewInt(int64(pub.E)), pub.N)
-	em := m.Bytes()
-	if len(em) < k {
-		padded := make([]byte, k)
-		copy(padded[k-len(em):], em)
-		em = padded
-	}
-
-	if len(em) < 11 || em[0] != 0x00 || em[1] != 0x01 {
-		return nil, errors.New("invalid PKCS#1 padding")
-	}
-
-	index := 2
-	for index < len(em) && em[index] == 0xff {
-		index++
-	}
-	if index >= len(em) || em[index] != 0x00 {
-		return nil, errors.New("invalid PKCS#1 padding delimiter")
-	}
-
-	plain := em[index+1:]
-	if len(plain) == 0 {
-		return nil, errors.New("empty decrypted payload")
-	}
-
-	return plain, nil
-}
-
-func inferKeyTypeFromPEM(pemData string) (KeyType, error) {
-	block, _ := pem.Decode([]byte(pemData))
-	if block == nil {
-		return KeyType_KEY_TYPE_UNSPECIFIED, errors.New("failed to decode public key PEM")
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to parse public key: %w", err)
-	}
-
-	switch key := pub.(type) {
-	case *rsa.PublicKey:
-		bits := key.N.BitLen()
-		switch bits {
-		case 2048:
-			return KeyType_KEY_TYPE_RSA_2048, nil
-		case 3072:
-			return KeyType_KEY_TYPE_RSA_3072, nil
-		case 4096:
-			return KeyType_KEY_TYPE_RSA_4096, nil
-		default:
-			return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported RSA key size: %d", bits)
-		}
-	case *ecdsa.PublicKey:
-		switch key.Curve.Params().Name {
-		case "P-256":
-			return KeyType_KEY_TYPE_ECC_P256, nil
-		case "P-384":
-			return KeyType_KEY_TYPE_ECC_P384, nil
-		case "P-521":
-			return KeyType_KEY_TYPE_ECC_P521, nil
-		default:
-			return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported ECC curve: %s", key.Curve.Params().Name)
-		}
-	default:
-		return KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported key type %T", pub)
-	}
-}
-
-// validateCreateKeyRequest validates the create key request
-func (s *Server) validateCreateKeyRequest(req *CreateKeyRequest) error {
-	if req.Name == "" {
-		return fmt.Errorf("key name is required")
-	}
-
-	if req.KeyType == KeyType_KEY_TYPE_UNSPECIFIED {
-		return fmt.Errorf("key type is required")
-	}
-
-	if req.ProviderType == KeyProviderType_KEY_PROVIDER_TYPE_UNSPECIFIED {
-		return fmt.Errorf("provider type is required")
-	}
-
-	return nil
-}
-
-// keyPairToKey converts a KeyPair to a Key protobuf message
-func (s *Server) keyPairToKey(keyPair *KeyPair) *Key {
-	key := &Key{
-		KeyId:         keyPair.KeyID,
-		KeyType:       keyPair.KeyType,
-		ProviderType:  keyPair.ProviderType,
-		Status:        KeyStatus_KEY_STATUS_ACTIVE,
-		PublicKeyPem:  keyPair.PublicKeyPEM,
-		CreatedAt:     timestamppb.New(keyPair.CreatedAt),
-		UsageCount:    keyPair.UsageCount,
-		MaxUsageCount: keyPair.MaxUsageCount,
-		Metadata:      make(map[string]string),
-	}
-
-	if keyPair.ExpiresAt != nil {
-		key.ExpiresAt = timestamppb.New(*keyPair.ExpiresAt)
-	}
-
-	if keyPair.LastRotated != nil {
-		key.LastRotated = timestamppb.New(*keyPair.LastRotated)
-	}
-
-	for k, v := range keyPair.Metadata {
-		key.Metadata[k] = v
-	}
-
-	if keyPair.ExternallyManaged {
-		key.ExternallyManaged = true
-		key.ExternalSource = keyPair.ExternalSource
-		key.ExternalManifestPath = keyPair.ExternalManifestPath
-		key.PrivateKeySource = keyPair.PrivateKeySource
-		if keyPair.ExternalLoadedAt != nil {
-			key.ExternalLoadedAt = timestamppb.New(*keyPair.ExternalLoadedAt)
-		}
-	}
-
-	return key
 }

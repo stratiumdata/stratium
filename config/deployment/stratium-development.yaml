@@ -95,6 +95,9 @@ security:
       - Content-Type
     allow_credentials: true
     max_age: 3600s
+  fips:
+    enabled: true
+    go_module: v1.0.0
 
 observability:
   metrics:

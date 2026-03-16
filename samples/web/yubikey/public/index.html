@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stratium YubiKey Web Sample</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient a1" aria-hidden="true"></div>
+    <div class="ambient a2" aria-hidden="true"></div>
+
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">Stratium Sample</p>
+        <h1>Client-Side YubiKey WebAuthn Wrap + Unwrap</h1>
+        <p>
+          Client-only demo: browser triggers YubiKey touch via WebAuthn and performs
+          wrap/unwrap in browser WebCrypto. No backend crypto workflow.
+        </p>
+      </header>
+
+      <section class="panel">
+        <h2>YubiKey Registration</h2>
+        <div class="grid two">
+          <label>Relying Party ID <input id="rpId" placeholder="Defaults to current hostname" /></label>
+          <label>Display Name <input id="userDisplayName" value="Stratium User" /></label>
+        </div>
+        <button id="registerBtn" class="action">Register / Rotate YubiKey Credential</button>
+        <button id="touchBtn" class="action alt">Test Touch Assertion</button>
+      </section>
+
+      <section class="panel">
+        <h2>Metadata</h2>
+        <label>Resource <input id="resource" value="document-service" /></label>
+      </section>
+
+      <section class="panel">
+        <h2>Wrap</h2>
+        <div class="grid one">
+          <label>Plaintext <textarea id="wrapText">ZTDF test with browser-side YubiKey touch gate</textarea></label>
+          <label>Output filename <input id="outputName" value="yubikey-client-demo.ztdf" /></label>
+        </div>
+        <button id="wrapBtn" class="action">Wrap (Requires Touch)</button>
+      </section>
+
+      <section class="panel">
+        <h2>Unwrap</h2>
+        <div class="grid one">
+          <label>Upload wrapped file <input id="inputFile" type="file" accept=".json,.ztdf" /></label>
+          <label>Or paste Base64 .ztdf <textarea id="wrappedInput" placeholder="Optional: paste base64-encoded .ztdf bytes"></textarea></label>
+          <label>Decrypted plaintext <textarea id="unwrapText" readonly></textarea></label>
+        </div>
+        <button id="unwrapBtn" class="action alt">Unwrap (Requires Touch)</button>
+      </section>
+
+      <section class="panel">
+        <h2>Execution Log</h2>
+        <p id="status" class="status">Idle</p>
+        <pre id="result" class="result">No operation run yet.</pre>
+      </section>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

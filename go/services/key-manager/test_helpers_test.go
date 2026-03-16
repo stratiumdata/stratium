@@ -12,6 +12,10 @@ import (
 
 // newTestKeyManagerServer creates a key manager server backed by in-memory stores.
 func newTestKeyManagerServer(t testing.TB, alg encryption.Algorithm) *Server {
+	return newTestKeyManagerServerWithFIPS(t, alg, false)
+}
+
+func newTestKeyManagerServerWithFIPS(t testing.TB, alg encryption.Algorithm, fipsEnabled bool) *Server {
 	t.Helper()
 
 	keyStore := NewInMemoryKeyStore()
@@ -32,8 +36,9 @@ func newTestKeyManagerServer(t testing.TB, alg encryption.Algorithm) *Server {
 		clientKeyStore:  clientKeyStore,
 		providerFactory: providerFactory,
 		rotationManager: &testRotationManager{keyStore: keyStore},
-		dekService:      NewDEKUnwrappingService(keyStore, providerFactory, clientKeyStore),
+		dekService:      NewDEKUnwrappingService(keyStore, providerFactory, clientKeyStore, fipsEnabled),
 		integrityMgr:    NewKeyIntegrityManager(),
+		fipsEnabled:     fipsEnabled,
 	}
 
 	return server

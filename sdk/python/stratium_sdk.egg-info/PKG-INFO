@@ -4,7 +4,7 @@ Version: 0.2.0
 Summary: Python SDK for Stratium services (Key Access, Key Manager, Platform, and ZTDF tooling).
 Author: Stratium
 License: Apache-2.0
-Requires-Python: >=3.14
+Requires-Python: >=3.13
 Description-Content-Type: text/markdown
 Requires-Dist: cryptography>=42.0.0
 Requires-Dist: googleapis-common-protos>=1.62.0
@@ -50,6 +50,7 @@ config = StratiumConfig(
     key_manager_address="key-manager.stratium.local:50052",
     key_access_address="kas.stratium.local:50053",
     client_id="training-app",
+    fips_enabled=False,
     oidc=OIDCConfig(
         issuer_url="https://keycloak.stratium.local/realms/stratium",
         client_id="training-app",
@@ -71,6 +72,11 @@ wrap_result = client.wrap(
 
 plaintext = client.unwrap(wrap_result.ztdf_blob)
 ```
+
+Set `fips_enabled=True` to disable client-side RSA PKCS#1 v1.5 wrapping and send the DEK in plaintext over TLS.
+The SDK validates that the linked OpenSSL runtime is in FIPS mode and raises a `ValidationError` if it is not.
+If the OpenSSL FIPS APIs are not exposed by `cryptography`, set `OPENSSL_BIN` to a compatible `openssl`
+binary and ensure `OPENSSL_CONF`/`OPENSSL_MODULES` point at the FIPS provider configuration.
 
 ### Running tests
 

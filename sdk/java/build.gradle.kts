@@ -14,6 +14,13 @@ java {
     withJavadocJar()
 }
 
+val fipsDependenciesEnabled = providers.gradleProperty("fips")
+    .map { it.equals("true", ignoreCase = true) || it == "1" }
+    .orElse(false)
+val bcFipsVersion = providers.gradleProperty("bcFipsVersion").orElse("2.1.2")
+val bcpkixFipsVersion = providers.gradleProperty("bcpkixFipsVersion").orElse("2.1.10")
+val bctlsFipsVersion = providers.gradleProperty("bctlsFipsVersion").orElse("2.1.22")
+
 group = "com.stratium"
 version = "0.1.0-SNAPSHOT"
 
@@ -30,6 +37,11 @@ dependencies {
     implementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")
     implementation("com.fasterxml.jackson.core:jackson-annotations:2.17.1")
     implementation("javax.annotation:javax.annotation-api:1.3.2")
+    if (fipsDependenciesEnabled.get()) {
+        implementation("org.bouncycastle:bc-fips:${bcFipsVersion.get()}")
+        implementation("org.bouncycastle:bcpkix-fips:${bcpkixFipsVersion.get()}")
+        implementation("org.bouncycastle:bctls-fips:${bctlsFipsVersion.get()}")
+    }
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.0")
     testImplementation("org.assertj:assertj-core:3.26.3")
@@ -37,6 +49,7 @@ dependencies {
 
 repositories {
     mavenCentral()
+    maven { url = uri("https://www.bouncycastle.org/repo") }
 }
 
 protobuf {

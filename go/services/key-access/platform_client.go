@@ -3,14 +3,17 @@ package key_access
 import (
 	"context"
 	"fmt"
+	"stratium/config"
 	"stratium/pkg/auth"
 	"stratium/pkg/extractors"
+	"stratium/pkg/security/tlspolicy"
 
 	platform "stratium/services/platform"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -22,15 +25,26 @@ type GRPCPlatformClient struct {
 }
 
 // NewGRPCPlatformClient creates a new Platform client that connects to the Platform service
-func NewGRPCPlatformClient(platformAddr string) (*GRPCPlatformClient, error) {
+func NewGRPCPlatformClient(platformAddr string, cfg *config.ServiceEndpoint) (*GRPCPlatformClient, error) {
 	if platformAddr == "" {
 		return nil, fmt.Errorf("platform address is required")
+	}
+
+	var creds credentials.TransportCredentials
+	if cfg != nil && cfg.TLS.Enabled {
+		tlsConfig, err := tlspolicy.LoadClientConfig(platformAddr, cfg.TLS.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		creds = credentials.NewTLS(tlsConfig)
+	} else {
+		creds = insecure.NewCredentials()
 	}
 
 	// Connect to Platform service
 	conn, err := grpc.NewClient(
 		platformAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {

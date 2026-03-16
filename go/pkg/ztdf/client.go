@@ -5,17 +5,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"stratium/pkg/auth"
 	"stratium/pkg/models"
+	"stratium/pkg/security/tlspolicy"
 	keyAccess "stratium/services/key-access"
-	keyManager "stratium/services/key-manager"
+	keyManagerService "stratium/services/key-manager"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
@@ -30,7 +30,7 @@ import (
 type Client struct {
 	keyAccessAddr string
 	kasClient     keyAccess.KeyAccessServiceClient
-	kmClient      keyManager.KeyManagerServiceClient
+	kmClient      keyManagerService.KeyManagerServiceClient
 	kasConn       *grpc.ClientConn
 	kmConn        *grpc.ClientConn
 	keyManager    models.KeyManager
@@ -46,11 +46,18 @@ type WrapStreamResult struct {
 }
 
 type ZtdfClientConfig struct {
-	KeyAccessAddr  string
-	KeyManagerAddr string
-	KeyStorePath   string
-	AuthConfig     *auth.AuthConfig
-	UseTLS         bool
+	KeyAccessAddr       string
+	KeyManagerAddr      string
+	KeyStorePath        string
+	ClientKeyProvider   string
+	FIPSEnabled         *bool
+	YubiKeySlot         string
+	YubiKeyPIN          string
+	YubiKeyRequireTouch bool
+	YubiKeyPIVToolPath  string
+	YubiKeyYKManPath    string
+	AuthConfig          *auth.AuthConfig
+	UseTLS              bool
 }
 
 // NewClient creates a new ZTDF SDK client
@@ -76,8 +83,29 @@ func NewClient(config *ZtdfClientConfig) (*Client, error) {
 		}
 	}
 
+	fipsEnabled := isFIPSModeEnabled()
+	if config.FIPSEnabled != nil {
+		fipsEnabled = *config.FIPSEnabled
+	}
+	if err := tlspolicy.RequireTLSInFIPS(fipsEnabled, config.UseTLS); err != nil {
+		return nil, &models.Error{
+			Code:    "FIPS_TLS_REQUIRED",
+			Message: err.Error(),
+			Err:     err,
+		}
+	}
+
+	kasDialOpt, err := dialCredentials(config.KeyAccessAddr, config.UseTLS, fipsEnabled)
+	if err != nil {
+		return nil, &models.Error{
+			Code:    "TLS_CONFIG_FAILED",
+			Message: "failed to configure TLS for Key Access Service",
+			Err:     err,
+		}
+	}
+
 	// Connect to Key Access Service
-	kasConn, err := grpc.NewClient(config.KeyAccessAddr, dialCredentials(config.KeyAccessAddr, config.UseTLS))
+	kasConn, err := grpc.NewClient(config.KeyAccessAddr, kasDialOpt)
 	if err != nil {
 		return nil, &models.Error{
 			Code:    "CONNECTION_FAILED",
@@ -86,8 +114,18 @@ func NewClient(config *ZtdfClientConfig) (*Client, error) {
 		}
 	}
 
+	kmDialOpt, err := dialCredentials(config.KeyManagerAddr, config.UseTLS, fipsEnabled)
+	if err != nil {
+		kasConn.Close()
+		return nil, &models.Error{
+			Code:    "TLS_CONFIG_FAILED",
+			Message: "failed to configure TLS for Key Manager Service",
+			Err:     err,
+		}
+	}
+
 	// Connect to Key Manager Service
-	kmConn, err := grpc.NewClient(config.KeyManagerAddr, dialCredentials(config.KeyManagerAddr, config.UseTLS))
+	kmConn, err := grpc.NewClient(config.KeyManagerAddr, kmDialOpt)
 	if err != nil {
 		kasConn.Close()
 		return nil, &models.Error{
@@ -98,10 +136,30 @@ func NewClient(config *ZtdfClientConfig) (*Client, error) {
 	}
 
 	kasClient := keyAccess.NewKeyAccessServiceClient(kasConn)
-	kmClient := keyManager.NewKeyManagerServiceClient(kmConn)
+	kmClient := keyManagerService.NewKeyManagerServiceClient(kmConn)
 
 	// Create key manager
-	localKeyManager, err := NewLocalKeyManager(config.KeyStorePath)
+	clientKeyProvider := strings.ToLower(strings.TrimSpace(config.ClientKeyProvider))
+	if clientKeyProvider == "" {
+		clientKeyProvider = "local"
+	}
+
+	var keyManager models.KeyManager
+	switch clientKeyProvider {
+	case "local":
+		keyManager, err = NewLocalKeyManager(config.KeyStorePath)
+	case "yubikey":
+		keyManager, err = NewYubiKeyKeyManager(config.KeyStorePath, &YubiKeyKeyManagerOptions{
+			Slot:         config.YubiKeySlot,
+			PIN:          config.YubiKeyPIN,
+			RequireTouch: config.YubiKeyRequireTouch,
+			PIVToolPath:  config.YubiKeyPIVToolPath,
+			YKManPath:    config.YubiKeyYKManPath,
+			FIPSEnabled:  fipsEnabled,
+		})
+	default:
+		err = fmt.Errorf("unsupported client key provider: %s", config.ClientKeyProvider)
+	}
 	if err != nil {
 		kasConn.Close()
 		kmConn.Close()
@@ -130,23 +188,27 @@ func NewClient(config *ZtdfClientConfig) (*Client, error) {
 		kmClient:      kmClient,
 		kasConn:       kasConn,
 		kmConn:        kmConn,
-		keyManager:    localKeyManager,
+		keyManager:    keyManager,
 		authProvider:  authProvider,
 		authConfig:    config.AuthConfig,
 	}, nil
 }
 
-func dialCredentials(addr string, useTLS bool) grpc.DialOption {
+func dialCredentials(addr string, useTLS bool, fipsEnabled bool) (grpc.DialOption, error) {
 	if useTLS {
-		tlsConfig := &tls.Config{}
-		if host, _, err := net.SplitHostPort(addr); err == nil {
-			tlsConfig.ServerName = host
-		} else if addr != "" {
-			tlsConfig.ServerName = addr
+		tlsConfig, err := tlspolicy.LoadClientConfig(addr, "")
+		if err != nil {
+			if fipsEnabled {
+				return nil, err
+			}
+			return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
 		}
-		return grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+		return grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), nil
 	}
-	return grpc.WithTransportCredentials(insecure.NewCredentials())
+	if fipsEnabled {
+		return nil, fmt.Errorf("FIPS mode requires TLS for service connections")
+	}
+	return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
 }
 
 // Initialize sets up client keys (first-time setup)
@@ -549,12 +611,11 @@ func (c *Client) Close() error {
 
 // ensureInitialized ensures the client is initialized
 func (c *Client) ensureInitialized(ctx context.Context) error {
-	// Check if key manager has keys loaded
-	if _, err := c.keyManager.GetPrivateKey(); err != nil {
-		// Try to initialize
-		return c.Initialize(ctx)
+	metadata := c.keyManager.GetMetadata()
+	if metadata != nil && strings.TrimSpace(metadata.KeyID) != "" {
+		return nil
 	}
-	return nil
+	return c.Initialize(ctx)
 }
 
 // wrapDEK wraps a DEK using the Key Access Server
@@ -577,9 +638,13 @@ func (c *Client) wrapDEK(ctx context.Context, dek []byte, resource string, polic
 	// Add auth token to context
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", fmt.Sprintf("Bearer %s", authToken))
 
-	clientWrappedDEK, err := c.keyManager.WrapDEK(dek)
-	if err != nil {
-		return nil, "", err
+	clientWrappedDEK := dek
+	if !isFIPSModeEnabled() {
+		var err error
+		clientWrappedDEK, err = c.keyManager.WrapDEK(dek)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	clientKeyID := c.keyManager.GetKeyID()
@@ -636,11 +701,19 @@ func (c *Client) unwrapDEK(ctx context.Context, wrappedDEK []byte, keyID string,
 	// Add auth token to context
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", fmt.Sprintf("Bearer %s", authToken))
 
+	clientKeyID := c.keyManager.GetKeyID()
+	if strings.TrimSpace(clientKeyID) == "" {
+		return nil, &models.Error{
+			Code:    models.ErrCodeKeyNotFound,
+			Message: "client key ID not available",
+		}
+	}
+
 	// Call UnwrapDEK
 	resp, err := c.kasClient.UnwrapDEK(ctx, &keyAccess.UnwrapDEKRequest{
 		Resource:    resource,
 		WrappedDek:  wrappedDEK,
-		ClientKeyId: c.keyManager.GetMetadata().KeyID,
+		ClientKeyId: clientKeyID,
 		KeyId:       keyID,
 		Action:      "unwrap_dek",
 		Policy:      policy,

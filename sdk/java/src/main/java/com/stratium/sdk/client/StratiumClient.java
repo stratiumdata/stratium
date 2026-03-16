@@ -3,6 +3,7 @@ package com.stratium.sdk.client;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.stratium.sdk.crypto.CryptoUtils;
+import com.stratium.sdk.crypto.FipsMode;
 import com.stratium.sdk.crypto.CryptoUtils.PayloadEncryptionResult;
 import com.stratium.sdk.crypto.PemUtils;
 import com.stratium.sdk.key.KeyManagerClient;
@@ -19,6 +20,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.Provider;
 import java.security.interfaces.RSAPrivateKey;
 import java.time.Duration;
 import java.time.Instant;
@@ -31,6 +33,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import javax.crypto.Cipher;
 
 /**
  * High-level facade providing wrap/unwrap flows mirroring the Go/JS SDKs.
@@ -50,6 +53,10 @@ public final class StratiumClient {
 
     public StratiumClient(StratiumClientConfig config, KeyStore keyStore, TokenProvider tokenProvider) {
         this.config = config;
+        if (config.isFipsEnabled()) {
+            FipsMode.enable();
+            ensureFipsProvider();
+        }
         this.keyStore = keyStore;
         this.tokenProvider = tokenProvider;
         this.keyAccessChannel = buildChannel(config.getKeyAccessUri());
@@ -76,7 +83,9 @@ public final class StratiumClient {
         byte[] iv = CryptoUtils.generateIv();
         PayloadEncryptionResult encrypted = CryptoUtils.encryptPayload(plaintext, dek, iv);
 
-        byte[] clientWrappedDek = wrapDekWithPrivateKey(dek, (RSAPrivateKey) currentKeyPair.getPrivateKey());
+        byte[] clientWrappedDek = config.isFipsEnabled()
+                ? dek
+                : wrapDekWithPrivateKey(dek, (RSAPrivateKey) currentKeyPair.getPrivateKey());
 
         KeyAccessClient.WrapDekResult wrapResult;
         try {
@@ -152,7 +161,11 @@ public final class StratiumClient {
         System.err.println("[StratiumClient] encrypted DEK for subject length=" + encryptedForSubject.length
                 + ", clientKeyId=" + currentKeyPair.getMetadata().getKeyId()
                 + ", preview=" + dekPreview);
-        byte[] dek = CryptoUtils.decryptDek(encryptedForSubject, currentKeyPair.getPrivateKey());
+        byte[] dek = CryptoUtils.decryptDek(
+                encryptedForSubject,
+                currentKeyPair.getPrivateKey(),
+                config.isFipsEnabled()
+        );
 
         ZtdfManifest.PolicyBinding policyBinding = keyAccess.policyBinding();
         if (policyBinding != null && policyBinding.hash() != null && !policyBinding.hash().isBlank()
@@ -346,5 +359,27 @@ public final class StratiumClient {
             builder.usePlaintext();
         }
         return builder.build();
+    }
+
+    private static void ensureFipsProvider() {
+        Provider provider;
+        try {
+            provider = Cipher.getInstance("AES/GCM/NoPadding").getProvider();
+        } catch (Exception e) {
+            throw new IllegalStateException("FIPS mode requires AES/GCM support from a FIPS provider.", e);
+        }
+        if (provider == null) {
+            throw new IllegalStateException("FIPS mode is enabled but no JCE provider is available.");
+        }
+        String name = provider.getName();
+        String info = provider.getInfo();
+        boolean looksFips = (name != null && name.toUpperCase().contains("FIPS"))
+                || (info != null && info.toUpperCase().contains("FIPS"));
+        if (!looksFips) {
+            throw new IllegalStateException(
+                    "FIPS mode is enabled but the default JCE provider is not FIPS. Configure a FIPS provider "
+                            + "(e.g., BCFIPS or a FIPS-enabled JDK) as the highest priority provider."
+            );
+        }
     }
 }

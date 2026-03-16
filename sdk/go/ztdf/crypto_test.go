@@ -576,6 +576,9 @@ func TestRSAFullEncryptionFlow(t *testing.T) {
 }
 
 func TestECCFullEncryptionFlow(t *testing.T) {
+	if isFIPSModeEnabled() {
+		t.Skip("ECC/ECIES is disabled in FIPS mode")
+	}
 	// Generate ECC key pair
 	privateKey, err := GenerateECCKeyPair("P-256")
 	if err != nil {

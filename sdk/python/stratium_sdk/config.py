@@ -70,6 +70,7 @@ class StratiumConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT
     retry_attempts: int = DEFAULT_RETRY_ATTEMPTS
     use_tls: bool = False
+    fips_enabled: bool = False
 
     telemetry: Optional[TelemetryConfig] = None
 

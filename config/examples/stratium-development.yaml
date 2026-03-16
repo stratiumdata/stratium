@@ -90,6 +90,9 @@ security:
     allowed_headers:
       - Authorization
       - Content-Type
+  fips:
+    enabled: true
+    go_module: v1.0.0-c2097c7c
     expose_headers:
       - Content-Length
       - Content-Type

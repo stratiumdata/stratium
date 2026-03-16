@@ -8,14 +8,15 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/cloudflare/circl/kem/kyber/kyber1024"
-	"github.com/cloudflare/circl/kem/kyber/kyber512"
-	"github.com/cloudflare/circl/kem/kyber/kyber768"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -27,6 +28,15 @@ type DEKUnwrappingService struct {
 	providerFactory ProviderFactory
 	clientKeyStore  ClientKeyStore
 	auditLogger     AuditLogger
+	fipsEnabled     bool
+}
+
+const yubiKeyPlainDEKEnvelopeVersion = "yubikey-plain-dek-v1"
+const yubiKeyTouchRequiredMetadataKey = "yubikey_touch_required"
+
+type yubiKeyPlainDEKEnvelope struct {
+	Version string `json:"version"`
+	DEK     string `json:"dek"`
 }
 
 // AuditLogger logs security and access events
@@ -59,12 +69,14 @@ func NewDEKUnwrappingService(
 	keyStore KeyStore,
 	providerFactory ProviderFactory,
 	clientKeyStore ClientKeyStore,
+	fipsEnabled bool,
 ) *DEKUnwrappingService {
 	return &DEKUnwrappingService{
 		keyStore:        keyStore,
 		providerFactory: providerFactory,
 		clientKeyStore:  clientKeyStore,
 		auditLogger:     &DefaultAuditLogger{},
+		fipsEnabled:     fipsEnabled,
 	}
 }
 
@@ -86,6 +98,11 @@ func (d *DEKUnwrappingService) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequ
 	serviceKey, err := d.keyStore.GetKey(ctx, req.KeyId)
 	if err != nil {
 		reason := fmt.Sprintf("Service key not found: %v", err)
+		d.logDEKAccess(ctx, req, false, reason, nil)
+		return d.createDeniedResponse(req, reason), nil
+	}
+	if d.fipsEnabled && !isFIPSKeyTypeAllowed(serviceKey.KeyType) {
+		reason := fmt.Sprintf("Service key type %s is not allowed in FIPS mode", serviceKey.KeyType)
 		d.logDEKAccess(ctx, req, false, reason, nil)
 		return d.createDeniedResponse(req, reason), nil
 	}
@@ -138,7 +155,7 @@ func (d *DEKUnwrappingService) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequ
 	logger.Info("Parsed subject public key type: %T", subjectPublicKey)
 
 	// Step 6: Encrypt the DEK with the subject's public key
-	encryptedDEKForSubject, subjectKeyID, err := d.encryptDEKForSubject(subjectPublicKey, dekBytes, req.Subject)
+	encryptedDEKForSubject, subjectKeyID, err := d.encryptDEKForSubject(subjectKey, subjectPublicKey, dekBytes, req.Subject)
 	if err != nil {
 		reason := fmt.Sprintf("Failed to encrypt DEK for subject: %v", err)
 		d.logDEKAccess(ctx, req, false, reason, nil)
@@ -188,7 +205,23 @@ func (d *DEKUnwrappingService) validateUnwrapRequest(req *UnwrapDEKRequest) erro
 }
 
 // encryptDEKForSubject encrypts the DEK using the subject's public key
-func (d *DEKUnwrappingService) encryptDEKForSubject(subjectPublicKey crypto.PublicKey, dekBytes []byte, subject string) ([]byte, string, error) {
+func (d *DEKUnwrappingService) encryptDEKForSubject(subjectKey *Key, subjectPublicKey crypto.PublicKey, dekBytes []byte, subject string) ([]byte, string, error) {
+	if shouldUseYubiKeyPlainEnvelope(subjectKey) {
+		encoded, err := json.Marshal(yubiKeyPlainDEKEnvelope{
+			Version: yubiKeyPlainDEKEnvelopeVersion,
+			DEK:     base64.StdEncoding.EncodeToString(dekBytes),
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to encode yubikey DEK envelope: %w", err)
+		}
+		return encoded, fmt.Sprintf("subject-%s-yubikey-plain", subject), nil
+	}
+
+	if d.fipsEnabled {
+		if _, ok := subjectPublicKey.(*rsa.PublicKey); !ok {
+			return nil, "", fmt.Errorf("subject key type %T is not allowed in FIPS mode", subjectPublicKey)
+		}
+	}
 	switch pubKey := subjectPublicKey.(type) {
 	case *rsa.PublicKey:
 		encryptedDEK, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKey, dekBytes, nil)
@@ -207,6 +240,31 @@ func (d *DEKUnwrappingService) encryptDEKForSubject(subjectPublicKey crypto.Publ
 	default:
 		return nil, "", fmt.Errorf("unsupported public key type for subject %s %v", subject, pubKey)
 	}
+}
+
+func isYubiKeySubjectKey(subjectKey *Key) bool {
+	if subjectKey == nil || subjectKey.Metadata == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(subjectKey.Metadata["client_key_provider"]), "yubikey")
+}
+
+func shouldUseYubiKeyPlainEnvelope(subjectKey *Key) bool {
+	if !isYubiKeySubjectKey(subjectKey) {
+		return false
+	}
+
+	// Require explicit touch-required metadata in both FIPS and non-FIPS modes.
+	// This ensures plaintext envelope mode is only used for hardware-presence flows.
+	return parseMetadataBool(subjectKey.Metadata[yubiKeyTouchRequiredMetadataKey])
+}
+
+func parseMetadataBool(value string) bool {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	return parsed
 }
 
 // createDeniedResponse creates a denied response
@@ -300,52 +358,10 @@ func publicKeyToPEM(publicKey crypto.PublicKey) (string, KeyType, error) {
 
 		return string(pemBlock), keyType, nil
 
-	case *kyber512.PublicKey:
-		// Marshal KYBER key to binary
-		keyBytes, err := key.MarshalBinary()
-		if err != nil {
-			return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to marshal KYBER-512 public key: %w", err)
-		}
-
-		// Encode to PEM
-		pemBlock := pem.EncodeToMemory(&pem.Block{
-			Type:  "KYBER-512 PUBLIC KEY",
-			Bytes: keyBytes,
-		})
-
-		return string(pemBlock), KeyType_KEY_TYPE_KYBER_512, nil
-
-	case *kyber768.PublicKey:
-		// Marshal KYBER key to binary
-		keyBytes, err := key.MarshalBinary()
-		if err != nil {
-			return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to marshal KYBER-768 public key: %w", err)
-		}
-
-		// Encode to PEM
-		pemBlock := pem.EncodeToMemory(&pem.Block{
-			Type:  "KYBER-768 PUBLIC KEY",
-			Bytes: keyBytes,
-		})
-
-		return string(pemBlock), KeyType_KEY_TYPE_KYBER_768, nil
-
-	case *kyber1024.PublicKey:
-		// Marshal KYBER key to binary
-		keyBytes, err := key.MarshalBinary()
-		if err != nil {
-			return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to marshal KYBER-1024 public key: %w", err)
-		}
-
-		// Encode to PEM
-		pemBlock := pem.EncodeToMemory(&pem.Block{
-			Type:  "KYBER-1024 PUBLIC KEY",
-			Bytes: keyBytes,
-		})
-
-		return string(pemBlock), KeyType_KEY_TYPE_KYBER_1024, nil
-
 	default:
+		if pemValue, keyType, ok, err := publicKeyToPEMIfKyber(publicKey); ok {
+			return pemValue, keyType, err
+		}
 		return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported public key type: %T", publicKey)
 	}
 }

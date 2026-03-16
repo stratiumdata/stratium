@@ -9,6 +9,9 @@ public final class DekWrap {
     }
 
     public static byte[] wrapWithPublicKey(byte[] dek, RSAPublicKey publicKey) {
+        if (FipsMode.isEnabled()) {
+            throw new IllegalStateException("FIPS mode forbids PKCS#1 v1.5 DEK wrapping");
+        }
         int k = (publicKey.getModulus().bitLength() + 7) / 8;
         if (dek.length > k - 11) {
             throw new IllegalArgumentException("DEK too large for client key");

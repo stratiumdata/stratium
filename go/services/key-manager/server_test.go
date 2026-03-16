@@ -2,10 +2,20 @@ package key_manager
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"testing"
 
 	"stratium/pkg/security/encryption"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestServer_CreateKey(t *testing.T) {
@@ -92,6 +102,492 @@ func TestServer_CreateKey(t *testing.T) {
 				t.Error("Expected timestamp to be set")
 			}
 		})
+	}
+}
+
+func TestServer_CreateKey_FIPSDisallowsKeyType(t *testing.T) {
+	server := newTestKeyManagerServerWithFIPS(t, encryption.RSA2048, true)
+
+	tests := []KeyType{
+		KeyType_KEY_TYPE_KYBER_768,
+		KeyType_KEY_TYPE_ECC_P256,
+	}
+
+	for _, keyType := range tests {
+		req := &CreateKeyRequest{
+			Name:         "fips-blocked-key",
+			KeyType:      keyType,
+			ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+		}
+
+		_, err := server.CreateKey(context.Background(), req)
+		if err == nil {
+			t.Fatalf("Expected error for non-FIPS key type %v, got nil", keyType)
+		}
+	}
+}
+
+func TestServer_RewrapClientDEK_SmartCardRoundTrip(t *testing.T) {
+	server := newTestKeyManagerServerWithFIPS(t, encryption.RSA2048, true)
+	ctx := context.Background()
+
+	createResp, err := server.CreateKey(ctx, &CreateKeyRequest{
+		Name:         "smartcard-service-key",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SMART_CARD,
+		ProviderConfig: map[string]string{
+			"device_id": "mock-device-1",
+			"pin":       "1234",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	clientPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+
+	clientPublicDER, err := x509.MarshalPKIXPublicKey(&clientPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal client public key: %v", err)
+	}
+
+	clientPublicPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: clientPublicDER,
+	}))
+
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-1",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("failed to register client key: %v", err)
+	}
+
+	dekPlaintext := []byte("0123456789abcdef0123456789abcdef")
+	clientWrapped, err := wrapClientDEK(clientPrivateKey, dekPlaintext)
+	if err != nil {
+		t.Fatalf("failed to wrap DEK with client key: %v", err)
+	}
+
+	rewrapResp, err := server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-1",
+		ClientWrappedDek: clientWrapped,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	})
+	if err != nil {
+		t.Fatalf("RewrapClientDEK failed: %v", err)
+	}
+
+	provider, err := server.providerFactory.GetProvider(KeyProviderType_KEY_PROVIDER_TYPE_SMART_CARD)
+	if err != nil {
+		t.Fatalf("failed to get smartcard provider: %v", err)
+	}
+
+	unwrapped, err := provider.Decrypt(ctx, createResp.Key.KeyId, rewrapResp.ServiceWrappedDek)
+	if err != nil {
+		t.Fatalf("smartcard provider decrypt failed: %v", err)
+	}
+
+	if string(unwrapped) != string(dekPlaintext) {
+		t.Fatalf("DEK mismatch: got %x want %x", unwrapped, dekPlaintext)
+	}
+}
+
+func TestServer_RewrapClientDEK_FIPSRejectsPlaintextForNonYubiKey(t *testing.T) {
+	server := newTestKeyManagerServerWithFIPS(t, encryption.RSA2048, true)
+	ctx := context.Background()
+
+	createResp, err := server.CreateKey(ctx, &CreateKeyRequest{
+		Name:         "software-service-key",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	clientPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+
+	clientPublicDER, err := x509.MarshalPKIXPublicKey(&clientPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal client public key: %v", err)
+	}
+
+	clientPublicPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: clientPublicDER,
+	}))
+
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-fips-plain-reject",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("failed to register client key: %v", err)
+	}
+
+	dekPlaintext := []byte("0123456789abcdef0123456789abcdef")
+	_, err = server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-fips-plain-reject",
+		ClientWrappedDek: dekPlaintext,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	})
+	if err == nil {
+		t.Fatalf("expected plaintext DEK rewrap to be rejected in FIPS mode")
+	}
+}
+
+func TestServer_RewrapClientDEK_YubiKeySignedEnvelope_NonFIPS(t *testing.T) {
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
+	ctx := context.Background()
+
+	createResp, err := server.CreateKey(ctx, &CreateKeyRequest{
+		Name:         "software-service-key",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	clientPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+
+	clientPublicDER, err := x509.MarshalPKIXPublicKey(&clientPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal client public key: %v", err)
+	}
+
+	clientPublicPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: clientPublicDER,
+	}))
+
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-yubikey-1",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+		Metadata: map[string]string{
+			clientKeyProviderMetadataKey: clientKeyProviderYubiKey,
+		},
+	}); err != nil {
+		t.Fatalf("failed to register client key: %v", err)
+	}
+
+	dekPlaintext := []byte("0123456789abcdef0123456789abcdef")
+	clientWrapped, err := wrapYubiKeySignedDEKForTest(clientPrivateKey, dekPlaintext)
+	if err != nil {
+		t.Fatalf("failed to sign YubiKey envelope: %v", err)
+	}
+
+	rewrapResp, err := server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-yubikey-1",
+		ClientWrappedDek: clientWrapped,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	})
+	if err != nil {
+		t.Fatalf("RewrapClientDEK failed: %v", err)
+	}
+
+	provider, err := server.providerFactory.GetProvider(KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE)
+	if err != nil {
+		t.Fatalf("failed to get software provider: %v", err)
+	}
+
+	unwrapped, err := provider.Decrypt(ctx, createResp.Key.KeyId, rewrapResp.ServiceWrappedDek)
+	if err != nil {
+		t.Fatalf("software provider decrypt failed: %v", err)
+	}
+
+	if string(unwrapped) != string(dekPlaintext) {
+		t.Fatalf("DEK mismatch: got %x want %x", unwrapped, dekPlaintext)
+	}
+}
+
+func TestServer_RewrapClientDEK_YubiKeyPlainEnvelopeRequiresTouchMetadata(t *testing.T) {
+	server := newTestKeyManagerServer(t, encryption.RSA2048)
+	ctx := context.Background()
+
+	createResp, err := server.CreateKey(ctx, &CreateKeyRequest{
+		Name:         "software-service-key",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	clientPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+
+	clientPublicDER, err := x509.MarshalPKIXPublicKey(&clientPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal client public key: %v", err)
+	}
+
+	clientPublicPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: clientPublicDER,
+	}))
+
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-yubikey-no-touch",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+		Metadata: map[string]string{
+			clientKeyProviderMetadataKey: clientKeyProviderYubiKey,
+		},
+	}); err != nil {
+		t.Fatalf("failed to register no-touch client key: %v", err)
+	}
+
+	dekPlaintext := []byte("0123456789abcdef0123456789abcdef")
+	if _, err := server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-yubikey-no-touch",
+		ClientWrappedDek: dekPlaintext,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	}); err == nil {
+		t.Fatalf("expected no-touch YubiKey plain envelope to be rejected")
+	}
+
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-yubikey-touch",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+		Metadata: map[string]string{
+			clientKeyProviderMetadataKey:    clientKeyProviderYubiKey,
+			yubiKeyTouchRequiredMetadataKey: "true",
+		},
+	}); err != nil {
+		t.Fatalf("failed to register touch-required client key: %v", err)
+	}
+
+	rewrapResp, err := server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-yubikey-touch",
+		ClientWrappedDek: dekPlaintext,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	})
+	if err != nil {
+		t.Fatalf("RewrapClientDEK for touch-required key failed: %v", err)
+	}
+
+	provider, err := server.providerFactory.GetProvider(KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE)
+	if err != nil {
+		t.Fatalf("failed to get software provider: %v", err)
+	}
+
+	unwrapped, err := provider.Decrypt(ctx, createResp.Key.KeyId, rewrapResp.ServiceWrappedDek)
+	if err != nil {
+		t.Fatalf("software provider decrypt failed: %v", err)
+	}
+
+	if string(unwrapped) != string(dekPlaintext) {
+		t.Fatalf("DEK mismatch: got %x want %x", unwrapped, dekPlaintext)
+	}
+}
+
+func TestServer_RewrapClientDEK_YubiKeySignedEnvelope_FIPSRejectsMissingYubiMetadata(t *testing.T) {
+	server := newTestKeyManagerServerWithFIPS(t, encryption.RSA2048, true)
+	ctx := context.Background()
+
+	createResp, err := server.CreateKey(ctx, &CreateKeyRequest{
+		Name:         "software-service-key-fips",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	clientPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+
+	clientPublicDER, err := x509.MarshalPKIXPublicKey(&clientPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal client public key: %v", err)
+	}
+
+	clientPublicPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: clientPublicDER,
+	}))
+
+	// Intentionally omit client_key_provider metadata to match legacy DB records.
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-yubikey-fips-no-meta",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("failed to register client key: %v", err)
+	}
+
+	dekPlaintext := []byte("0123456789abcdef0123456789abcdef")
+	clientWrapped, err := wrapYubiKeySignedDEKForTest(clientPrivateKey, dekPlaintext)
+	if err != nil {
+		t.Fatalf("failed to sign YubiKey envelope: %v", err)
+	}
+
+	_, err = server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-yubikey-fips-no-meta",
+		ClientWrappedDek: clientWrapped,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	})
+	if err == nil {
+		t.Fatalf("expected RewrapClientDEK to fail when YubiKey metadata is missing")
+	}
+}
+
+func TestServer_RewrapClientDEK_YubiKeySignedEnvelope_FIPSWithYubiMetadata(t *testing.T) {
+	server := newTestKeyManagerServerWithFIPS(t, encryption.RSA2048, true)
+	ctx := context.Background()
+
+	createResp, err := server.CreateKey(ctx, &CreateKeyRequest{
+		Name:         "software-service-key-fips",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		ProviderType: KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE,
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	clientPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+
+	clientPublicDER, err := x509.MarshalPKIXPublicKey(&clientPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal client public key: %v", err)
+	}
+
+	clientPublicPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: clientPublicDER,
+	}))
+
+	if err := server.clientKeyStore.RegisterKey(ctx, &Key{
+		KeyId:        "client-key-yubikey-fips",
+		ClientId:     "subject-1",
+		KeyType:      KeyType_KEY_TYPE_RSA_2048,
+		Status:       KeyStatus_KEY_STATUS_ACTIVE,
+		PublicKeyPem: clientPublicPEM,
+		CreatedAt:    timestamppb.Now(),
+		Metadata: map[string]string{
+			clientKeyProviderMetadataKey: clientKeyProviderYubiKey,
+		},
+	}); err != nil {
+		t.Fatalf("failed to register client key: %v", err)
+	}
+
+	dekPlaintext := []byte("0123456789abcdef0123456789abcdef")
+	clientWrapped, err := wrapYubiKeySignedDEKForTest(clientPrivateKey, dekPlaintext)
+	if err != nil {
+		t.Fatalf("failed to sign YubiKey envelope: %v", err)
+	}
+
+	rewrapResp, err := server.RewrapClientDEK(ctx, &RewrapClientDEKRequest{
+		Subject:          "subject-1",
+		ClientKeyId:      "client-key-yubikey-fips",
+		ClientWrappedDek: clientWrapped,
+		ServiceKeyId:     createResp.Key.KeyId,
+		Resource:         "document-service",
+	})
+	if err != nil {
+		t.Fatalf("RewrapClientDEK failed: %v", err)
+	}
+
+	provider, err := server.providerFactory.GetProvider(KeyProviderType_KEY_PROVIDER_TYPE_SOFTWARE)
+	if err != nil {
+		t.Fatalf("failed to get software provider: %v", err)
+	}
+
+	unwrapped, err := provider.Decrypt(ctx, createResp.Key.KeyId, rewrapResp.ServiceWrappedDek)
+	if err != nil {
+		t.Fatalf("software provider decrypt failed: %v", err)
+	}
+
+	if string(unwrapped) != string(dekPlaintext) {
+		t.Fatalf("DEK mismatch: got %x want %x", unwrapped, dekPlaintext)
+	}
+}
+
+func wrapYubiKeySignedDEKForTest(privateKey *rsa.PrivateKey, dek []byte) ([]byte, error) {
+	digest := sha256.Sum256(dek)
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		return nil, err
+	}
+
+	envelope := yubiKeySignedDEKEnvelope{
+		Version:   yubiKeyEnvelopeVersionSignedV1,
+		DEK:       base64.StdEncoding.EncodeToString(dek),
+		Signature: base64.StdEncoding.EncodeToString(signature),
+	}
+	return json.Marshal(envelope)
+}
+
+func TestVerifyYubiKeyRSASignature_RejectsDigestAsPlaintextFallback(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	dek := make([]byte, sha256.Size)
+	if _, err := rand.Read(dek); err != nil {
+		t.Fatalf("failed to generate dek: %v", err)
+	}
+
+	// Sign the provided DEK bytes directly as if they were already a SHA-256 digest.
+	legacySignature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, dek)
+	if err != nil {
+		t.Fatalf("failed to generate legacy signature: %v", err)
+	}
+
+	if err := verifyYubiKeyRSASignature(&privateKey.PublicKey, dek, legacySignature); err == nil {
+		t.Fatalf("expected signature verification to fail for digest-as-plaintext fallback")
 	}
 }
 
@@ -542,6 +1038,29 @@ func TestServer_ListProviders(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestServer_ListProviders_FIPSFiltersKeyTypes(t *testing.T) {
+	server := newTestKeyManagerServerWithFIPS(t, encryption.RSA2048, true)
+
+	response, err := server.ListProviders(context.Background(), &ListProvidersRequest{})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	for _, provider := range response.Providers {
+		for _, keyType := range provider.SupportedKeyTypes {
+			switch keyType {
+			case KeyType_KEY_TYPE_ECC_P256,
+				KeyType_KEY_TYPE_ECC_P384,
+				KeyType_KEY_TYPE_ECC_P521,
+				KeyType_KEY_TYPE_KYBER_512,
+				KeyType_KEY_TYPE_KYBER_768,
+				KeyType_KEY_TYPE_KYBER_1024:
+				t.Fatalf("FIPS mode should not allow key type %v", keyType)
+			}
+		}
 	}
 }
 

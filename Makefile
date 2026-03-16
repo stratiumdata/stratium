@@ -12,7 +12,7 @@
 .PHONY: docker-customer-up docker-customer-down docker-customer-logs verify-customer
 .PHONY: push-customer push-customer-platform push-customer-key-manager push-customer-key-access push-customer-pap
 .PHONY: setup-buildx build-customer-multiplatform build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access
-.PHONY: build-postgres push-postgres fmt-all tests-unit tests-integration tests-e2e tests-all build-all docker-build-images docker-push-images \
+.PHONY: build-postgres push-postgres fmt-all tests-unit tests-integration tests-e2e tests-all fips-validate build-all docker-build-images docker-push-images \
 	docker-compose-up docker-compose-down docker-compose-logs helm-minikube helm-eks eks-create eks-delete aws-ecr-login
 
 # Default target
@@ -47,42 +47,52 @@ HELM_RELEASE ?= stratium
 HELM_NAMESPACE ?= stratium
 export COMPOSE_PROJECT_NAME
 
+FIPS ?= 1
+GOFIPS140 ?= v1.0.0
+ifeq ($(FIPS),1)
+GO_BUILD_ENV := GOFIPS140=$(GOFIPS140)
+GO_BUILD_TAGS := -tags fips
+else
+GO_BUILD_ENV :=
+GO_BUILD_TAGS :=
+endif
+
 build: build-platform build-key-manager build-key-access build-pap ## Build all binaries
 
 build-platform: ## Build platform service binaries
 	@echo "Building platform server..."
-	cd go && go build -o ../bin/platform-server ./cmd/platform-server
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/platform-server ./cmd/platform-server
 	@echo "Building platform client..."
-	cd go && go build -o ../bin/platform-client ./cmd/platform-client
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/platform-client ./cmd/platform-client
 	@echo "Platform build complete!"
 
 build-key-manager: ## Build key manager service binaries
 	@echo "Building key manager server..."
-	cd go && go build -o ../bin/key-manager-server ./cmd/key-manager-server
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/key-manager-server ./cmd/key-manager-server
 	@echo "Building key manager client..."
-	cd go && go build -o ../bin/key-manager-client ./cmd/key-manager-client
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/key-manager-client ./cmd/key-manager-client
 	@echo "Key manager build complete!"
 
 build-key-access: ## Build key access service binaries
 	@echo "Building key access server..."
-	cd go && go build -o ../bin/key-access-server ./cmd/key-access-server
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/key-access-server ./cmd/key-access-server
 	@echo "Building key access client..."
-	cd go && go build -o ../bin/key-access-client ./cmd/key-access-client
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/key-access-client ./cmd/key-access-client
 	@echo "Key access build complete!"
 
 build-pap: ## Build PAP service binary
 	@echo "Building PAP server..."
-	cd go && go build -o ../bin/pap-server ./cmd/pap-server
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/pap-server ./cmd/pap-server
 	@echo "PAP build complete!"
 
 build-pap-cli: ## Build PAP CLI client
 	@echo "Building PAP CLI client..."
-	cd go && go build -o ../bin/pap-cli ./cmd/pap-cli
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/pap-cli ./cmd/pap-cli
 	@echo "PAP CLI build complete!"
 
 build-license-signer: ## Build license signer CLI
 	@echo "Building license signer CLI..."
-	cd go && go build -o ../bin/license-signer ./cmd/license-signer
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/license-signer ./cmd/license-signer
 	@echo "License signer CLI build complete!"
 
 generate-license-bundle: build-license-signer ## Generate a customer license bundle (uses scripts/generate-license-bundle.sh)
@@ -119,7 +129,8 @@ test-pap: ## Run PAP service tests
 
 tests-integration: ## Run integration tests for services and SDK
 	@echo "Running integration tests..."
-	cd go && go test ./services/... ./sdk/...
+	cd go && go test ./services/...
+	cd sdk/go && go test ./...
 
 tests-e2e: test-platform-pdp test-pap-auth ## Run end-to-end shell-based tests
 
@@ -130,6 +141,13 @@ test-platform-pdp: ## Run PDP integration tests
 test-pap-auth: ## Run PAP authentication tests
 	@echo "Running PAP authentication test..."
 	./scripts/test_pap_auth.sh
+
+fips-validate: ## Validate runtime FIPS crypto modules (STRICT=1 to fail on skips)
+	@echo "Validating FIPS runtime crypto modules..."
+	@STRICT=$(STRICT) GO_BIN_PATH=$(GO_BIN_PATH) \
+	PYTHON_BIN=$(PYTHON_BIN) OPENSSL_CONF=$(OPENSSL_CONF) OPENSSL_MODULES=$(OPENSSL_MODULES) OPENSSL_BIN=$(OPENSSL_BIN) \
+	JAVA_SECURITY_PROPERTIES=$(JAVA_SECURITY_PROPERTIES) JAVA_FIPS_CLASSPATH=$(JAVA_FIPS_CLASSPATH) \
+	./scripts/validate_fips_runtime.sh
 
 full: generate build docker-down docker-build docker-up ## Rebuilds artifacts and docker images
 	@echo ""

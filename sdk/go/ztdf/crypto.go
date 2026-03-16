@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -22,7 +23,6 @@ import (
 	"path/filepath"
 
 	"github.com/stratiumdata/go-sdk/gen/models"
-	"golang.org/x/crypto/hkdf"
 )
 
 const (
@@ -107,6 +107,9 @@ func RSAPublicKeyToPEM(publicKey *rsa.PublicKey) (string, error) {
 //	    log.Fatal(err)
 //	}
 func GenerateECCKeyPair(curve string) (*ecdh.PrivateKey, error) {
+	if isFIPSModeEnabled() {
+		return nil, fmt.Errorf("ECC key generation is disabled in FIPS mode")
+	}
 	var c ecdh.Curve
 
 	switch curve {
@@ -527,6 +530,9 @@ func DecryptDEKWithRSAPrivateKey(privateKey *rsa.PrivateKey, encryptedDEK []byte
 //	    log.Fatal(err)
 //	}
 func EncryptDEKWithECCPublicKey(publicKey *ecdh.PublicKey, dek []byte) ([]byte, error) {
+	if isFIPSModeEnabled() {
+		return nil, fmt.Errorf("ECIES is disabled in FIPS mode")
+	}
 	// Generate ephemeral key pair using the same curve as the recipient's public key
 	curve := publicKey.Curve()
 	ephemeralPrivateKey, err := curve.GenerateKey(rand.Reader)
@@ -541,9 +547,8 @@ func EncryptDEKWithECCPublicKey(publicKey *ecdh.PublicKey, dek []byte) ([]byte, 
 	}
 
 	// Derive encryption key using HKDF-SHA256
-	hkdfReader := hkdf.New(sha256.New, sharedSecret, nil, []byte("ztdf-ecies-v1"))
-	derivedKey := make([]byte, 32) // AES-256 key
-	if _, err := io.ReadFull(hkdfReader, derivedKey); err != nil {
+	derivedKey, err := hkdf.Key(sha256.New, sharedSecret, nil, "ztdf-ecies-v1", 32)
+	if err != nil {
 		return nil, fmt.Errorf("failed to derive key: %w", err)
 	}
 
@@ -589,6 +594,9 @@ func EncryptDEKWithECCPublicKey(publicKey *ecdh.PublicKey, dek []byte) ([]byte, 
 //	    log.Fatal(err)
 //	}
 func DecryptDEKWithECCPrivateKey(privateKey *ecdh.PrivateKey, encryptedDEK []byte) ([]byte, error) {
+	if isFIPSModeEnabled() {
+		return nil, fmt.Errorf("ECIES is disabled in FIPS mode")
+	}
 	// Parse encrypted blob
 	if len(encryptedDEK) < 1 {
 		return nil, errors.New("encrypted DEK too short")
@@ -619,9 +627,8 @@ func DecryptDEKWithECCPrivateKey(privateKey *ecdh.PrivateKey, encryptedDEK []byt
 	}
 
 	// Derive encryption key using HKDF-SHA256
-	hkdfReader := hkdf.New(sha256.New, sharedSecret, nil, []byte("ztdf-ecies-v1"))
-	derivedKey := make([]byte, 32) // AES-256 key
-	if _, err := io.ReadFull(hkdfReader, derivedKey); err != nil {
+	derivedKey, err := hkdf.Key(sha256.New, sharedSecret, nil, "ztdf-ecies-v1", 32)
+	if err != nil {
 		return nil, fmt.Errorf("failed to derive key: %w", err)
 	}
 

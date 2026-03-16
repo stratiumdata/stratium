@@ -9,6 +9,8 @@ import (
 
 	"stratium/features"
 	"stratium/pkg/security/encryption"
+	"stratium/pkg/security/fipsbuild"
+	"stratium/pkg/security/fipsruntime"
 
 	"github.com/spf13/viper"
 )
@@ -80,10 +82,12 @@ type ServerConfig struct {
 
 // TLSConfig holds TLS/SSL settings
 type TLSConfig struct {
-	Enabled  bool   `mapstructure:"enabled"`
-	CertFile string `mapstructure:"cert_file"`
-	KeyFile  string `mapstructure:"key_file"`
-	CAFile   string `mapstructure:"ca_file"`
+	Enabled           bool   `mapstructure:"enabled"`
+	CertFile          string `mapstructure:"cert_file"`
+	KeyFile           string `mapstructure:"key_file"`
+	CAFile            string `mapstructure:"ca_file"`
+	ClientCAFile      string `mapstructure:"client_ca_file"`
+	RequireClientCert bool   `mapstructure:"require_client_cert"`
 }
 
 // DatabaseConfig holds database connection settings
@@ -164,6 +168,7 @@ type LoggingConfig struct {
 type SecurityConfig struct {
 	RateLimiting RateLimitConfig `mapstructure:"rate_limiting"`
 	CORS         CORSConfig      `mapstructure:"cors"`
+	FIPS         FIPSConfig      `mapstructure:"fips"`
 }
 
 // RateLimitConfig holds rate limiting settings
@@ -182,6 +187,12 @@ type CORSConfig struct {
 	ExposeHeaders    []string      `mapstructure:"expose_headers"`
 	AllowCredentials bool          `mapstructure:"allow_credentials"`
 	MaxAge           time.Duration `mapstructure:"max_age"`
+}
+
+// FIPSConfig controls FIPS 140-3 enforcement for Go services.
+type FIPSConfig struct {
+	Enabled  bool   `mapstructure:"enabled"`
+	GoModule string `mapstructure:"go_module"`
 }
 
 // ObservabilityConfig holds metrics and tracing settings
@@ -394,9 +405,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.rate_limiting.requests_per_min", 100)
 	v.SetDefault("security.rate_limiting.burst", 50)
 	v.SetDefault("security.cors.enabled", true)
-	v.SetDefault("security.cors.allowed_origins", []string{"*"})
+	v.SetDefault("security.cors.allowed_origins", []string{})
 	v.SetDefault("security.cors.allowed_methods", []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"})
 	v.SetDefault("security.cors.allowed_headers", []string{"Authorization", "Content-Type"})
+	v.SetDefault("security.fips.enabled", false)
+	v.SetDefault("security.fips.go_module", "v1.0.0-c2097c7c")
 
 	// Observability defaults
 	v.SetDefault("observability.metrics.enabled", false)
@@ -440,6 +453,14 @@ func validateConfig(cfg *Config) error {
 		if !fileExists(cfg.Server.TLS.KeyFile) {
 			return fmt.Errorf("TLS key file not found: %s", cfg.Server.TLS.KeyFile)
 		}
+		if cfg.Server.TLS.RequireClientCert {
+			if cfg.Server.TLS.ClientCAFile == "" {
+				return fmt.Errorf("server.tls.client_ca_file is required when mutual TLS is enabled")
+			}
+			if !fileExists(cfg.Server.TLS.ClientCAFile) {
+				return fmt.Errorf("TLS client CA file not found: %s", cfg.Server.TLS.ClientCAFile)
+			}
+		}
 	}
 
 	// Validate database configuration
@@ -459,6 +480,19 @@ func validateConfig(cfg *Config) error {
 		}
 		if cfg.OIDC.ClientID == "" {
 			return fmt.Errorf("oidc.client_id is required when OIDC is enabled")
+		}
+	}
+
+	if cfg.Security.CORS.Enabled {
+		hasOrigin := false
+		for _, origin := range cfg.Security.CORS.AllowedOrigins {
+			if strings.TrimSpace(origin) != "" {
+				hasOrigin = true
+				break
+			}
+		}
+		if !hasOrigin {
+			return fmt.Errorf("security.cors.allowed_origins is required when CORS is enabled")
 		}
 	}
 
@@ -502,6 +536,14 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
+	if err := validateFIPSConfig(cfg); err != nil {
+		return err
+	}
+
+	if cfg.Security.FIPS.Enabled && fipsbuild.Enabled && !cfg.Server.TLS.Enabled {
+		return fmt.Errorf("FIPS build requires server.tls.enabled=true")
+	}
+
 	return nil
 }
 
@@ -524,7 +566,14 @@ func (c *Config) GetDatabaseURL() string {
 
 // GetEncryptionAlgorithm returns the parsed encryption algorithm
 func (c *Config) GetEncryptionAlgorithm() (encryption.Algorithm, error) {
-	return encryption.ParseAlgorithm(c.Encryption.Algorithm)
+	alg, err := encryption.ParseAlgorithm(c.Encryption.Algorithm)
+	if err != nil {
+		return "", err
+	}
+	if c.Security.FIPS.Enabled && !encryption.IsFIPSApproved(alg) {
+		return "", fmt.Errorf("encryption.algorithm %q is not approved for FIPS mode", c.Encryption.Algorithm)
+	}
+	return alg, nil
 }
 
 // IsDevelopment returns true if running in development mode
@@ -557,6 +606,34 @@ func fileExists(path string) bool {
 	}
 	_, err := os.Stat(expandedPath)
 	return err == nil
+}
+
+func validateFIPSConfig(cfg *Config) error {
+	if !cfg.Security.FIPS.Enabled {
+		return nil
+	}
+
+	if strings.TrimSpace(cfg.Security.FIPS.GoModule) == "" {
+		return fmt.Errorf("security.fips.go_module is required when FIPS mode is enabled")
+	}
+
+	buildSetting, ok := fipsruntime.GoFIPSBuildSetting()
+	if !ok {
+		return fmt.Errorf("security.fips.enabled requires GOFIPS140 build setting %q", cfg.Security.FIPS.GoModule)
+	}
+	if buildSetting != cfg.Security.FIPS.GoModule {
+		return fmt.Errorf("security.fips.go_module %q does not match build setting %q", cfg.Security.FIPS.GoModule, buildSetting)
+	}
+
+	if value, ok := fipsruntime.GoDebugSetting("fips140"); ok && value == "off" {
+		return fmt.Errorf("GODEBUG fips140=off disables FIPS mode")
+	}
+
+	if _, err := cfg.GetEncryptionAlgorithm(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // applyFeatureFlags applies build-time feature flags to override configuration
@@ -592,8 +669,10 @@ func applyFeatureFlags(cfg *Config) {
 		cfg.Services.PAP.Timeout = 3 * time.Second
 	}
 
-	// Respect both config and feature flag for rate limiting
-	cfg.Security.RateLimiting.Enabled = cfg.Security.RateLimiting.Enabled && features.ShouldEnableRateLimiting()
+	// Only enable via feature flag; do not disable if already enabled.
+	if features.ShouldEnableRateLimiting() {
+		cfg.Security.RateLimiting.Enabled = true
+	}
 
 	// Disable caching unless feature flag is enabled
 	if !features.ShouldEnableCaching() {

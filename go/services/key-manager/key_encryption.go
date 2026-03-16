@@ -10,11 +10,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-
-	"github.com/cloudflare/circl/kem"
-	"github.com/cloudflare/circl/kem/kyber/kyber1024"
-	"github.com/cloudflare/circl/kem/kyber/kyber512"
-	"github.com/cloudflare/circl/kem/kyber/kyber768"
 )
 
 // Helper functions to check key type families
@@ -148,33 +143,10 @@ func serializePrivateKey(privateKey any, keyType KeyType) ([]byte, error) {
 	}
 
 	if isKyberKeyType(keyType) {
-		// Kyber keys implement kem.PrivateKey interface
-		// We need to serialize the private key bytes
-		switch k := privateKey.(type) {
-		case *kyber512.PrivateKey:
-			keyBytes := make([]byte, kyber512.Scheme().PrivateKeySize())
-			k.Pack(keyBytes)
-			return keyBytes, nil
-		case *kyber768.PrivateKey:
-			keyBytes := make([]byte, kyber768.Scheme().PrivateKeySize())
-			k.Pack(keyBytes)
-			return keyBytes, nil
-		case *kyber1024.PrivateKey:
-			keyBytes := make([]byte, kyber1024.Scheme().PrivateKeySize())
-			k.Pack(keyBytes)
-			return keyBytes, nil
-		default:
-			// Fallback for generic KEM private key
-			if kemKey, ok := privateKey.(kem.PrivateKey); ok {
-				// Marshal as bytes (implementation-specific)
-				keyBytes, err := kemKey.MarshalBinary()
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal KEM key: %w", err)
-				}
-				return keyBytes, nil
-			}
-			return nil, fmt.Errorf("unsupported Kyber key type: %T", privateKey)
+		if keyBytes, ok, err := serializeKyberPrivateKey(privateKey, keyType); ok {
+			return keyBytes, err
 		}
+		return nil, fmt.Errorf("kyber key serialization is disabled")
 	}
 
 	return nil, fmt.Errorf("unsupported key type for serialization: %s", keyType)
@@ -207,33 +179,10 @@ func deserializePrivateKey(keyBytes []byte, keyType KeyType) (any, error) {
 	}
 
 	if isKyberKeyType(keyType) {
-		// For Kyber, we need to determine the variant based on private key size
-		// This is a limitation - we should store the variant in metadata
-		// For now, we'll try each variant
-		var privateKey kem.PrivateKey
-
-		// Try Kyber512
-		if len(keyBytes) == kyber512.Scheme().PrivateKeySize() {
-			privateKey = new(kyber512.PrivateKey)
-			privateKey.(*kyber512.PrivateKey).Unpack(keyBytes)
-			return privateKey, nil
+		if privateKey, ok, err := deserializeKyberPrivateKey(keyBytes, keyType); ok {
+			return privateKey, err
 		}
-
-		// Try Kyber768
-		if len(keyBytes) == kyber768.Scheme().PrivateKeySize() {
-			privateKey = new(kyber768.PrivateKey)
-			privateKey.(*kyber768.PrivateKey).Unpack(keyBytes)
-			return privateKey, nil
-		}
-
-		// Try Kyber1024
-		if len(keyBytes) == kyber1024.Scheme().PrivateKeySize() {
-			privateKey = new(kyber1024.PrivateKey)
-			privateKey.(*kyber1024.PrivateKey).Unpack(keyBytes)
-			return privateKey, nil
-		}
-
-		return nil, fmt.Errorf("failed to deserialize Kyber key: unsupported private key size %d or invalid key", len(keyBytes))
+		return nil, fmt.Errorf("kyber key deserialization is disabled")
 	}
 
 	return nil, fmt.Errorf("unsupported key type for deserialization: %s", keyType)
@@ -328,17 +277,10 @@ func ConvertPrivateKeyToPEM(privateKey any, keyType KeyType) (string, error) {
 	}
 
 	if isKyberKeyType(keyType) {
-		// Kyber keys don't have a standard PEM format
-		// We'll use a custom format
-		keyBytes, err := serializePrivateKey(privateKey, keyType)
-		if err != nil {
-			return "", fmt.Errorf("failed to serialize Kyber key: %w", err)
+		if pemValue, ok, err := convertKyberPrivateKeyToPEM(privateKey, keyType); ok {
+			return pemValue, err
 		}
-		block := &pem.Block{
-			Type:  "KYBER PRIVATE KEY",
-			Bytes: keyBytes,
-		}
-		return string(pem.EncodeToMemory(block)), nil
+		return "", fmt.Errorf("kyber key PEM conversion is disabled")
 	}
 
 	return "", fmt.Errorf("unsupported key type for PEM conversion: %s", keyType)

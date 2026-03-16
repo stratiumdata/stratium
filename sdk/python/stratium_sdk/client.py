@@ -23,6 +23,7 @@ from .crypto import (
     decrypt_dek,
     decrypt_payload,
     decrypt_segmented_payload,
+    ensure_fips_mode,
     encrypt_payload,
     generate_dek,
     generate_iv,
@@ -52,6 +53,8 @@ class StratiumClient:
     ) -> None:
         self._config = config
         self._config.validate()
+        if self._config.fips_enabled:
+            ensure_fips_mode()
         self._key_store = key_store or FileKeyStore(Path(".stratium-keys"))
         self._token_provider = token_provider or build_token_provider(config)
         if not self._token_provider:
@@ -141,7 +144,7 @@ class StratiumClient:
         if not result.access_granted:
             raise APIError(result.access_reason or "access denied")
 
-        dek = decrypt_dek(result.dek_for_subject, pair.private_key)
+        dek = decrypt_dek(result.dek_for_subject, pair.private_key, self._config.fips_enabled)
         encryption_method = manifest.encryption_information.method
         iv = base64.b64decode(encryption_method.iv)
 
@@ -192,7 +195,10 @@ class StratiumClient:
         dek = generate_dek()
         iv = generate_iv()
         encryption = encrypt_payload(plaintext, dek, iv)
-        client_wrapped_dek = wrap_dek_with_private_key(dek, pair.private_key)
+        if self._config.fips_enabled:
+            client_wrapped_dek = dek
+        else:
+            client_wrapped_dek = wrap_dek_with_private_key(dek, pair.private_key)
 
         wrap_request = WrapDEKRequest(
             resource=options.resource,

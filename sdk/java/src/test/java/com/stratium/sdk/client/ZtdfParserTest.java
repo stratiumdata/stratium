@@ -21,10 +21,9 @@ class ZtdfParserTest {
                 "encryptionInformation", Map.of(
                         "type", "split",
                         "keyAccess", new Object[]{Map.of(
-                                "type", "wrapped",
-                                "kid", "key-123",
-                                "wrappedKey", "YmFzZTY0",
-                                "policyBinding", ""
+                        "type", "wrapped",
+                        "kid", "key-123",
+                        "wrappedKey", "YmFzZTY0"
                         )},
                         "method", Map.of(
                                 "algorithm", "AES-256-GCM",

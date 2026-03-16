@@ -67,7 +67,7 @@ encryption:       # Encryption settings
 oidc:             # OIDC/OAuth2 authentication
 services:         # Service discovery/connections
 logging:          # Logging configuration
-security:         # Security settings (rate limiting, CORS)
+security:         # Security settings (rate limiting, CORS, FIPS mode)
 observability:    # Metrics and tracing
 license:          # Offline license enforcement
 ```
@@ -195,6 +195,8 @@ encryption:
   - `P384` - NIST P-384 curve (ECC_P384)
   - `P521` - NIST P-521 curve (ECC_P521)
 
+- FIPS mode note: when `security.fips.enabled=true`, Stratium currently allows only RSA algorithms for key wrapping.
+
 - `key_rotation`: Enable automatic key rotation
 - `admin_key_provider`: Where to load admin keys from (`env`, `file`, or `composite`)
 - `admin_key_config`: Path or configuration for admin key
@@ -294,6 +296,9 @@ security:
       - X-RateLimit-Remaining
     allow_credentials: true
     max_age: 3600s
+  fips:
+    enabled: false
+    go_module: v1.0.0
 ```
 
 **Settings:**
@@ -307,6 +312,9 @@ security:
 - `cors.expose_headers`: List of headers that are safe to expose to the client (optional)
 - `cors.allow_credentials`: Allow credentials (cookies, authorization headers) in CORS requests (default: false)
 - `cors.max_age`: Maximum time browsers can cache preflight request results (default: 0s)
+- `fips.enabled`: Enforce FIPS 140-3 runtime requirements (default: false)
+- `fips.go_module`: Required `GOFIPS140` module version when FIPS is enabled (default: `v1.0.0`)
+Go services must be built with the matching `GOFIPS140` module (default Makefile builds with FIPS on; use `make build FIPS=0` to disable).
 
 ### Observability Configuration
 

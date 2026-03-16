@@ -1,0 +1,6 @@
+regex:
+  administrative: '([bad'
+  classification: '\b(?:TOP SECRET|SECRET|CONFIDENTIAL|RESTRICTED|UNCLASSIFIED)\b'
+  only: '^.*(?:UNCLASSIFIED|RESTRICTED|CONFIDENTIAL|TOP SECRET|SECRET)\s'
+  releasable_to: 'Releasable To'
+  special_category_designator: '\s-\s(?:ATOMAL|BOHEMIA|CRYPTO|SIOP)(?:,(?:ATOMAL|BOHEMIA|CRYPTO|SIOP))*'

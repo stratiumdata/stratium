@@ -148,14 +148,17 @@ func (c *Client) wrapStream(ctx context.Context, reader io.Reader, opts *WrapOpt
 		return nil, fmt.Errorf("%s: %s", ErrMsgFailedToWrapDEK, "client private key path is required")
 	}
 
-	privateKey, err := GetRSAPrivateKeyFromFile(opts.ClientPrivateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
-	}
+	clientWrappedDEK := dek
+	if c.stratiumClient == nil || c.stratiumClient.Config() == nil || !c.stratiumClient.Config().IsFIPSMode() {
+		privateKey, err := GetRSAPrivateKeyFromFile(opts.ClientPrivateKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
+		}
 
-	clientWrappedDEK, err := WrapDEKWithRSAPrivateKey(privateKey, dek)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
+		clientWrappedDEK, err = WrapDEKWithRSAPrivateKey(privateKey, dek)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", ErrMsgFailedToWrapDEK, err)
+		}
 	}
 
 	wrappedDEK, keyID, err := c.wrapDEK(ctx, opts.Resource, opts.ClientKeyID, clientWrappedDEK, dek, opts.ResourceAttributes, policyBase64, opts.Context)
@@ -248,6 +251,12 @@ func (c *Client) Unwrap(ctx context.Context, tdo *TrustedDataObject, opts *Unwra
 	}
 	if encInfo.Method == nil {
 		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "missing encryption method")
+	}
+	if encInfo.Method.GetIsStreamable() && (encInfo.IntegrityInformation == nil || len(encInfo.IntegrityInformation.Segments) == 0) {
+		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "missing encryption method or integrity information")
+	}
+	if opts.VerifyIntegrity && encInfo.IntegrityInformation == nil {
+		return nil, fmt.Errorf("%s: %s", ErrMsgInvalidZTDF, "missing encryption method or integrity information")
 	}
 
 	ivBase64 := encInfo.Method.Iv
