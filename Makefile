@@ -159,12 +159,14 @@ docker-build: ## Build all Docker images (production)
 			--build-arg BUILD_VERSION=$(DOCKER_VERSION) \
 			-f deployment/docker/Dockerfile \
 			-t $(DOCKER_REGISTRY)/$$svc:$(DOCKER_VERSION) \
+			-t local/$$svc:latest \
 			.; \
 	done; \
 	echo "Building pap-ui image..."; \
 	docker build \
 		-f pap-ui/Dockerfile \
 		-t $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) \
+		-t local/pap-ui:latest \
 		pap-ui
 
 docker-push: ## Push Docker images to registry/ECR
