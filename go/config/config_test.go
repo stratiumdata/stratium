@@ -70,33 +70,51 @@ func TestConfig_GetDatabaseURL(t *testing.T) {
 
 func TestConfig_GetEncryptionAlgorithm(t *testing.T) {
 	tests := []struct {
-		name      string
-		algorithm string
-		expected  encryption.Algorithm
-		wantErr   bool
+		name        string
+		algorithm   string
+		fipsEnabled bool
+		expected    encryption.Algorithm
+		wantErr     bool
 	}{
 		{
-			name:      "RSA2048",
-			algorithm: "RSA2048",
-			expected:  encryption.RSA2048,
-			wantErr:   false,
+			name:        "RSA2048",
+			algorithm:   "RSA2048",
+			fipsEnabled: false,
+			expected:    encryption.RSA2048,
+			wantErr:     false,
 		},
 		{
-			name:      "RSA4096",
-			algorithm: "RSA4096",
-			expected:  encryption.RSA4096,
-			wantErr:   false,
+			name:        "RSA4096",
+			algorithm:   "RSA4096",
+			fipsEnabled: false,
+			expected:    encryption.RSA4096,
+			wantErr:     false,
 		},
 		{
-			name:      "KYBER768",
-			algorithm: "KYBER768",
-			expected:  encryption.KYBER768,
-			wantErr:   false,
+			name:        "KYBER768",
+			algorithm:   "KYBER768",
+			fipsEnabled: false,
+			expected:    encryption.KYBER768,
+			wantErr:     false,
 		},
 		{
-			name:      "invalid algorithm",
-			algorithm: "INVALID",
-			wantErr:   true,
+			name:        "invalid algorithm",
+			algorithm:   "INVALID",
+			fipsEnabled: false,
+			wantErr:     true,
+		},
+		{
+			name:        "FIPS allows RSA2048",
+			algorithm:   "RSA2048",
+			fipsEnabled: true,
+			expected:    encryption.RSA2048,
+			wantErr:     false,
+		},
+		{
+			name:        "FIPS rejects KYBER768",
+			algorithm:   "KYBER768",
+			fipsEnabled: true,
+			wantErr:     true,
 		},
 	}
 
@@ -105,6 +123,11 @@ func TestConfig_GetEncryptionAlgorithm(t *testing.T) {
 			cfg := &Config{
 				Encryption: EncryptionConfig{
 					Algorithm: tt.algorithm,
+				},
+				Security: SecurityConfig{
+					FIPS: FIPSConfig{
+						Enabled: tt.fipsEnabled,
+					},
 				},
 			}
 
@@ -236,6 +259,43 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "service.name is required",
+		},
+		{
+			name: "CORS enabled without allowed origins",
+			config: &Config{
+				Service: ServiceConfig{
+					Name: "test-service",
+				},
+				Server: ServerConfig{
+					Port: 8080,
+				},
+				Security: SecurityConfig{
+					CORS: CORSConfig{
+						Enabled:        true,
+						AllowedOrigins: []string{},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "security.cors.allowed_origins is required when CORS is enabled",
+		},
+		{
+			name: "CORS enabled with explicit allowed origins",
+			config: &Config{
+				Service: ServiceConfig{
+					Name: "test-service",
+				},
+				Server: ServerConfig{
+					Port: 8080,
+				},
+				Security: SecurityConfig{
+					CORS: CORSConfig{
+						Enabled:        true,
+						AllowedOrigins: []string{"https://example.com"},
+					},
+				},
+			},
+			wantErr: false,
 		},
 		{
 			name: "invalid port - too low",
@@ -412,10 +472,12 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("STRATIUM_SERVICE_NAME", "env-test-service")
 	os.Setenv("STRATIUM_SERVER_PORT", "9090")
 	os.Setenv("STRATIUM_SERVICE_ENVIRONMENT", "testing")
+	os.Setenv("STRATIUM_SECURITY_CORS_ALLOWED_ORIGINS", "https://example.com")
 	defer func() {
 		os.Unsetenv("STRATIUM_SERVICE_NAME")
 		os.Unsetenv("STRATIUM_SERVER_PORT")
 		os.Unsetenv("STRATIUM_SERVICE_ENVIRONMENT")
+		os.Unsetenv("STRATIUM_SECURITY_CORS_ALLOWED_ORIGINS")
 	}()
 
 	cfg, err := LoadFromEnv()
@@ -461,6 +523,12 @@ logging:
   level: warn
   format: json
   output: stdout
+
+security:
+  cors:
+    enabled: true
+    allowed_origins:
+      - https://example.com
 `
 
 	err := os.WriteFile(configFile, []byte(configContent), 0644)
@@ -528,12 +596,12 @@ func TestLoad_NonExistentConfigFile(t *testing.T) {
 
 func TestApplyServiceSpecificRateLimits(t *testing.T) {
 	tests := []struct {
-		name                              string
-		serviceName                       string
-		expectedRequestPerMinIfEnabled    int
-		expectedBurstIfEnabled            int
-		expectedRequestPerMinIfDisabled   int
-		expectedBurstIfDisabled           int
+		name                            string
+		serviceName                     string
+		expectedRequestPerMinIfEnabled  int
+		expectedBurstIfEnabled          int
+		expectedRequestPerMinIfDisabled int
+		expectedBurstIfDisabled         int
 	}{
 		{
 			name:                            "key-access-server",
@@ -672,6 +740,9 @@ func TestApplyFeatureFlags(t *testing.T) {
 }
 
 func TestDefaultValues(t *testing.T) {
+	os.Setenv("STRATIUM_SECURITY_CORS_ALLOWED_ORIGINS", "https://example.com")
+	defer os.Unsetenv("STRATIUM_SECURITY_CORS_ALLOWED_ORIGINS")
+
 	// Load without config file (should use defaults)
 	cfg, err := LoadFromEnv()
 	require.NoError(t, err)
@@ -718,10 +789,12 @@ func TestConfig_EnvironmentOverridesDefaults(t *testing.T) {
 	os.Setenv("STRATIUM_SERVER_HOST", "custom.host")
 	os.Setenv("STRATIUM_SERVER_PORT", "7777")
 	os.Setenv("STRATIUM_LOGGING_LEVEL", "debug")
+	os.Setenv("STRATIUM_SECURITY_CORS_ALLOWED_ORIGINS", "https://example.com")
 	defer func() {
 		os.Unsetenv("STRATIUM_SERVER_HOST")
 		os.Unsetenv("STRATIUM_SERVER_PORT")
 		os.Unsetenv("STRATIUM_LOGGING_LEVEL")
+		os.Unsetenv("STRATIUM_SECURITY_CORS_ALLOWED_ORIGINS")
 	}()
 
 	cfg, err := LoadFromEnv()

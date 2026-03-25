@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stratiumdata/go-sdk/internal/fipsruntime"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -62,6 +63,9 @@ type Config struct {
 
 	// Telemetry
 	Telemetry *TelemetryConfig
+
+	// FIPS controls FIPS 140-3 enforcement for SDK crypto paths.
+	FIPS *FIPSConfig
 }
 
 // TelemetryConfig controls SDK OpenTelemetry exporters.
@@ -82,6 +86,12 @@ type OIDCConfig struct {
 	Password     string   // Password to use with password grant
 	Scopes       []string // OIDC scopes (default: ["openid", "profile", "email"])
 	RedirectURL  string   // OIDC redirect url (e.g., https://localhost:8080/callback)
+}
+
+// FIPSConfig controls FIPS 140-3 enforcement for SDK crypto.
+type FIPSConfig struct {
+	Enabled  bool   // Enable FIPS enforcement for SDK crypto paths
+	GoModule string // Required GOFIPS140 module version (e.g., v1.0.0-c2097c7c)
 }
 
 // Validate checks if the configuration is valid.
@@ -111,6 +121,22 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.FIPS != nil && c.FIPS.Enabled {
+		if strings.TrimSpace(c.FIPS.GoModule) == "" {
+			return fmt.Errorf("fips.go_module is required when FIPS mode is enabled")
+		}
+		buildSetting, ok := fipsruntime.GoFIPSBuildSetting()
+		if !ok {
+			return fmt.Errorf("FIPS mode requires GOFIPS140 build setting %q", c.FIPS.GoModule)
+		}
+		if buildSetting != c.FIPS.GoModule {
+			return fmt.Errorf("fips.go_module %q does not match build setting %q", c.FIPS.GoModule, buildSetting)
+		}
+		if value, ok := fipsruntime.GoDebugSetting("fips140"); ok && value == "off" {
+			return fmt.Errorf("GODEBUG fips140=off disables FIPS mode")
+		}
+	}
+
 	return nil
 }
 
@@ -133,6 +159,14 @@ func (c *Config) SetDefaults() {
 			c.Telemetry.Endpoint = "localhost:4317"
 		}
 	}
+	if c.FIPS != nil && c.FIPS.GoModule == "" {
+		c.FIPS.GoModule = "v1.0.0-c2097c7c"
+	}
+}
+
+// IsFIPSMode returns true when FIPS enforcement is enabled.
+func (c *Config) IsFIPSMode() bool {
+	return c.FIPS != nil && c.FIPS.Enabled
 }
 
 // dialOptions returns the gRPC dial options based on configuration.

@@ -142,6 +142,30 @@ func TestAlgorithmConstants(t *testing.T) {
 	}
 }
 
+func TestIsFIPSApproved(t *testing.T) {
+	tests := []struct {
+		name     string
+		alg      Algorithm
+		expected bool
+	}{
+		{"RSA2048", RSA2048, true},
+		{"RSA3072", RSA3072, true},
+		{"RSA4096", RSA4096, true},
+		{"P256", ECC_P256, false},
+		{"P384", ECC_P384, false},
+		{"P521", ECC_P521, false},
+		{"KYBER512", KYBER512, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if IsFIPSApproved(tt.alg) != tt.expected {
+				t.Errorf("IsFIPSApproved(%s) = %v, want %v", tt.alg, IsFIPSApproved(tt.alg), tt.expected)
+			}
+		})
+	}
+}
+
 func TestAlgorithmString(t *testing.T) {
 	tests := []struct {
 		alg  Algorithm

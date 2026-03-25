@@ -2,6 +2,7 @@ package pap
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"stratium/config"
@@ -26,6 +27,14 @@ type Server struct {
 	authService      *AuthService
 	cacheInvalidator cache.CacheInvalidator
 	licenseEnforcer  *middleware.LicenseEnforcer
+	tlsEnabled       bool
+	tlsConfig        *tls.Config
+}
+
+// ConfigureTLS sets the server TLS configuration.
+func (s *Server) ConfigureTLS(tlsConfig *tls.Config) {
+	s.tlsConfig = tlsConfig
+	s.tlsEnabled = tlsConfig != nil
 }
 
 // NewServer creates a new PAP server instance
@@ -135,7 +144,25 @@ func (s *Server) setupRoutes(config config.CORSConfig) {
 // Start starts the HTTP server
 func (s *Server) Start(addr string) error {
 	logger.Startup("Starting PAP API server on %s", addr)
-	return s.router.Run(addr)
+	if s.router == nil {
+		logger.Error("PAP server router is nil at startup")
+		panic("pap server router not initialized")
+	}
+
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: s.router,
+	}
+
+	if s.tlsEnabled {
+		if s.tlsConfig == nil {
+			return fmt.Errorf("TLS is enabled but no TLS config is set")
+		}
+		httpServer.TLSConfig = s.tlsConfig
+		return httpServer.ListenAndServeTLS("", "")
+	}
+
+	return httpServer.ListenAndServe()
 }
 
 // healthCheck returns the server health status

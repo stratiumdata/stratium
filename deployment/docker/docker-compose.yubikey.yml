@@ -1,0 +1,12 @@
+services:
+  key-manager:
+    build:
+      args:
+        ENABLE_YUBIKEY_TOOLS: "true"
+    environment:
+      - STRATIUM_ENABLE_YUBIKEY=true
+    user: root
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - "c 189:* rmw"

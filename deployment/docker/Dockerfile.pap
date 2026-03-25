@@ -8,16 +8,30 @@ RUN apk add --no-cache git ca-certificates
 WORKDIR /app
 
 # Copy go mod files
-COPY go/go.mod go/go.sum ./
+COPY go/go.mod go/go.sum ./go/
+# Copy local replace modules needed for dependency resolution
+COPY third_party/gin/go.mod third_party/gin/go.sum ./third_party/gin/
 
 # Download dependencies
+WORKDIR /app/go
 RUN go mod download
 
 # Copy source code
-COPY go/ ./
+WORKDIR /app
+COPY go/ ./go/
+COPY third_party/gin/ ./third_party/gin/
+
+# Ensure local replace module is available for builds
+WORKDIR /app/third_party/gin
+RUN go mod download
+
+WORKDIR /app/go
 
 # Build the PAP server
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o pap-server ./cmd/pap-server
+ARG GOFIPS140=""
+ARG BUILD_TAGS=""
+RUN CGO_ENABLED=0 GOOS=linux GOFIPS140=${GOFIPS140} \
+    go build -tags "${BUILD_TAGS}" -a -installsuffix cgo -o /app/pap-server ./cmd/pap-server
 
 # Final stage
 FROM cgr.dev/chainguard/wolfi-base:latest

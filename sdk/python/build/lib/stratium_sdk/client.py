@@ -192,7 +192,10 @@ class StratiumClient:
         dek = generate_dek()
         iv = generate_iv()
         encryption = encrypt_payload(plaintext, dek, iv)
-        client_wrapped_dek = wrap_dek_with_private_key(dek, pair.private_key)
+        if self._config.fips_enabled:
+            client_wrapped_dek = dek
+        else:
+            client_wrapped_dek = wrap_dek_with_private_key(dek, pair.private_key)
 
         wrap_request = WrapDEKRequest(
             resource=options.resource,

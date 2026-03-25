@@ -25,8 +25,15 @@ type ZTDFCreator struct {
 func NewZTDFCreator(keyManagerAddr, keyAccessAddr, keycloakURL, clientID, username, password string, useTLS bool) (*ZTDFCreator, error) {
 	// Configure the SDK client
 	config := &ztdf.ZtdfClientConfig{
-		KeyManagerAddr: keyManagerAddr,
-		KeyAccessAddr:  keyAccessAddr,
+		KeyManagerAddr:      keyManagerAddr,
+		KeyAccessAddr:       keyAccessAddr,
+		KeyStorePath:        clientKeyStorePath,
+		ClientKeyProvider:   clientKeyProvider,
+		YubiKeySlot:         yubiKeySlot,
+		YubiKeyPIN:          yubiKeyPIN,
+		YubiKeyRequireTouch: yubiKeyRequireTouch,
+		YubiKeyPIVToolPath:  yubiKeyPIVToolPath,
+		YubiKeyYKManPath:    yubiKeyYKManPath,
 		AuthConfig: &auth.AuthConfig{
 			IssuerURL: keycloakURL,
 			ClientID:  clientID,

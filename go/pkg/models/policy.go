@@ -43,11 +43,11 @@ type Policy struct {
 
 // CreatePolicyRequest represents a request to create a new policy
 type CreatePolicyRequest struct {
-	Name          string         `json:"name" binding:"required"`
+	Name          string         `json:"name"`
 	Description   string         `json:"description"`
-	Language      PolicyLanguage `json:"language" binding:"required,oneof=xacml opa json"`
-	PolicyContent string         `json:"policy_content" binding:"required"`
-	Effect        PolicyEffect   `json:"effect" binding:"required,oneof=allow deny"`
+	Language      PolicyLanguage `json:"language"`
+	PolicyContent string         `json:"policy_content"`
+	Effect        PolicyEffect   `json:"effect"`
 	Priority      int            `json:"priority"`
 	Enabled       bool           `json:"enabled"`
 }
@@ -67,10 +67,10 @@ type UpdatePolicyRequest struct {
 type PolicyEvaluationRequest struct {
 	PolicyID           *uuid.UUID             `json:"policy_id,omitempty"`
 	PolicyContent      *string                `json:"policy_content,omitempty"`
-	Language           PolicyLanguage         `json:"language" binding:"required,oneof=xacml opa json"`
-	SubjectAttributes  map[string]interface{} `json:"subject_attributes" binding:"required"`
-	ResourceAttributes map[string]interface{} `json:"resource_attributes" binding:"required"`
-	Action             string                 `json:"action" binding:"required"`
+	Language           PolicyLanguage         `json:"language"`
+	SubjectAttributes  map[string]interface{} `json:"subject_attributes"`
+	ResourceAttributes map[string]interface{} `json:"resource_attributes"`
+	Action             string                 `json:"action"`
 	Environment        map[string]interface{} `json:"environment"`
 }
 

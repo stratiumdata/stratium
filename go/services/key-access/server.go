@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -22,15 +23,13 @@ import (
 	"time"
 
 	"stratium/pkg/models"
+	"stratium/pkg/security/tlspolicy"
 	keyManager "stratium/services/key-manager"
 
-	"github.com/cloudflare/circl/kem/kyber/kyber1024"
-	"github.com/cloudflare/circl/kem/kyber/kyber512"
-	"github.com/cloudflare/circl/kem/kyber/kyber768"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/attribute"
-	"golang.org/x/crypto/hkdf"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -55,6 +54,7 @@ type Server struct {
 	authProvider     auth.AuthProvider
 	serviceKeyCache  *serviceKeyCache
 	rewrapClientDEK  func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error)
+	fipsEnabled      bool
 }
 
 // SubjectKeyStore manages public keys for subjects
@@ -85,10 +85,22 @@ type InMemorySubjectKeyStore struct {
 
 // NewServer creates a new key access server
 func NewServer(keyManagerAddr string, cfg *config.Config) (*Server, error) {
+	if err := tlspolicy.RequireTLSInFIPS(cfg.Security.FIPS.Enabled, cfg.Services.KeyManager.TLS.Enabled); err != nil {
+		return nil, err
+	}
+	if err := tlspolicy.RequireTLSInFIPS(cfg.Security.FIPS.Enabled, cfg.Services.Platform.TLS.Enabled); err != nil {
+		return nil, err
+	}
+
+	keyManagerCreds, err := dialServiceCredentials(&cfg.Services.KeyManager)
+	if err != nil {
+		return nil, err
+	}
+
 	// Connect to key manager service
 	conn, err := grpc.NewClient(
 		keyManagerAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(keyManagerCreds),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
@@ -138,6 +150,7 @@ func NewServer(keyManagerAddr string, cfg *config.Config) (*Server, error) {
 		authService:      authService,
 		authProvider:     authProvider,
 		serviceKeyCache:  newServiceKeyCache(cacheTTL),
+		fipsEnabled:      cfg.Security.FIPS.Enabled,
 	}
 	server.rewrapClientDEK = func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error) {
 		return server.keyManagerClient.RewrapClientDEK(ctx, req)
@@ -156,12 +169,23 @@ func createPlatformClient(config *config.ServiceEndpoint) (PlatformClient, *grpc
 	}
 
 	logger.Info("Connecting to Platform service at: %s", platformAddr)
-	client, err := NewGRPCPlatformClient(platformAddr)
+	client, err := NewGRPCPlatformClient(platformAddr, config)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return client, client.conn, nil
+}
+
+func dialServiceCredentials(endpoint *config.ServiceEndpoint) (credentials.TransportCredentials, error) {
+	if endpoint != nil && endpoint.TLS.Enabled {
+		tlsConfig, err := tlspolicy.LoadClientConfig(endpoint.Address, endpoint.TLS.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		return credentials.NewTLS(tlsConfig), nil
+	}
+	return insecure.NewCredentials(), nil
 }
 
 // createAuthServiceFromConfig creates an auth service from auth config
@@ -570,41 +594,21 @@ func (s *Server) parsePublicKeyPEM(pemData string, keyType keyManager.KeyType) (
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Handle KYBER keys differently - they use binary encoding, not ASN.1
-	switch keyType {
-	case keyManager.KeyType_KEY_TYPE_KYBER_512:
-		pub, err := kyber512.Scheme().UnmarshalBinaryPublicKey(block.Bytes)
+	if publicKey, ok, err := parseKyberPublicKey(block.Bytes, keyType); ok {
 		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal KYBER-512 public key: %w", err)
+			return nil, err
 		}
-		logger.Info("Parsed KYBER-512 public key")
-		return pub, nil
-
-	case keyManager.KeyType_KEY_TYPE_KYBER_768:
-		pub, err := kyber768.Scheme().UnmarshalBinaryPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal KYBER-768 public key: %w", err)
-		}
-		logger.Info("Parsed KYBER-768 public key")
-		return pub, nil
-
-	case keyManager.KeyType_KEY_TYPE_KYBER_1024:
-		pub, err := kyber1024.Scheme().UnmarshalBinaryPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal KYBER-1024 public key: %w", err)
-		}
-		logger.Info("Parsed KYBER-1024 public key")
-		return pub, nil
-
-	default:
-		// For RSA and ECC, use standard x509 parsing
-		publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse public key: %w", err)
-		}
-		logger.Info("Parsed public key type: %T", publicKey)
+		logger.Info("Parsed KYBER public key")
 		return publicKey, nil
 	}
+
+	// For RSA and ECC, use standard x509 parsing
+	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+	logger.Info("Parsed public key type: %T", publicKey)
+	return publicKey, nil
 }
 
 func (s *Server) encryptDEK(publicKey crypto.PublicKey, dek []byte) ([]byte, error) {
@@ -624,9 +628,8 @@ func (s *Server) encryptDEK(publicKey crypto.PublicKey, dek []byte) ([]byte, err
 		sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, ephemeralKey.D.Bytes())
 
 		// Derive encryption key using HKDF
-		kdf := hkdf.New(sha256.New, sharedX.Bytes(), nil, []byte("key-access-dek-wrap"))
-		encKey := make([]byte, 32) // AES-256
-		if _, err := kdf.Read(encKey); err != nil {
+		encKey, err := hkdf.Key(sha256.New, sharedX.Bytes(), nil, "key-access-dek-wrap", 32)
+		if err != nil {
 			return nil, fmt.Errorf("failed to derive encryption key: %w", err)
 		}
 
@@ -652,29 +655,10 @@ func (s *Server) encryptDEK(publicKey crypto.PublicKey, dek []byte) ([]byte, err
 		ephemeralPubKey := append(ephemeralKey.PublicKey.X.Bytes(), ephemeralKey.PublicKey.Y.Bytes()...)
 		return append(ephemeralPubKey, ciphertext...), nil
 
-	case *kyber512.PublicKey:
-		// KYBER is a KEM - use it to encapsulate a shared secret, then use that to encrypt the DEK
-		ciphertext, sharedSecret, err := kyber512.Scheme().Encapsulate(pubKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encapsulate with KYBER-512: %w", err)
-		}
-		return s.encryptDEKWithSharedSecret(dek, sharedSecret, ciphertext)
-
-	case *kyber768.PublicKey:
-		ciphertext, sharedSecret, err := kyber768.Scheme().Encapsulate(pubKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encapsulate with KYBER-768: %w", err)
-		}
-		return s.encryptDEKWithSharedSecret(dek, sharedSecret, ciphertext)
-
-	case *kyber1024.PublicKey:
-		ciphertext, sharedSecret, err := kyber1024.Scheme().Encapsulate(pubKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encapsulate with KYBER-1024: %w", err)
-		}
-		return s.encryptDEKWithSharedSecret(dek, sharedSecret, ciphertext)
-
 	default:
+		if encrypted, ok, err := s.encryptDEKWithKyber(publicKey, dek); ok {
+			return encrypted, err
+		}
 		return nil, fmt.Errorf("unsupported public key type: %T", publicKey)
 	}
 }
@@ -724,6 +708,9 @@ func (s *Server) getServicePublicKey(ctx context.Context, keyID string) (crypto.
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to get service key: %w", err)
 	}
+	if s.fipsEnabled && !isFIPSKeyTypeAllowed(getKeyResp.Key.KeyType) {
+		return nil, fmt.Errorf("service key type %s is not allowed in FIPS mode", getKeyResp.Key.KeyType)
+	}
 
 	publicKey, err := s.parsePublicKeyPEM(getKeyResp.Key.PublicKeyPem, getKeyResp.Key.KeyType)
 	if err != nil {
@@ -733,6 +720,17 @@ func (s *Server) getServicePublicKey(ctx context.Context, keyID string) (crypto.
 
 	s.serviceKeyCache.Set(keyID, publicKey)
 	return publicKey, nil
+}
+
+func isFIPSKeyTypeAllowed(keyType keyManager.KeyType) bool {
+	switch keyType {
+	case keyManager.KeyType_KEY_TYPE_RSA_2048,
+		keyManager.KeyType_KEY_TYPE_RSA_3072,
+		keyManager.KeyType_KEY_TYPE_RSA_4096:
+		return true
+	default:
+		return false
+	}
 }
 
 type serviceKeyCache struct {

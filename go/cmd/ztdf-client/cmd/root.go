@@ -10,17 +10,24 @@ import (
 
 var (
 	// Global flags
-	keycloakURL    string
-	clientID       string
-	clientSecret   string
-	username       string
-	password       string
-	tokenFile      string
-	keyManagerAddr string
-	keyAccessAddr  string
-	resourceName   string
-	verbose        bool
-	useTLS         bool
+	keycloakURL         string
+	clientID            string
+	clientSecret        string
+	username            string
+	password            string
+	tokenFile           string
+	keyManagerAddr      string
+	keyAccessAddr       string
+	clientKeyProvider   string
+	clientKeyStorePath  string
+	yubiKeySlot         string
+	yubiKeyPIN          string
+	yubiKeyRequireTouch bool
+	yubiKeyPIVToolPath  string
+	yubiKeyYKManPath    string
+	resourceName        string
+	verbose             bool
+	useTLS              bool
 )
 
 // rootCmd represents the base command
@@ -57,6 +64,13 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&tokenFile, "token-file", defaultTokenFile, "Path to store/load authentication token")
 	rootCmd.PersistentFlags().StringVar(&keyManagerAddr, "km-addr", "localhost:50052", "Key Manager Server address (gRPC)")
 	rootCmd.PersistentFlags().StringVar(&keyAccessAddr, "kas-addr", "localhost:50053", "Key Access Server address (gRPC)")
+	rootCmd.PersistentFlags().StringVar(&clientKeyProvider, "client-key-provider", "local", "Client key provider: local or yubikey")
+	rootCmd.PersistentFlags().StringVar(&clientKeyStorePath, "client-key-store", "", "Path for client key material/metadata storage")
+	rootCmd.PersistentFlags().StringVar(&yubiKeySlot, "yk-slot", "9d", "YubiKey PIV slot to use when --client-key-provider=yubikey")
+	rootCmd.PersistentFlags().StringVar(&yubiKeyPIN, "yk-pin", "", "YubiKey PIV PIN when --client-key-provider=yubikey (or set STRATIUM_YUBIKEY_PIN)")
+	rootCmd.PersistentFlags().BoolVar(&yubiKeyRequireTouch, "yk-require-touch", false, "Require YubiKey touch policy for private-key operations")
+	rootCmd.PersistentFlags().StringVar(&yubiKeyPIVToolPath, "yk-piv-tool-path", "", "Path to yubico-piv-tool binary")
+	rootCmd.PersistentFlags().StringVar(&yubiKeyYKManPath, "yk-ykman-path", "", "Path to ykman binary")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
 	rootCmd.PersistentFlags().BoolVar(&useTLS, "use-tls", false, "Use TLS for gRPC connections to Key Manager and Key Access servers")
 

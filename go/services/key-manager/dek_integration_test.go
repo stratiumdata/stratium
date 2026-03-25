@@ -1,3 +1,5 @@
+//go:build !fips
+
 package key_manager
 
 import (
@@ -61,7 +63,7 @@ func newDEKTestEnv(t *testing.T, alg encryption.Algorithm) *dekTestEnv {
 
 	// Align server fields for upcoming tests.
 	server.providerFactory = factory
-	server.dekService = NewDEKUnwrappingService(server.keyStore, factory, server.clientKeyStore)
+	server.dekService = NewDEKUnwrappingService(server.keyStore, factory, server.clientKeyStore, server.fipsEnabled)
 
 	return &dekTestEnv{
 		algorithm:       alg,

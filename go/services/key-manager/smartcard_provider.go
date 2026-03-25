@@ -3,7 +3,14 @@ package key_manager
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	crand "crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"fmt"
+	"stratium/pkg/security/fipsbuild"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +20,7 @@ import (
 type SmartCardKeyProvider struct {
 	mu          sync.RWMutex
 	config      map[string]string
+	fipsEnabled bool
 	initialized bool
 	cardReader  CardReader
 	keyMetadata map[string]*KeyPair
@@ -49,29 +57,83 @@ type MockCardReader struct {
 	authenticated  bool
 	devices        map[string]string
 	selectedDevice string
-	keys           map[string]interface{}
+	keys           map[string]*mockCardKey
+}
+
+type mockCardKey struct {
+	keyType      KeyType
+	created      time.Time
+	rsaPrivate   *rsa.PrivateKey
+	ecdsaPrivate *ecdsa.PrivateKey
 }
 
 // NewSmartCardKeyProvider creates a new smart card/USB token key provider
 func NewSmartCardKeyProvider(deviceType string, config map[string]string) *SmartCardKeyProvider {
 	provider := &SmartCardKeyProvider{
 		config:      make(map[string]string),
+		fipsEnabled: fipsbuild.Enabled,
 		keyMetadata: make(map[string]*KeyPair),
 		deviceType:  deviceType,
-		cardReader: &MockCardReader{
-			devices: map[string]string{
-				"mock-device-1": "Mock Smart Card",
-				"mock-token-1":  "Mock USB Token",
-			},
-			keys: make(map[string]interface{}),
-		},
+		cardReader:  newMockCardReader(),
 	}
 
 	if config != nil {
+		if useHardwareCardReaderConfig(config) {
+			provider.cardReader = NewYubiKeyPIVCardReader()
+		}
 		provider.Configure(config)
 	}
 
 	return provider
+}
+
+func newMockCardReader() *MockCardReader {
+	return &MockCardReader{
+		devices: map[string]string{
+			"mock-device-1": "Mock Smart Card",
+			"mock-token-1":  "Mock USB Token",
+		},
+		keys: make(map[string]*mockCardKey),
+	}
+}
+
+func useHardwareCardReaderConfig(config map[string]string) bool {
+	if len(config) == 0 {
+		return false
+	}
+
+	backend := strings.ToLower(strings.TrimSpace(config["reader_backend"]))
+	if backend == "yubikey" || backend == "pkcs11" || backend == "pcsc" {
+		return true
+	}
+
+	triggerFields := []string{
+		"pkcs11_library",
+		"piv_tool_path",
+		"ykman_path",
+		"slot",
+		"key_id",
+	}
+
+	for _, key := range triggerFields {
+		if strings.TrimSpace(config[key]) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isYubiKeyCardReader(reader CardReader) bool {
+	_, ok := reader.(*YubiKeyPIVCardReader)
+	return ok
+}
+
+func (s *SmartCardKeyProvider) isAvailableLocked() bool {
+	if !s.initialized {
+		return false
+	}
+	return s.cardReader != nil && s.cardReader.IsConnected() && s.cardReader.IsAuthenticated()
 }
 
 // GetProviderType returns the provider type based on device type
@@ -95,21 +157,15 @@ func (s *SmartCardKeyProvider) IsAvailable() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if !s.initialized {
-		return false
-	}
-
-	return s.cardReader != nil && s.cardReader.IsConnected() && s.cardReader.IsAuthenticated()
+	return s.isAvailableLocked()
 }
 
 // GetSupportedKeyTypes returns supported key types
 func (s *SmartCardKeyProvider) GetSupportedKeyTypes() []KeyType {
-	// Smart cards and USB tokens typically support fewer key types due to hardware constraints
-	return []KeyType{
-		KeyType_KEY_TYPE_RSA_2048,
-		KeyType_KEY_TYPE_ECC_P256,
-		KeyType_KEY_TYPE_ECC_P384,
-	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.getSupportedKeyTypesLocked()
 }
 
 // SupportsRotation indicates if the provider supports key rotation
@@ -127,8 +183,20 @@ func (s *SmartCardKeyProvider) GenerateKeyPair(ctx context.Context, keyType KeyT
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.IsAvailable() {
+	if !s.isAvailableLocked() {
 		return nil, fmt.Errorf("%s is not available or not authenticated", s.GetProviderName())
+	}
+
+	return s.generateKeyPairLocked(keyType, keyID, config)
+}
+
+func (s *SmartCardKeyProvider) generateKeyPairLocked(keyType KeyType, keyID string, config map[string]string) (*KeyPair, error) {
+	if !s.isAvailableLocked() {
+		return nil, fmt.Errorf("%s is not available or not authenticated", s.GetProviderName())
+	}
+
+	if err := s.validateFIPSKeyTypeLocked(keyType); err != nil {
+		return nil, err
 	}
 
 	// Check if key already exists
@@ -138,7 +206,7 @@ func (s *SmartCardKeyProvider) GenerateKeyPair(ctx context.Context, keyType KeyT
 
 	// Validate key type is supported
 	supported := false
-	for _, supportedType := range s.GetSupportedKeyTypes() {
+	for _, supportedType := range s.getSupportedKeyTypesLocked() {
 		if keyType == supportedType {
 			supported = true
 			break
@@ -223,13 +291,16 @@ func (s *SmartCardKeyProvider) GetKeyPair(ctx context.Context, keyID string) (*K
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if !s.IsAvailable() {
+	if !s.isAvailableLocked() {
 		return nil, fmt.Errorf("%s is not available or not authenticated", s.GetProviderName())
 	}
 
 	keyPair, exists := s.keyMetadata[keyID]
 	if !exists {
 		return nil, fmt.Errorf("key with ID %s not found", keyID)
+	}
+	if err := s.validateFIPSKeyTypeLocked(keyPair.KeyType); err != nil {
+		return nil, err
 	}
 
 	// Check if key has expired
@@ -251,7 +322,7 @@ func (s *SmartCardKeyProvider) DeleteKeyPair(ctx context.Context, keyID string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.IsAvailable() {
+	if !s.isAvailableLocked() {
 		return fmt.Errorf("%s is not available or not authenticated", s.GetProviderName())
 	}
 
@@ -271,7 +342,7 @@ func (s *SmartCardKeyProvider) ListKeyPairs(ctx context.Context) ([]string, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if !s.IsAvailable() {
+	if !s.isAvailableLocked() {
 		return nil, fmt.Errorf("%s is not available or not authenticated", s.GetProviderName())
 	}
 
@@ -292,6 +363,10 @@ func (s *SmartCardKeyProvider) Sign(ctx context.Context, keyID string, data []by
 
 	// Update usage count
 	s.mu.Lock()
+	if err := s.validateFIPSKeyByIDLocked(keyID); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if keyPair, exists := s.keyMetadata[keyID]; exists {
 		keyPair.UsageCount++
 	}
@@ -308,6 +383,10 @@ func (s *SmartCardKeyProvider) Decrypt(ctx context.Context, keyID string, cipher
 
 	// Update usage count
 	s.mu.Lock()
+	if err := s.validateFIPSKeyByIDLocked(keyID); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if keyPair, exists := s.keyMetadata[keyID]; exists {
 		keyPair.UsageCount++
 	}
@@ -324,6 +403,10 @@ func (s *SmartCardKeyProvider) Encrypt(ctx context.Context, keyID string, plaint
 
 	// Update usage count
 	s.mu.Lock()
+	if err := s.validateFIPSKeyByIDLocked(keyID); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if keyPair, exists := s.keyMetadata[keyID]; exists {
 		keyPair.UsageCount++
 	}
@@ -337,13 +420,16 @@ func (s *SmartCardKeyProvider) RotateKey(ctx context.Context, keyID string) (*Ke
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.IsAvailable() {
+	if !s.isAvailableLocked() {
 		return nil, fmt.Errorf("%s is not available or not authenticated", s.GetProviderName())
 	}
 
 	oldKeyPair, exists := s.keyMetadata[keyID]
 	if !exists {
 		return nil, fmt.Errorf("key with ID %s not found", keyID)
+	}
+	if err := s.validateFIPSKeyTypeLocked(oldKeyPair.KeyType); err != nil {
+		return nil, err
 	}
 
 	// Create config from metadata
@@ -364,7 +450,7 @@ func (s *SmartCardKeyProvider) RotateKey(ctx context.Context, keyID string) (*Ke
 	delete(s.keyMetadata, keyID)
 
 	// Generate new key
-	newKeyPair, err := s.GenerateKeyPair(ctx, oldKeyPair.KeyType, keyID, config)
+	newKeyPair, err := s.generateKeyPairLocked(oldKeyPair.KeyType, keyID, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate new key during rotation: %w", err)
 	}
@@ -383,6 +469,17 @@ func (s *SmartCardKeyProvider) Configure(config map[string]string) error {
 	// Update config
 	for k, v := range config {
 		s.config[k] = v
+	}
+	if err := s.applyFIPSModeFromConfigLocked(); err != nil {
+		return err
+	}
+
+	if useHardwareCardReaderConfig(s.config) {
+		if !isYubiKeyCardReader(s.cardReader) {
+			s.cardReader = NewYubiKeyPIVCardReader()
+		}
+	} else if s.cardReader == nil {
+		s.cardReader = newMockCardReader()
 	}
 
 	// Initialize device connection
@@ -412,6 +509,69 @@ func (s *SmartCardKeyProvider) Configure(config map[string]string) error {
 	}
 
 	return nil
+}
+
+func (s *SmartCardKeyProvider) getSupportedKeyTypesLocked() []KeyType {
+	supported := []KeyType{
+		KeyType_KEY_TYPE_RSA_2048,
+		KeyType_KEY_TYPE_ECC_P256,
+		KeyType_KEY_TYPE_ECC_P384,
+	}
+	if s.isFIPSEnabledLocked() {
+		return filterFIPSKeyTypes(supported)
+	}
+	return supported
+}
+
+func (s *SmartCardKeyProvider) isFIPSEnabledLocked() bool {
+	return fipsbuild.Enabled || s.fipsEnabled
+}
+
+func (s *SmartCardKeyProvider) applyFIPSModeFromConfigLocked() error {
+	raw, exists := s.config["fips_enabled"]
+	if !exists {
+		s.fipsEnabled = fipsbuild.Enabled
+		return nil
+	}
+
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("invalid fips_enabled value %q: %w", raw, err)
+	}
+	s.fipsEnabled = enabled || fipsbuild.Enabled
+	return nil
+}
+
+func (s *SmartCardKeyProvider) validateFIPSKeyTypeLocked(keyType KeyType) error {
+	if !s.isFIPSEnabledLocked() {
+		return nil
+	}
+	if isFIPSKeyTypeAllowed(keyType) {
+		return nil
+	}
+	return fmt.Errorf("key type %s is not allowed in FIPS mode for %s", keyType, s.GetProviderName())
+}
+
+func (s *SmartCardKeyProvider) validateFIPSKeyByIDLocked(keyID string) error {
+	if !s.isFIPSEnabledLocked() {
+		return nil
+	}
+
+	keyType := KeyType_KEY_TYPE_UNSPECIFIED
+	if keyPair, exists := s.keyMetadata[keyID]; exists {
+		keyType = keyPair.KeyType
+	} else {
+		publicKey, err := s.cardReader.GetPublicKey(keyID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve key type for %s in FIPS mode: %w", keyID, err)
+		}
+		keyType = keyTypeFromPublicKey(publicKey)
+	}
+
+	if isFIPSKeyTypeAllowed(keyType) {
+		return nil
+	}
+	return fmt.Errorf("key %s type %s is not allowed in FIPS mode for %s", keyID, keyType, s.GetProviderName())
 }
 
 // GetConfiguration returns current configuration (excluding sensitive data like PIN)
@@ -506,10 +666,35 @@ func (m *MockCardReader) GenerateKey(keyType KeyType, keyID string, options map[
 		return fmt.Errorf("not connected or authenticated")
 	}
 
-	m.keys[keyID] = map[string]interface{}{
-		"type":    keyType,
-		"created": time.Now(),
+	key := &mockCardKey{
+		keyType: keyType,
+		created: time.Now(),
 	}
+
+	switch keyType {
+	case KeyType_KEY_TYPE_RSA_2048:
+		privateKey, err := rsa.GenerateKey(crand.Reader, 2048)
+		if err != nil {
+			return fmt.Errorf("failed to generate RSA key: %w", err)
+		}
+		key.rsaPrivate = privateKey
+	case KeyType_KEY_TYPE_ECC_P256:
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+		if err != nil {
+			return fmt.Errorf("failed to generate ECC P-256 key: %w", err)
+		}
+		key.ecdsaPrivate = privateKey
+	case KeyType_KEY_TYPE_ECC_P384:
+		privateKey, err := ecdsa.GenerateKey(elliptic.P384(), crand.Reader)
+		if err != nil {
+			return fmt.Errorf("failed to generate ECC P-384 key: %w", err)
+		}
+		key.ecdsaPrivate = privateKey
+	default:
+		return fmt.Errorf("unsupported key type %s", keyType)
+	}
+
+	m.keys[keyID] = key
 	return nil
 }
 
@@ -518,11 +703,19 @@ func (m *MockCardReader) GetPublicKey(keyID string) (crypto.PublicKey, error) {
 		return nil, fmt.Errorf("not connected or authenticated")
 	}
 
-	if _, exists := m.keys[keyID]; !exists {
+	key, exists := m.keys[keyID]
+	if !exists {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	return &MockPublicKey{keyID: keyID}, nil
+	if key.rsaPrivate != nil {
+		return &key.rsaPrivate.PublicKey, nil
+	}
+	if key.ecdsaPrivate != nil {
+		return &key.ecdsaPrivate.PublicKey, nil
+	}
+
+	return nil, fmt.Errorf("public key not available")
 }
 
 func (m *MockCardReader) DeleteKey(keyID string) error {
@@ -555,7 +748,17 @@ func (m *MockCardReader) Sign(keyID string, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	return []byte("mock-card-signature"), nil
+	key := m.keys[keyID]
+	hash := sha256.Sum256(data)
+
+	if key.rsaPrivate != nil {
+		return rsa.SignPKCS1v15(crand.Reader, key.rsaPrivate, crypto.SHA256, hash[:])
+	}
+	if key.ecdsaPrivate != nil {
+		return ecdsa.SignASN1(crand.Reader, key.ecdsaPrivate, hash[:])
+	}
+
+	return nil, fmt.Errorf("private key not available")
 }
 
 func (m *MockCardReader) Decrypt(keyID string, ciphertext []byte) ([]byte, error) {
@@ -563,11 +766,20 @@ func (m *MockCardReader) Decrypt(keyID string, ciphertext []byte) ([]byte, error
 		return nil, fmt.Errorf("not connected or authenticated")
 	}
 
-	if _, exists := m.keys[keyID]; !exists {
+	key, exists := m.keys[keyID]
+	if !exists {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	return []byte("mock-card-decrypted-data"), nil
+	if key.rsaPrivate != nil {
+		plaintext, err := rsa.DecryptOAEP(sha256.New(), crand.Reader, key.rsaPrivate, ciphertext, nil)
+		if err != nil {
+			return nil, fmt.Errorf("RSA decrypt failed: %w", err)
+		}
+		return plaintext, nil
+	}
+
+	return nil, fmt.Errorf("decrypt not supported for key type %s", key.keyType)
 }
 
 func (m *MockCardReader) Encrypt(keyID string, plaintext []byte) ([]byte, error) {
@@ -575,11 +787,20 @@ func (m *MockCardReader) Encrypt(keyID string, plaintext []byte) ([]byte, error)
 		return nil, fmt.Errorf("not connected or authenticated")
 	}
 
-	if _, exists := m.keys[keyID]; !exists {
+	key, exists := m.keys[keyID]
+	if !exists {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	return []byte("mock-card-encrypted-data"), nil
+	if key.rsaPrivate != nil {
+		ciphertext, err := rsa.EncryptOAEP(sha256.New(), crand.Reader, &key.rsaPrivate.PublicKey, plaintext, nil)
+		if err != nil {
+			return nil, fmt.Errorf("RSA encrypt failed: %w", err)
+		}
+		return ciphertext, nil
+	}
+
+	return nil, fmt.Errorf("encrypt not supported for key type %s", key.keyType)
 }
 
 func (m *MockCardReader) GetKeyInfo(keyID string) (map[string]interface{}, error) {
@@ -587,8 +808,12 @@ func (m *MockCardReader) GetKeyInfo(keyID string) (map[string]interface{}, error
 		return nil, fmt.Errorf("not connected or authenticated")
 	}
 
-	if info, exists := m.keys[keyID]; exists {
-		return info.(map[string]interface{}), nil
+	if key, exists := m.keys[keyID]; exists {
+		info := map[string]interface{}{
+			"type":    key.keyType,
+			"created": key.created,
+		}
+		return info, nil
 	}
 
 	return nil, fmt.Errorf("key not found")

@@ -95,6 +95,14 @@ func (parser *ZtdfParser) ParseAssertions(data []byte) ([]*models.Assertion, err
 			AllowPartial: true,
 		}.Unmarshal(rawMessage, assertion)
 
+		if assertion.Id == "" {
+			if assertionMap, ok := assertionGeneric.(map[string]interface{}); ok {
+				if id, ok := assertionMap["id"].(string); ok {
+					assertion.Id = id
+				}
+			}
+		}
+
 		assertion.Type = parser.parseType(assertionGeneric)
 		assertion.Scope = parser.parseScope(assertionGeneric)
 		assertion.AppliesToState = parser.parseAppliesToState(assertionGeneric)

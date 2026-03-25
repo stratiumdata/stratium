@@ -16,9 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudflare/circl/kem/kyber/kyber1024"
-	"github.com/cloudflare/circl/kem/kyber/kyber512"
-	"github.com/cloudflare/circl/kem/kyber/kyber768"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -347,6 +344,7 @@ func (s *InMemoryClientKeyStore) StoreClientPublicKey(ctx context.Context, subje
 	// Create a Key record
 	userKey := &Key{
 		KeyId:        keyID,
+		ClientId:     subject,
 		PublicKeyPem: publicKeyPEM,
 		KeyType:      keyType,
 		Status:       KeyStatus_KEY_STATUS_ACTIVE,
@@ -418,52 +416,10 @@ func (s *InMemoryClientKeyStore) publicKeyToPEM(publicKey crypto.PublicKey) (str
 
 		return string(pemBlock), keyType, nil
 
-	case *kyber512.PublicKey:
-		// Marshal KYBER key to binary
-		keyBytes, err := key.MarshalBinary()
-		if err != nil {
-			return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to marshal KYBER-512 public key: %w", err)
-		}
-
-		// Encode to PEM
-		pemBlock := pem.EncodeToMemory(&pem.Block{
-			Type:  "KYBER-512 PUBLIC KEY",
-			Bytes: keyBytes,
-		})
-
-		return string(pemBlock), KeyType_KEY_TYPE_KYBER_512, nil
-
-	case *kyber768.PublicKey:
-		// Marshal KYBER key to binary
-		keyBytes, err := key.MarshalBinary()
-		if err != nil {
-			return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to marshal KYBER-768 public key: %w", err)
-		}
-
-		// Encode to PEM
-		pemBlock := pem.EncodeToMemory(&pem.Block{
-			Type:  "KYBER-768 PUBLIC KEY",
-			Bytes: keyBytes,
-		})
-
-		return string(pemBlock), KeyType_KEY_TYPE_KYBER_768, nil
-
-	case *kyber1024.PublicKey:
-		// Marshal KYBER key to binary
-		keyBytes, err := key.MarshalBinary()
-		if err != nil {
-			return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("failed to marshal KYBER-1024 public key: %w", err)
-		}
-
-		// Encode to PEM
-		pemBlock := pem.EncodeToMemory(&pem.Block{
-			Type:  "KYBER-1024 PUBLIC KEY",
-			Bytes: keyBytes,
-		})
-
-		return string(pemBlock), KeyType_KEY_TYPE_KYBER_1024, nil
-
 	default:
+		if pemValue, keyType, ok, err := publicKeyToPEMIfKyber(publicKey); ok {
+			return pemValue, keyType, err
+		}
 		return "", KeyType_KEY_TYPE_UNSPECIFIED, fmt.Errorf("unsupported public key type: %T", publicKey)
 	}
 }
@@ -475,29 +431,14 @@ func (s *InMemoryClientKeyStore) parsePublicKeyPEM(pemData string, keyType KeyTy
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Handle KYBER keys differently - they use binary encoding, not ASN.1
+	if publicKey, ok, err := parseKyberPublicKeyFromPEM(block.Bytes, keyType); ok {
+		if err != nil {
+			return nil, err
+		}
+		return publicKey, nil
+	}
+
 	switch keyType {
-	case KeyType_KEY_TYPE_KYBER_512:
-		pub, err := kyber512.Scheme().UnmarshalBinaryPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal KYBER-512 public key: %w", err)
-		}
-		return pub, nil
-
-	case KeyType_KEY_TYPE_KYBER_768:
-		pub, err := kyber768.Scheme().UnmarshalBinaryPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal KYBER-768 public key: %w", err)
-		}
-		return pub, nil
-
-	case KeyType_KEY_TYPE_KYBER_1024:
-		pub, err := kyber1024.Scheme().UnmarshalBinaryPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal KYBER-1024 public key: %w", err)
-		}
-		return pub, nil
-
 	case KeyType_KEY_TYPE_RSA_2048, KeyType_KEY_TYPE_RSA_3072, KeyType_KEY_TYPE_RSA_4096:
 		// Parse as RSA key
 		publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)

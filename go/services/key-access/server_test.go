@@ -208,7 +208,7 @@ func TestServer_WrapDEK_Integration(t *testing.T) {
 	platformHandle := startMockPlatformGRPCServer(t)
 	defer platformHandle.cleanup()
 
-	platformClient, err := NewGRPCPlatformClient(platformHandle.addr)
+	platformClient, err := NewGRPCPlatformClient(platformHandle.addr, nil)
 	if err != nil {
 		t.Fatalf("failed to create platform client: %v", err)
 	}
@@ -281,8 +281,9 @@ func TestServer_WrapDEK_Integration(t *testing.T) {
 		t.Fatalf("expected wrapped DEK from key manager")
 	}
 	kmServer.mu.Lock()
-	defer kmServer.mu.Unlock()
-	if !bytes.Equal(kmServer.lastPlainDEK, dek) {
+	lastPlain := append([]byte(nil), kmServer.lastPlainDEK...)
+	kmServer.mu.Unlock()
+	if !bytes.Equal(lastPlain, dek) {
 		t.Fatalf("key manager rewrap received incorrect DEK")
 	}
 
@@ -376,6 +377,51 @@ func (m *mockKeyManagerServer) GetKey(ctx context.Context, req *keyManager.GetKe
 			PublicKeyPem: string(pubPEM),
 			Status:       keyManager.KeyStatus_KEY_STATUS_ACTIVE,
 		},
+	}, nil
+}
+
+func (m *mockKeyManagerServer) UnwrapDEK(ctx context.Context, req *keyManager.UnwrapDEKRequest) (*keyManager.UnwrapDEKResponse, error) {
+	priv := m.serviceKeys[req.GetKeyId()]
+	if priv == nil {
+		return &keyManager.UnwrapDEKResponse{
+			AccessGranted: false,
+			AccessReason:  fmt.Sprintf("service key %s not found", req.GetKeyId()),
+			Timestamp:     timestamppb.Now(),
+		}, nil
+	}
+
+	dek, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, req.GetEncryptedDek(), nil)
+	if err != nil {
+		return &keyManager.UnwrapDEKResponse{
+			AccessGranted: false,
+			AccessReason:  fmt.Sprintf("failed to decrypt DEK: %v", err),
+			Timestamp:     timestamppb.Now(),
+		}, nil
+	}
+
+	clientKey := m.clientKeys[req.GetClientKeyId()]
+	if clientKey == nil {
+		return &keyManager.UnwrapDEKResponse{
+			AccessGranted: false,
+			AccessReason:  fmt.Sprintf("client key %s not found", req.GetClientKeyId()),
+			Timestamp:     timestamppb.Now(),
+		}, nil
+	}
+
+	encrypted, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, clientKey.publicKey, dek, nil)
+	if err != nil {
+		return &keyManager.UnwrapDEKResponse{
+			AccessGranted: false,
+			AccessReason:  fmt.Sprintf("failed to re-encrypt DEK: %v", err),
+			Timestamp:     timestamppb.Now(),
+		}, nil
+	}
+
+	return &keyManager.UnwrapDEKResponse{
+		EncryptedDekForSubject: encrypted,
+		AccessGranted:          true,
+		AccessReason:           "unwrap granted",
+		Timestamp:              timestamppb.Now(),
 	}, nil
 }
 
@@ -739,5 +785,200 @@ func TestSubjectKeyStore(t *testing.T) {
 	_, err = store.GetSubjectPublicKey(context.Background(), "non-existent-subject")
 	if err == nil {
 		t.Error("Expected error for non-existent subject")
+	}
+}
+
+// buildUnwrapTestServer creates a key-access Server wired to mock key-manager and platform servers.
+func buildUnwrapTestServer(t *testing.T, clientKeys map[string]*mockClientKey, serviceKeys map[string]*rsa.PrivateKey) *Server {
+	t.Helper()
+	kmAddr, _ := startMockKeyManagerGRPCServer(t, clientKeys, serviceKeys)
+	platformHandle := startMockPlatformGRPCServer(t)
+	t.Cleanup(platformHandle.cleanup)
+
+	platformClient, err := NewGRPCPlatformClient(platformHandle.addr, nil)
+	if err != nil {
+		t.Fatalf("NewGRPCPlatformClient: %v", err)
+	}
+	t.Cleanup(func() { platformClient.Close() })
+
+	kmConn, err := grpc.NewClient(kmAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial key manager: %v", err)
+	}
+	t.Cleanup(func() { kmConn.Close() })
+	kmClient := keyManager.NewKeyManagerServiceClient(kmConn)
+
+	srv := &Server{
+		platformClient:   platformClient,
+		keyManagerClient: kmClient,
+		serviceKeyCache:  newServiceKeyCache(time.Minute),
+	}
+	srv.rewrapClientDEK = func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error) {
+		return kmClient.RewrapClientDEK(ctx, req)
+	}
+	return srv
+}
+
+// ctxWithBearerToken returns a context with a JWT in both the user_token value and metadata.
+func ctxWithBearerToken(token string) context.Context {
+	md := metadata.Pairs("authorization", "Bearer "+token)
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+	return context.WithValue(ctx, "user_token", token)
+}
+
+func TestServer_UnwrapDEK_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	clientPriv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	servicePriv, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	clientKeyID := "unwrap-client-key"
+	serviceKeyID := "unwrap-service-key"
+
+	srv := buildUnwrapTestServer(t, map[string]*mockClientKey{
+		clientKeyID: {
+			publicKey: &clientPriv.PublicKey,
+			clientID:  "user123",
+			status:    keyManager.KeyStatus_KEY_STATUS_ACTIVE,
+			createdAt: time.Now(),
+		},
+	}, map[string]*rsa.PrivateKey{
+		serviceKeyID: servicePriv,
+	})
+
+	// Create a DEK and wrap it with the service public key
+	dek := make([]byte, 32)
+	if _, err := rand.Read(dek); err != nil {
+		t.Fatalf("generate DEK: %v", err)
+	}
+	wrappedDEK, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &servicePriv.PublicKey, dek, nil)
+	if err != nil {
+		t.Fatalf("wrap DEK: %v", err)
+	}
+
+	token := mustCreateJWT(t, map[string]interface{}{
+		"sub":                "user123",
+		"preferred_username": "user123",
+		"role":               "user",
+	})
+	policy := mustMakePolicy(t, "document-service")
+
+	resp, err := srv.UnwrapDEK(ctxWithBearerToken(token), &UnwrapDEKRequest{
+		Resource:    "document-service",
+		WrappedDek:  wrappedDEK,
+		KeyId:       serviceKeyID,
+		ClientKeyId: clientKeyID,
+		Action:      "unwrap_dek",
+		Policy:      policy,
+	})
+	if err != nil {
+		t.Fatalf("UnwrapDEK error = %v", err)
+	}
+	if !resp.AccessGranted {
+		t.Fatalf("UnwrapDEK denied: %s", resp.AccessReason)
+	}
+	if len(resp.DekForSubject) == 0 {
+		t.Fatal("UnwrapDEK returned empty DekForSubject")
+	}
+
+	// Decrypt the returned DEK with the client private key
+	recovered, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, clientPriv, resp.DekForSubject, nil)
+	if err != nil {
+		t.Fatalf("decrypt DekForSubject: %v", err)
+	}
+	if !bytes.Equal(recovered, dek) {
+		t.Error("recovered DEK does not match original")
+	}
+}
+
+func TestServer_UnwrapDEK_AccessDenied(t *testing.T) {
+	t.Parallel()
+
+	servicePriv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	serviceKeyID := "denied-service-key"
+
+	srv := buildUnwrapTestServer(t, map[string]*mockClientKey{}, map[string]*rsa.PrivateKey{
+		serviceKeyID: servicePriv,
+	})
+
+	wrappedDEK, _ := rsa.EncryptOAEP(sha256.New(), rand.Reader, &servicePriv.PublicKey, make([]byte, 16), nil)
+
+	// The mock platform DENY path: resource "secret-resource" is not "document-service"
+	// and the role is not "admin", so the mock platform returns DENY.
+	token := mustCreateJWT(t, map[string]interface{}{
+		"sub":  "user-restricted",
+		"role": "viewer",
+	})
+	policy := mustMakePolicy(t, "restricted-resource")
+
+	resp, err := srv.UnwrapDEK(ctxWithBearerToken(token), &UnwrapDEKRequest{
+		Resource:    "restricted-resource",
+		WrappedDek:  wrappedDEK,
+		KeyId:       serviceKeyID,
+		ClientKeyId: "any-client-key",
+		Action:      "unwrap_dek",
+		Policy:      policy,
+	})
+	if err != nil {
+		t.Fatalf("UnwrapDEK error = %v", err)
+	}
+	if resp.AccessGranted {
+		t.Error("UnwrapDEK should be denied for restricted resource")
+	}
+}
+
+func TestServer_UnwrapDEK_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	srv := buildUnwrapTestServer(t, map[string]*mockClientKey{}, map[string]*rsa.PrivateKey{})
+
+	resp, err := srv.UnwrapDEK(context.Background(), &UnwrapDEKRequest{
+		Resource:    "some-resource",
+		WrappedDek:  []byte("garbage"),
+		KeyId:       "key-id",
+		ClientKeyId: "client-key",
+		Action:      "unwrap_dek",
+	})
+	if err != nil {
+		t.Fatalf("UnwrapDEK error = %v", err)
+	}
+	if resp.AccessGranted {
+		t.Error("UnwrapDEK should be denied for missing/invalid token")
+	}
+}
+
+func TestServer_UnwrapDEK_MissingClientKey(t *testing.T) {
+	t.Parallel()
+
+	servicePriv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	serviceKeyID := "service-key-missing-client"
+
+	srv := buildUnwrapTestServer(t, map[string]*mockClientKey{}, map[string]*rsa.PrivateKey{
+		serviceKeyID: servicePriv,
+	})
+
+	wrappedDEK, _ := rsa.EncryptOAEP(sha256.New(), rand.Reader, &servicePriv.PublicKey, make([]byte, 16), nil)
+
+	token := mustCreateJWT(t, map[string]interface{}{
+		"sub":  "user123",
+		"role": "admin", // admin → ALLOW from mock platform
+	})
+	policy := mustMakePolicy(t, "document-service")
+
+	resp, err := srv.UnwrapDEK(ctxWithBearerToken(token), &UnwrapDEKRequest{
+		Resource:    "document-service",
+		WrappedDek:  wrappedDEK,
+		KeyId:       serviceKeyID,
+		ClientKeyId: "nonexistent-client-key",
+		Action:      "unwrap_dek",
+		Policy:      policy,
+	})
+	if err != nil {
+		t.Fatalf("UnwrapDEK error = %v", err)
+	}
+	// Access should be granted at platform level but key manager will fail
+	// because the client key doesn't exist
+	if resp.AccessGranted {
+		t.Error("UnwrapDEK should not be granted when client key is missing")
 	}
 }

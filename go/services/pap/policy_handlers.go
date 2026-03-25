@@ -17,6 +17,10 @@ func (s *Server) createPolicy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if err := validateCreatePolicyRequest(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// Get authenticated user
 	user, err := s.getUserFromContext(c)
@@ -127,6 +131,10 @@ func (s *Server) updatePolicy(c *gin.Context) {
 
 	var req models.UpdatePolicyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateUpdatePolicyRequest(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -252,11 +260,15 @@ func (s *Server) deletePolicy(c *gin.Context) {
 // validatePolicy validates a policy without creating it
 func (s *Server) validatePolicy(c *gin.Context) {
 	var req struct {
-		Language      models.PolicyLanguage `json:"language" binding:"required,oneof=xacml opa json"`
-		PolicyContent string                `json:"policy_content" binding:"required"`
+		Language      models.PolicyLanguage `json:"language"`
+		PolicyContent string                `json:"policy_content"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validatePolicyCheckRequest(req.Language, req.PolicyContent); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -285,15 +297,19 @@ func (s *Server) validatePolicy(c *gin.Context) {
 // testPolicy tests a policy against sample input without persisting it
 func (s *Server) testPolicy(c *gin.Context) {
 	var req struct {
-		Language           models.PolicyLanguage  `json:"language" binding:"required,oneof=xacml opa json"`
-		PolicyContent      string                 `json:"policy_content" binding:"required"`
-		SubjectAttributes  map[string]interface{} `json:"subject_attributes" binding:"required"`
-		ResourceAttributes map[string]interface{} `json:"resource_attributes" binding:"required"`
-		Action             string                 `json:"action" binding:"required"`
+		Language           models.PolicyLanguage  `json:"language"`
+		PolicyContent      string                 `json:"policy_content"`
+		SubjectAttributes  map[string]interface{} `json:"subject_attributes"`
+		ResourceAttributes map[string]interface{} `json:"resource_attributes"`
+		Action             string                 `json:"action"`
 		Environment        map[string]interface{} `json:"environment"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validatePolicyTestRequest(req.Language, req.PolicyContent, req.SubjectAttributes, req.ResourceAttributes, req.Action); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

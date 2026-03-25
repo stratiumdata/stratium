@@ -23,6 +23,12 @@ const (
 	ECC_P521 Algorithm = "P521"
 )
 
+var fipsApprovedAlgorithms = map[Algorithm]struct{}{
+	RSA2048:  {},
+	RSA3072:  {},
+	RSA4096:  {},
+}
+
 // ParseAlgorithm converts a string (usually from an environment variable)
 // into the corresponding Algorithm type.
 func ParseAlgorithm(alg string) (Algorithm, error) {
@@ -48,6 +54,12 @@ func ParseAlgorithm(alg string) (Algorithm, error) {
 	default:
 		return "", fmt.Errorf("unsupported algorithm: %s", alg)
 	}
+}
+
+// IsFIPSApproved returns true when an algorithm is allowed in FIPS mode.
+func IsFIPSApproved(alg Algorithm) bool {
+	_, ok := fipsApprovedAlgorithms[alg]
+	return ok
 }
 
 type Provider interface {

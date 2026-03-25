@@ -14,7 +14,15 @@ import { PassThrough } from 'stream';
 import { finished } from 'stream/promises';
 import { createReadStream, createWriteStream } from 'fs';
 import { readFile, stat as statFile } from 'fs/promises';
-import { createHash, createCipheriv, createDecipheriv, privateEncrypt, constants as cryptoConstants } from 'crypto';
+import {
+  createHash,
+  createCipheriv,
+  createDecipheriv,
+  privateEncrypt,
+  constants as cryptoConstants,
+  getFips,
+  setFips,
+} from 'crypto';
 import { createKeyAccessGrpcClient } from '../grpc/key-access-grpc.js';
 import { createAuthenticatedTransport } from './grpc-transport.js';
 import { generateClientKeyPair } from './key-generation.js';
@@ -81,6 +89,7 @@ export class ZtdfClient {
    * @param {number} [config.clientKeyExpirationMs=86400000] - Client key expiration in milliseconds (default 24 hours)
    * @param {Function} [config.getToken] - Optional function that returns an auth token
    * @param {boolean} [config.debug=false] - Enable debug logging
+   * @param {boolean} [config.fipsEnabled=false] - Enable FIPS mode (send plaintext DEK over TLS)
    */
   constructor(config) {
     if (!config.keyAccessUrl) {
@@ -100,7 +109,12 @@ export class ZtdfClient {
       clientKeyExpirationMs: config.clientKeyExpirationMs || 24 * 60 * 60 * 1000,
       getToken: config.getToken,
       debug: config.debug || false,
+      fipsEnabled: config.fipsEnabled || false,
     };
+
+    if (this.config.fipsEnabled) {
+      ensureFipsMode();
+    }
 
     // Create gRPC clients
     const kasTransport = createAuthenticatedTransport(this.config.keyAccessUrl, this.config.getToken);
@@ -531,7 +545,9 @@ export class ZtdfClient {
       ...normalizeStringMap(context),
     };
 
-    const clientWrappedDek = wrapDekWithPrivateKey(this.currentKeyPair.privateKey, dek);
+    const clientWrappedDek = this.config.fipsEnabled
+      ? dek
+      : wrapDekWithPrivateKey(this.currentKeyPair.privateKey, dek);
     const response = await this.kasClient.wrapDEK({
       resource,
       dek: clientWrappedDek,
@@ -887,4 +903,18 @@ function wrapDekWithPrivateKey(privateKeyPem, dek) {
     buffer
   );
   return new Uint8Array(wrapped);
+}
+
+function ensureFipsMode() {
+  if (typeof setFips !== 'function' || typeof getFips !== 'function') {
+    throw new Error('FIPS mode requires a Node.js build with OpenSSL FIPS support.');
+  }
+  try {
+    setFips(1);
+  } catch (err) {
+    throw new Error(`Failed to enable OpenSSL FIPS mode: ${err.message}`);
+  }
+  if (getFips() !== 1) {
+    throw new Error('FIPS mode is enabled but OpenSSL FIPS provider is not active.');
+  }
 }

@@ -13,6 +13,7 @@ import (
 	"stratium/middleware"
 	"stratium/pkg/cache"
 	"stratium/pkg/repository/postgres"
+	"stratium/pkg/security/tlspolicy"
 	"stratium/services/pap"
 )
 
@@ -137,6 +138,20 @@ func main() {
 
 	// Create PAP server with cache invalidator
 	server := pap.NewServerWithCacheInvalidator(repo, authService, cacheInvalidator, cfg.Security.CORS, licenseEnforcer)
+	if cfg.Server.TLS.Enabled {
+		tlsConfig, err := tlspolicy.LoadServerConfig(
+			cfg.Server.TLS.CertFile,
+			cfg.Server.TLS.KeyFile,
+			cfg.Server.TLS.CAFile,
+			cfg.Server.TLS.ClientCAFile,
+			cfg.Server.TLS.RequireClientCert,
+		)
+		if err != nil {
+			logger.Error("Failed to configure TLS: %v", err)
+			os.Exit(1)
+		}
+		server.ConfigureTLS(tlsConfig)
+	}
 
 	// Determine server address
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

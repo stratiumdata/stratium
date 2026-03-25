@@ -1,0 +1,221 @@
+:root {
+  --bg: #05131b;
+  --panel: rgba(8, 29, 39, 0.74);
+  --line: rgba(126, 181, 183, 0.34);
+  --text: #e9fff3;
+  --muted: #a7c6bc;
+  --primary: #28c4a6;
+  --primary-2: #31e6bb;
+  --alt: #ef8f49;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 18% 22%, #0c6b68 0%, transparent 35%),
+    radial-gradient(circle at 82% 10%, #8a4124 0%, transparent 28%),
+    linear-gradient(155deg, #021015 0%, #071f2a 48%, #021216 100%);
+}
+
+.ambient {
+  position: fixed;
+  z-index: 0;
+  border-radius: 999px;
+  opacity: 0.25;
+  filter: blur(45px);
+  pointer-events: none;
+  animation: drift 12s ease-in-out infinite alternate;
+}
+
+.ambient.a1 {
+  width: 300px;
+  height: 300px;
+  background: #2cd9be;
+  top: -90px;
+  right: -80px;
+}
+
+.ambient.a2 {
+  width: 320px;
+  height: 320px;
+  background: #d76b2e;
+  bottom: -100px;
+  left: -80px;
+  animation-delay: 0.8s;
+}
+
+.shell {
+  position: relative;
+  z-index: 1;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 2rem 1rem 3rem;
+  animation: fade-in 420ms ease-out;
+}
+
+.hero {
+  margin-bottom: 1.2rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.3rem;
+  color: var(--primary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 4vw, 2.5rem);
+}
+
+h2 {
+  margin-top: 0;
+  font-size: 1.2rem;
+}
+
+.hero p:last-child {
+  color: var(--muted);
+  max-width: 74ch;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem;
+  backdrop-filter: blur(5px);
+  margin-top: 1rem;
+}
+
+.grid {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.grid.one {
+  grid-template-columns: 1fr;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+input,
+textarea {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #21505f;
+  background: #081f2d;
+  color: var(--text);
+  padding: 0.6rem 0.7rem;
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  font-size: 0.9rem;
+}
+
+textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.check-row {
+  margin-top: 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+
+.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.action {
+  margin-top: 0.9rem;
+  border: 0;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: #07221b;
+  font-weight: 700;
+  padding: 0.72rem 1rem;
+  cursor: pointer;
+  font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
+}
+
+.action.alt {
+  background: linear-gradient(135deg, var(--alt), #ffad5f);
+  color: #2b1607;
+}
+
+.action:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.status {
+  font-weight: 500;
+  margin: 0;
+}
+
+.result {
+  margin: 0.9rem 0 0;
+  border-radius: 10px;
+  border: 1px solid #264d58;
+  background: #061822;
+  padding: 0.8rem;
+  min-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  font-size: 0.84rem;
+}
+
+code {
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  background: rgba(21, 58, 72, 0.45);
+  padding: 0.1rem 0.3rem;
+  border-radius: 6px;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: translateY(-8px) translateX(0);
+  }
+  to {
+    transform: translateY(10px) translateX(-16px);
+  }
+}
+
+@media (max-width: 820px) {
+  .grid.two {
+    grid-template-columns: 1fr;
+  }
+}

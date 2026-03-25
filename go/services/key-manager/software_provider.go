@@ -15,10 +15,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/cloudflare/circl/kem/kyber/kyber1024"
-	"github.com/cloudflare/circl/kem/kyber/kyber512"
-	"github.com/cloudflare/circl/kem/kyber/kyber768"
 )
 
 // SoftwareKeyProvider implements KeyProvider for software-defined keys
@@ -141,26 +137,12 @@ func (s *SoftwareKeyProvider) generateKeyPairInternal(ctx context.Context, keyTy
 		}
 		publicKey = &privateKey.(*ecdsa.PrivateKey).PublicKey
 
-	case KeyType_KEY_TYPE_KYBER_512:
-		pub, priv, err := kyber512.GenerateKeyPair(rand.Reader)
+	case KeyType_KEY_TYPE_KYBER_512,
+		KeyType_KEY_TYPE_KYBER_768,
+		KeyType_KEY_TYPE_KYBER_1024:
+		pub, priv, err := s.generateKyberKeyPair(keyType)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate KYBER-512 key: %w", err)
-		}
-		publicKey = pub
-		privateKey = priv
-
-	case KeyType_KEY_TYPE_KYBER_768:
-		pub, priv, err := kyber768.GenerateKeyPair(rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate KYBER-768 key: %w", err)
-		}
-		publicKey = pub
-		privateKey = priv
-
-	case KeyType_KEY_TYPE_KYBER_1024:
-		pub, priv, err := kyber1024.GenerateKeyPair(rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate KYBER-1024 key: %w", err)
+			return nil, err
 		}
 		publicKey = pub
 		privateKey = priv
@@ -325,13 +307,10 @@ func (s *SoftwareKeyProvider) Decrypt(ctx context.Context, keyID string, ciphert
 		return rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, ciphertext, nil)
 	case *ecdsa.PrivateKey:
 		return decryptDEKWithECCPrivateKey(privateKey, ciphertext)
-	case *kyber512.PrivateKey:
-		return s.decryptWithKyber512(privateKey, ciphertext)
-	case *kyber768.PrivateKey:
-		return s.decryptWithKyber768(privateKey, ciphertext)
-	case *kyber1024.PrivateKey:
-		return s.decryptWithKyber1024(privateKey, ciphertext)
 	default:
+		if plaintext, ok, err := s.decryptWithKyber(privateKey, ciphertext); ok {
+			return plaintext, err
+		}
 		return nil, fmt.Errorf("unsupported private key type for decryption: %T", privateKey)
 	}
 }
@@ -352,25 +331,10 @@ func (s *SoftwareKeyProvider) Encrypt(ctx context.Context, keyID string, plainte
 		return rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, plaintext, nil)
 	case *ecdsa.PublicKey:
 		return encryptDEKWithECCPublicKey(publicKey, plaintext)
-	case *kyber512.PublicKey:
-		ciphertext, sharedSecret, err := kyber512.Scheme().Encapsulate(publicKey)
-		if err != nil {
-			return nil, fmt.Errorf("KYBER-512 encapsulation failed: %w", err)
-		}
-		return s.encryptDEKWithSharedSecret(plaintext, sharedSecret, ciphertext)
-	case *kyber768.PublicKey:
-		ciphertext, sharedSecret, err := kyber768.Scheme().Encapsulate(publicKey)
-		if err != nil {
-			return nil, fmt.Errorf("KYBER-768 encapsulation failed: %w", err)
-		}
-		return s.encryptDEKWithSharedSecret(plaintext, sharedSecret, ciphertext)
-	case *kyber1024.PublicKey:
-		ciphertext, sharedSecret, err := kyber1024.Scheme().Encapsulate(publicKey)
-		if err != nil {
-			return nil, fmt.Errorf("KYBER-1024 encapsulation failed: %w", err)
-		}
-		return s.encryptDEKWithSharedSecret(plaintext, sharedSecret, ciphertext)
 	default:
+		if ciphertext, ok, err := s.encryptWithKyber(publicKey, plaintext); ok {
+			return ciphertext, err
+		}
 		return nil, fmt.Errorf("unsupported public key type for encryption: %T", publicKey)
 	}
 }
@@ -450,22 +414,10 @@ func (s *SoftwareKeyProvider) publicKeyToPEM(publicKey any) (string, error) {
 		if err != nil {
 			return "", err
 		}
-	case *kyber512.PublicKey:
-		publicKeyBytes, err = pub.MarshalBinary()
-		if err != nil {
-			return "", err
-		}
-	case *kyber768.PublicKey:
-		publicKeyBytes, err = pub.MarshalBinary()
-		if err != nil {
-			return "", err
-		}
-	case *kyber1024.PublicKey:
-		publicKeyBytes, err = pub.MarshalBinary()
-		if err != nil {
-			return "", err
-		}
 	default:
+		if pemValue, ok, err := s.publicKeyToPEMForKyber(publicKey); ok {
+			return pemValue, err
+		}
 		return "", fmt.Errorf("unsupported public key type: %T", publicKey)
 	}
 
@@ -475,78 +427,6 @@ func (s *SoftwareKeyProvider) publicKeyToPEM(publicKey any) (string, error) {
 	})
 
 	return string(publicKeyPEM), nil
-}
-
-// decryptWithKyber512 decrypts data encrypted with KYBER-512 KEM
-func (s *SoftwareKeyProvider) decryptWithKyber512(privateKey *kyber512.PrivateKey, ciphertext []byte) ([]byte, error) {
-	// KYBER-512 ciphertext size is 768 bytes
-	kemCiphertextSize := kyber512.Scheme().CiphertextSize()
-
-	// The ciphertext format is: KEM ciphertext || encrypted DEK
-	if len(ciphertext) < kemCiphertextSize {
-		return nil, fmt.Errorf("ciphertext too short: expected at least %d bytes, got %d", kemCiphertextSize, len(ciphertext))
-	}
-
-	// Split the ciphertext
-	kemCiphertext := ciphertext[:kemCiphertextSize]
-	encryptedDEK := ciphertext[kemCiphertextSize:]
-
-	// Decapsulate to get the shared secret
-	sharedSecret, err := kyber512.Scheme().Decapsulate(privateKey, kemCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("KYBER-512 decapsulation failed: %w", err)
-	}
-
-	// Decrypt the DEK using the shared secret
-	return s.decryptDEKWithSharedSecret(encryptedDEK, sharedSecret)
-}
-
-// decryptWithKyber768 decrypts data encrypted with KYBER-768 KEM
-func (s *SoftwareKeyProvider) decryptWithKyber768(privateKey *kyber768.PrivateKey, ciphertext []byte) ([]byte, error) {
-	// KYBER-768 ciphertext size is 1088 bytes
-	kemCiphertextSize := kyber768.Scheme().CiphertextSize()
-
-	// The ciphertext format is: KEM ciphertext || encrypted DEK
-	if len(ciphertext) < kemCiphertextSize {
-		return nil, fmt.Errorf("ciphertext too short: expected at least %d bytes, got %d", kemCiphertextSize, len(ciphertext))
-	}
-
-	// Split the ciphertext
-	kemCiphertext := ciphertext[:kemCiphertextSize]
-	encryptedDEK := ciphertext[kemCiphertextSize:]
-
-	// Decapsulate to get the shared secret
-	sharedSecret, err := kyber768.Scheme().Decapsulate(privateKey, kemCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("KYBER-768 decapsulation failed: %w", err)
-	}
-
-	// Decrypt the DEK using the shared secret
-	return s.decryptDEKWithSharedSecret(encryptedDEK, sharedSecret)
-}
-
-// decryptWithKyber1024 decrypts data encrypted with KYBER-1024 KEM
-func (s *SoftwareKeyProvider) decryptWithKyber1024(privateKey *kyber1024.PrivateKey, ciphertext []byte) ([]byte, error) {
-	// KYBER-1024 ciphertext size is 1568 bytes
-	kemCiphertextSize := kyber1024.Scheme().CiphertextSize()
-
-	// The ciphertext format is: KEM ciphertext || encrypted DEK
-	if len(ciphertext) < kemCiphertextSize {
-		return nil, fmt.Errorf("ciphertext too short: expected at least %d bytes, got %d", kemCiphertextSize, len(ciphertext))
-	}
-
-	// Split the ciphertext
-	kemCiphertext := ciphertext[:kemCiphertextSize]
-	encryptedDEK := ciphertext[kemCiphertextSize:]
-
-	// Decapsulate to get the shared secret
-	sharedSecret, err := kyber1024.Scheme().Decapsulate(privateKey, kemCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("KYBER-1024 decapsulation failed: %w", err)
-	}
-
-	// Decrypt the DEK using the shared secret
-	return s.decryptDEKWithSharedSecret(encryptedDEK, sharedSecret)
 }
 
 // encryptDEKWithSharedSecret encrypts a DEK using a KEM shared secret

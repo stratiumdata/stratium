@@ -7,7 +7,14 @@ import (
 	"testing"
 )
 
+func skipIfFIPS(t *testing.T) {
+	if isFIPSModeEnabled() {
+		t.Skip("ECC/ECIES is disabled in FIPS mode")
+	}
+}
+
 func TestGenerateECCKeyPair_P256(t *testing.T) {
+	skipIfFIPS(t)
 	privateKey, err := GenerateECCKeyPair("P-256")
 	if err != nil {
 		t.Fatalf("Failed to generate P-256 key pair: %v", err)
@@ -24,6 +31,7 @@ func TestGenerateECCKeyPair_P256(t *testing.T) {
 }
 
 func TestGenerateECCKeyPair_P384(t *testing.T) {
+	skipIfFIPS(t)
 	privateKey, err := GenerateECCKeyPair("P-384")
 	if err != nil {
 		t.Fatalf("Failed to generate P-384 key pair: %v", err)
@@ -40,6 +48,7 @@ func TestGenerateECCKeyPair_P384(t *testing.T) {
 }
 
 func TestGenerateECCKeyPair_UnsupportedCurve(t *testing.T) {
+	skipIfFIPS(t)
 	_, err := GenerateECCKeyPair("P-521")
 	if err == nil {
 		t.Fatal("Expected error for unsupported curve, got nil")
@@ -47,6 +56,7 @@ func TestGenerateECCKeyPair_UnsupportedCurve(t *testing.T) {
 }
 
 func TestSaveAndLoadECCPrivateKey(t *testing.T) {
+	skipIfFIPS(t)
 	// Create temp directory
 	tmpDir := t.TempDir()
 
@@ -85,6 +95,7 @@ func TestSaveAndLoadECCPrivateKey(t *testing.T) {
 }
 
 func TestECCPublicKeyToPEM(t *testing.T) {
+	skipIfFIPS(t)
 	privateKey, err := GenerateECCKeyPair("P-256")
 	if err != nil {
 		t.Fatalf("Failed to generate key pair: %v", err)
@@ -110,6 +121,7 @@ func TestECCPublicKeyToPEM(t *testing.T) {
 }
 
 func TestEncryptDecryptDEKWithECC_P256(t *testing.T) {
+	skipIfFIPS(t)
 	// Generate key pair
 	privateKey, err := GenerateECCKeyPair("P-256")
 	if err != nil {
@@ -145,6 +157,7 @@ func TestEncryptDecryptDEKWithECC_P256(t *testing.T) {
 }
 
 func TestEncryptDecryptDEKWithECC_P384(t *testing.T) {
+	skipIfFIPS(t)
 	// Generate key pair
 	privateKey, err := GenerateECCKeyPair("P-384")
 	if err != nil {
@@ -180,6 +193,7 @@ func TestEncryptDecryptDEKWithECC_P384(t *testing.T) {
 }
 
 func TestDecryptDEKWithECCPrivateKey_InvalidFormat(t *testing.T) {
+	skipIfFIPS(t)
 	privateKey, err := GenerateECCKeyPair("P-256")
 	if err != nil {
 		t.Fatalf("Failed to generate key pair: %v", err)
@@ -194,6 +208,7 @@ func TestDecryptDEKWithECCPrivateKey_InvalidFormat(t *testing.T) {
 }
 
 func TestEncryptDecryptDEKWithECC_MultipleRounds(t *testing.T) {
+	skipIfFIPS(t)
 	// Generate key pair
 	privateKey, err := GenerateECCKeyPair("P-256")
 	if err != nil {

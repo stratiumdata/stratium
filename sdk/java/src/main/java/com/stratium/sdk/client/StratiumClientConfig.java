@@ -9,6 +9,7 @@ public final class StratiumClientConfig {
     private final String clientId;
     private final String subjectId;
     private final String realm;
+    private final boolean fipsEnabled;
 
     private StratiumClientConfig(Builder builder) {
         this.keyAccessUri = builder.keyAccessUri;
@@ -16,6 +17,7 @@ public final class StratiumClientConfig {
         this.clientId = builder.clientId;
         this.subjectId = builder.subjectId;
         this.realm = builder.realm;
+        this.fipsEnabled = builder.fipsEnabled;
     }
 
     public URI getKeyAccessUri() {
@@ -38,6 +40,10 @@ public final class StratiumClientConfig {
         return realm;
     }
 
+    public boolean isFipsEnabled() {
+        return fipsEnabled;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -48,6 +54,7 @@ public final class StratiumClientConfig {
         private String clientId;
         private String subjectId;
         private String realm;
+        private boolean fipsEnabled;
 
         public Builder keyAccessUri(URI uri) {
             this.keyAccessUri = uri;
@@ -71,6 +78,11 @@ public final class StratiumClientConfig {
 
         public Builder realm(String realm) {
             this.realm = realm;
+            return this;
+        }
+
+        public Builder fipsEnabled(boolean fipsEnabled) {
+            this.fipsEnabled = fipsEnabled;
             return this;
         }
 

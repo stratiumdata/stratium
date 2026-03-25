@@ -15,9 +15,11 @@ import (
 	"stratium/logging"
 	"stratium/middleware"
 	"stratium/pkg/security/encryption"
+	"stratium/pkg/security/tlspolicy"
 	keyManager "stratium/services/key-manager"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -124,13 +126,29 @@ func main() {
 		unaryInterceptors = append(unaryInterceptors, keyManagerServer.GetAuthService().AuthInterceptor())
 	}
 
-	grpcServer := grpc.NewServer(
+	grpcServerOpts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 		grpc.ChainStreamInterceptor(
 			licenseEnforcer.StreamServerInterceptor(),
 			rateLimiter.StreamServerInterceptor(),
 		),
-	)
+	}
+	if cfg.Server.TLS.Enabled {
+		tlsConfig, err := tlspolicy.LoadServerConfig(
+			cfg.Server.TLS.CertFile,
+			cfg.Server.TLS.KeyFile,
+			cfg.Server.TLS.CAFile,
+			cfg.Server.TLS.ClientCAFile,
+			cfg.Server.TLS.RequireClientCert,
+		)
+		if err != nil {
+			logger.Error("Failed to configure TLS: %v", err)
+			os.Exit(1)
+		}
+		grpcServerOpts = append(grpcServerOpts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+
+	grpcServer := grpc.NewServer(grpcServerOpts...)
 
 	keyManager.RegisterKeyManagerServiceServer(grpcServer, keyManagerServer)
 

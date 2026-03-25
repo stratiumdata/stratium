@@ -62,8 +62,12 @@ export class ZtdfClient {
    * @param {number} [config.clientKeyExpirationMs=86400000] - Client key expiration in milliseconds (default 24 hours)
    * @param {Function} [config.getToken] - Optional function that returns an auth token
    * @param {boolean} [config.debug=false] - Enable debug logging
+   * @param {boolean} [config.fipsEnabled=false] - FIPS mode (not supported in browsers)
    */
   constructor(config) {
+    if (config.fipsEnabled) {
+      throw new Error('FIPS mode is not supported in the browser SDK.');
+    }
     if (!config.keyAccessUrl) {
       throw new Error('keyAccessUrl is required');
     }

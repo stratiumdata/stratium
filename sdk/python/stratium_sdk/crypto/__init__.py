@@ -7,10 +7,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
 from cryptography import exceptions as crypto_exceptions
+from cryptography.hazmat.bindings.openssl.binding import Binding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -19,6 +22,74 @@ from ..errors import EncryptionError, ValidationError
 
 AES_KEY_SIZE_BYTES = 32
 AES_GCM_IV_BYTES = 12
+
+
+def _resolve_openssl_binary() -> str:
+    configured = os.environ.get("OPENSSL_BIN", "").strip()
+    if configured:
+        candidate = os.path.realpath(os.path.expanduser(configured))
+        if not os.path.isabs(candidate):
+            raise ValidationError("OPENSSL_BIN must be an absolute path.")
+        if not os.path.isfile(candidate):
+            raise ValidationError(f"OPENSSL_BIN does not exist: {candidate}")
+        if not os.access(candidate, os.X_OK):
+            raise ValidationError(f"OPENSSL_BIN is not executable: {candidate}")
+        return candidate
+
+    resolved = shutil.which("openssl")
+    if not resolved:
+        raise ValidationError(
+            "Unable to determine OpenSSL FIPS mode; install openssl or set OPENSSL_BIN."
+        )
+    return resolved
+
+
+def ensure_fips_mode() -> None:
+    binding = Binding()
+    lib = binding.lib
+    ffi = binding.ffi
+
+    if hasattr(lib, "EVP_default_properties_is_fips_enabled"):
+        enabled = bool(lib.EVP_default_properties_is_fips_enabled(ffi.NULL))
+        if not enabled and hasattr(lib, "EVP_default_properties_enable_fips"):
+            if lib.EVP_default_properties_enable_fips(ffi.NULL, 1) != 1:
+                raise ValidationError("FIPS mode requires an OpenSSL FIPS provider.")
+            enabled = bool(lib.EVP_default_properties_is_fips_enabled(ffi.NULL))
+        if not enabled:
+            raise ValidationError("FIPS mode is enabled but OpenSSL FIPS provider is not active.")
+        return
+
+    if hasattr(lib, "FIPS_mode"):
+        enabled = bool(lib.FIPS_mode())
+        if not enabled and hasattr(lib, "FIPS_mode_set"):
+            if lib.FIPS_mode_set(1) != 1:
+                raise ValidationError("FIPS mode requires an OpenSSL FIPS-capable build.")
+            enabled = bool(lib.FIPS_mode())
+        if not enabled:
+            raise ValidationError("FIPS mode is enabled but OpenSSL FIPS mode is not active.")
+        return
+
+    openssl_bin = _resolve_openssl_binary()
+    try:
+        result = subprocess.run(
+            [openssl_bin, "list", "-providers"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise ValidationError(
+            "Unable to determine OpenSSL FIPS mode; ensure cryptography links to a FIPS-capable OpenSSL "
+            "or set OPENSSL_BIN to a compatible openssl binary."
+        ) from exc
+
+    if result.returncode != 0:
+        raise ValidationError(
+            "Unable to determine OpenSSL FIPS mode; openssl provider listing failed."
+        )
+
+    if "fips" not in (result.stdout + result.stderr).lower():
+        raise ValidationError("OpenSSL FIPS provider is not active.")
 
 
 def generate_dek() -> bytes:
@@ -131,18 +202,29 @@ def wrap_dek_with_private_key(dek: bytes, private_key: rsa.RSAPrivateKey) -> byt
     return c.to_bytes(k, "big")
 
 
-def decrypt_dek(ciphertext: bytes, private_key: rsa.RSAPrivateKey) -> bytes:
-    paddings = [
-        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
-        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA1(), label=None),
-        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA1()), algorithm=hashes.SHA1(), label=None),
-        padding.PKCS1v15(),
-    ]
+def decrypt_dek(ciphertext: bytes, private_key: rsa.RSAPrivateKey, fips_enabled: bool = False) -> bytes:
+    if fips_enabled:
+        paddings = [
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        ]
+    else:
+        paddings = [
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA1(), label=None),
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA1()), algorithm=hashes.SHA1(), label=None),
+            padding.PKCS1v15(),
+        ]
     for pad in paddings:
         try:
             return private_key.decrypt(ciphertext, pad)
         except Exception:
             continue
+    if fips_enabled:
+        raise EncryptionError("unable to decrypt DEK using FIPS-approved padding")
     raise EncryptionError("unable to decrypt DEK using the provided client key")
 
 

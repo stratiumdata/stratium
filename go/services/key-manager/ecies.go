@@ -4,12 +4,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"math/big"
-
-	"golang.org/x/crypto/hkdf"
 )
 
 // encryptDEKWithECCPublicKey encrypts plaintext using ECIES with the provided ECDSA public key.
@@ -29,9 +28,8 @@ func encryptDEKWithECCPublicKey(publicKey *ecdsa.PublicKey, plaintext []byte) ([
 		return nil, fmt.Errorf("failed to derive shared secret")
 	}
 
-	kdf := hkdf.New(sha256.New, sharedX.Bytes(), nil, []byte("key-manager-ecc-dek"))
-	encKey := make([]byte, 32)
-	if _, err := kdf.Read(encKey); err != nil {
+	encKey, err := hkdf.Key(sha256.New, sharedX.Bytes(), nil, "key-manager-ecc-dek", 32)
+	if err != nil {
 		return nil, fmt.Errorf("failed to derive encryption key: %w", err)
 	}
 
@@ -90,9 +88,8 @@ func decryptDEKWithECCPrivateKey(privateKey *ecdsa.PrivateKey, data []byte) ([]b
 		return nil, fmt.Errorf("failed to derive shared secret")
 	}
 
-	kdf := hkdf.New(sha256.New, sharedX.Bytes(), nil, []byte("key-manager-ecc-dek"))
-	encKey := make([]byte, 32)
-	if _, err := kdf.Read(encKey); err != nil {
+	encKey, err := hkdf.Key(sha256.New, sharedX.Bytes(), nil, "key-manager-ecc-dek", 32)
+	if err != nil {
 		return nil, fmt.Errorf("failed to derive encryption key: %w", err)
 	}
 

@@ -28,7 +28,8 @@ const client = new ZtdfClient({
   clientId: 'my-server-app',
   clientKeyExpirationMs: 24 * 60 * 60 * 1000, // 24 hours
   getToken: async () => await getMyAuthToken(),
-  debug: true
+  debug: true,
+  fipsEnabled: false
 });
 
 // Initialize (generates/loads keys)
@@ -103,6 +104,20 @@ import { setStorageDirectory } from '@stratiumdata/sdk/nodejs';
 // Set custom key storage directory
 setStorageDirectory('/var/app/secrets/ztdf-keys');
 ```
+
+### FIPS Mode
+
+```javascript
+const client = new ZtdfClient({
+  keyAccessUrl: 'http://localhost:8081',
+  keyManagerUrl: 'http://localhost:8081',
+  clientId: 'my-server-app',
+  fipsEnabled: true
+});
+```
+
+When `fipsEnabled` is true, the client sends the DEK in plaintext over TLS to the Key Access service.
+The client also enables OpenSSL FIPS mode via `crypto.setFips(1)` and throws if FIPS support is unavailable.
 
 ### Key Management
 

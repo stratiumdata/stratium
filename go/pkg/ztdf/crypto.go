@@ -298,6 +298,13 @@ func DecryptDEKWithPrivateKey(privateKey *rsa.PrivateKey, encryptedDEK []byte) (
 
 // WrapDEKWithPrivateKey wraps a DEK using the client's private RSA key (PKCS#1 v1.5 signing format)
 func WrapDEKWithPrivateKey(privateKey *rsa.PrivateKey, dek []byte) ([]byte, error) {
+	if isFIPSModeEnabled() {
+		return nil, &models.Error{
+			Code:    models.ErrCodeEncryptionFailed,
+			Message: "client-side PKCS#1 v1.5 DEK wrapping is disabled in FIPS mode",
+		}
+	}
+
 	k := (privateKey.N.BitLen() + 7) / 8
 	if len(dek) > k-11 {
 		return nil, &models.Error{

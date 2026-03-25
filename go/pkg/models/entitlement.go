@@ -27,11 +27,11 @@ type Entitlement struct {
 
 // CreateEntitlementRequest represents a request to create a new entitlement
 type CreateEntitlementRequest struct {
-	Name               string                 `json:"name" binding:"required"`
+	Name               string                 `json:"name"`
 	Description        string                 `json:"description"`
-	SubjectAttributes  map[string]interface{} `json:"subject_attributes" binding:"required"`
+	SubjectAttributes  map[string]interface{} `json:"subject_attributes"`
 	ResourceAttributes map[string]interface{} `json:"resource_attributes"`
-	Actions            []string               `json:"actions" binding:"required,min=1"`
+	Actions            []string               `json:"actions"`
 	Conditions         map[string]interface{} `json:"conditions"`
 	Enabled            bool                   `json:"enabled"`
 	ExpiresAt          *time.Time             `json:"expires_at,omitempty"`
@@ -59,9 +59,9 @@ type ListEntitlementsRequest struct {
 
 // EntitlementMatchRequest represents a request to find matching entitlements
 type EntitlementMatchRequest struct {
-	SubjectAttributes  map[string]interface{} `json:"subject_attributes" binding:"required"`
+	SubjectAttributes  map[string]interface{} `json:"subject_attributes"`
 	ResourceAttributes map[string]interface{} `json:"resource_attributes"`
-	Action             string                 `json:"action" binding:"required"`
+	Action             string                 `json:"action"`
 }
 
 // ToEntitlement converts CreateEntitlementRequest to Entitlement

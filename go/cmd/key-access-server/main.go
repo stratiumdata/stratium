@@ -16,10 +16,12 @@ import (
 	"stratium/logging"
 	"stratium/middleware"
 	"stratium/observability"
+	"stratium/pkg/security/tlspolicy"
 	keyAccess "stratium/services/key-access"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -137,14 +139,30 @@ func main() {
 		unaryInterceptors = append(unaryInterceptors, keyAccessServer.GetAuthService().AuthInterceptor())
 	}
 
-	grpcServer := grpc.NewServer(
+	grpcServerOpts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 		grpc.ChainStreamInterceptor(
 			licenseEnforcer.StreamServerInterceptor(),
 			rateLimiter.StreamServerInterceptor(),
 		),
-	)
+	}
+	if cfg.Server.TLS.Enabled {
+		tlsConfig, err := tlspolicy.LoadServerConfig(
+			cfg.Server.TLS.CertFile,
+			cfg.Server.TLS.KeyFile,
+			cfg.Server.TLS.CAFile,
+			cfg.Server.TLS.ClientCAFile,
+			cfg.Server.TLS.RequireClientCert,
+		)
+		if err != nil {
+			logger.Error("Failed to configure TLS: %v", err)
+			os.Exit(1)
+		}
+		grpcServerOpts = append(grpcServerOpts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+
+	grpcServer := grpc.NewServer(grpcServerOpts...)
 
 	// Register the key access service
 	keyAccess.RegisterKeyAccessServiceServer(grpcServer, keyAccessServer)

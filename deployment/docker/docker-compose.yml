@@ -93,6 +93,8 @@ services:
         SERVICE_NAME: platform-server
         SERVICE_PORT: 50051
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
+        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/platform-server:latest
     container_name: stratium-platform
     ports:
@@ -108,6 +110,8 @@ services:
     volumes:
       # Mount configuration file
       - ../../config/examples/platform-server.yaml:/etc/stratium/stratium.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/stratium/certs:ro
     networks:
       - stratium-network
     depends_on:
@@ -133,6 +137,8 @@ services:
         SERVICE_NAME: key-manager-server
         SERVICE_PORT: 50052
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
+        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/key-manager-server:latest
     container_name: stratium-key-manager
     ports:
@@ -149,6 +155,8 @@ services:
     volumes:
       # Mount configuration file
       - ../../config/examples/key-manager.yaml:/etc/stratium/stratium.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/stratium/certs:ro
       # Mount volume for admin key persistence
       - /Users/benjaminparrish/.stratium/admin-key:/var/run/secrets/stratium/admin-key:ro
       # Mount seed data configuration
@@ -178,6 +186,8 @@ services:
         SERVICE_NAME: key-access-server
         SERVICE_PORT: 50053
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
+        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/key-access-server:latest
     container_name: stratium-key-access
     ports:
@@ -191,6 +201,8 @@ services:
     volumes:
       # Mount configuration file
       - ../../config/examples/key-access-server.yaml:/etc/stratium/stratium.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/stratium/certs:ro
     networks:
       - stratium-network
     depends_on:
@@ -267,6 +279,9 @@ services:
     build:
       context: ../..
       dockerfile: deployment/docker/Dockerfile.pap
+      args:
+        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/pap-server:latest
     container_name: stratium-pap
     ports:
@@ -278,9 +293,13 @@ services:
       - STRATIUM_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
       # OIDC client secret (if enabling OIDC)
       - STRATIUM_OIDC_CLIENT_SECRET=${PAP_OIDC_CLIENT_SECRET:-stratium-pap-secret}
+      # FIPS switch
+      - GODEBUG=fips140=on
     volumes:
       # Mount configuration file
       - ../../config/examples/pap-server.yaml:/etc/stratium/stratium.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/stratium/certs:ro
     networks:
       - stratium-network
     depends_on:
@@ -291,7 +310,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "-O", "/dev/null", "http://localhost:8090/health"]
+      test: ["CMD", "wget", "--no-check-certificate", "--no-verbose", "--tries=1", "-O", "/dev/null", "https://localhost:8090/health"]
       interval: 10s
       timeout: 5s
       retries: 5

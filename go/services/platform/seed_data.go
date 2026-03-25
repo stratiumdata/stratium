@@ -187,7 +187,7 @@ func defaultSeedData() *SeedData {
 					{
 						Type:     "time",
 						Operator: "before",
-						Value:    "2025-12-31T23:59:59Z",
+						Value:    time.Now().AddDate(1, 0, 0).UTC().Format(time.RFC3339),
 					},
 				},
 				Metadata: map[string]string{

@@ -141,6 +141,10 @@ public final class CryptoUtils {
     }
 
     public static byte[] decryptDek(byte[] encryptedDek, PrivateKey privateKey) {
+        return decryptDek(encryptedDek, privateKey, false);
+    }
+
+    public static byte[] decryptDek(byte[] encryptedDek, PrivateKey privateKey, boolean fipsEnabled) {
         if (!(privateKey instanceof RSAPrivateKey rsaPrivateKey)) {
             throw new CryptoException("decrypt", "Client key must be RSA for DEK decryption", null);
         }
@@ -156,6 +160,9 @@ public final class CryptoUtils {
             return attempt.result();
         }
         lastError = attempt.error();
+        if (fipsEnabled) {
+            throw new CryptoException("decrypt", "Failed to decrypt DEK with FIPS-approved OAEP parameters", lastError);
+        }
         attempt = tryOaep(rsaPrivateKey, encryptedDek, "SHA-256", "SHA-1");
         if (attempt.result() != null) {
             return attempt.result();
