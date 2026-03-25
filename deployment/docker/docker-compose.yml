@@ -95,7 +95,7 @@ services:
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
         GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
-    image: stratium-platform:latest
+    image: local/platform-server:latest
     container_name: stratium-platform
     ports:
       - "50051:50051"
@@ -105,6 +105,8 @@ services:
       - STRATIUM_DATABASE_PASSWORD=stratium
       # Cache password if needed
       - STRATIUM_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # FIPS switch
+      - GODEBUG=fips140=on
     volumes:
       # Mount configuration file
       - ../../config/examples/platform-server.yaml:/etc/stratium/stratium.yaml:ro
@@ -137,7 +139,7 @@ services:
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
         GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
-    image: stratium-key-manager:latest
+    image: local/key-manager-server:latest
     container_name: stratium-key-manager
     ports:
       - "50052:50052"
@@ -148,6 +150,8 @@ services:
       - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_KEY_MANAGER_CLIENT_SECRET:-stratium-key-manager-secret}
       # Optional: Direct admin key (development only - NOT recommended for production)
       - STRATIUM_ADMIN_KEY=${STRATIUM_ADMIN_KEY:-}
+      # FIPS switch
+      - GODEBUG=fips140=on
     volumes:
       # Mount configuration file
       - ../../config/examples/key-manager.yaml:/etc/stratium/stratium.yaml:ro
@@ -184,7 +188,7 @@ services:
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
         GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
-    image: stratium-key-access:latest
+    image: local/key-access-server:latest
     container_name: stratium-key-access
     ports:
       - "50053:50053"
@@ -192,6 +196,8 @@ services:
     environment:
       # OIDC client secret
       - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_KEY_ACCESS_CLIENT_SECRET:-stratium-key-manager-secret}
+      # FIPS switch
+      - GODEBUG=fips140=on
     volumes:
       # Mount configuration file
       - ../../config/examples/key-access-server.yaml:/etc/stratium/stratium.yaml:ro
@@ -276,6 +282,7 @@ services:
       args:
         GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+    image: local/pap-server:latest
     container_name: stratium-pap
     ports:
       - "8090:8090"
@@ -328,6 +335,7 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_MODE: docker
+    image: local/pap-ui:latest
     container_name: stratium-pap-ui
     ports:
       - "3000:8080"
