@@ -293,6 +293,8 @@ services:
       - STRATIUM_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
       # OIDC client secret (if enabling OIDC)
       - STRATIUM_OIDC_CLIENT_SECRET=${PAP_OIDC_CLIENT_SECRET:-stratium-pap-secret}
+      # FIPS switch
+      - GODEBUG=fips140=on
     volumes:
       # Mount configuration file
       - ../../config/examples/pap-server.yaml:/etc/stratium/stratium.yaml:ro
