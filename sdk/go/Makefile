@@ -44,6 +44,7 @@ copy-proto:
 	@mkdir -p proto/services/platform
 	@mkdir -p proto/services/key-manager
 	@mkdir -p proto/services/key-access
+	@mkdir -p proto/services/agent-gateway
 	@mkdir -p proto/models
 
 	@echo "  - Copying platform service protos..."
@@ -54,6 +55,9 @@ copy-proto:
 
 	@echo "  - Copying key-access service protos..."
 	@cp -r $(PROTO_SOURCE_DIR)/services/key-access/*.proto proto/services/key-access/ 2>/dev/null || true
+
+	@echo "  - Copying agent-gateway service protos..."
+	@cp -r $(PROTO_SOURCE_DIR)/services/agent-gateway/*.proto proto/services/agent-gateway/ 2>/dev/null || true
 
 	@echo "  - Copying model protos..."
 	@cp -r $(PROTO_SOURCE_DIR)/models/*.proto proto/models/ 2>/dev/null || true
@@ -79,6 +83,11 @@ generate-proto: copy-proto
 	protoc --go_out=gen --go_opt=module=stratium \
 		--go-grpc_out=gen --go-grpc_opt=module=stratium \
 		proto/services/key-access/key-access.proto
+
+	@echo "Generating Agent Gateway service..."
+	protoc --go_out=gen --go_opt=module=stratium \
+		--go-grpc_out=gen --go-grpc_opt=module=stratium \
+		proto/services/agent-gateway/agent-gateway.proto
 
 	@echo "Generating model protos..."
 	protoc --go_out=gen --go_opt=module=stratium \

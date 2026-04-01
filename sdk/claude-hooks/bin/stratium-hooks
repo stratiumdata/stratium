@@ -1,0 +1,569 @@
+#!/usr/bin/env node
+/**
+ * stratium-hooks CLI
+ *
+ * Usage:
+ *   stratium-hooks configure [options]   Write machine config + register hooks in settings.json
+ *   stratium-hooks status                Show current session and config status
+ *   stratium-hooks login [--user <u>]   Authenticate and cache OIDC token
+ *   stratium-hooks logout                Clear cached OIDC tokens
+ *   stratium-hooks revoke                Revoke active session delegation in Stratium
+ *   stratium-hooks ping                  Test connectivity to Stratium gateway
+ *   stratium-hooks scope                 Show the active stratium: scope for the current dir
+ *   stratium-hooks override [--reason]   Request a temporary break-glass override
+ *   stratium-hooks session-init          Run session init (used as UserPromptSubmit hook)
+ *   stratium-hooks pre-tool-use          Run pre-tool-use check (used as PreToolUse hook)
+ *   stratium-hooks post-tool-use         Run post-tool-use audit (used as PostToolUse hook)
+ *   stratium-hooks version               Print version
+ */
+
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
+
+const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
+const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8'));
+
+const HOME_DIR         = os.homedir();
+const CLAUDE_DIR       = path.join(HOME_DIR, '.claude');
+const MACHINE_CONFIG   = path.join(CLAUDE_DIR, 'stratium.json');
+const CLAUDE_SETTINGS  = path.join(CLAUDE_DIR, 'settings.json');
+const AGENT_FILE       = path.join(CLAUDE_DIR, 'stratium-agent.json');
+const TOKEN_CACHE      = path.join(CLAUDE_DIR, 'stratium-tokens.json');
+const AUDIT_LOG        = path.join(CLAUDE_DIR, 'stratium-audit.jsonl');
+
+// ── Utility ──────────────────────────────────────────────────────────────────
+
+function readJSON(filePath, fallback = null) {
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+  catch { return fallback; }
+}
+
+function writeJSON(filePath, obj) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(obj, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+}
+
+function parseArgs(argv) {
+  const args  = {};
+  const flags = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith('--')) {
+      const key = argv[i].slice(2);
+      args[key] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
+    } else {
+      flags.push(argv[i]);
+    }
+  }
+  return { args, flags };
+}
+
+// ── Commands ─────────────────────────────────────────────────────────────────
+
+/**
+ * configure: write ~/.claude/stratium.json and register hooks in settings.json
+ */
+function cmdConfigure(args) {
+  if (!args.gateway) {
+    console.error('Error: --gateway <host:port> is required');
+    process.exit(1);
+  }
+
+  const config = {
+    gateway:     args.gateway,
+    pap_url:     args['pap-url']  || `https://${args.gateway.split(':')[0]}:8090`,
+    keycloak_url: args.keycloak   || `https://keycloak.${args.gateway.split(':')[0].split('.').slice(1).join('.')}`,
+    realm:       args.realm       || 'master',
+    client_id:   args['client-id'] || 'claude-code',
+    cacert:      args.cacert      || null,
+    plaintext:   args.plaintext   || false,
+    delegation_ttl_seconds: parseInt(args['delegation-ttl'] || '14400', 10),
+    default_scope: {
+      max_action_tier: args['max-tier'] ? parseInt(args['max-tier'], 10) : 1,
+      approved_tools:  [],
+      on_unavailable:  args['fail-closed'] ? 'fail_closed' : (args['fail-open'] ? 'fail_open' : 'fail_closed'),
+    },
+  };
+
+  writeJSON(MACHINE_CONFIG, config);
+  if (!args.silent) console.log(`[stratium] Machine config written to ${MACHINE_CONFIG}`);
+
+  // Register hooks in ~/.claude/settings.json
+  registerHooksInSettings(args.silent);
+}
+
+/**
+ * Register PreToolUse + UserPromptSubmit hooks in ~/.claude/settings.json
+ */
+function registerHooksInSettings(silent) {
+  const settings = readJSON(CLAUDE_SETTINGS, {});
+  if (!settings.hooks) settings.hooks = {};
+
+  // Determine hook command — prefer direct node path if available, else npx
+  const scriptDir    = path.join(__dirname, '..', 'src');
+  const sessionScript = path.join(scriptDir, 'session-init.js');
+  const preToolScript = path.join(scriptDir, 'pre-tool-use.js');
+  const postToolScript = path.join(scriptDir, 'post-tool-use.js');
+
+  // Use 'node /absolute/path' if the scripts exist (installed package)
+  const nodeCmd = process.execPath; // absolute path to node binary
+
+  const sessionCmd  = fs.existsSync(sessionScript)
+    ? `${nodeCmd} ${sessionScript}`
+    : 'npx @stratium/claude-hooks session-init';
+
+  const preToolCmd  = fs.existsSync(preToolScript)
+    ? `${nodeCmd} ${preToolScript}`
+    : 'npx @stratium/claude-hooks pre-tool-use';
+
+  const postToolCmd = fs.existsSync(postToolScript)
+    ? `${nodeCmd} ${postToolScript}`
+    : 'npx @stratium/claude-hooks post-tool-use';
+
+  // Build hook entries — remove any existing stratium entries first.
+  // Claude Code hook format: { matcher: string, hooks: [{ type, command }] }
+  function withoutStratium(hookArray) {
+    if (!Array.isArray(hookArray)) return [];
+    return hookArray.filter(h => {
+      // Remove old flat-format entries (command directly on entry)
+      if (String(h.command || '').includes('stratium')) return false;
+      // Remove new nested-format entries (command inside hooks array)
+      if (Array.isArray(h.hooks) && h.hooks.some(i => String(i.command || '').includes('stratium'))) return false;
+      return true;
+    });
+  }
+
+  function makeHookEntry(command) {
+    return { matcher: '', hooks: [{ type: 'command', command }] };
+  }
+
+  settings.hooks.UserPromptSubmit = [
+    ...withoutStratium(settings.hooks.UserPromptSubmit),
+    makeHookEntry(sessionCmd),
+  ];
+
+  settings.hooks.PreToolUse = [
+    ...withoutStratium(settings.hooks.PreToolUse),
+    makeHookEntry(preToolCmd),
+  ];
+
+  settings.hooks.PostToolUse = [
+    ...withoutStratium(settings.hooks.PostToolUse),
+    makeHookEntry(postToolCmd),
+  ];
+
+  writeJSON(CLAUDE_SETTINGS, settings);
+  if (!silent) console.log(`[stratium] Hooks registered in ${CLAUDE_SETTINGS}`);
+}
+
+/**
+ * status: show current configuration and session state
+ */
+function cmdStatus() {
+  const config  = readJSON(MACHINE_CONFIG);
+  const agent   = readJSON(AGENT_FILE);
+  const session = readJSON(
+    process.env.STRATIUM_SESSION_FILE ||
+    path.join(os.tmpdir(), `stratium-session-${process.pid}.json`)
+  );
+
+  const { keychainAvailable } = require('../src/auth');
+
+  console.log('── Stratium Claude Hooks Status ─────────────────────────────');
+  console.log(`  version:      ${pkg.version}`);
+  console.log(`  config:       ${config ? MACHINE_CONFIG : '(not configured)'}`);
+
+  if (config) {
+    console.log(`  gateway:      ${config.gateway}`);
+    console.log(`  pap_url:      ${config.pap_url}`);
+    console.log(`  keycloak:     ${config.keycloak_url} (realm: ${config.realm})`);
+    console.log(`  fail mode:    ${(config.default_scope || {}).on_unavailable || 'fail_closed'}`);
+  }
+
+  console.log(`  keychain:     ${keychainAvailable() ? `YES (${process.platform === 'darwin' ? 'macOS Keychain' : 'GNOME Keyring'})` : 'NO (file cache fallback)'}`);
+
+  console.log(`  agent file:   ${agent ? AGENT_FILE : '(not registered)'}`);
+  if (agent) {
+    console.log(`  agent_id:     ${agent.agent_id}`);
+    console.log(`  machine_id:   ${agent.machine_id}`);
+    console.log(`  registered:   ${agent.registered_at}`);
+  }
+
+  console.log(`  session:      ${session ? 'active' : '(not active in this process)'}`);
+  if (session) {
+    console.log(`  user:         ${session.user}`);
+    console.log(`  delegation:   ${session.delegation_id}`);
+    console.log(`  expires_at:   ${session.expires_at}`);
+  }
+
+  const hooks = readJSON(CLAUDE_SETTINGS, {}).hooks || {};
+  function hasStratiumHook(hookArray) {
+    return (hookArray || []).some(h =>
+      String(h.command || '').includes('stratium') ||
+      (Array.isArray(h.hooks) && h.hooks.some(i => String(i.command || '').includes('stratium')))
+    );
+  }
+  const hasPreTool = hasStratiumHook(hooks.PreToolUse);
+  const hasSession = hasStratiumHook(hooks.UserPromptSubmit);
+  console.log(`  hooks:        PreToolUse=${hasPreTool ? 'YES' : 'NO'}, UserPromptSubmit=${hasSession ? 'YES' : 'NO'}`);
+  console.log('─────────────────────────────────────────────────────────────');
+}
+
+/**
+ * revoke: revoke the active session delegation in Stratium
+ */
+function cmdRevoke() {
+  const config  = readJSON(MACHINE_CONFIG);
+  const session = readJSON(
+    process.env.STRATIUM_SESSION_FILE ||
+    path.join(os.tmpdir(), `stratium-session-${process.pid}.json`)
+  );
+
+  if (!config) {
+    console.error('Error: not configured. Run: stratium-hooks configure --gateway <host:port>');
+    process.exit(1);
+  }
+
+  if (!session || !session.delegation_id) {
+    console.log('[stratium] No active session delegation found in this process.');
+    process.exit(0);
+  }
+
+  const { grpcCall } = require('../src/grpc-client');
+  const grpcOpts = {
+    gateway:   config.gateway,
+    cacert:    config.cacert   || undefined,
+    plaintext: config.plaintext || false,
+  };
+
+  try {
+    grpcCall(grpcOpts, 'agent_gateway.AgentGatewayService/RevokeDelegation', {
+      delegation_id: session.delegation_id,
+    });
+
+    // Remove local session file
+    const sessionFile = process.env.STRATIUM_SESSION_FILE ||
+      path.join(os.tmpdir(), `stratium-session-${process.pid}.json`);
+    try { require('fs').unlinkSync(sessionFile); } catch { /* ignore */ }
+
+    console.log(`[stratium] Delegation ${session.delegation_id.slice(0, 8)} revoked.`);
+    console.log('[stratium] All tools will be blocked until the next Claude Code session starts.');
+  } catch (err) {
+    console.error(`[stratium] Revocation failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * override: request a temporary break-glass override delegation.
+ *
+ * Creates a short-lived elevated delegation for emergency use cases.
+ * All override sessions are logged with an admin-visible justification.
+ */
+function cmdOverride(args) {
+  const config = readJSON(MACHINE_CONFIG);
+  if (!config) {
+    console.error('Error: not configured. Run: stratium-hooks configure --gateway <host:port>');
+    process.exit(1);
+  }
+
+  const reason = args.reason || args.r || '';
+  if (!reason) {
+    console.error('Error: --reason <justification> is required for break-glass overrides.');
+    console.error('Example: stratium-hooks override --reason "Production incident P1-1234 - need to patch auth.go"');
+    process.exit(1);
+  }
+
+  const username  = process.env.STRATIUM_OIDC_USER || os.userInfo().username;
+  const tier      = parseInt(args.tier || '2', 10);
+  const ttl       = parseInt(args.ttl  || '3600', 10);
+
+  const { getToken } = require('../src/auth');
+  const { grpcCall }  = require('../src/grpc-client');
+  const { loadAgentRecord } = require('../src/agent-registry');
+
+  let tokenEntry;
+  try {
+    tokenEntry = getToken({
+      keycloak_url: config.keycloak_url,
+      realm:        config.realm,
+      client_id:    config.client_id || 'claude-code',
+      username,
+    });
+  } catch (err) {
+    console.error(`[stratium] Authentication failed: ${err.message}`);
+    process.exit(1);
+  }
+
+  const agent = loadAgentRecord();
+  if (!agent) {
+    console.error('[stratium] No agent record found. Run stratium-hooks login first.');
+    process.exit(1);
+  }
+
+  const grpcOpts = {
+    gateway:   config.gateway,
+    cacert:    config.cacert   || undefined,
+    plaintext: config.plaintext || false,
+  };
+
+  try {
+    const { createDelegation: _createDelegation } = require('../src/grpc-client');
+    const delegation = _createDelegation(grpcOpts, {
+      agent_id:        agent.agent_id,
+      delegator_token: tokenEntry.access_token,
+      user_id:         tokenEntry.user_email || username,
+      approved_tools:  [],  // all tools at tier
+      max_action_tier: tier,
+      ttl_seconds:     ttl,
+      purpose:         `[BREAK-GLASS] ${reason}`,
+      conversation_id: `override-${Date.now()}`,
+    });
+
+    // Write override session file
+    const sessionFile = process.env.STRATIUM_SESSION_FILE ||
+      path.join(os.tmpdir(), `stratium-session-${process.pid}.json`);
+    const sessionState = {
+      agent_id:         agent.agent_id,
+      delegation_id:    delegation.delegation_id,
+      delegation_token: delegation.delegation_token,
+      expires_at:       delegation.expires_at,
+      user:             tokenEntry.user_email || username,
+      on_unavailable:   'fail_closed',
+      gateway:          config.gateway,
+      cacert:           config.cacert || null,
+      plaintext:        config.plaintext || false,
+      override:         true,
+      override_reason:  reason,
+      project_scope: {
+        max_action_tier: tier,
+        approved_tools:  [],
+        tool_tiers:      {},
+      },
+    };
+    require('fs').writeFileSync(sessionFile, JSON.stringify(sessionState, null, 2), { mode: 0o600 });
+
+    const tierLabel = ['REASONING','READ_ONLY','INTERNAL_MODIFY','EXTERNAL_COMMS','DESTRUCTIVE'][tier] || '?';
+    console.log(`[stratium] ⚠️  BREAK-GLASS OVERRIDE ACTIVE`);
+    console.log(`[stratium]    Delegation: ${delegation.delegation_id}`);
+    console.log(`[stratium]    Tier:       ${tierLabel} (${tier})`);
+    console.log(`[stratium]    TTL:        ${ttl}s`);
+    console.log(`[stratium]    Reason:     ${reason}`);
+    console.log(`[stratium]    This override is logged and will be reviewed by your security team.`);
+  } catch (err) {
+    console.error(`[stratium] Override request failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * login: authenticate and cache token
+ */
+function cmdLogin(args) {
+  const config = readJSON(MACHINE_CONFIG);
+  if (!config) {
+    console.error('Error: not configured. Run: stratium-hooks configure --gateway <host:port>');
+    process.exit(1);
+  }
+
+  const username = args.user || process.env.STRATIUM_OIDC_USER || os.userInfo().username;
+  const { getToken } = require('../src/auth');
+
+  try {
+    const token = getToken({
+      keycloak_url: config.keycloak_url,
+      realm:        config.realm,
+      client_id:    config.client_id || 'claude-code',
+      username,
+    });
+    console.log(`[stratium] Authenticated as ${token.user_email || username}`);
+    console.log(`[stratium] Token expires at: ${new Date(token.expires_at * 1000).toISOString()}`);
+  } catch (err) {
+    console.error(`[stratium] Login failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * logout: clear cached tokens
+ */
+function cmdLogout() {
+  const { clearAllTokens } = require('../src/auth');
+  clearAllTokens();
+  console.log('[stratium] All cached tokens cleared.');
+}
+
+/**
+ * ping: test connectivity to gateway and PAP
+ */
+function cmdPing() {
+  const config = readJSON(MACHINE_CONFIG);
+  if (!config) {
+    console.error('Error: not configured. Run: stratium-hooks configure --gateway <host:port>');
+    process.exit(1);
+  }
+
+  const { execFileSync } = require('child_process');
+  let ok = true;
+
+  // Test grpcurl
+  try {
+    const grpcurl = process.env.STRATIUM_GRPCURL_PATH || 'grpcurl';
+    const args = ['-version'];
+    if (config.plaintext) args.unshift('-plaintext');
+    execFileSync(grpcurl, args, { timeout: 5000, stdio: 'pipe' });
+    console.log('[stratium] grpcurl:  OK (found on PATH)');
+  } catch {
+    console.error('[stratium] grpcurl:  MISSING — install grpcurl: https://github.com/fullstorydev/grpcurl');
+    ok = false;
+  }
+
+  // Test curl
+  try {
+    const curl = process.env.STRATIUM_CURL_PATH || 'curl';
+    execFileSync(curl, ['--version'], { timeout: 3000, stdio: 'pipe' });
+    console.log('[stratium] curl:     OK (found on PATH)');
+  } catch {
+    console.error('[stratium] curl:     MISSING');
+    ok = false;
+  }
+
+  // Test PAP connectivity
+  try {
+    const curl = process.env.STRATIUM_CURL_PATH || 'curl';
+    const healthUrl = `${config.pap_url}/health`;
+    execFileSync(curl, ['-s', '-f', '-o', '/dev/null', '--max-time', '5', healthUrl], {
+      timeout: 6000, stdio: 'pipe',
+    });
+    console.log(`[stratium] PAP:      OK (${config.pap_url})`);
+  } catch {
+    console.error(`[stratium] PAP:      UNREACHABLE (${config.pap_url})`);
+    ok = false;
+  }
+
+  process.exit(ok ? 0 : 1);
+}
+
+/**
+ * scope: print the resolved stratium: scope for the current directory
+ */
+function cmdScope() {
+  const { loadScope } = require('../src/claude-md-parser');
+  const projectDir    = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const { scope, claudeMdPath } = loadScope(projectDir);
+
+  console.log('── Stratium Scope ────────────────────────────────────────────');
+  console.log(`  CLAUDE.md:    ${claudeMdPath || '(not found)'}`);
+  console.log(`  enabled:      ${scope.enabled}`);
+  console.log(`  agent_name:   ${scope.agent_name}`);
+  console.log(`  max_tier:     ${scope.max_action_tier} (${['REASONING','READ_ONLY','INTERNAL_MODIFY','EXTERNAL_COMMS','DESTRUCTIVE'][scope.max_action_tier] || '?'})`);
+  console.log(`  approved:     ${scope.approved_tools.length > 0 ? scope.approved_tools.join(', ') : '(all at tier)'}`);
+  console.log(`  on_unavail:   ${scope.on_unavailable}`);
+  console.log(`  purpose:      ${scope.purpose || '(none)'}`);
+  console.log('─────────────────────────────────────────────────────────────');
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
+
+const rawArgs  = process.argv.slice(2);
+const command  = rawArgs[0];
+const { args } = parseArgs(rawArgs.slice(1));
+
+switch (command) {
+  case 'configure':
+    cmdConfigure(args);
+    break;
+
+  case 'status':
+    cmdStatus();
+    break;
+
+  case 'login':
+    cmdLogin(args);
+    break;
+
+  case 'logout':
+    cmdLogout();
+    break;
+
+  case 'ping':
+    cmdPing();
+    break;
+
+  case 'scope':
+    cmdScope();
+    break;
+
+  case 'revoke':
+    cmdRevoke();
+    break;
+
+  case 'override':
+    cmdOverride(args);
+    break;
+
+  case 'session-init':
+    // Delegate to session-init.js (hook entrypoint)
+    require('../src/session-init');
+    break;
+
+  case 'pre-tool-use':
+    // Delegate to pre-tool-use.js (hook entrypoint)
+    require('../src/pre-tool-use');
+    break;
+
+  case 'post-tool-use':
+    // Delegate to post-tool-use.js (hook entrypoint)
+    require('../src/post-tool-use');
+    break;
+
+  case 'version':
+  case '--version':
+  case '-v':
+    console.log(`@stratium/claude-hooks ${pkg.version}`);
+    break;
+
+  case 'help':
+  case '--help':
+  case '-h':
+  case undefined:
+    console.log(`
+@stratium/claude-hooks v${pkg.version}
+Zero-Trust authorization hooks for Claude Code
+
+Usage:
+  stratium-hooks configure --gateway <host:port> [options]
+  stratium-hooks status
+  stratium-hooks login [--user <username>]
+  stratium-hooks logout
+  stratium-hooks revoke
+  stratium-hooks ping
+  stratium-hooks scope
+  stratium-hooks override --reason <justification> [--tier <0-4>] [--ttl <seconds>]
+
+Configure options:
+  --gateway <host:port>       Agent Gateway address (required)
+  --pap-url <url>             PAP REST API URL (default: derived from gateway)
+  --keycloak <url>            Keycloak URL
+  --realm <realm>             Keycloak realm (default: master)
+  --client-id <id>            OAuth client ID (default: claude-code)
+  --cacert <path>             CA certificate for TLS
+  --fail-closed               Block all tools if Stratium unreachable (default)
+  --fail-open                 Allow all tools if Stratium unreachable
+  --delegation-ttl <seconds>  Delegation TTL (default: 14400 = 4h)
+  --silent                    Suppress output (for MDM scripts)
+
+Override options:
+  --reason <text>             Justification for break-glass (required)
+  --tier <0-4>                Max action tier (default: 2 = INTERNAL_MODIFY)
+  --ttl <seconds>             Override duration (default: 3600 = 1h)
+`);
+    break;
+
+  default:
+    console.error(`Unknown command: ${command}. Run 'stratium-hooks help' for usage.`);
+    process.exit(1);
+}

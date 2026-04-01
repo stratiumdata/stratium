@@ -1,0 +1,24 @@
+# .npmrc.template — copy to .npmrc and fill in the registry token.
+#
+# For private Artifactory / Verdaccio registry:
+#   1. Replace REGISTRY_URL with your registry base URL
+#   2. Set NPM_TOKEN in your CI environment (GitHub Actions secret / Jamf parameter)
+#   3. Copy this file to .npmrc (never commit .npmrc with a real token)
+#
+# Public npmjs.org (default):
+#   //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+#
+# Artifactory (JFrog):
+#   registry=https://artifactory.corp.com/artifactory/api/npm/npm-local/
+#   //artifactory.corp.com/artifactory/api/npm/npm-local/:_authToken=${NPM_TOKEN}
+#   always-auth=true
+#
+# Verdaccio:
+#   registry=https://npm.corp.com/
+#   //npm.corp.com/:_authToken=${NPM_TOKEN}
+#
+
+# Uncomment and edit one of the blocks above, then run:
+#   cp .npmrc.template .npmrc
+#   # Fill in the registry URL and token
+#   npm publish

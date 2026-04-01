@@ -138,6 +138,9 @@ func (s *Server) setupRoutes(config config.CORSConfig) {
 			auditLogs.GET("", s.listAuditLogs)
 			auditLogs.GET("/:id", s.getAuditLog)
 		}
+
+		// Agent registry routes (only when agent-auth feature is enabled)
+		s.registerAgentRoutes(v1)
 	}
 }
 

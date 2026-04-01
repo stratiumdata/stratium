@@ -1,0 +1,98 @@
+# Agent Gateway Server Configuration - Docker Deployment
+
+service:
+  name: agent-gateway-server
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 50054
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 300s
+  graceful_stop: 60s
+  tls:
+    enabled: true
+    cert_file: /etc/stratium/certs/server.crt
+    key_file: /etc/stratium/certs/server.key
+    ca_file: /etc/stratium/certs/ca.crt
+    client_ca_file: /etc/stratium/certs/ca.crt
+    require_client_cert: false
+
+database:
+  driver: postgres
+  host: postgres
+  port: 5432
+  database: stratium_pap
+  user: stratium
+  password: stratium  # Override via STRATIUM_DATABASE_PASSWORD
+  sslmode: disable
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 10m
+
+security:
+  rate_limiting:
+    enabled: false
+  cors:
+    enabled: false
+  fips:
+    enabled: false
+    go_module: v1.0.0-c2097c7c
+
+license:
+  enabled: false
+
+encryption:
+  algorithm: RSA2048
+  key_rotation: false
+
+logging:
+  level: info
+  format: json
+  output: stdout
+
+observability:
+  metrics:
+    enabled: true
+    address: ":9094"
+    path: /metrics
+  tracing:
+    enabled: true
+    provider: otlp
+    endpoint: otel-collector:4317
+    service_name: agent-gateway-server
+
+# Agent Gateway specific
+agent_gateway:
+  enabled: true
+  grpc_port: 50054
+  delegation_token_ttl: 15m
+  delegation_max_ttl: 1h
+  delegation_signing_key: ""  # Override via STRATIUM_AGENT_GATEWAY_DELEGATION_SIGNING_KEY
+  delegation_max_depth: 5
+  chain_cache_ttl: 30s
+  cascade_revoke: true
+
+# Downstream services
+services:
+  platform:
+    address: platform:50051
+    timeout: 10s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt
+  key_manager:
+    address: key-manager:50052
+    timeout: 10s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt
+  key_access:
+    address: key-access:50053
+    timeout: 10s
+    tls:
+      enabled: true
+      ca_file: /etc/stratium/certs/ca.crt

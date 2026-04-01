@@ -30,8 +30,11 @@ WORKDIR /app/go
 # Build the PAP server
 ARG GOFIPS140=""
 ARG BUILD_TAGS=""
+ARG BUILD_FEATURES=""
 RUN CGO_ENABLED=0 GOOS=linux GOFIPS140=${GOFIPS140} \
-    go build -tags "${BUILD_TAGS}" -a -installsuffix cgo -o /app/pap-server ./cmd/pap-server
+    go build -tags "${BUILD_TAGS}" \
+    -ldflags "-X 'stratium/features.BuildFeatures=${BUILD_FEATURES}'" \
+    -a -installsuffix cgo -o /app/pap-server ./cmd/pap-server
 
 # Final stage
 FROM cgr.dev/chainguard/wolfi-base:latest

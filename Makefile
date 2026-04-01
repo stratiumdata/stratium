@@ -39,7 +39,7 @@ DEPLOY_ENV ?= production
 COMPOSE_FILE ?= deployment/docker/docker-compose.yml
 COMPOSE_PROJECT_NAME ?= $(notdir $(CURDIR))
 COMPOSE_SERVICE_TAGS := platform:platform-server key-manager:key-manager-server key-access:key-access-server pap:pap-server pap-ui:pap-ui
-DOCKER_SERVICES := platform-server:50051 key-manager-server:50052 key-access-server:50053 pap-server:8090
+DOCKER_SERVICES := key-manager-server:50052 key-access-server:50053 pap-server:8090
 AWS_REGION ?= us-east-2
 AWS_ACCOUNT_ID ?= 
 PUSH_TO_ECR ?= true
@@ -52,12 +52,14 @@ GOFIPS140 ?= v1.0.0
 ifeq ($(FIPS),1)
 GO_BUILD_ENV := GOFIPS140=$(GOFIPS140)
 GO_BUILD_TAGS := -tags fips
+GO_BUILD_TAGS_RAW := fips
 else
 GO_BUILD_ENV :=
 GO_BUILD_TAGS :=
+GO_BUILD_TAGS_RAW :=
 endif
 
-build: build-platform build-key-manager build-key-access build-pap ## Build all binaries
+build: build-platform build-key-manager build-key-access build-pap build-agent-gateway ## Build all binaries
 
 build-platform: ## Build platform service binaries
 	@echo "Building platform server..."
@@ -89,6 +91,13 @@ build-pap-cli: ## Build PAP CLI client
 	@echo "Building PAP CLI client..."
 	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) -o ../bin/pap-cli ./cmd/pap-cli
 	@echo "PAP CLI build complete!"
+
+build-agent-gateway: ## Build agent gateway service binary
+	@echo "Building agent gateway server..."
+	cd go && $(GO_BUILD_ENV) go build $(GO_BUILD_TAGS) \
+		-ldflags "-X stratium/features.BuildFeatures=agent-auth" \
+		-o ../bin/agent-gateway-server ./cmd/agent-gateway-server
+	@echo "Agent gateway build complete!"
 
 build-license-signer: ## Build license signer CLI
 	@echo "Building license signer CLI..."
@@ -149,14 +158,17 @@ fips-validate: ## Validate runtime FIPS crypto modules (STRICT=1 to fail on skip
 	JAVA_SECURITY_PROPERTIES=$(JAVA_SECURITY_PROPERTIES) JAVA_FIPS_CLASSPATH=$(JAVA_FIPS_CLASSPATH) \
 	./scripts/validate_fips_runtime.sh
 
-full: generate build docker-down docker-build docker-up ## Rebuilds artifacts and docker images
+docker-migrate: ## Apply database migrations (safe to re-run)
+	@echo "Applying database migrations..."
+	docker exec -i stratium-postgres psql -U keycloak -d stratium_pap < deployment/postgres/04-init-agent-auth.sql
+	@echo "Migrations applied!"
+
+full: generate build docker-down docker-build docker-up docker-migrate ## Rebuilds artifacts, docker images, and runs migrations
 	@echo ""
 	@echo "✓ Rebuild complete!"
 	@echo ""
-	@echo "Waiting for services to be healthy..."
-	@sleep 10
-	@echo ""
-	@echo "You can now test the system!"
+	@echo "You can now test the system:"
+	@echo "  ./scripts/test_agent_auth.sh"
 
 bench: ## Run all benchmarks
 	@echo "Running platform benchmarks..."
@@ -175,11 +187,45 @@ docker-build: ## Build all Docker images (production)
 			--build-arg SERVICE_PORT=$$port \
 			--build-arg BUILD_MODE=$(DEPLOY_ENV) \
 			--build-arg BUILD_VERSION=$(DOCKER_VERSION) \
+			--build-arg GOFIPS140=$(GOFIPS140) \
+			--build-arg BUILD_TAGS=$(GO_BUILD_TAGS_RAW) \
 			-f deployment/docker/Dockerfile \
 			-t $(DOCKER_REGISTRY)/$$svc:$(DOCKER_VERSION) \
 			-t local/$$svc:latest \
 			.; \
 	done; \
+	echo "Building platform-server image with agent-auth feature..."; \
+	docker build \
+		--build-arg SERVICE_NAME=platform-server \
+		--build-arg SERVICE_PORT=50051 \
+		--build-arg BUILD_MODE=$(DEPLOY_ENV) \
+		--build-arg BUILD_VERSION=$(DOCKER_VERSION) \
+		--build-arg GOFIPS140=$(GOFIPS140) \
+		--build-arg BUILD_TAGS=$(GO_BUILD_TAGS_RAW) \
+		--build-arg BUILD_FEATURES=metrics,observability,caching,rate-limiting,agent-auth \
+		-f deployment/docker/Dockerfile \
+		-t $(DOCKER_REGISTRY)/platform-server:$(DOCKER_VERSION) \
+		-t local/platform-server:latest \
+		.; \
+	echo "Building pap-server image with agent-auth feature..."; \
+	docker build \
+		--build-arg GOFIPS140=$(GOFIPS140) \
+		--build-arg BUILD_TAGS=$(GO_BUILD_TAGS_RAW) \
+		--build-arg BUILD_FEATURES=agent-auth \
+		-f deployment/docker/Dockerfile.pap \
+		-t $(DOCKER_REGISTRY)/pap-server:$(DOCKER_VERSION) \
+		-t local/pap-server:latest \
+		.; \
+	echo "Building agent-gateway-server image..."; \
+	docker build \
+		--build-arg SERVICE_NAME=agent-gateway-server \
+		--build-arg GOFIPS140=$(GOFIPS140) \
+		--build-arg BUILD_TAGS=$(GO_BUILD_TAGS_RAW) \
+		--build-arg BUILD_FEATURES=agent-auth \
+		-f deployment/docker/Dockerfile \
+		-t $(DOCKER_REGISTRY)/agent-gateway-server:$(DOCKER_VERSION) \
+		-t local/agent-gateway-server:latest \
+		.; \
 	echo "Building pap-ui image..."; \
 	docker build \
 		-f pap-ui/Dockerfile \
@@ -219,33 +265,34 @@ docker-push: ## Push Docker images to registry/ECR
 	docker tag $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION); \
 	docker push $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION)
 
-docker-up: ## Start all services with Docker Compose
+docker-up: ## Start all services with Docker Compose (including agent-gateway)
 	@echo "Starting all services with Docker Compose..."
-	docker-compose -f deployment/docker/docker-compose.yml up -d
+	docker-compose -f deployment/docker/docker-compose.yml --profile agent-auth up -d
 	@echo "Services started!"
 	@echo ""
 	@echo "Enabling HTTPS on Keycloak"
 	docker exec stratium-keycloak /opt/keycloak/bin/kcadm.sh update realms/master -s sslRequired=NONE --server http://localhost:8080 --realm master --user admin --password admin
 	@echo ""
 	@echo "Services available at:"
-	@echo "  Platform:     localhost:50051 (gRPC)"
-	@echo "  Key Manager:  localhost:50052 (gRPC)"
-	@echo "  Key Access:   localhost:50053 (gRPC)"
-	@echo "  PAP API:      http://localhost:8090"
-	@echo "  Keycloak:     http://localhost:8080"
-	@echo "  PostgreSQL:   localhost:5432"
-	@echo "  Redis:        localhost:6379"
-	@echo "  Prometheus:   http://localhost:9095"
-	@echo "  Grafana:      http://localhost:3001"
+	@echo "  Platform:       localhost:50051 (gRPC)"
+	@echo "  Key Manager:    localhost:50052 (gRPC)"
+	@echo "  Key Access:     localhost:50053 (gRPC)"
+	@echo "  Agent Gateway:  localhost:50054 (gRPC)"
+	@echo "  PAP API:        https://localhost:8090"
+	@echo "  Keycloak:       http://localhost:8080"
+	@echo "  PostgreSQL:     localhost:5432"
+	@echo "  Redis:          localhost:6379"
+	@echo "  Prometheus:     http://localhost:9095"
+	@echo "  Grafana:        http://localhost:3001"
 
 docker-down: ## Stop all services
 	@echo "Stopping all services..."
-	docker-compose -f deployment/docker/docker-compose.yml down
+	docker-compose -f deployment/docker/docker-compose.yml --profile agent-auth down
 	@echo "Services stopped!"
 
 docker-down-volumes: ## Stop all services and remove volumes
 	@echo "Stopping all services and removing volumes..."
-	docker-compose -f deployment/docker/docker-compose.yml down -v
+	docker-compose -f deployment/docker/docker-compose.yml --profile agent-auth down -v
 	@echo "Services stopped and volumes removed!"
 
 docker-logs: ## View logs from all services
@@ -376,6 +423,10 @@ generate: ## Generate all protobuf code
 		   --go_out=go --go_opt=module=stratium \
 	       --go-grpc_out=go --go-grpc_opt=module=stratium \
 	       proto/services/key-access/key-access.proto
+	@echo "Generating agent gateway protobuf code..."
+	protoc --go_out=go --go_opt=module=stratium \
+	       --go-grpc_out=go --go-grpc_opt=module=stratium \
+	       proto/services/agent-gateway/agent-gateway.proto
 	@echo "Generating ZTDF protobuf models..."
 	protoc --go_out=go/pkg --go_opt=module=stratium \
            --go-grpc_out=go/pkg --go-grpc_opt=module=stratium \

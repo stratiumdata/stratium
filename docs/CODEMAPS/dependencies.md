@@ -1,8 +1,8 @@
-<!-- Generated: 2026-03-12 | External Dependencies & Crypto Primitives | Token estimate: ~800 -->
+<!-- Generated: 2026-03-28 | External Dependencies & Crypto Primitives | Files scanned: 275 Go | Token estimate: ~850 -->
 
 # Dependencies Codemap
 
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-03-28
 
 ## Critical Runtime Dependencies
 
@@ -48,6 +48,9 @@
 - `github.com/google/uuid` v1.6.0 - UUID generation
 - `github.com/samber/lo` v1.52.0 - Functional utilities
 - `github.com/stretchr/testify` v1.11.1 - Testing assertions
+
+**Web Framework** (vendored):
+- `third_party/gin/` - Vendored Gin web framework for PAP REST API
 
 **AWS Integration** (optional):
 - `github.com/aws/aws-sdk-go-v2` v1.30.5 - AWS SDK

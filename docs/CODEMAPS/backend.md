@@ -1,8 +1,8 @@
-<!-- Generated: 2026-03-12 | gRPC APIs & Service Implementations | Token estimate: ~850 -->
+<!-- Generated: 2026-03-28 | gRPC APIs & Service Implementations | Files scanned: 275 Go | Token estimate: ~950 -->
 
 # Backend Services Codemap
 
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-03-28
 
 ## Service APIs
 
@@ -185,9 +185,15 @@ func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (*UnwrapD
 | POST | `/entitlements` | CreateEntitlement | Create entitlement |
 | GET | `/entitlements/{id}` | GetEntitlement | Retrieve entitlement |
 | GET | `/entitlements` | ListEntitlements | List entitlements |
+| PUT | `/policies/{id}` | UpdatePolicy | Update policy |
+| DELETE | `/policies/{id}` | DeletePolicy | Delete policy |
+| PUT | `/entitlements/{id}` | UpdateEntitlement | Update entitlement |
+| DELETE | `/entitlements/{id}` | DeleteEntitlement | Delete entitlement |
+| GET | `/audit-logs` | ListAuditLogs | List audit logs |
+| GET | `/audit-logs/{id}` | GetAuditLog | Get audit entry |
 | POST | `/validation` | ValidatePolicy | Validate policy JSON |
 
-**Framework**: Gin web framework (see `/go/services/pap/server.go`)
+**Framework**: Gin web framework (vendored at `third_party/gin/`, see `/go/services/pap/server.go`)
 
 ## Core Packages
 
@@ -261,8 +267,37 @@ claims := verify(tokenString)  // Via OIDC provider
 
 See `/Users/benjaminparrish/Development/stratium/go/services/key-manager/server.go:initializePostgresKeyStore()` for initialization.
 
+## Middleware
+
+### Rate Limiting
+**Package**: `go/middleware/ratelimit.go`
+- Per-client IP rate limiting (token bucket via `golang.org/x/time/rate`)
+- gRPC unary + stream interceptors
+- Config: `RATE_LIMIT_REQUESTS_PER_MIN`, `RATE_LIMIT_BURST`
+
+### License Enforcement
+**Package**: `go/middleware/license.go`
+- `LicenseEnforcer` wraps `licensing.Manager`
+- gRPC interceptor: returns `codes.PermissionDenied` when license invalid
+- Gin middleware: returns HTTP 403
+- Auto-refresh: checks license file every 5 minutes
+
+### Licensing Manager
+**Package**: `go/pkg/licensing/`
+- `Manager` — loads JWT-signed license files, validates RS256 signatures
+- `Claims` — custom JWT claims: service features, expiry, seat count
+- `State` — tracks loaded license validity + last error
+- License file path + public key path from `config.LicenseConfig`
+
+### Observability
+**Package**: `go/observability/observability.go`
+- `Provider` struct wires tracerProvider + meterProvider
+- `Init()` — configures OTLP trace exporter + Prometheus metrics HTTP server
+- Integrated into all service `main.go` entry points
+
 ## Related Documentation
 
 - **Architecture**: `/docs/CODEMAPS/architecture.md`
+- **Frontend**: `/docs/CODEMAPS/frontend.md`
 - **Data Models**: `/docs/CODEMAPS/data.md`
 - **Configuration**: `/docs/CONFIGURATION.md`

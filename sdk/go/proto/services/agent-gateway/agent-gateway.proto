@@ -1,0 +1,436 @@
+syntax = "proto3";
+
+package agent_gateway;
+
+option go_package = "stratium/services/agent-gateway";
+
+import "google/protobuf/timestamp.proto";
+
+// AgentGatewayService manages AI agent delegation tokens, action execution,
+// and agent registry operations. It sits between AI agent frameworks and
+// Stratium's core services, enforcing double-hop authorization.
+service AgentGatewayService {
+    // Authenticate user+agent pair and mint a delegation token.
+    // For root delegations: user OIDC token in Authorization header + agent credentials.
+    // For child delegations: parent delegation token + child agent credentials.
+    rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
+
+    // Revoke an active delegation. Cascades to all child delegations in the chain.
+    rpc RevokeDelegation(RevokeDelegationRequest) returns (RevokeDelegationResponse);
+
+    // Execute an agent action with full chain authorization.
+    // Resolves the complete delegation chain and evaluates every principal
+    // (user + all agents) before forwarding to the target service.
+    rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
+
+    // Validate that declared actions match the tool call (anti-spoofing).
+    rpc ValidateActionPlan(ValidateActionPlanRequest) returns (ValidateActionPlanResponse);
+
+    // Inspect a delegation chain (for debugging/observability).
+    rpc GetDelegationChain(GetDelegationChainRequest) returns (GetDelegationChainResponse);
+
+    // --- Agent Registry (admin-only) ---
+
+    // Register a new agent (admin-only).
+    rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+
+    // Retrieve an agent by ID.
+    rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
+
+    // List registered agents with optional filtering.
+    rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+
+    // Update an existing agent configuration.
+    rpc UpdateAgent(UpdateAgentRequest) returns (UpdateAgentResponse);
+
+    // Suspend an agent (revokes all active delegations).
+    rpc SuspendAgent(SuspendAgentRequest) returns (SuspendAgentResponse);
+}
+
+// --- Enums ---
+
+enum AgentTrustTier {
+    AGENT_TRUST_TIER_UNVERIFIED = 0;       // Read-only, sandboxed
+    AGENT_TRUST_TIER_REGISTERED = 1;       // Read + limited write
+    AGENT_TRUST_TIER_CERTIFIED = 2;        // Full read/write within delegation scope
+    AGENT_TRUST_TIER_PLATFORM_TRUSTED = 3; // System-level actions
+}
+
+enum ActionTier {
+    ACTION_TIER_REASONING = 0;        // Reasoning only, no side effects
+    ACTION_TIER_READ_ONLY = 1;        // Read-only data retrieval
+    ACTION_TIER_INTERNAL_MODIFY = 2;  // Internal data modifications
+    ACTION_TIER_EXTERNAL_COMMS = 3;   // External communications
+    ACTION_TIER_DESTRUCTIVE = 4;      // Destructive or financially binding actions
+}
+
+enum ExecutionMode {
+    EXECUTION_MODE_DELEGATED = 0;  // Agent acts FOR user (intersection of rights)
+    EXECUTION_MODE_SYSTEM = 1;     // Agent acts AS system function (separate policy)
+}
+
+enum AgentCertStatus {
+    AGENT_CERT_STATUS_PENDING = 0;
+    AGENT_CERT_STATUS_CERTIFIED = 1;
+    AGENT_CERT_STATUS_SUSPENDED = 2;
+    AGENT_CERT_STATUS_REVOKED = 3;
+}
+
+// --- Delegation Messages ---
+
+message CreateDelegationRequest {
+    // Agent ID to delegate to
+    string agent_id = 1;
+
+    // Tools this delegation permits
+    repeated string approved_tools = 2;
+
+    // Action sensitivity tiers allowed
+    repeated ActionTier approved_actions = 3;
+
+    // Maximum action sensitivity tier
+    ActionTier max_action_tier = 4;
+
+    // Per-hierarchy classification caps (e.g., {"nato": "CONFIDENTIAL", "commercial": "INTERNAL"})
+    map<string, string> classification_caps = 5;
+
+    // Resource type/tag restrictions
+    map<string, string> resource_constraints = 6;
+
+    // Declared purpose of delegation
+    string purpose = 7;
+
+    // Requested TTL in seconds (capped by max and parent)
+    int32 ttl_seconds = 8;
+
+    // Originating conversation/session ID
+    string conversation_id = 9;
+
+    // Parent agent's delegation token (empty for root delegations)
+    string parent_delegation_token = 10;
+}
+
+message CreateDelegationResponse {
+    // Signed JWT delegation token
+    string delegation_token = 1;
+
+    // Unique delegation identifier
+    string delegation_id = 2;
+
+    // Depth in the delegation chain (0 = root)
+    int32 depth = 3;
+
+    // Token expiration time
+    google.protobuf.Timestamp expires_at = 4;
+
+    // Root delegation ID (same as delegation_id for root)
+    string root_delegation_id = 5;
+}
+
+message RevokeDelegationRequest {
+    // Delegation ID to revoke
+    string delegation_id = 1;
+
+    // Reason for revocation
+    string reason = 2;
+}
+
+message RevokeDelegationResponse {
+    // Whether the revocation succeeded
+    bool success = 1;
+
+    // Number of delegations revoked (including cascaded children)
+    int32 revoked_count = 2;
+
+    // IDs of all revoked delegations
+    repeated string revoked_delegation_ids = 3;
+}
+
+// --- Action Execution Messages ---
+
+message ExecuteActionRequest {
+    // Delegation token (JWT)
+    string delegation_token = 1;
+
+    // Target service to forward to ("platform", "key-manager", "key-access")
+    string target_service = 2;
+
+    // RPC method to call on the target service
+    string method = 3;
+
+    // Action type (e.g., "read", "write", "delete")
+    string action = 4;
+
+    // Action sensitivity tier
+    ActionTier action_tier = 5;
+
+    // Tool name being invoked
+    string tool_name = 6;
+
+    // Resource attributes for policy evaluation
+    map<string, string> resource_attributes = 7;
+
+    // Serialized request payload for the target service
+    bytes payload = 8;
+
+    // Execution mode
+    ExecutionMode execution_mode = 9;
+}
+
+message ExecuteActionResponse {
+    // Whether the action was authorized and executed
+    bool authorized = 1;
+
+    // Decision details (populated regardless of outcome)
+    CompoundDecision decision = 2;
+
+    // Serialized response payload from the target service (only if authorized)
+    bytes payload = 3;
+
+    // Error message if action was denied or failed
+    string error = 4;
+}
+
+// --- Action Validation Messages ---
+
+message ValidateActionPlanRequest {
+    // Delegation ID to validate against
+    string delegation_id = 1;
+
+    // Planned actions to validate
+    repeated PlannedAction actions = 2;
+}
+
+message PlannedAction {
+    // Tool name
+    string tool_name = 1;
+
+    // Action type (read, write, delete, send, etc.)
+    string action = 2;
+
+    // Declared action sensitivity tier
+    ActionTier declared_tier = 3;
+
+    // Resource attributes
+    map<string, string> resource = 4;
+
+    // Tool parameters
+    map<string, string> parameters = 5;
+}
+
+message ValidateActionPlanResponse {
+    // Whether all actions are valid
+    bool valid = 1;
+
+    // Per-action validation results
+    repeated ActionValidationResult results = 2;
+}
+
+message ActionValidationResult {
+    // Index of the action in the request
+    int32 action_index = 1;
+
+    // Whether this specific action is valid
+    bool valid = 2;
+
+    // Reason for invalidity
+    string reason = 3;
+
+    // Stratium's assessment of the actual action tier
+    ActionTier actual_tier = 4;
+
+    // Whether the agent declared the wrong tier
+    bool tier_mismatch = 5;
+}
+
+// --- Delegation Chain Messages ---
+
+message GetDelegationChainRequest {
+    // Any delegation ID in the chain
+    string delegation_id = 1;
+}
+
+message GetDelegationChainResponse {
+    // Root delegation ID
+    string root_delegation_id = 1;
+
+    // Originating user ID
+    string user_id = 2;
+
+    // Ordered chain links from root to leaf
+    repeated ChainLink chain = 3;
+
+    // Total depth of the chain
+    int32 total_depth = 4;
+}
+
+message ChainLink {
+    // Delegation ID for this hop
+    string delegation_id = 1;
+
+    // Agent ID
+    string agent_id = 2;
+
+    // Agent name
+    string agent_name = 3;
+
+    // Agent trust tier
+    AgentTrustTier trust_tier = 4;
+
+    // Depth in the chain
+    int32 depth = 5;
+
+    // Maximum action tier at this hop
+    ActionTier max_action_tier = 6;
+
+    // Classification caps at this hop
+    map<string, string> classification_caps = 7;
+
+    // Approved tools at this hop
+    repeated string approved_tools = 8;
+
+    // Expiration time
+    google.protobuf.Timestamp expires_at = 9;
+
+    // Whether this delegation has been revoked
+    bool revoked = 10;
+}
+
+// --- Compound Decision Messages ---
+
+message CompoundDecision {
+    // Overall user decision
+    Decision user_decision = 1;
+    string user_reason = 2;
+
+    // Single-agent fields (backward compatible)
+    Decision agent_decision = 3;
+    string agent_reason = 4;
+    Decision delegation_decision = 5;
+    string delegation_reason = 6;
+
+    // Chain fields — per-agent decision breakdown (ordered root to leaf)
+    repeated ChainHopDecision chain_decisions = 7;
+
+    // Depth where first DENY occurred (-1 if all ALLOW)
+    int32 denied_at_depth = 8;
+
+    // Principal that denied ("user", "agent:<id>", or "delegation:<id>")
+    string denied_principal = 9;
+}
+
+message ChainHopDecision {
+    // Depth in the chain
+    int32 depth = 1;
+
+    // Agent ID at this hop
+    string agent_id = 2;
+
+    // Delegation ID at this hop
+    string delegation_id = 3;
+
+    // Agent authorization decision
+    Decision agent_decision = 4;
+    string agent_reason = 5;
+
+    // Delegation scope decision
+    Decision delegation_decision = 6;
+    string delegation_reason = 7;
+}
+
+// Decision enum (mirrors platform.Decision for self-containment)
+enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    DECISION_ALLOW = 1;
+    DECISION_DENY = 2;
+    DECISION_CONDITIONAL = 3;
+}
+
+// --- Agent Registry Messages ---
+
+message RegisterAgentRequest {
+    string name = 1;
+    string description = 2;
+    string provider = 3;              // e.g., "openai", "anthropic", "custom"
+    string model_identifier = 4;      // e.g., "gpt-4", "claude-sonnet-4-20250514"
+    AgentTrustTier trust_tier = 5;
+    repeated string allowed_tools = 6;
+    repeated ActionTier allowed_actions = 7;
+    string tenant_id = 8;
+    map<string, string> metadata = 9;
+}
+
+message RegisterAgentResponse {
+    string agent_id = 1;
+    string client_id = 2;            // Generated client ID for authentication
+    string client_secret = 3;        // Generated client secret (shown once)
+    google.protobuf.Timestamp created_at = 4;
+}
+
+message GetAgentRequest {
+    string agent_id = 1;
+}
+
+message GetAgentResponse {
+    AgentInfo agent = 1;
+}
+
+message ListAgentsRequest {
+    string tenant_id = 1;
+    AgentTrustTier trust_tier_filter = 2;
+    bool enabled_only = 3;
+    int32 page_size = 4;
+    string page_token = 5;
+}
+
+message ListAgentsResponse {
+    repeated AgentInfo agents = 1;
+    string next_page_token = 2;
+    int32 total_count = 3;
+}
+
+message UpdateAgentRequest {
+    string agent_id = 1;
+    string name = 2;
+    string description = 3;
+    AgentTrustTier trust_tier = 4;
+    repeated string allowed_tools = 5;
+    repeated ActionTier allowed_actions = 6;
+    map<string, string> metadata = 7;
+    bool enabled = 8;
+}
+
+message UpdateAgentResponse {
+    AgentInfo agent = 1;
+}
+
+message SuspendAgentRequest {
+    string agent_id = 1;
+    string reason = 2;
+}
+
+message SuspendAgentResponse {
+    bool success = 1;
+    int32 revoked_delegations = 2;  // Number of active delegations revoked
+}
+
+// --- Common Messages ---
+
+message AgentInfo {
+    string id = 1;
+    string name = 2;
+    string description = 3;
+    string provider = 4;
+    string model_identifier = 5;
+    AgentTrustTier trust_tier = 6;
+    repeated string allowed_tools = 7;
+    repeated ActionTier allowed_actions = 8;
+    string tenant_id = 9;
+    AgentCertStatus cert_status = 10;
+    string client_id = 11;
+    map<string, string> metadata = 12;
+    bool enabled = 13;
+    google.protobuf.Timestamp created_at = 14;
+    google.protobuf.Timestamp updated_at = 15;
+    string created_by = 16;
+}

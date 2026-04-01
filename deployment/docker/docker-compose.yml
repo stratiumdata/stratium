@@ -14,6 +14,7 @@ services:
       - ../postgres/01-init-multiple-dbs.sql:/docker-entrypoint-initdb.d/01-init-multiple-dbs.sql:ro
       - ../postgres/02-init.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
       - ../postgres/03-init-keymanager.sql:/docker-entrypoint-initdb.d/03-init-keymanager.sql:ro
+      - ../postgres/04-init-agent-auth.sql:/docker-entrypoint-initdb.d/04-init-agent-auth.sql:ro
     networks:
       - stratium-network
     healthcheck:
@@ -92,8 +93,8 @@ services:
       args:
         SERVICE_NAME: platform-server
         SERVICE_PORT: 50051
-        BUILD_FEATURES: metrics,observability,caching,rate-limiting
-        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting,agent-auth
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/platform-server:latest
     container_name: stratium-platform
@@ -137,7 +138,7 @@ services:
         SERVICE_NAME: key-manager-server
         SERVICE_PORT: 50052
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
-        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/key-manager-server:latest
     container_name: stratium-key-manager
@@ -186,7 +187,7 @@ services:
         SERVICE_NAME: key-access-server
         SERVICE_PORT: 50053
         BUILD_FEATURES: metrics,observability,caching,rate-limiting
-        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
     image: local/key-access-server:latest
     container_name: stratium-key-access
@@ -280,8 +281,9 @@ services:
       context: ../..
       dockerfile: deployment/docker/Dockerfile.pap
       args:
-        GOFIPS140: ${GOFIPS140:-v1.0.0-c2097c7c}
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
         BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+        # BUILD_FEATURES: "agent-auth"
     image: local/pap-server:latest
     container_name: stratium-pap
     ports:
@@ -289,6 +291,8 @@ services:
     environment:
       # Database password
       - STRATIUM_DATABASE_PASSWORD=stratium
+      # Enable agent authorization (when built with agent-auth feature flag)
+      - STRATIUM_AGENT_GATEWAY_ENABLED=true
       # Cache password if needed
       - STRATIUM_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
       # OIDC client secret (if enabling OIDC)
@@ -353,6 +357,47 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  # Agent Gateway Service (requires agent-auth feature flag)
+  agent-gateway:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+      args:
+        SERVICE_NAME: agent-gateway-server
+        BUILD_FEATURES: "agent-auth"
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+    image: local/agent-gateway-server:latest
+    container_name: stratium-agent-gateway
+    ports:
+      - "50054:50054"
+    environment:
+      - STRATIUM_DATABASE_PASSWORD=stratium
+      - STRATIUM_AGENT_GATEWAY_ENABLED=true
+      - STRATIUM_AGENT_GATEWAY_GRPC_PORT=50054
+      - STRATIUM_AGENT_GATEWAY_DELEGATION_TOKEN_TTL=15m
+      - STRATIUM_AGENT_GATEWAY_DELEGATION_MAX_DEPTH=5
+      - STRATIUM_SERVICES_PLATFORM_ADDRESS=platform:50051
+      - STRATIUM_SERVICES_KEY_MANAGER_ADDRESS=key-manager:50052
+      - STRATIUM_SERVICES_KEY_ACCESS_ADDRESS=key-access:50053
+      - STRATIUM_OIDC_ISSUER_URL=http://keycloak:8080/realms/stratium
+      - GODEBUG=fips140=on
+    volumes:
+      - ../../config/examples/agent-gateway-server.yaml:/etc/stratium/stratium.yaml:ro
+      - ../../config/examples/certs:/etc/stratium/certs:ro
+    networks:
+      - stratium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      platform:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    profiles:
+      - agent-auth
     restart: unless-stopped
 
 networks:

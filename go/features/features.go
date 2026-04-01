@@ -30,6 +30,7 @@ const (
 	FeatureRateLimiting  = "rate-limiting"
 	FeatureShortTimeouts = "short-timeouts"
 	FeatureCaching       = "caching"
+	FeatureAgentAuth     = "agent-auth"
 )
 
 var (
@@ -49,6 +50,8 @@ var (
 	observabilityConfigSet            = false
 	cachingConfigEnabled              = true
 	cachingConfigSet                  = false
+	agentAuthConfigEnabled            = true
+	agentAuthConfigSet                = false
 )
 
 // IsEnabled checks if a feature is enabled based on build-time flags
@@ -202,5 +205,22 @@ func SetCachingConfig(enabled bool) {
 	cacheMux.Lock()
 	cachingConfigEnabled = enabled
 	cachingConfigSet = true
+	cacheMux.Unlock()
+}
+
+// ShouldEnableAgentAuth returns true if agent authorization should be enabled.
+func ShouldEnableAgentAuth() bool {
+	if agentAuthConfigSet && !agentAuthConfigEnabled {
+		return false
+	}
+
+	return IsEnabled(FeatureAgentAuth)
+}
+
+// SetAgentAuthConfig records the runtime configuration toggle for agent auth.
+func SetAgentAuthConfig(enabled bool) {
+	cacheMux.Lock()
+	agentAuthConfigEnabled = enabled
+	agentAuthConfigSet = true
 	cacheMux.Unlock()
 }

@@ -1,8 +1,8 @@
-<!-- Generated: 2026-03-12 | Service Architecture | Token estimate: ~950 -->
+<!-- Generated: 2026-03-28 | Service Architecture | Files scanned: 275 Go | Token estimate: ~980 -->
 
 # Stratium Architecture Codemap
 
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-03-28
 
 ## System Overview
 
@@ -97,16 +97,15 @@ Key components:
 - Client key caching
 - Audit logging
 
-### PAP Server (`:8080`)
+### PAP Server (`:8090`)
 **File**: `/Users/benjaminparrish/Development/stratium/go/services/pap/`
 
 Entry point: `/Users/benjaminparrish/Development/stratium/go/cmd/pap-server/main.go`
 
-REST endpoints:
-- POST `/policies` - Create policy
-- GET `/policies/{id}` - Get policy
-- POST `/entitlements` - Create entitlement
-- GET `/entitlements/{id}` - Get entitlement
+REST endpoints (Gin framework):
+- POST/GET/PUT/DELETE `/api/policies` - Policy CRUD
+- POST/GET/PUT/DELETE `/api/entitlements` - Entitlement CRUD
+- GET `/api/audit-logs` - Audit log viewer
 - POST `/validation` - Validate policy JSON
 
 ## Data Flow: ZTDF Encryption
@@ -166,9 +165,30 @@ Environment variables (sampled):
 
 See `/Users/benjaminparrish/Development/stratium/docs/CONFIGURATION.md` for full list.
 
+## Cross-Cutting Concerns
+
+### Licensing
+**Package**: `go/pkg/licensing/` — JWT-based offline license validation
+**Middleware**: `go/middleware/license.go` — gRPC + Gin interceptors block requests when license invalid
+**Config**: `config.LicenseConfig` — enabled flag, public key path, license file path
+
+### Observability
+**Package**: `go/observability/observability.go` — OpenTelemetry Provider
+- OTLP trace export (gRPC to collector)
+- Prometheus metrics endpoint (HTTP)
+- Resource attributes: service name, version, environment
+
+### Docker Compose Variants
+- `deployment/docker/docker-compose.yml` — Standard development stack
+- `deployment/docker/docker-compose.yubikey.yml` — YubiKey-enabled variant with smart card passthrough
+
+### Vendored Dependencies
+- `third_party/gin/` — Vendored Gin web framework
+
 ## Related Documentation
 
 - **Backend API**: `/docs/CODEMAPS/backend.md`
+- **Frontend UI**: `/docs/CODEMAPS/frontend.md`
 - **Data Models**: `/docs/CODEMAPS/data.md`
 - **SDKs**: `/docs/CODEMAPS/sdks.md`
 - **Dependencies**: `/docs/CODEMAPS/dependencies.md`
