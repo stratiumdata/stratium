@@ -1,8 +1,8 @@
-<!-- Generated: 2026-03-12 | Data Models & Protobuf Types | Token estimate: ~900 -->
+<!-- Generated: 2026-03-28 | Data Models & Protobuf Types | Files scanned: 275 Go | Token estimate: ~950 -->
 
 # Data Models Codemap
 
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-03-28
 
 ## Core Domain Models
 
@@ -240,17 +240,40 @@ Passed through ABAC evaluation:
 
 ### Audit Log Entry
 
-**Stored in PostgreSQL** (inferred):
+**Go type**: `go/pkg/models/audit.go`
+**DB table**: `audit_logs` (see `deployment/postgres/02-init.sql`)
+
+```go
+type AuditLog struct {
+  ID         uuid.UUID
+  EntityType string  // "policy" | "entitlement"
+  EntityID   uuid.UUID
+  Action     string  // "create" | "update" | "delete" | "evaluate" | "test"
+  Actor      string
+  Changes    map[string]interface{}  // JSONB
+  Result     map[string]interface{}  // JSONB
+  Timestamp  time.Time
+  IPAddress  string
+  UserAgent  string
+}
 ```
-event_type: "DECISION", "KEY_CREATION", "KEY_ROTATION"
-subject: "user@example.com"
-resource: "document-id"
-action: "read"
-result: "ALLOW" | "DENY"
-reason: "Entitlement matches policy"
-timestamp: 2026-03-12T10:30:00Z
-request_id: UUID (for tracing)
+
+**Indexes**: entity (type+id), timestamp DESC, actor
+
+## License Models
+
+### License Claims
+
+**Go type**: `go/pkg/licensing/claims.go`
+
+```go
+type Claims struct {
+  jwt.RegisteredClaims
+  // Service feature flags, seat count, tier
+}
 ```
+
+**License State**: `go/pkg/licensing/manager.go:State` — tracks validity, loaded timestamp, last error
 
 ## Protobuf Message Hierarchy
 

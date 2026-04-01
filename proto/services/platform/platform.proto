@@ -32,6 +32,19 @@ message GetDecisionRequest {
 
     // Optional policy ID to evaluate against
     string policy_id = 5;
+
+    // --- Agent authorization fields (ignored when agent-auth feature is disabled) ---
+
+    // Single-agent attributes (for simple user→agent delegation)
+    AgentAttributes agent_attributes = 6;
+
+    // Single delegation context
+    DelegationContext delegation_context = 7;
+
+    // Delegation chain fields (for N-level subagent authorization)
+    // Ordered from root (user's direct agent) to leaf (executing agent)
+    repeated AgentAttributes agent_chain = 8;
+    repeated DelegationContext delegation_chain = 9;
 }
 
 // Response message for GetDecision
@@ -50,6 +63,9 @@ message GetDecisionResponse {
 
     // Policy that was evaluated
     string evaluated_policy = 5;
+
+    // Compound decision breakdown (populated when agent_attributes are present)
+    CompoundDecision compound_decision = 6;
 }
 
 // Decision enum
@@ -139,4 +155,94 @@ message Condition {
 
     // Additional parameters for the condition
     map<string, string> parameters = 4;
+}
+
+// --- Agent Authorization Messages ---
+
+// AgentTrustTier defines the trust level of an agent
+enum AgentTrustTier {
+    AGENT_TRUST_TIER_UNVERIFIED = 0;
+    AGENT_TRUST_TIER_REGISTERED = 1;
+    AGENT_TRUST_TIER_CERTIFIED = 2;
+    AGENT_TRUST_TIER_PLATFORM_TRUSTED = 3;
+}
+
+// ActionTier defines the sensitivity level of an action
+enum ActionTier {
+    ACTION_TIER_REASONING = 0;
+    ACTION_TIER_READ_ONLY = 1;
+    ACTION_TIER_INTERNAL_MODIFY = 2;
+    ACTION_TIER_EXTERNAL_COMMS = 3;
+    ACTION_TIER_DESTRUCTIVE = 4;
+}
+
+// ExecutionMode defines how the agent is acting
+enum ExecutionMode {
+    EXECUTION_MODE_DELEGATED = 0;
+    EXECUTION_MODE_SYSTEM = 1;
+}
+
+// AgentAttributes contains the attributes of an agent in the authorization chain
+message AgentAttributes {
+    string agent_id = 1;
+    string agent_name = 2;
+    AgentTrustTier trust_tier = 3;
+    string provider = 4;
+    string model_identifier = 5;
+    repeated string allowed_tools = 6;
+    repeated ActionTier allowed_actions = 7;
+    string tenant_id = 8;
+}
+
+// DelegationContext contains the delegation scope for policy evaluation
+message DelegationContext {
+    string delegation_id = 1;
+    string user_id = 2;
+    string agent_id = 3;
+    string conversation_id = 4;
+    ExecutionMode execution_mode = 5;
+    ActionTier action_tier = 6;
+    string tool_name = 7;
+    string purpose = 8;
+    map<string, string> classification_caps = 9;
+    map<string, string> resource_constraints = 10;
+
+    // Chain fields
+    string parent_delegation_id = 11;
+    string root_delegation_id = 12;
+    int32 depth = 13;
+    repeated string chain_agent_ids = 14;
+}
+
+// CompoundDecision breaks down the authorization decision by component
+message CompoundDecision {
+    // User authorization
+    Decision user_decision = 1;
+    string user_reason = 2;
+
+    // Single-agent decision (backward compatible)
+    Decision agent_decision = 3;
+    string agent_reason = 4;
+    Decision delegation_decision = 5;
+    string delegation_reason = 6;
+
+    // Chain decision breakdown (ordered root to leaf)
+    repeated ChainHopDecision chain_decisions = 7;
+
+    // Depth where first DENY occurred (-1 if all ALLOW)
+    int32 denied_at_depth = 8;
+
+    // Principal that denied ("user", "agent:<id>", or "delegation:<id>")
+    string denied_principal = 9;
+}
+
+// ChainHopDecision contains the decision for a single hop in the delegation chain
+message ChainHopDecision {
+    int32 depth = 1;
+    string agent_id = 2;
+    string delegation_id = 3;
+    Decision agent_decision = 4;
+    string agent_reason = 5;
+    Decision delegation_decision = 6;
+    string delegation_reason = 7;
 }

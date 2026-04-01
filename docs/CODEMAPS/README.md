@@ -1,8 +1,8 @@
-<!-- Generated: 2026-03-12 | Codemaps Index | Token estimate: ~450 -->
+<!-- Generated: 2026-03-28 | Codemaps Index | Token estimate: ~500 -->
 
 # Stratium Codemaps
 
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-03-28
 
 ## Overview
 
@@ -39,9 +39,11 @@ Stratium codemaps provide architectural reference documentation for the Zero-Tru
 **Covers**:
 - gRPC service APIs (protobuf messages)
 - RPC method signatures and implementations
-- Database schema (inferred)
 - Core packages: PolicyDecisionPoint, ZTDF Validators, Auth
 - Key management operations
+- Middleware: rate limiting, license enforcement
+- Licensing manager (JWT offline validation)
+- Observability provider (OpenTelemetry + Prometheus)
 
 **Audience**: Backend engineers, API integration developers
 
@@ -49,10 +51,29 @@ Stratium codemaps provide architectural reference documentation for the Zero-Tru
 - Platform Service (GetDecision, GetEntitlements)
 - Key Manager Service (UnwrapDEK, RotateKey, RegisterClientKey)
 - Key Access Service (WrapDEK, UnwrapDEK)
-- PAP REST API endpoints
-- Database schema and tables
+- PAP REST API endpoints (full CRUD + audit logs)
+- Middleware (rate limiting, license enforcement)
+- Licensing Manager and Observability Provider
 
 **File paths**: Proto definitions, service implementations
+
+### 2b. Frontend (`frontend.md`)
+
+**Purpose**: PAP UI architecture and component hierarchy
+
+**Covers**:
+- Route tree and page components
+- Auth flow (Keycloak JS adapter)
+- API client pattern (Bearer token auto-refresh)
+- State management (TanStack Query + custom hooks)
+- Component hierarchy (Shadcn/UI)
+
+**Audience**: Frontend engineers, UI contributors
+
+**Key sections**:
+- Route Tree, Component Hierarchy
+- Auth Flow, API Client
+- Build & Deploy
 
 ### 3. Data Models (`data.md`)
 
@@ -307,6 +328,7 @@ When adding new features or services:
 
 | Date | Changes |
 |------|---------|
+| 2026-03-28 | Added frontend.md, licensing/observability/middleware to backend.md, audit model to data.md, port fix (PAP 8090), YubiKey docker-compose variant |
 | 2026-03-12 | Initial codemaps generated (architecture, backend, data, dependencies, sdks) |
 
 ---

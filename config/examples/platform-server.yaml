@@ -66,7 +66,7 @@ security:
     allow_credentials: true
     max_age: 3600s
   fips:
-    enabled: true
+    enabled: false
     go_module: v1.0.0-c2097c7c
 
 license:
@@ -99,3 +99,6 @@ observability:
 platform:
   seed_sample_data: true
   seed_data_path: /etc/stratium/platform-seed.yaml
+
+agent_gateway:
+  enabled: true

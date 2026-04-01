@@ -58,6 +58,21 @@ type Config struct {
 
 	// Key Manager-specific configuration
 	KeyManager KeyManagerConfig `mapstructure:"key_manager"`
+
+	// Agent Gateway-specific configuration
+	AgentGateway AgentGatewayConfig `mapstructure:"agent_gateway"`
+}
+
+// AgentGatewayConfig holds agent gateway-specific settings
+type AgentGatewayConfig struct {
+	Enabled              bool          `mapstructure:"enabled"`
+	GRPCPort             int           `mapstructure:"grpc_port"`
+	DelegationTokenTTL   time.Duration `mapstructure:"delegation_token_ttl"`
+	DelegationMaxTTL     time.Duration `mapstructure:"delegation_max_ttl"`
+	DelegationSigningKey string        `mapstructure:"delegation_signing_key"`
+	DelegationMaxDepth   int           `mapstructure:"delegation_max_depth"`
+	ChainCacheTTL        time.Duration `mapstructure:"chain_cache_ttl"`
+	CascadeRevoke        bool          `mapstructure:"cascade_revoke"`
 }
 
 // ServiceConfig identifies the service
@@ -144,10 +159,11 @@ type OIDCConfig struct {
 
 // ServicesConfig holds connection information for other services
 type ServicesConfig struct {
-	Platform   ServiceEndpoint `mapstructure:"platform"`
-	KeyManager ServiceEndpoint `mapstructure:"key_manager"`
-	KeyAccess  ServiceEndpoint `mapstructure:"key_access"`
-	PAP        ServiceEndpoint `mapstructure:"pap"`
+	Platform     ServiceEndpoint `mapstructure:"platform"`
+	KeyManager   ServiceEndpoint `mapstructure:"key_manager"`
+	KeyAccess    ServiceEndpoint `mapstructure:"key_access"`
+	PAP          ServiceEndpoint `mapstructure:"pap"`
+	AgentGateway ServiceEndpoint `mapstructure:"agent_gateway"`
 }
 
 // ServiceEndpoint defines how to connect to a service
@@ -321,6 +337,7 @@ func Load(configPath string) (*Config, error) {
 	features.SetMetricsConfig(cfg.Observability.Metrics.Enabled)
 	features.SetObservabilityConfig(cfg.Observability.Tracing.Enabled)
 	features.SetCachingConfig(cfg.Cache.Type != "none")
+	features.SetAgentAuthConfig(cfg.AgentGateway.Enabled)
 
 	// Apply feature flag overrides
 	applyFeatureFlags(&cfg)
@@ -394,6 +411,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("services.key_access.timeout", "10s")
 	v.SetDefault("services.pap.address", "localhost:8090")
 	v.SetDefault("services.pap.timeout", "10s")
+	v.SetDefault("services.agent_gateway.address", "localhost:50054")
+	v.SetDefault("services.agent_gateway.timeout", "10s")
+
+	// Agent Gateway defaults
+	v.SetDefault("agent_gateway.enabled", false)
+	v.SetDefault("agent_gateway.grpc_port", 50054)
+	v.SetDefault("agent_gateway.delegation_token_ttl", "15m")
+	v.SetDefault("agent_gateway.delegation_max_ttl", "1h")
+	v.SetDefault("agent_gateway.delegation_signing_key", "")
+	v.SetDefault("agent_gateway.delegation_max_depth", 5)
+	v.SetDefault("agent_gateway.chain_cache_ttl", "30s")
+	v.SetDefault("agent_gateway.cascade_revoke", true)
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")

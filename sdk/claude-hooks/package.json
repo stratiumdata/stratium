@@ -1,0 +1,33 @@
+{
+  "name": "@stratium/claude-hooks",
+  "version": "1.0.0",
+  "description": "Zero-Trust authorization hooks for Claude Code — enforces Stratium agent delegation policies on every tool call",
+  "main": "src/index.js",
+  "bin": {
+    "stratium-hooks": "./bin/stratium-hooks"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js",
+    "lint": "node --check src/*.js bin/stratium-hooks",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": ["stratium", "claude-code", "hooks", "authorization", "zero-trust", "ai-security"],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "files": [
+    "src/",
+    "bin/",
+    "scripts/",
+    "deployment/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "https://registry.npmjs.org"
+  }
+}

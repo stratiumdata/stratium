@@ -107,11 +107,67 @@ type AuditRepository interface {
 	Count(ctx context.Context, req *models.ListAuditLogsRequest) (int, error)
 }
 
+// AgentRepository defines operations for agent data access
+type AgentRepository interface {
+	// Create registers a new agent
+	Create(ctx context.Context, agent *models.Agent) error
+
+	// GetByID retrieves an agent by ID
+	GetByID(ctx context.Context, id uuid.UUID) (*models.Agent, error)
+
+	// GetByClientID retrieves an agent by client ID (for authentication)
+	GetByClientID(ctx context.Context, clientID string) (*models.Agent, error)
+
+	// List retrieves agents with optional filtering
+	List(ctx context.Context, req *models.ListAgentsRequest) ([]*models.Agent, error)
+
+	// Update updates an existing agent
+	Update(ctx context.Context, agent *models.Agent) error
+
+	// Delete deletes an agent by ID
+	Delete(ctx context.Context, id uuid.UUID) error
+
+	// Count returns the total count of agents matching the criteria
+	Count(ctx context.Context, req *models.ListAgentsRequest) (int, error)
+}
+
+// DelegationRepository defines operations for delegation data access
+type DelegationRepository interface {
+	// Create creates a new delegation record
+	Create(ctx context.Context, delegation *models.Delegation) error
+
+	// GetByID retrieves a delegation by ID
+	GetByID(ctx context.Context, id uuid.UUID) (*models.Delegation, error)
+
+	// GetChain retrieves the full delegation chain from root to the given delegation
+	GetChain(ctx context.Context, delegationID uuid.UUID) ([]*models.Delegation, error)
+
+	// GetChildren retrieves all direct child delegations
+	GetChildren(ctx context.Context, parentID uuid.UUID) ([]*models.Delegation, error)
+
+	// GetDescendants retrieves all descendants (for cascade revocation)
+	GetDescendants(ctx context.Context, rootDelegationID uuid.UUID, minDepth int) ([]*models.Delegation, error)
+
+	// Revoke revokes a delegation and returns the number of cascaded revocations
+	Revoke(ctx context.Context, id uuid.UUID, reason string) (int, []uuid.UUID, error)
+
+	// ListActive retrieves all active delegations for a user+agent pair
+	ListActive(ctx context.Context, userID string, agentID uuid.UUID) ([]*models.Delegation, error)
+
+	// RevokeByAgent revokes all active delegations for an agent (used when suspending)
+	RevokeByAgent(ctx context.Context, agentID uuid.UUID) (int, error)
+
+	// CleanExpired removes expired delegations (maintenance)
+	CleanExpired(ctx context.Context) (int, error)
+}
+
 // Repository provides access to all repository interfaces
 type Repository struct {
 	Policy      PolicyRepository
 	Entitlement EntitlementRepository
 	Audit       AuditRepository
+	Agent       AgentRepository
+	Delegation  DelegationRepository
 	db          Database
 }
 

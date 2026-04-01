@@ -1,0 +1,59 @@
+Codemap Diff Report
+Generated: 2026-03-28
+Previous generation: 2026-03-12
+Commits since last scan: 2 (b802b80, b123383)
+Files changed in repo: 343 (78,698 insertions, 1,196 deletions)
+
+== FILES ADDED ==
+- frontend.md (NEW) — PAP UI architecture, routes, auth flow, API client
+
+== FILES MODIFIED ==
+- architecture.md
+  + Fixed PAP Server port: 8080 → 8090
+  + Added Cross-Cutting Concerns section: Licensing, Observability, Docker Compose variants
+  + Added vendored gin reference (third_party/gin/)
+  + Added frontend.md to Related Documentation
+  Estimated change: ~20%
+
+- backend.md
+  + Added full CRUD REST endpoints (PUT/DELETE for policies/entitlements)
+  + Added audit log endpoints (GET /audit-logs, GET /audit-logs/{id})
+  + Added Middleware section: rate limiting, license enforcement
+  + Added Licensing Manager section (go/pkg/licensing/)
+  + Added Observability section (go/observability/)
+  + Noted vendored gin framework
+  Estimated change: ~25%
+
+- data.md
+  + Replaced inferred audit model with actual AuditLog struct from go/pkg/models/audit.go
+  + Added database table reference (deployment/postgres/02-init.sql)
+  + Added audit_logs indexes
+  + Added License Models section (Claims, State)
+  Estimated change: ~15%
+
+- dependencies.md
+  + Added vendored gin web framework entry (third_party/gin/)
+  Estimated change: ~5%
+
+- sdks.md
+  + Freshness header updated
+  Estimated change: ~2%
+
+- README.md
+  + Added frontend.md entry (section 2b)
+  + Updated backend.md description with middleware/licensing/observability
+  + Added version history entry for 2026-03-28
+  Estimated change: ~15%
+
+== NEW DEPENDENCIES DETECTED ==
+- third_party/gin/ — vendored Gin web framework
+
+== ARCHITECTURE CHANGES ==
+- New package: go/pkg/licensing/ (license management)
+- New package: go/observability/ (OpenTelemetry provider)
+- New middleware: go/middleware/license.go (license enforcement interceptors)
+- New Docker variant: deployment/docker/docker-compose.yubikey.yml
+- New deployment configs: config/deployment/*.yaml, config/examples/*.yaml
+
+== STALENESS WARNINGS ==
+- None (all codemaps now current as of 2026-03-28)

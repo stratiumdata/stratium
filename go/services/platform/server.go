@@ -104,7 +104,19 @@ func (s *Server) GetDecision(ctx context.Context, req *GetDecisionRequest) (*Get
 		EvaluatedPolicy: decision.PolicyID,
 	}
 
-	logger.Info("Decision: %s, Reason: %s", decision.Decision.String(), decision.Reason)
+	// Evaluate compound decision if agent attributes are present
+	compound := s.evaluateCompoundDecision(req, decision)
+	if compound != nil {
+		response.CompoundDecision = compound
+
+		// Override the top-level decision if agent/delegation denied
+		if compound.DeniedAtDepth >= 0 {
+			response.Decision = Decision_DECISION_DENY
+			response.Reason = "compound decision denied by " + compound.DeniedPrincipal
+		}
+	}
+
+	logger.Info("Decision: %s, Reason: %s", response.Decision.String(), response.Reason)
 	return response, nil
 }
 

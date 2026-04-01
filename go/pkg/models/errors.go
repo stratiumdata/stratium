@@ -29,7 +29,22 @@ var (
 	ErrDatabaseUpdate     = errors.New("database update failed")
 	ErrDatabaseDelete     = errors.New("database delete failed")
 
+	// Agent errors
+	ErrAgentNotFound      = errors.New("agent not found")
+	ErrAgentAlreadyExists = errors.New("agent already exists")
+	ErrAgentSuspended     = errors.New("agent is suspended")
+	ErrAgentDisabled      = errors.New("agent is disabled")
+
+	// Delegation errors
+	ErrDelegationNotFound      = errors.New("delegation not found")
+	ErrDelegationExpired       = errors.New("delegation expired")
+	ErrDelegationRevoked       = errors.New("delegation revoked")
+	ErrDelegationMaxDepth      = errors.New("delegation chain exceeds maximum depth")
+	ErrDelegationScopeExceeded = errors.New("child delegation scope exceeds parent")
+	ErrDelegationInvalidToken  = errors.New("invalid delegation token")
+
 	// General errors
+	ErrNotFound          = errors.New("not found")
 	ErrInvalidInput      = errors.New("invalid input")
 	ErrUnauthorized      = errors.New("unauthorized")
 	ErrForbidden         = errors.New("forbidden")

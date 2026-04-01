@@ -1,8 +1,8 @@
-<!-- Generated: 2026-03-12 | SDK Implementations & Client Patterns | Token estimate: ~950 -->
+<!-- Generated: 2026-03-28 | SDK Implementations & Client Patterns | Files scanned: 4 SDKs | Token estimate: ~950 -->
 
 # SDKs Codemap
 
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-03-28
 
 ## SDK Matrix
 

@@ -117,6 +117,8 @@ func NewRepository(connString string) (*repository.Repository, error) {
 	repo.Policy = NewPolicyRepository(db.DB())
 	repo.Entitlement = NewEntitlementRepository(db.DB())
 	repo.Audit = NewAuditRepository(db.DB())
+	repo.Agent = NewAgentRepository(db.DB())
+	repo.Delegation = NewDelegationRepository(db.DB())
 
 	return repo, nil
 }
