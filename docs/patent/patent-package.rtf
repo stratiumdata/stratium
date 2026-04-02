@@ -1,0 +1,1054 @@
+{\rtf1\ansi\ansicpg1252\deff0
+{\fonttbl{\f0 Times New Roman;}{\f1 Courier New;}}
+{\colortbl;\red0\green0\blue0;\red40\green40\blue40;}
+\paperw12240\paperh15840\margl1440\margr1440\margt1440\margb1440
+\fs24
+\pard\qc\b\fs36 Patent Package: Agent Authorization Workflow\b0\fs24\par
+\pard\qc Generated: 2026-04-02\par
+\pard\sa180 This compiled package contains the current patent drafting materials and figure index for Stratium's agent authorization workflow.\par
+\pard\b\fs28 Contents\b0\fs24\par
+\pard 1. docs/patent/README.md\par
+\pard 2. docs/patent/01-patent-specification-draft.md\par
+\pard 3. docs/patent/02-claim-set.md\par
+\pard 4. docs/patent/03-figure-descriptions.md\par
+\pard 5. docs/patent/04-invention-disclosure-form.md\par
+\pard 6. docs/patent/05-provisional-ready-package.md\par
+\pard 7. docs/patent/06-nonprovisional-attorney-package.md\par
+\pard 8. docs/patent/figures/README.md\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/README.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Patent Draft Package: Agent Authorization\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 This directory contains a working patent draft package for Stratium's agent authorization workflow, tailored to the double-hop delegation model described in \f1 \cf2 docs/PRD_AGENT_AUTHORIZATION.md\f0 \cf0.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Documents\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/01-patent-specification-draft.md\f0 \cf0 — patent-style specification draft\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/02-claim-set.md\f0 \cf0 — independent and dependent claims\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0 — figure list and drawing narratives\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/04-invention-disclosure-form.md\f0 \cf0 — attorney-ready invention disclosure form\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/05-provisional-ready-package.md\f0 \cf0 — provisional-oriented filing package and checklist\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/06-nonprovisional-attorney-package.md\f0 \cf0 — nonprovisional assembly and attorney handoff package\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/README.md\f0 \cf0 — draft Mermaid figure set for all six patent figures\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/*.svg\f0 \cf0 — cleaner black-and-white SVG drafts for illustrator or counsel review\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Notes\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab These documents are a technical drafting starting point, not legal advice.\par
+\pard\li720\fi-360 \bullet	ab The specification and claims are written in nonprovisional style so they can be adapted for a provisional filing or expanded for a later nonprovisional application.\par
+\pard\li720\fi-360 \bullet	ab For U.S. filing practice, provisional applications generally do not require claims, while nonprovisional applications do. See the USPTO guidance:\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/apply/provisional-application\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/types-patent-applications\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Drafting Assumptions\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab The invention centers on task-bound authorization for autonomous or semi-autonomous agents.\par
+\pard\li720\fi-360 \bullet	ab The implementation context is Stratium's delegated authorization architecture, including agent registration, delegation tokens, compound policy evaluation, trust tiers, scope narrowing, and audit lineage.\par
+\pard\li720\fi-360 \bullet	ab Novelty emphasis is placed on runtime enforcement, derivative delegated scope, cryptographic delegation artifacts, and provenance across agent chains.\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/01-patent-specification-draft.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Patent Specification Draft: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Title\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Systems and Methods for Task-Bound Authorization of Autonomous Software Agents\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Cross-Reference to Related Applications\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 None.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Field\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The present disclosure relates generally to computer security, identity and access management, distributed computing, and machine-executed workflow control, and more particularly to authorization workflows for autonomous or semi-autonomous software agents operating on behalf of one or more principals.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Background\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Software agents are increasingly used to perform actions across enterprise systems, cloud services, application programming interfaces, content repositories, and transaction platforms. Representative examples include AI agents, robotic process automation agents, orchestration workers, and delegated software assistants. These systems frequently act on behalf of a human user, enterprise tenant, application, or another service principal.\par
+\pard\sa120\par
+\pard\sa120 Conventional authorization mechanisms were designed primarily for human users or static service identities. As a result, existing approaches often grant permissions at an account, role, or service level without binding those permissions to a particular approved task, workflow phase, tool set, runtime constraint, or delegation chain. In agentic environments, this creates technical shortcomings. An agent may receive excessive authority relative to the user's intended task. A downstream agent may inherit broader permissions than required. Runtime behavior may drift away from the approved scope without an inline enforcement mechanism. Audit trails may record that an action occurred without preserving a verifiable relationship between principal approval, delegated scope, tool invocation, and resulting output.\par
+\pard\sa120\par
+\pard\sa120 These limitations become more pronounced in multi-agent systems and tool-use environments where a first agent may plan, a second agent may retrieve data, and a third agent may execute a higher-impact action. Existing role-based, attribute-based, or token-based approaches do not reliably constrain such actions to a cryptographically verifiable intersection of principal authority, agent authority, delegated scope, and runtime policy context.\par
+\pard\sa120\par
+\pard\sa120 Accordingly, a need exists for systems and methods that authorize autonomous or semi-autonomous agents through task-bound delegation, enforce authorization at runtime for each attempted action, support reduced-scope delegation to downstream agents, and maintain provenance across the authorization and execution lifecycle.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Summary\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one embodiment, a computer-implemented method receives a task request associated with a principal and identifies a software agent designated to execute at least a portion of the task request. A policy engine evaluates a combination of principal attributes, agent attributes, delegation attributes, requested actions, tool usage, target resources, and contextual constraints. Based on that evaluation, the system generates a scoped authorization artifact that defines a bounded permission envelope for the software agent.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, the permission envelope is task-bound and includes one or more of: a task identifier, a delegation identifier, a root delegation identifier, a permitted tool set, a permitted action set, a maximum action sensitivity tier, per-resource constraints, classification caps, a time-to-live, a conversation or session identifier, a tenant scope, a maximum delegation depth, and a parent delegation reference.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, runtime enforcement occurs through an agent gateway or similar mediation layer that intercepts each attempted agent action before execution. The attempted action is validated against the scoped authorization artifact and a compound decision is computed using at least principal authority, agent authority, and delegation authority. Execution is allowed only if the action falls within the approved intersection of those authorities.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, the system supports downstream delegation by generating derivative authorization artifacts for child agents, wherein each child artifact is constrained to a subset of the parent artifact's scope. In some embodiments, authorization may be dynamically narrowed, suspended, or revoked in response to anomaly detection, policy changes, expiration, explicit revocation, or deviations from approved intent.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, an audit subsystem records provenance that links approval, token issuance, policy evaluation, runtime actions, delegation events, and generated outputs, thereby enabling post-hoc verification that an agent acted within an authorized scope.\par
+\pard\sa120\par
+\pard\sa120 The disclosed architecture improves least-privilege enforcement, runtime safety, delegation containment, and auditability for agent-driven workflows in distributed computing environments.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Brief Description of the Drawings\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 1\f0 \cf0 illustrates an example system architecture for task-bound agent authorization.\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 2\f0 \cf0 illustrates an example authorization issuance workflow for a delegated agent session.\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 3\f0 \cf0 illustrates an example runtime enforcement workflow for an agent tool invocation.\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 4\f0 \cf0 illustrates an example delegated authorization workflow for child agents in a multi-agent chain.\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 5\f0 \cf0 illustrates an example revocation and adaptive scope-narrowing workflow.\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 6\f0 \cf0 illustrates an example provenance graph for authorization, execution, and delegation lineage.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Detailed Description\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 1. System Architecture\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 A system 100 may include a principal interface 102, an identity service 104, an agent registry 106, a policy engine 108, an authorization issuer 110, an agent gateway 112, one or more target services 114, a delegation manager 116, a risk engine 118, and an audit subsystem 120.\par
+\pard\sa120\par
+\pard\sa120 The principal interface 102 may receive a task request from a user, administrator, enterprise service, or another authorized principal. The task request may be expressed in structured form, natural language, or a hybrid representation, and may identify one or more requested outcomes, permitted tools, data classifications, resource boundaries, spending thresholds, or workflow constraints.\par
+\pard\sa120\par
+\pard\sa120 The identity service 104 may authenticate the principal and the agent. The agent registry 106 may store metadata describing registered agents, including provider information, model identifier, trust tier, allowed tools, allowed actions, tenant binding, credential status, and enablement state. In some embodiments, agents participate in an open registration framework while still being governed by platform-issued policy constraints.\par
+\pard\sa120\par
+\pard\sa120 The policy engine 108 evaluates whether a particular agent may act for a principal under a given delegated context. In some embodiments, the policy engine produces a compound decision in which effective permission is defined as an intersection of a principal decision, an agent decision, and a delegation decision.\par
+\pard\sa120\par
+\pard\sa120 The authorization issuer 110 creates a machine-readable authorization artifact, such as a signed token or capability envelope, that encodes the bounded delegated scope. The agent gateway 112 mediates agent actions by intercepting tool or service invocations and validating them against the delegated scope before forwarding them to target services 114. The delegation manager 116 governs child delegations and lineage preservation. The risk engine 118 computes dynamic risk signals. The audit subsystem 120 records provenance for authorization and execution events.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 2. Double-Hop Authorization Model\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one embodiment, the invention implements a double-hop authorization model. A first hop corresponds to authority possessed by the principal. A second hop corresponds to authority possessed by the acting agent. A third decision dimension corresponds to explicitly delegated scope. Rather than allowing either the principal or the agent identity alone to control authorization, the system computes an effective permission according to a compound evaluation, such as:\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 effective_permission = principal_allowed AND agent_allowed AND delegation_allowed\f0 \cf0\par
+\pard\sa120\par
+\pard\sa120 This model prevents privilege amplification by ensuring that an agent cannot exercise authority merely because the principal could do so, and likewise prevents the principal from inheriting standing authority of the agent beyond the approved delegated context.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 3. Delegation Artifact\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one embodiment, the authorization issuer generates a delegation artifact that is short-lived, cryptographically verifiable, and bound to a user-agent-session relationship. The artifact may include one or more of the following fields:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab principal identifier\par
+\pard\li720\fi-360 \bullet	ab agent identifier\par
+\pard\li720\fi-360 \bullet	ab tenant identifier\par
+\pard\li720\fi-360 \bullet	ab delegation identifier\par
+\pard\li720\fi-360 \bullet	ab root delegation identifier\par
+\pard\li720\fi-360 \bullet	ab parent delegation identifier\par
+\pard\li720\fi-360 \bullet	ab approved tools\par
+\pard\li720\fi-360 \bullet	ab approved action types\par
+\pard\li720\fi-360 \bullet	ab maximum action tier\par
+\pard\li720\fi-360 \bullet	ab classification caps by hierarchy\par
+\pard\li720\fi-360 \bullet	ab resource constraints\par
+\pard\li720\fi-360 \bullet	ab declared purpose\par
+\pard\li720\fi-360 \bullet	ab conversation or session identifier\par
+\pard\li720\fi-360 \bullet	ab chain depth\par
+\pard\li720\fi-360 \bullet	ab chain agent identifiers\par
+\pard\li720\fi-360 \bullet	ab issued-at timestamp\par
+\pard\li720\fi-360 \bullet	ab expiration timestamp\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, the delegation artifact is signed by the platform so that downstream enforcement components can independently verify integrity and issuer authenticity. In some embodiments, the artifact is minted by a dedicated gateway service.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 4. Authorization Issuance Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 An example workflow proceeds as follows:\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab The principal authenticates to the system.\par
+\pard\li720\fi-360 2.\tab The designated agent authenticates using agent credentials.\par
+\pard\li720\fi-360 3.\tab The system receives a request to create a delegated authorization context.\par
+\pard\li720\fi-360 4.\tab The policy engine evaluates principal attributes, agent attributes, tenant constraints, trust tier, requested tools, requested actions, and resource limitations.\par
+\pard\li720\fi-360 5.\tab The system optionally validates that the requested delegated scope does not exceed the principal's classification, policy, or resource boundaries.\par
+\pard\li720\fi-360 6.\tab The authorization issuer generates a scoped delegation artifact with a limited time-to-live.\par
+\pard\li720\fi-360 7.\tab The system returns the artifact to the agent runtime for use during subsequent tool invocation.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, the system stores the artifact or a corresponding server-side record in a delegation table for later validation, inspection, or revocation.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 5. Runtime Enforcement Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one embodiment, the agent gateway intercepts each action request initiated by the agent. The action request may specify an operation type, target resource, target service, execution context, conversation identifier, or supporting metadata. The gateway validates the delegation artifact and obtains or computes a compound authorization decision.\par
+\pard\sa120\par
+\pard\sa120 If the action falls within the approved delegation scope and the compound decision resolves to allow, the gateway forwards the request to the relevant target service. If any policy component denies the request, the gateway returns a deny response. In some embodiments, the response identifies which component of the compound decision caused the denial. In some embodiments, the gateway logs the request, decision, and resulting outcome to the audit subsystem.\par
+\pard\sa120\par
+\pard\sa120 This approach differs from conventional bearer-token validation because authorization is not merely a static identity check. Instead, the runtime system evaluates action-specific and delegation-specific constraints before every execution.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 6. Classification and Resource Boundaries\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, the system encodes classification caps on a per-hierarchy basis. For example, a principal with authority to access a higher classification level may delegate a lower classification level to an agent. Different caps may be applied for different classification systems or domains. Similarly, resource constraints may be applied by resource type, tag, identifier, tenant binding, or query boundary.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, child delegations are required to be a strict subset of parent delegations. Classification caps may only narrow. Allowed tool sets may only shrink. Allowed actions may only narrow. Maximum action tier may only decrease. Resource constraints may only become more restrictive.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 7. Delegation Chains and Child Agents\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, a first agent invokes a second agent to perform a subtask. The system may issue a child delegation artifact having a parent delegation identifier and a root delegation identifier. The child delegation may inherit only a narrowed subset of the parent scope. Chain depth may be bounded by a configurable maximum value. This provides controlled multi-agent delegation without copying broad standing credentials across agents.\par
+\pard\sa120\par
+\pard\sa120 In one implementation, lineage metadata includes the ordered set of agent identifiers from the root agent to the current child. This enables the system to reconstruct how authority propagated across a multi-agent workflow.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 8. Dynamic Narrowing and Revocation\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, authorization is not static for the lifetime of the artifact. The system may continuously evaluate risk and context. Revocation or narrowing may occur in response to:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab anomaly detection\par
+\pard\li720\fi-360 \bullet	ab trust-tier changes\par
+\pard\li720\fi-360 \bullet	ab policy updates\par
+\pard\li720\fi-360 \bullet	ab explicit principal withdrawal\par
+\pard\li720\fi-360 \bullet	ab expiration\par
+\pard\li720\fi-360 \bullet	ab attempted scope escalation\par
+\pard\li720\fi-360 \bullet	ab target resource status changes\par
+\pard\sa120\par
+\pard\sa120 Upon revocation, the system may prevent further use of the affected artifact and any derivative child artifacts. In some embodiments, active requests are blocked before execution if revocation status is detected.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 9. Provenance and Audit\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one embodiment, the audit subsystem records events such as agent registration, delegation creation, policy evaluation, tool invocation, decision outcome, child delegation creation, revocation, and target-service response. These records may be stored in audit logs, append-only event stores, or tamper-evident ledgers.\par
+\pard\sa120\par
+\pard\sa120 Because each delegation artifact carries identifiers for root delegation, parent delegation, and acting agent, the system can produce an auditable chain from the approving principal to the final executed action. This provides post-hoc verification that the action remained within the approved delegated scope at the time of execution.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 10. Technical Advantages\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The disclosed techniques provide several technical improvements over conventional authorization systems:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab task-bound delegated scope rather than broad standing permissions\par
+\pard\li720\fi-360 \bullet	ab compound double-hop authorization combining principal, agent, and delegation decisions\par
+\pard\li720\fi-360 \bullet	ab per-action runtime enforcement through a mediation layer\par
+\pard\li720\fi-360 \bullet	ab narrowed child delegation for multi-agent systems\par
+\pard\li720\fi-360 \bullet	ab classification-aware and resource-aware delegation boundaries\par
+\pard\li720\fi-360 \bullet	ab revocation and adaptive narrowing for in-flight workflows\par
+\pard\li720\fi-360 \bullet	ab provenance linking authorization, delegation, execution, and output generation\par
+\pard\sa120\par
+\pard\sa160\b\fs24 11. Example Embodiments\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one example, a research agent is allowed to search and summarize internal documents for a particular tenant but is prohibited from exporting underlying source documents to an external destination.\par
+\pard\sa120\par
+\pard\sa120 In another example, a coding agent is allowed to read project files and propose code changes but is limited to a specified action tier and may not perform destructive operations without separate approval.\par
+\pard\sa120\par
+\pard\sa120 In another example, a procurement workflow uses a planning agent and an execution agent. The planning agent may analyze purchase options, while the execution agent receives a narrowed child delegation artifact permitting creation of a purchase request below a monetary threshold.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 12. Variations\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Although certain embodiments describe a gateway-mediated architecture, enforcement may alternatively be performed by sidecars, service middleware, integrated policy hooks, or distributed adapters associated with specific tools. Likewise, the authorization artifact may be embodied as a signed token, server-side capability record, certificate-based delegation object, or hybrid representation.\par
+\pard\sa120\par
+\pard\sa120 The foregoing description is illustrative and not limiting. Other embodiments consistent with the disclosed principles are within the scope of the invention.\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/02-claim-set.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Claim Set: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Independent Claims\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 1\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 A computer-implemented method for authorizing a software agent to act on behalf of a principal, the method comprising:\par
+\pard\sa120\par
+\pard\sa120 receiving a task request associated with the principal;\par
+\pard\sa120\par
+\pard\sa120 identifying the software agent designated to perform at least a portion of the task request;\par
+\pard\sa120\par
+\pard\sa120 determining authorization constraints based on the task request, an identity of the principal, an identity of the software agent, and one or more policies;\par
+\pard\sa120\par
+\pard\sa120 generating a scoped authorization artifact encoding a bounded permission set for the software agent;\par
+\pard\sa120\par
+\pard\sa120 intercepting an action request generated by the software agent prior to execution of the action request;\par
+\pard\sa120\par
+\pard\sa120 validating the action request against the scoped authorization artifact using a compound authorization decision that includes at least a principal decision, an agent decision, and a delegation decision; and\par
+\pard\sa120\par
+\pard\sa120 selectively permitting, denying, modifying, or escalating execution of the action request based on the validating.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 2\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein the compound authorization decision permits execution only when the principal decision, the agent decision, and the delegation decision each resolve to allow.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 3\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein the scoped authorization artifact is bound to at least one of a task identifier, a tenant identifier, a permitted tool set, a permitted action set, a resource scope, a time window, an invocation limit, a spending threshold, a data sensitivity class, or a maximum delegation depth.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 4\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein generating the scoped authorization artifact comprises cryptographically signing the scoped authorization artifact.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 5\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein the scoped authorization artifact includes at least a delegation identifier and a root delegation identifier.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 6\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein the authorization constraints include one or more classification caps associated with one or more classification hierarchies.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 7\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein the authorization constraints include a maximum action sensitivity tier for the software agent.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 8\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, wherein intercepting the action request comprises intercepting at least one of an API call, a database query, a document retrieval, a network request, a payment operation, a code execution request, or a downstream agent invocation.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 9\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, further comprising computing a contextual risk value associated with the action request and dynamically narrowing the bounded permission set when the contextual risk value satisfies a threshold condition.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 10\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 9, wherein dynamically narrowing the bounded permission set comprises reducing an allowed tool set, reducing a resource scope, lowering an action sensitivity tier, suspending execution, or requiring additional approval.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 11\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, further comprising determining that the software agent requests delegation to a secondary software agent and, in response, generating a derivative authorization artifact for the secondary software agent, the derivative authorization artifact having a permission scope no broader than the scoped authorization artifact.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 12\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 11, wherein the derivative authorization artifact includes a parent delegation identifier that references the scoped authorization artifact.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 13\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 11, wherein generating the derivative authorization artifact comprises enforcing that at least one of classification caps, allowed actions, allowed tools, or resource constraints is narrowed relative to the scoped authorization artifact.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 14\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, further comprising revoking the scoped authorization artifact before expiration in response to a policy change, anomaly detection event, principal withdrawal, trust-tier change, or attempted scope escalation.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 15\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 14, further comprising revoking one or more derivative authorization artifacts associated with the scoped authorization artifact.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 16\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 1, further comprising recording provenance data associating the principal, the software agent, the task request, the scoped authorization artifact, and one or more action requests.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 17\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 16, wherein the provenance data further associates one or more delegation events and one or more generated outputs.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 18\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The method of claim 16, wherein the provenance data is stored in an append-only audit store or tamper-evident ledger.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 19\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 A system comprising one or more processors and memory storing instructions that, when executed by the one or more processors, cause the system to:\par
+\pard\sa120\par
+\pard\sa120 receive a task request for execution by a software agent on behalf of a principal;\par
+\pard\sa120\par
+\pard\sa120 evaluate one or more policies and contextual factors associated with the principal, the software agent, and a delegated scope;\par
+\pard\sa120\par
+\pard\sa120 issue a scoped authorization artifact bound to the task request;\par
+\pard\sa120\par
+\pard\sa120 enforce the scoped authorization artifact during runtime across a plurality of tool or service invocations initiated by the software agent;\par
+\pard\sa120\par
+\pard\sa120 dynamically update or revoke the scoped authorization artifact in response to changed execution conditions; and\par
+\pard\sa120\par
+\pard\sa120 record provenance data associating the principal, the software agent, the scoped authorization artifact, and the plurality of tool or service invocations.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 20\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The system of claim 19, wherein the system comprises an identity service, an agent registry, a policy engine, an authorization issuer, an enforcement gateway, a delegation manager, a risk engine, and an audit subsystem.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 21\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The system of claim 19, wherein the enforcement gateway is configured to deny the plurality of tool or service invocations unless a principal decision, an agent decision, and a delegation decision each resolve to allow.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 22\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The system of claim 19, wherein the delegation manager is configured to issue derivative authorization artifacts for downstream agents and to enforce a maximum delegation depth.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim 23\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 A non-transitory computer-readable medium storing instructions that, when executed by one or more processors, cause the one or more processors to:\par
+\pard\sa120\par
+\pard\sa120 receive a task request associated with a principal;\par
+\pard\sa120\par
+\pard\sa120 generate a task-bound authorization artifact for a software agent;\par
+\pard\sa120\par
+\pard\sa120 validate runtime actions of the software agent against the task-bound authorization artifact using a compound authorization decision;\par
+\pard\sa120\par
+\pard\sa120 generate a derivative authorization artifact for a downstream software agent when delegation is permitted; and\par
+\pard\sa120\par
+\pard\sa120 store provenance records linking principal approval, authorization issuance, runtime actions, delegation events, and generated outputs.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Optional Claim Themes for Later Expansion\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab claims focused on trust tiers and trust-tier-dependent scope\par
+\pard\li720\fi-360 \bullet	ab claims focused on per-hierarchy classification caps\par
+\pard\li720\fi-360 \bullet	ab claims focused on conversation-bound or session-bound delegation\par
+\pard\li720\fi-360 \bullet	ab claims focused on action-tier gating for destructive operations\par
+\pard\li720\fi-360 \bullet	ab claims focused on gateway-forwarded responses and denial attribution\par
+\pard\li720\fi-360 \bullet	ab claims focused on delegation-chain visualization and audit reconstruction\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/03-figure-descriptions.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Figure Descriptions: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Figure List\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 1\f0 \cf0 — System architecture for task-bound agent authorization\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 2\f0 \cf0 — Delegation issuance workflow\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 3\f0 \cf0 — Runtime action enforcement workflow\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 4\f0 \cf0 — Multi-agent delegated authorization chain\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 5\f0 \cf0 — Dynamic narrowing and revocation workflow\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 Fig. 6\f0 \cf0 — Provenance and audit lineage graph\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Detailed Figure Descriptions\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Fig. 1 — System Architecture for Task-Bound Agent Authorization\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 Fig. 1\f0 \cf0 depicts an example system including a principal device or principal-facing interface, an identity service, an agent registry, a policy engine, an authorization issuer, an agent gateway, one or more protected platform services, a delegation manager, a risk engine, and an audit store.\par
+\pard\sa120\par
+\pard\sa120 The figure should show that a principal submits or approves a task, an agent authenticates to the platform, and the platform issues a delegation artifact that is later enforced by the gateway before the gateway forwards permitted requests to protected services. The figure should also show that audit events and delegation lineage are preserved.\par
+\pard\sa120\par
+\pard\sa120 Suggested drawing callouts:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 102\f0 \cf0 principal interface\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 104\f0 \cf0 identity service\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 106\f0 \cf0 agent registry\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 108\f0 \cf0 policy engine\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 110\f0 \cf0 authorization issuer\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 112\f0 \cf0 agent gateway\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 114\f0 \cf0 protected services\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 116\f0 \cf0 delegation manager\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 118\f0 \cf0 risk engine\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 120\f0 \cf0 audit subsystem\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Fig. 2 — Delegation Issuance Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 Fig. 2\f0 \cf0 depicts a flow in which a principal and an agent authenticate, a delegated authorization request is received, policy inputs are evaluated, requested scope is compared against permitted scope, and a short-lived delegation artifact is issued.\par
+\pard\sa120\par
+\pard\sa120 Suggested sequence:\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab Principal authenticates\par
+\pard\li720\fi-360 2.\tab Agent authenticates\par
+\pard\li720\fi-360 3.\tab Request for delegation is submitted\par
+\pard\li720\fi-360 4.\tab Policy engine evaluates principal, agent, and requested scope\par
+\pard\li720\fi-360 5.\tab Optional trust-tier and classification checks are applied\par
+\pard\li720\fi-360 6.\tab Scoped delegation artifact is minted\par
+\pard\li720\fi-360 7.\tab Delegation record is stored\par
+\pard\li720\fi-360 8.\tab Artifact is returned to the agent runtime\par
+\pard\sa120\par
+\pard\sa120 The figure should emphasize that the artifact is bound to a specific delegated context rather than broad standing permissions.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Fig. 3 — Runtime Action Enforcement Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 Fig. 3\f0 \cf0 depicts the runtime path for an agent-initiated action. The agent presents the delegation artifact with an action request. The gateway intercepts the request, validates token integrity and scope, computes a compound authorization decision, and either denies the action or forwards it to a protected service.\par
+\pard\sa120\par
+\pard\sa120 Suggested decision branches:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab validate signature or integrity\par
+\pard\li720\fi-360 \bullet	ab validate expiration and revocation status\par
+\pard\li720\fi-360 \bullet	ab validate action against approved tools and actions\par
+\pard\li720\fi-360 \bullet	ab validate resource and classification boundaries\par
+\pard\li720\fi-360 \bullet	ab compute principal, agent, and delegation decisions\par
+\pard\li720\fi-360 \bullet	ab allow, deny, modify, or escalate\par
+\pard\li720\fi-360 \bullet	ab record audit event\par
+\pard\sa120\par
+\pard\sa120 The figure should make clear that enforcement occurs before the target service executes the requested action.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Fig. 4 — Multi-Agent Delegated Authorization Chain\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 Fig. 4\f0 \cf0 depicts a parent agent delegating a subtask to a child agent through issuance of a derivative authorization artifact. The figure should show a root delegation identifier, parent delegation identifier, reduced child scope, and bounded delegation depth.\par
+\pard\sa120\par
+\pard\sa120 Suggested elements:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab root principal approval\par
+\pard\li720\fi-360 \bullet	ab parent delegation artifact\par
+\pard\li720\fi-360 \bullet	ab child delegation request\par
+\pard\li720\fi-360 \bullet	ab scope-subset validation\par
+\pard\li720\fi-360 \bullet	ab child delegation artifact\par
+\pard\li720\fi-360 \bullet	ab child agent execution\par
+\pard\li720\fi-360 \bullet	ab lineage record written to audit store\par
+\pard\sa120\par
+\pard\sa120 The figure should emphasize that child scope cannot exceed parent scope and that delegation chains remain traceable.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Fig. 5 — Dynamic Narrowing and Revocation Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 Fig. 5\f0 \cf0 depicts runtime risk monitoring and revocation. The figure should show an active delegation artifact being monitored by a risk engine or policy update path. Upon detection of an anomaly, policy change, trust-tier downgrade, or explicit revocation, the system marks the artifact as revoked or narrowed and distributes that state to enforcement points.\par
+\pard\sa120\par
+\pard\sa120 Suggested flow:\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab Active artifact is in use\par
+\pard\li720\fi-360 2.\tab Risk or policy event is detected\par
+\pard\li720\fi-360 3.\tab Revocation or narrowing decision is computed\par
+\pard\li720\fi-360 4.\tab Artifact state is updated\par
+\pard\li720\fi-360 5.\tab Child delegations are revoked or frozen\par
+\pard\li720\fi-360 6.\tab Future actions are denied or constrained\par
+\pard\li720\fi-360 7.\tab Revocation event is logged\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Fig. 6 — Provenance and Audit Lineage Graph\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 \f1 \cf2 Fig. 6\f0 \cf0 depicts a graph or linked-record structure connecting:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab principal approval\par
+\pard\li720\fi-360 \bullet	ab agent registration\par
+\pard\li720\fi-360 \bullet	ab delegation artifact issuance\par
+\pard\li720\fi-360 \bullet	ab tool invocation events\par
+\pard\li720\fi-360 \bullet	ab child delegation events\par
+\pard\li720\fi-360 \bullet	ab target-service responses\par
+\pard\li720\fi-360 \bullet	ab output generation\par
+\pard\li720\fi-360 \bullet	ab revocation or expiration\par
+\pard\sa120\par
+\pard\sa120 The figure should show that each node is linked by identifiers such as principal ID, agent ID, delegation ID, parent delegation ID, and root delegation ID, allowing reconstruction of the full authorization-to-execution chain.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Drafting Notes for Counsel or Illustrator\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Prefer sequence diagrams for \f1 \cf2 Fig. 2\f0 \cf0 through \f1 \cf2 Fig. 5\f0 \cf0.\par
+\pard\li720\fi-360 \bullet	ab Prefer a component block diagram for \f1 \cf2 Fig. 1\f0 \cf0.\par
+\pard\li720\fi-360 \bullet	ab Prefer a graph or lineage diagram for \f1 \cf2 Fig. 6\f0 \cf0.\par
+\pard\li720\fi-360 \bullet	ab Keep labels technology-neutral enough for claim flexibility, but preserve the core concepts of task-bound scope, compound decisioning, derivative delegation, and audit lineage.\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/04-invention-disclosure-form.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Invention Disclosure Form: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Invention Title\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Task-Bound Runtime Authorization for Autonomous Software Agents\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Inventor Information\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Inventor name(s): \f1 \cf2 [insert legal names]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Residence / citizenship: \f1 \cf2 [insert as needed by counsel]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Primary contact: \f1 \cf2 [insert name, email, phone]\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Business Context\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Product / platform: \f1 \cf2 Stratium\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Functional area: agent authorization, delegated access control, platform security\par
+\pard\li720\fi-360 \bullet	ab Related internal document: \f1 \cf2 docs/PRD_AGENT_AUTHORIZATION.md\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Problem Statement\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Autonomous and semi-autonomous agents need to act on behalf of users and other principals, but conventional authorization systems are user-centric or service-account-centric. Those systems do not reliably constrain an agent to a specific approved task, delegated scope, runtime context, or downstream delegation boundary.\par
+\pard\sa120\par
+\pard\sa120 This causes several technical problems:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab privilege amplification when an agent's standing privileges exceed the user's intended authority\par
+\pard\li720\fi-360 \bullet	ab inability to distinguish user authority from agent authority in a single runtime decision\par
+\pard\li720\fi-360 \bullet	ab uncontrolled propagation of permissions across sub-agents\par
+\pard\li720\fi-360 \bullet	ab weak linkage between approval, delegated token issuance, executed actions, and resulting outputs\par
+\pard\li720\fi-360 \bullet	ab limited ability to revoke or narrow authorization during live agent execution\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Core Invention\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The invention issues a task-bound, machine-readable authorization artifact for an agent acting on behalf of a principal and enforces that artifact at runtime for each attempted action. Authorization is evaluated using a compound decision that includes at least principal authority, agent authority, and delegation authority. Child delegation is supported through derivative artifacts that cannot exceed parent scope. Audit and provenance records link approval, issuance, execution, delegation, and revocation.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Key Novel Features\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab double-hop or compound authorization combining principal, agent, and delegated scope\par
+\pard\li720\fi-360 \bullet	ab short-lived delegation artifacts bound to a user-agent-session or task context\par
+\pard\li720\fi-360 \bullet	ab runtime gateway enforcement for each tool or service invocation\par
+\pard\li720\fi-360 \bullet	ab reduced-scope child delegation for multi-agent workflows\par
+\pard\li720\fi-360 \bullet	ab per-hierarchy classification caps and resource constraints\par
+\pard\li720\fi-360 \bullet	ab configurable maximum delegation depth\par
+\pard\li720\fi-360 \bullet	ab dynamic narrowing or revocation during execution\par
+\pard\li720\fi-360 \bullet	ab provenance linking approval, delegation chain, actions, and outputs\par
+\pard\sa120\par
+\pard\sa160\b\fs28 High-Level Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab A principal authenticates or otherwise approves a task.\par
+\pard\li720\fi-360 2.\tab An agent authenticates using platform-recognized credentials.\par
+\pard\li720\fi-360 3.\tab The platform evaluates policies using principal attributes, agent attributes, and requested delegated scope.\par
+\pard\li720\fi-360 4.\tab The platform issues a bounded delegation artifact.\par
+\pard\li720\fi-360 5.\tab The agent presents the artifact when invoking tools or protected services.\par
+\pard\li720\fi-360 6.\tab A gateway or enforcement layer validates each request against the delegated scope and computes a compound authorization decision.\par
+\pard\li720\fi-360 7.\tab The platform optionally issues narrowed child artifacts for downstream agents.\par
+\pard\li720\fi-360 8.\tab The platform records provenance and supports revocation, expiration, or narrowing.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Technical Components\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab principal interface\par
+\pard\li720\fi-360 \bullet	ab identity service\par
+\pard\li720\fi-360 \bullet	ab agent registry\par
+\pard\li720\fi-360 \bullet	ab policy engine\par
+\pard\li720\fi-360 \bullet	ab authorization issuer\par
+\pard\li720\fi-360 \bullet	ab gateway or enforcement layer\par
+\pard\li720\fi-360 \bullet	ab delegation manager\par
+\pard\li720\fi-360 \bullet	ab risk engine\par
+\pard\li720\fi-360 \bullet	ab audit subsystem\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Example Scope Fields in the Delegation Artifact\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab principal identifier\par
+\pard\li720\fi-360 \bullet	ab agent identifier\par
+\pard\li720\fi-360 \bullet	ab tenant identifier\par
+\pard\li720\fi-360 \bullet	ab delegation identifier\par
+\pard\li720\fi-360 \bullet	ab parent delegation identifier\par
+\pard\li720\fi-360 \bullet	ab root delegation identifier\par
+\pard\li720\fi-360 \bullet	ab approved tools\par
+\pard\li720\fi-360 \bullet	ab approved actions\par
+\pard\li720\fi-360 \bullet	ab maximum action tier\par
+\pard\li720\fi-360 \bullet	ab classification caps\par
+\pard\li720\fi-360 \bullet	ab resource constraints\par
+\pard\li720\fi-360 \bullet	ab declared purpose\par
+\pard\li720\fi-360 \bullet	ab conversation or session identifier\par
+\pard\li720\fi-360 \bullet	ab issued-at and expiration timestamps\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Example Use Cases\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab A research agent may search and summarize approved tenant documents but may not export original source content.\par
+\pard\li720\fi-360 \bullet	ab A coding agent may inspect source files and generate proposed code changes while remaining prohibited from destructive operations.\par
+\pard\li720\fi-360 \bullet	ab A support agent may access only records associated with a single tenant, case, or account.\par
+\pard\li720\fi-360 \bullet	ab A planning agent may delegate a subtask to an execution agent using a narrower child delegation artifact.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Technical Advantages\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab enforces least privilege for autonomous agents\par
+\pard\li720\fi-360 \bullet	ab prevents privilege amplification across user and agent identities\par
+\pard\li720\fi-360 \bullet	ab enables safe multi-agent coordination\par
+\pard\li720\fi-360 \bullet	ab supports real-time containment when behavior changes\par
+\pard\li720\fi-360 \bullet	ab improves compliance, forensics, and explainability through lineage records\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Alternative Embodiments\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab signed JWT-like artifact\par
+\pard\li720\fi-360 \bullet	ab server-side capability record with opaque reference token\par
+\pard\li720\fi-360 \bullet	ab gateway-based enforcement\par
+\pard\li720\fi-360 \bullet	ab sidecar or middleware-based enforcement\par
+\pard\li720\fi-360 \bullet	ab centralized revocation service\par
+\pard\li720\fi-360 \bullet	ab distributed enforcement adapters for individual tools\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Potential Claim Focus Areas\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab task-bound delegated authorization\par
+\pard\li720\fi-360 \bullet	ab compound principal-agent-delegation decisioning\par
+\pard\li720\fi-360 \bullet	ab derivative child authorization artifacts\par
+\pard\li720\fi-360 \bullet	ab classification-aware delegated scope\par
+\pard\li720\fi-360 \bullet	ab revocation propagation through delegation chains\par
+\pard\li720\fi-360 \bullet	ab provenance graphs linking approval to action execution\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Closest Known Approaches to Distinguish\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab role-based access control systems\par
+\pard\li720\fi-360 \bullet	ab attribute-based access control systems\par
+\pard\li720\fi-360 \bullet	ab OAuth and bearer-token delegation\par
+\pard\li720\fi-360 \bullet	ab service-account authorization\par
+\pard\li720\fi-360 \bullet	ab generic API gateway policy enforcement\par
+\pard\li720\fi-360 \bullet	ab workflow approval systems without per-action delegated runtime checks\par
+\pard\li720\fi-360 \bullet	ab agent frameworks without platform-enforced delegated scope lineage\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Distinguishing Characteristics\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab authorization is bound to a specific task or delegated context rather than only identity or role\par
+\pard\li720\fi-360 \bullet	ab every agent action is revalidated at runtime before execution\par
+\pard\li720\fi-360 \bullet	ab child delegation is generated as a scope-reduced derivative, not a copy of broad credentials\par
+\pard\li720\fi-360 \bullet	ab authorization decisions preserve lineage across multi-agent chains\par
+\pard\li720\fi-360 \bullet	ab audit records connect policy issuance to resulting actions and outputs\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Development and Reduction to Practice\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Earliest concept date: \f1 \cf2 [insert date]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Prototype date: \f1 \cf2 [insert date]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab First internal demo: \f1 \cf2 [insert date]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Production readiness: \f1 \cf2 [insert status]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Relevant repos / prototypes / demos: \f1 \cf2 [insert references]\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Public Disclosure and Bar-Date Review\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Any public disclosure? \f1 \cf2 [yes/no]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab If yes, date and venue: \f1 \cf2 [insert details]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Any public code repository exposure? \f1 \cf2 [yes/no]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Any customer demo, beta, or offer for sale? \f1 \cf2 [yes/no]\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab Need immediate filing before additional disclosure? \f1 \cf2 [yes/no]\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Commercial Relevance\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab enterprise AI governance\par
+\pard\li720\fi-360 \bullet	ab agentic workflow orchestration\par
+\pard\li720\fi-360 \bullet	ab regulated-industry automation\par
+\pard\li720\fi-360 \bullet	ab zero-trust delegated execution\par
+\pard\li720\fi-360 \bullet	ab secure tool-use platforms for LLM agents\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Supporting Materials to Gather\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab architecture diagrams\par
+\pard\li720\fi-360 \bullet	ab delegation token examples\par
+\pard\li720\fi-360 \bullet	ab policy examples\par
+\pard\li720\fi-360 \bullet	ab audit log samples\par
+\pard\li720\fi-360 \bullet	ab screenshots or demos\par
+\pard\li720\fi-360 \bullet	ab sequence diagrams for issuance and execution\par
+\pard\li720\fi-360 \bullet	ab trust-tier documentation\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Filing Notes\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab A provisional filing can usually be prepared quickly from the specification and figures if an early priority date is the immediate goal.\par
+\pard\li720\fi-360 \bullet	ab A later nonprovisional can expand claim coverage after prior-art review and attorney refinement.\par
+\pard\li720\fi-360 \bullet	ab Recommended USPTO references:\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/apply/provisional-application\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/types-patent-applications\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/05-provisional-ready-package.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Provisional-Ready Package: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Purpose\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 This document repackages the current invention materials into a provisional-oriented format for rapid attorney review and filing preparation. It is designed to support an early priority filing around Stratium's task-bound and delegated agent authorization architecture.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 USPTO-Oriented Framing\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 For a U.S. provisional application, the USPTO states that a provisional application is not required to include formal claims or an oath or declaration, but it must include a written description that satisfies the disclosure requirement and should include any drawings necessary to understand the invention. The USPTO also states that the provisional must name all inventors and include a cover sheet and filing fee. This package is drafted to maximize disclosure support while keeping the package fast to finalize for filing.\par
+\pard\sa120\par
+\pard\sa120 Official references:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/apply/provisional-application\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/types-patent-applications\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Recommended Provisional Filing Set\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Use the following as the filing-oriented package:\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab \f1 \cf2 docs/patent/01-patent-specification-draft.md\f0 \cf0\par
+\pard\li720\fi-360 2.\tab \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0\par
+\pard\li720\fi-360 3.\tab Drawings based on the figures described in \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0\par
+\pard\li720\fi-360 4.\tab Inventor and administrative details from \f1 \cf2 docs/patent/04-invention-disclosure-form.md\f0 \cf0\par
+\pard\li720\fi-360 5.\tab This checklist document\par
+\pard\sa120\par
+\pard\sa120 Optional but recommended for internal preservation of claim concepts:\par
+\pard\sa120\par
+\pard\li720\fi-360 6.\tab \f1 \cf2 docs/patent/02-claim-set.md\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Provisional Filing Checklist\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Administrative Items\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab confirm all inventors are identified\par
+\pard\li720\fi-360 \bullet	ab confirm title of invention\par
+\pard\li720\fi-360 \bullet	ab confirm correspondence address\par
+\pard\li720\fi-360 \bullet	ab confirm inventor residence information\par
+\pard\li720\fi-360 \bullet	ab confirm whether any U.S. government funding statement is required\par
+\pard\li720\fi-360 \bullet	ab confirm whether any public disclosure has already occurred\par
+\pard\li720\fi-360 \bullet	ab confirm target filing date\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Disclosure Sufficiency Items\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab include full written description of the delegated authorization workflow\par
+\pard\li720\fi-360 \bullet	ab include the double-hop or compound decision model\par
+\pard\li720\fi-360 \bullet	ab include delegation artifact fields and scope boundaries\par
+\pard\li720\fi-360 \bullet	ab include child delegation and scope narrowing behavior\par
+\pard\li720\fi-360 \bullet	ab include runtime enforcement flow\par
+\pard\li720\fi-360 \bullet	ab include revocation and dynamic narrowing behavior\par
+\pard\li720\fi-360 \bullet	ab include provenance and audit lineage\par
+\pard\li720\fi-360 \bullet	ab include alternative embodiments and implementation variations\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Drawings Items\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab prepare at least one architecture diagram\par
+\pard\li720\fi-360 \bullet	ab prepare at least one sequence diagram for delegation issuance\par
+\pard\li720\fi-360 \bullet	ab prepare at least one sequence diagram for runtime enforcement\par
+\pard\li720\fi-360 \bullet	ab prepare at least one sequence diagram for child delegation\par
+\pard\li720\fi-360 \bullet	ab prepare at least one diagram for revocation or lineage\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Bar-Date and Priority Items\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab confirm no public disclosure older than one year in the United States\par
+\pard\li720\fi-360 \bullet	ab confirm whether any foreign filing strategy is contemplated\par
+\pard\li720\fi-360 \bullet	ab confirm whether immediate filing is needed before demos, customer distribution, or repository publication\par
+\pard\li720\fi-360 \bullet	ab confirm date by which nonprovisional follow-on must be filed to claim benefit\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Provisional-Style Draft Text\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Title\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Systems and Methods for Task-Bound Authorization of Autonomous Software Agents\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Technical Field\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The disclosure relates to computer security, identity and access management, distributed systems, and runtime control of autonomous or semi-autonomous software agents.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Problem Addressed\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Autonomous agents increasingly perform actions on behalf of users, tenants, services, and other principals. Existing user-centric and service-account-centric authorization models do not adequately constrain agents to a particular approved task, execution scope, or delegation boundary. This can result in privilege amplification, overbroad tool access, poor containment of downstream delegation, and limited forensic traceability.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Summary of the Invention\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 In one embodiment, a platform receives a task request associated with a principal and identifies an agent authorized to act on the principal's behalf. The platform evaluates principal permissions, agent permissions, and explicitly delegated scope using a compound policy decision. The platform issues a short-lived authorization artifact that is bound to the delegated context and defines a bounded permission envelope for the agent.\par
+\pard\sa120\par
+\pard\sa120 At runtime, a gateway or similar mediation layer intercepts each attempted tool or service invocation by the agent and validates the invocation against the authorization artifact. If the action is within scope and the compound decision resolves to allow, the request is forwarded to a protected service. If not, the request is denied, modified, or escalated.\par
+\pard\sa120\par
+\pard\sa120 In some embodiments, a first agent delegates a subtask to a second agent only through issuance of a derivative authorization artifact that is equal to or narrower than the parent artifact. In some embodiments, the platform dynamically narrows or revokes authorization in response to anomaly detection, policy changes, trust-tier changes, or other execution conditions. The platform also records provenance linking approval, authorization issuance, delegation events, executed actions, and resulting outputs.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Representative Embodiments\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs22 Embodiment 1: Compound Authorization\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Authorization is computed from the intersection of:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab authority of the principal\par
+\pard\li720\fi-360 \bullet	ab authority of the acting agent\par
+\pard\li720\fi-360 \bullet	ab explicitly delegated scope\par
+\pard\sa120\par
+\pard\sa120 This model prevents either the principal or the agent from unilaterally expanding effective permission.\par
+\pard\sa120\par
+\pard\sa160\b\fs22 Embodiment 2: Delegation Artifact\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The system issues a machine-readable artifact containing one or more of:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab principal identifier\par
+\pard\li720\fi-360 \bullet	ab agent identifier\par
+\pard\li720\fi-360 \bullet	ab tenant identifier\par
+\pard\li720\fi-360 \bullet	ab delegation identifier\par
+\pard\li720\fi-360 \bullet	ab root delegation identifier\par
+\pard\li720\fi-360 \bullet	ab parent delegation identifier\par
+\pard\li720\fi-360 \bullet	ab approved tools\par
+\pard\li720\fi-360 \bullet	ab approved actions\par
+\pard\li720\fi-360 \bullet	ab maximum action tier\par
+\pard\li720\fi-360 \bullet	ab classification caps\par
+\pard\li720\fi-360 \bullet	ab resource constraints\par
+\pard\li720\fi-360 \bullet	ab declared purpose\par
+\pard\li720\fi-360 \bullet	ab session or conversation identifier\par
+\pard\li720\fi-360 \bullet	ab issued-at and expiration timestamps\par
+\pard\li720\fi-360 \bullet	ab chain depth and chain lineage fields\par
+\pard\sa120\par
+\pard\sa160\b\fs22 Embodiment 3: Runtime Enforcement\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Each agent action is intercepted before execution. The system validates:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab integrity and authenticity of the delegation artifact\par
+\pard\li720\fi-360 \bullet	ab expiration and revocation status\par
+\pard\li720\fi-360 \bullet	ab allowed tool and action scope\par
+\pard\li720\fi-360 \bullet	ab resource and classification boundaries\par
+\pard\li720\fi-360 \bullet	ab compound authorization outcome\par
+\pard\sa120\par
+\pard\sa160\b\fs22 Embodiment 4: Child Delegation\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The system allows multi-agent workflows by issuing child artifacts that remain within a subset of the parent scope. In some embodiments:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab tools can only be removed, not added\par
+\pard\li720\fi-360 \bullet	ab action sensitivity can only narrow\par
+\pard\li720\fi-360 \bullet	ab resource access can only narrow\par
+\pard\li720\fi-360 \bullet	ab classification caps can only narrow\par
+\pard\li720\fi-360 \bullet	ab delegation depth is bounded\par
+\pard\sa120\par
+\pard\sa160\b\fs22 Embodiment 5: Revocation and Provenance\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The system supports revocation, narrowing, and post-hoc verification. Audit records may connect:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab principal approval\par
+\pard\li720\fi-360 \bullet	ab agent registration\par
+\pard\li720\fi-360 \bullet	ab policy evaluation\par
+\pard\li720\fi-360 \bullet	ab artifact issuance\par
+\pard\li720\fi-360 \bullet	ab runtime invocation\par
+\pard\li720\fi-360 \bullet	ab child delegation\par
+\pard\li720\fi-360 \bullet	ab revocation\par
+\pard\li720\fi-360 \bullet	ab generated outputs\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Example Use Cases\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab A research agent can search internal documents and produce summaries but cannot export source material.\par
+\pard\li720\fi-360 \bullet	ab A coding agent can inspect and modify specified repositories but cannot perform destructive actions above its delegated action tier.\par
+\pard\li720\fi-360 \bullet	ab A support agent can query records for a particular tenant and case but cannot access unrelated customer data.\par
+\pard\li720\fi-360 \bullet	ab A planning agent can create a narrowed child delegation for an execution agent.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Information to Fill Before Filing\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab inventor legal names\par
+\pard\li720\fi-360 \bullet	ab inventor residences\par
+\pard\li720\fi-360 \bullet	ab filing entity status\par
+\pard\li720\fi-360 \bullet	ab exact title to be used\par
+\pard\li720\fi-360 \bullet	ab any government-interest statement\par
+\pard\li720\fi-360 \bullet	ab public disclosure history\par
+\pard\li720\fi-360 \bullet	ab target filing date\par
+\pard\li720\fi-360 \bullet	ab whether draft figures will be line drawings or converted attorney figures\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Internal Recommendation\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 For speed, file the provisional with the broad technical narrative, detailed architecture, and figures first. Preserve the richer claim ideas and prosecution variants from \f1 \cf2 docs/patent/02-claim-set.md\f0 \cf0 for follow-on nonprovisional work.\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/06-nonprovisional-attorney-package.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Attorney-Style Nonprovisional Package: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Purpose\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 This document organizes the existing patent materials into a nonprovisional-oriented handoff package for patent counsel. It is intended to streamline preparation of a U.S. utility application based on Stratium's agent authorization workflow.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 USPTO-Oriented Framing\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The USPTO states that the elements of a nonprovisional utility application generally include an application transmittal form, fee transmittal form, application data sheet, specification, drawings, and executed oath or declaration. The USPTO also states that the specification should include, in order, the title, any cross-reference to related applications, any government-support statement, background, summary, brief description of drawings, detailed description, at least one claim, and an abstract.\par
+\pard\sa120\par
+\pard\sa120 Official references:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/types-patent-applications\par
+\pard\li720\fi-360 \bullet	ab https://www.uspto.gov/patents/basics/apply/provisional-application\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Proposed Assembly Order\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Administrative Filing Materials\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab application transmittal form\par
+\pard\li720\fi-360 \bullet	ab fee transmittal form\par
+\pard\li720\fi-360 \bullet	ab application data sheet\par
+\pard\li720\fi-360 \bullet	ab executed inventor oath or declaration\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Technical Filing Materials\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab specification based on \f1 \cf2 docs/patent/01-patent-specification-draft.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab claims based on \f1 \cf2 docs/patent/02-claim-set.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab drawings based on \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab abstract drawn from the specification summary\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Counsel Support Materials\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab invention disclosure in \f1 \cf2 docs/patent/04-invention-disclosure-form.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab provisional-oriented summary in \f1 \cf2 docs/patent/05-provisional-ready-package.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab product and architecture context in \f1 \cf2 docs/PRD_AGENT_AUTHORIZATION.md\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Suggested Nonprovisional Specification Structure\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Patent counsel can assemble the nonprovisional specification in this order:\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab Title\par
+\pard\li720\fi-360 2.\tab Cross-reference to related applications\par
+\pard\li720\fi-360 3.\tab Statement regarding federally sponsored research or development, if applicable\par
+\pard\li720\fi-360 4.\tab Names of parties to any joint research agreement, if applicable\par
+\pard\li720\fi-360 5.\tab Background\par
+\pard\li720\fi-360 6.\tab Brief summary\par
+\pard\li720\fi-360 7.\tab Brief description of drawings\par
+\pard\li720\fi-360 8.\tab Detailed description\par
+\pard\li720\fi-360 9.\tab Claims\par
+\pard\li720\fi-360 10.\tab Abstract\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Attorney Handoff Summary\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Invention Theme\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The invention concerns task-bound authorization of autonomous or semi-autonomous agents, with runtime enforcement and delegation containment. The core novelty emphasis is not merely authorizing an AI agent, but enforcing a bounded, machine-readable delegation scope during actual execution and across downstream agent chains.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Likely Novelty Anchors\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab compound authorization requiring principal authority, agent authority, and delegated authority\par
+\pard\li720\fi-360 \bullet	ab short-lived delegation artifacts tied to a task, session, or conversation context\par
+\pard\li720\fi-360 \bullet	ab gateway-mediated runtime enforcement for each agent action\par
+\pard\li720\fi-360 \bullet	ab derivative child delegation with strict subset enforcement\par
+\pard\li720\fi-360 \bullet	ab per-hierarchy classification caps and resource constraints\par
+\pard\li720\fi-360 \bullet	ab delegation lineage through root and parent delegation identifiers\par
+\pard\li720\fi-360 \bullet	ab dynamic narrowing and revocation during execution\par
+\pard\li720\fi-360 \bullet	ab provenance linking approval, action, delegation, and output\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Implementation Context\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 The current Stratium model includes:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab registered agents with trust tiers\par
+\pard\li720\fi-360 \bullet	ab short-lived, platform-minted delegation tokens\par
+\pard\li720\fi-360 \bullet	ab compound policy evaluation\par
+\pard\li720\fi-360 \bullet	ab bounded action sensitivity tiers\par
+\pard\li720\fi-360 \bullet	ab classification caps by hierarchy\par
+\pard\li720\fi-360 \bullet	ab delegation chain depth limits\par
+\pard\li720\fi-360 \bullet	ab gateway-mediated forwarding to protected services\par
+\pard\li720\fi-360 \bullet	ab audit logging and chain lineage\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Draft Claim Strategy\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Primary Independent Method Claim\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Focus on receiving a task request, identifying principal and agent, generating a bounded authorization artifact, intercepting agent actions, computing a compound decision, and selectively permitting or denying runtime execution.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Primary System Claim\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Focus on a system including policy engine, issuer, gateway, delegation manager, risk engine, and audit subsystem that collectively enforce the delegated scope.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Primary Medium Claim\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 Focus on instructions causing a processor to generate task-bound authorization, validate runtime action requests, issue derivative child scope, and record provenance.\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Dependent Claim Clusters\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab cryptographic signing and artifact integrity\par
+\pard\li720\fi-360 \bullet	ab classification caps and resource constraints\par
+\pard\li720\fi-360 \bullet	ab trust-tier-based action limits\par
+\pard\li720\fi-360 \bullet	ab derivative child authorization\par
+\pard\li720\fi-360 \bullet	ab maximum delegation depth\par
+\pard\li720\fi-360 \bullet	ab dynamic revocation and narrowing\par
+\pard\li720\fi-360 \bullet	ab audit lineage and tamper-evident records\par
+\pard\li720\fi-360 \bullet	ab denial attribution identifying which policy component denied\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Counsel Questions to Resolve\b0\fs24\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Priority and Disclosure\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Has any public disclosure already occurred?\par
+\pard\li720\fi-360 \bullet	ab Is there a need to claim priority to an earlier provisional?\par
+\pard\li720\fi-360 \bullet	ab Are there foreign filing considerations that affect timing?\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Inventorship\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Which contributors conceived of the compound authorization model?\par
+\pard\li720\fi-360 \bullet	ab Which contributors conceived of child delegation narrowing and lineage?\par
+\pard\li720\fi-360 \bullet	ab Which contributors conceived of classification-cap delegation and chain-depth controls?\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Claim Breadth\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Should claims emphasize AI agents specifically or remain software-agent neutral?\par
+\pard\li720\fi-360 \bullet	ab Should the gateway be claimed as a required component or as one optional enforcement embodiment?\par
+\pard\li720\fi-360 \bullet	ab Should classification caps be core claim language or a dependent fallback position?\par
+\pard\sa120\par
+\pard\sa160\b\fs24 Prior-Art Positioning\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab What prior internal or external systems used delegated tokens before this concept?\par
+\pard\li720\fi-360 \bullet	ab How should OAuth, ABAC, and API-gateway prior art be distinguished most aggressively?\par
+\pard\li720\fi-360 \bullet	ab Are there known agent frameworks with tool gating but without compound delegated runtime authorization?\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Open Fact Fields for Counsel to Populate\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab inventor legal names\par
+\pard\li720\fi-360 \bullet	ab residence information\par
+\pard\li720\fi-360 \bullet	ab entity status\par
+\pard\li720\fi-360 \bullet	ab assignee information\par
+\pard\li720\fi-360 \bullet	ab government rights statement, if any\par
+\pard\li720\fi-360 \bullet	ab related applications, if any\par
+\pard\li720\fi-360 \bullet	ab earliest conception date\par
+\pard\li720\fi-360 \bullet	ab earliest reduction-to-practice date\par
+\pard\li720\fi-360 \bullet	ab disclosure history\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Recommended Drawing Set\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab system architecture block diagram\par
+\pard\li720\fi-360 \bullet	ab delegation issuance sequence diagram\par
+\pard\li720\fi-360 \bullet	ab runtime enforcement sequence diagram\par
+\pard\li720\fi-360 \bullet	ab multi-agent derivative delegation sequence diagram\par
+\pard\li720\fi-360 \bullet	ab revocation or narrowing sequence diagram\par
+\pard\li720\fi-360 \bullet	ab provenance lineage graph\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Recommended Next Drafting Moves\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 1.\tab Convert \f1 \cf2 docs/patent/01-patent-specification-draft.md\f0 \cf0 into full nonprovisional section ordering.\par
+\pard\li720\fi-360 2.\tab Expand \f1 \cf2 docs/patent/02-claim-set.md\f0 \cf0 into a broader prosecution set with multiple fallback trees.\par
+\pard\li720\fi-360 3.\tab Generate formal line-drawing figures from \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0.\par
+\pard\li720\fi-360 4.\tab Complete inventor and disclosure facts in \f1 \cf2 docs/patent/04-invention-disclosure-form.md\f0 \cf0.\par
+\pard\li720\fi-360 5.\tab Run counsel-led prior-art review and revise claims before filing.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Internal Packaging Recommendation\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 For internal use, treat the following as the current attorney packet:\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/01-patent-specification-draft.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/02-claim-set.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/04-invention-disclosure-form.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/05-provisional-ready-package.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/06-nonprovisional-attorney-package.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/PRD_AGENT_AUTHORIZATION.md\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Drafting Notes\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab Keep the specification broad enough to cover non-LLM agents, enterprise workflow agents, and service-side orchestration agents.\par
+\pard\li720\fi-360 \bullet	ab Preserve alternative embodiments so counsel can support broader claims and fallback positions.\par
+\pard\li720\fi-360 \bullet	ab Tie every claimed feature back to adequate written-description support in the specification and drawings.\par
+\pard\fs24\f0\par
+\page
+\pard\b\fs28 Source: \f1 docs/patent/figures/README.md\f0\b0\fs24\par
+\pard\sa160\b\fs32 Draft Patent Figures: Agent Authorization Workflow\b0\fs24\par
+\pard\sa120\par
+\pard\sa120 This directory contains draft figure diagrams for the patent package. The figures are provided as Markdown files with Mermaid diagrams so they can be reviewed, edited, and later converted into formal patent drawings.\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Figures\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-1-system-architecture.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-2-delegation-issuance-workflow.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-3-runtime-action-enforcement.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-4-multi-agent-delegation-chain.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-5-dynamic-narrowing-and-revocation.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-6-provenance-lineage-graph.md\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-1-system-architecture.svg\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-2-delegation-issuance-workflow.svg\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-3-runtime-action-enforcement.svg\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-4-multi-agent-delegation-chain.svg\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-5-dynamic-narrowing-and-revocation.svg\f0 \cf0\par
+\pard\li720\fi-360 \bullet	ab \f1 \cf2 docs/patent/figures/FIG-6-provenance-lineage-graph.svg\f0 \cf0\par
+\pard\sa120\par
+\pard\sa160\b\fs28 Notes\b0\fs24\par
+\pard\sa120\par
+\pard\li720\fi-360 \bullet	ab These are draft engineering diagrams, not formal patent drawings.\par
+\pard\li720\fi-360 \bullet	ab Each figure is aligned to \f1 \cf2 docs/patent/03-figure-descriptions.md\f0 \cf0.\par
+\pard\li720\fi-360 \bullet	ab The \f1 \cf2 .svg\f0 \cf0 files are black-and-white drafts intended to be easier for counsel or a patent illustrator to refine for filing.\par
+\pard\li720\fi-360 \bullet	ab A patent illustrator or counsel can later simplify line weights, labels, and callouts for final submission.\par
+\pard\fs24\f0\par
+}

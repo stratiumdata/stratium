@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Patent Package: Agent Authorization Workflow</title>
+  <style>
+    body { font-family: Georgia, "Times New Roman", serif; margin: 36px; color: #000; }
+    h1 { font-size: 28px; text-align: center; margin-bottom: 18px; }
+    h2 { font-size: 22px; margin-top: 28px; border-bottom: 1px solid #000; padding-bottom: 4px; }
+    h3 { font-size: 18px; margin-top: 20px; }
+    h4, h5, h6 { font-size: 16px; margin-top: 16px; }
+    p, li { font-size: 12px; line-height: 1.45; }
+    ul, ol { margin-top: 8px; margin-bottom: 12px; }
+    code { font-family: Menlo, Consolas, monospace; font-size: 11px; }
+    pre { border: 1px solid #000; padding: 10px; white-space: pre-wrap; font-size: 10px; }
+    hr { border: none; border-top: 2px solid #000; margin: 28px 0; }
+    a { color: #000; text-decoration: underline; }
+  </style>
+</head>
+<body>
+<h1>Patent Package: Agent Authorization Workflow</h1>
+<p><strong>Generated:</strong> 2026-04-02</p>
+<p>This compiled package contains the current patent drafting materials and figure index for Stratium's agent authorization workflow.</p>
+<h2>Contents</h2><ol>
+<li>README</li>
+<li>01 patent specification draft</li>
+<li>02 claim set</li>
+<li>03 figure descriptions</li>
+<li>04 invention disclosure form</li>
+<li>05 provisional ready package</li>
+<li>06 nonprovisional attorney package</li>
+<li>README</li>
+</ol>
+<hr/>
+<h2>Source: <code>docs/patent/README.md</code></h2>
+<h1>Patent Draft Package: Agent Authorization</h1>
+<p>This directory contains a working patent draft package for Stratium&#39;s agent authorization workflow, tailored to the double-hop delegation model described in <code>docs/PRD_AGENT_AUTHORIZATION.md</code>.</p>
+<h2>Documents</h2>
+<ul>
+<li><code>docs/patent/01-patent-specification-draft.md</code> — patent-style specification draft</li>
+<li><code>docs/patent/02-claim-set.md</code> — independent and dependent claims</li>
+<li><code>docs/patent/03-figure-descriptions.md</code> — figure list and drawing narratives</li>
+<li><code>docs/patent/04-invention-disclosure-form.md</code> — attorney-ready invention disclosure form</li>
+<li><code>docs/patent/05-provisional-ready-package.md</code> — provisional-oriented filing package and checklist</li>
+<li><code>docs/patent/06-nonprovisional-attorney-package.md</code> — nonprovisional assembly and attorney handoff package</li>
+<li><code>docs/patent/figures/README.md</code> — draft Mermaid figure set for all six patent figures</li>
+<li><code>docs/patent/figures/*.svg</code> — cleaner black-and-white SVG drafts for illustrator or counsel review</li>
+</ul>
+<h2>Notes</h2>
+<ul>
+<li>These documents are a technical drafting starting point, not legal advice.</li>
+<li>The specification and claims are written in nonprovisional style so they can be adapted for a provisional filing or expanded for a later nonprovisional application.</li>
+<li>For U.S. filing practice, provisional applications generally do not require claims, while nonprovisional applications do. See the USPTO guidance:</li>
+<li><a href="https://www.uspto.gov/patents/basics/apply/provisional-application">https://www.uspto.gov/patents/basics/apply/provisional-application</a></li>
+<li><a href="https://www.uspto.gov/patents/basics/types-patent-applications">https://www.uspto.gov/patents/basics/types-patent-applications</a></li>
+</ul>
+<h2>Drafting Assumptions</h2>
+<ul>
+<li>The invention centers on task-bound authorization for autonomous or semi-autonomous agents.</li>
+<li>The implementation context is Stratium&#39;s delegated authorization architecture, including agent registration, delegation tokens, compound policy evaluation, trust tiers, scope narrowing, and audit lineage.</li>
+<li>Novelty emphasis is placed on runtime enforcement, derivative delegated scope, cryptographic delegation artifacts, and provenance across agent chains.</li>
+</ul>
+<hr/>
+<h2>Source: <code>docs/patent/01-patent-specification-draft.md</code></h2>
+<h1>Patent Specification Draft: Agent Authorization Workflow</h1>
+<h2>Title</h2>
+<p>Systems and Methods for Task-Bound Authorization of Autonomous Software Agents</p>
+<h2>Cross-Reference to Related Applications</h2>
+<p>None.</p>
+<h2>Field</h2>
+<p>The present disclosure relates generally to computer security, identity and access management, distributed computing, and machine-executed workflow control, and more particularly to authorization workflows for autonomous or semi-autonomous software agents operating on behalf of one or more principals.</p>
+<h2>Background</h2>
+<p>Software agents are increasingly used to perform actions across enterprise systems, cloud services, application programming interfaces, content repositories, and transaction platforms. Representative examples include AI agents, robotic process automation agents, orchestration workers, and delegated software assistants. These systems frequently act on behalf of a human user, enterprise tenant, application, or another service principal.</p>
+<p>Conventional authorization mechanisms were designed primarily for human users or static service identities. As a result, existing approaches often grant permissions at an account, role, or service level without binding those permissions to a particular approved task, workflow phase, tool set, runtime constraint, or delegation chain. In agentic environments, this creates technical shortcomings. An agent may receive excessive authority relative to the user&#39;s intended task. A downstream agent may inherit broader permissions than required. Runtime behavior may drift away from the approved scope without an inline enforcement mechanism. Audit trails may record that an action occurred without preserving a verifiable relationship between principal approval, delegated scope, tool invocation, and resulting output.</p>
+<p>These limitations become more pronounced in multi-agent systems and tool-use environments where a first agent may plan, a second agent may retrieve data, and a third agent may execute a higher-impact action. Existing role-based, attribute-based, or token-based approaches do not reliably constrain such actions to a cryptographically verifiable intersection of principal authority, agent authority, delegated scope, and runtime policy context.</p>
+<p>Accordingly, a need exists for systems and methods that authorize autonomous or semi-autonomous agents through task-bound delegation, enforce authorization at runtime for each attempted action, support reduced-scope delegation to downstream agents, and maintain provenance across the authorization and execution lifecycle.</p>
+<h2>Summary</h2>
+<p>In one embodiment, a computer-implemented method receives a task request associated with a principal and identifies a software agent designated to execute at least a portion of the task request. A policy engine evaluates a combination of principal attributes, agent attributes, delegation attributes, requested actions, tool usage, target resources, and contextual constraints. Based on that evaluation, the system generates a scoped authorization artifact that defines a bounded permission envelope for the software agent.</p>
+<p>In some embodiments, the permission envelope is task-bound and includes one or more of: a task identifier, a delegation identifier, a root delegation identifier, a permitted tool set, a permitted action set, a maximum action sensitivity tier, per-resource constraints, classification caps, a time-to-live, a conversation or session identifier, a tenant scope, a maximum delegation depth, and a parent delegation reference.</p>
+<p>In some embodiments, runtime enforcement occurs through an agent gateway or similar mediation layer that intercepts each attempted agent action before execution. The attempted action is validated against the scoped authorization artifact and a compound decision is computed using at least principal authority, agent authority, and delegation authority. Execution is allowed only if the action falls within the approved intersection of those authorities.</p>
+<p>In some embodiments, the system supports downstream delegation by generating derivative authorization artifacts for child agents, wherein each child artifact is constrained to a subset of the parent artifact&#39;s scope. In some embodiments, authorization may be dynamically narrowed, suspended, or revoked in response to anomaly detection, policy changes, expiration, explicit revocation, or deviations from approved intent.</p>
+<p>In some embodiments, an audit subsystem records provenance that links approval, token issuance, policy evaluation, runtime actions, delegation events, and generated outputs, thereby enabling post-hoc verification that an agent acted within an authorized scope.</p>
+<p>The disclosed architecture improves least-privilege enforcement, runtime safety, delegation containment, and auditability for agent-driven workflows in distributed computing environments.</p>
+<h2>Brief Description of the Drawings</h2>
+<ul>
+<li><code>Fig. 1</code> illustrates an example system architecture for task-bound agent authorization.</li>
+<li><code>Fig. 2</code> illustrates an example authorization issuance workflow for a delegated agent session.</li>
+<li><code>Fig. 3</code> illustrates an example runtime enforcement workflow for an agent tool invocation.</li>
+<li><code>Fig. 4</code> illustrates an example delegated authorization workflow for child agents in a multi-agent chain.</li>
+<li><code>Fig. 5</code> illustrates an example revocation and adaptive scope-narrowing workflow.</li>
+<li><code>Fig. 6</code> illustrates an example provenance graph for authorization, execution, and delegation lineage.</li>
+</ul>
+<h2>Detailed Description</h2>
+<h3>1. System Architecture</h3>
+<p>A system 100 may include a principal interface 102, an identity service 104, an agent registry 106, a policy engine 108, an authorization issuer 110, an agent gateway 112, one or more target services 114, a delegation manager 116, a risk engine 118, and an audit subsystem 120.</p>
+<p>The principal interface 102 may receive a task request from a user, administrator, enterprise service, or another authorized principal. The task request may be expressed in structured form, natural language, or a hybrid representation, and may identify one or more requested outcomes, permitted tools, data classifications, resource boundaries, spending thresholds, or workflow constraints.</p>
+<p>The identity service 104 may authenticate the principal and the agent. The agent registry 106 may store metadata describing registered agents, including provider information, model identifier, trust tier, allowed tools, allowed actions, tenant binding, credential status, and enablement state. In some embodiments, agents participate in an open registration framework while still being governed by platform-issued policy constraints.</p>
+<p>The policy engine 108 evaluates whether a particular agent may act for a principal under a given delegated context. In some embodiments, the policy engine produces a compound decision in which effective permission is defined as an intersection of a principal decision, an agent decision, and a delegation decision.</p>
+<p>The authorization issuer 110 creates a machine-readable authorization artifact, such as a signed token or capability envelope, that encodes the bounded delegated scope. The agent gateway 112 mediates agent actions by intercepting tool or service invocations and validating them against the delegated scope before forwarding them to target services 114. The delegation manager 116 governs child delegations and lineage preservation. The risk engine 118 computes dynamic risk signals. The audit subsystem 120 records provenance for authorization and execution events.</p>
+<h3>2. Double-Hop Authorization Model</h3>
+<p>In one embodiment, the invention implements a double-hop authorization model. A first hop corresponds to authority possessed by the principal. A second hop corresponds to authority possessed by the acting agent. A third decision dimension corresponds to explicitly delegated scope. Rather than allowing either the principal or the agent identity alone to control authorization, the system computes an effective permission according to a compound evaluation, such as:</p>
+<p><code>effective_permission = principal_allowed AND agent_allowed AND delegation_allowed</code></p>
+<p>This model prevents privilege amplification by ensuring that an agent cannot exercise authority merely because the principal could do so, and likewise prevents the principal from inheriting standing authority of the agent beyond the approved delegated context.</p>
+<h3>3. Delegation Artifact</h3>
+<p>In one embodiment, the authorization issuer generates a delegation artifact that is short-lived, cryptographically verifiable, and bound to a user-agent-session relationship. The artifact may include one or more of the following fields:</p>
+<ul>
+<li>principal identifier</li>
+<li>agent identifier</li>
+<li>tenant identifier</li>
+<li>delegation identifier</li>
+<li>root delegation identifier</li>
+<li>parent delegation identifier</li>
+<li>approved tools</li>
+<li>approved action types</li>
+<li>maximum action tier</li>
+<li>classification caps by hierarchy</li>
+<li>resource constraints</li>
+<li>declared purpose</li>
+<li>conversation or session identifier</li>
+<li>chain depth</li>
+<li>chain agent identifiers</li>
+<li>issued-at timestamp</li>
+<li>expiration timestamp</li>
+</ul>
+<p>In some embodiments, the delegation artifact is signed by the platform so that downstream enforcement components can independently verify integrity and issuer authenticity. In some embodiments, the artifact is minted by a dedicated gateway service.</p>
+<h3>4. Authorization Issuance Workflow</h3>
+<p>An example workflow proceeds as follows:</p>
+<ol>
+<li>The principal authenticates to the system.</li>
+<li>The designated agent authenticates using agent credentials.</li>
+<li>The system receives a request to create a delegated authorization context.</li>
+<li>The policy engine evaluates principal attributes, agent attributes, tenant constraints, trust tier, requested tools, requested actions, and resource limitations.</li>
+<li>The system optionally validates that the requested delegated scope does not exceed the principal&#39;s classification, policy, or resource boundaries.</li>
+<li>The authorization issuer generates a scoped delegation artifact with a limited time-to-live.</li>
+<li>The system returns the artifact to the agent runtime for use during subsequent tool invocation.</li>
+</ol>
+<p>In some embodiments, the system stores the artifact or a corresponding server-side record in a delegation table for later validation, inspection, or revocation.</p>
+<h3>5. Runtime Enforcement Workflow</h3>
+<p>In one embodiment, the agent gateway intercepts each action request initiated by the agent. The action request may specify an operation type, target resource, target service, execution context, conversation identifier, or supporting metadata. The gateway validates the delegation artifact and obtains or computes a compound authorization decision.</p>
+<p>If the action falls within the approved delegation scope and the compound decision resolves to allow, the gateway forwards the request to the relevant target service. If any policy component denies the request, the gateway returns a deny response. In some embodiments, the response identifies which component of the compound decision caused the denial. In some embodiments, the gateway logs the request, decision, and resulting outcome to the audit subsystem.</p>
+<p>This approach differs from conventional bearer-token validation because authorization is not merely a static identity check. Instead, the runtime system evaluates action-specific and delegation-specific constraints before every execution.</p>
+<h3>6. Classification and Resource Boundaries</h3>
+<p>In some embodiments, the system encodes classification caps on a per-hierarchy basis. For example, a principal with authority to access a higher classification level may delegate a lower classification level to an agent. Different caps may be applied for different classification systems or domains. Similarly, resource constraints may be applied by resource type, tag, identifier, tenant binding, or query boundary.</p>
+<p>In some embodiments, child delegations are required to be a strict subset of parent delegations. Classification caps may only narrow. Allowed tool sets may only shrink. Allowed actions may only narrow. Maximum action tier may only decrease. Resource constraints may only become more restrictive.</p>
+<h3>7. Delegation Chains and Child Agents</h3>
+<p>In some embodiments, a first agent invokes a second agent to perform a subtask. The system may issue a child delegation artifact having a parent delegation identifier and a root delegation identifier. The child delegation may inherit only a narrowed subset of the parent scope. Chain depth may be bounded by a configurable maximum value. This provides controlled multi-agent delegation without copying broad standing credentials across agents.</p>
+<p>In one implementation, lineage metadata includes the ordered set of agent identifiers from the root agent to the current child. This enables the system to reconstruct how authority propagated across a multi-agent workflow.</p>
+<h3>8. Dynamic Narrowing and Revocation</h3>
+<p>In some embodiments, authorization is not static for the lifetime of the artifact. The system may continuously evaluate risk and context. Revocation or narrowing may occur in response to:</p>
+<ul>
+<li>anomaly detection</li>
+<li>trust-tier changes</li>
+<li>policy updates</li>
+<li>explicit principal withdrawal</li>
+<li>expiration</li>
+<li>attempted scope escalation</li>
+<li>target resource status changes</li>
+</ul>
+<p>Upon revocation, the system may prevent further use of the affected artifact and any derivative child artifacts. In some embodiments, active requests are blocked before execution if revocation status is detected.</p>
+<h3>9. Provenance and Audit</h3>
+<p>In one embodiment, the audit subsystem records events such as agent registration, delegation creation, policy evaluation, tool invocation, decision outcome, child delegation creation, revocation, and target-service response. These records may be stored in audit logs, append-only event stores, or tamper-evident ledgers.</p>
+<p>Because each delegation artifact carries identifiers for root delegation, parent delegation, and acting agent, the system can produce an auditable chain from the approving principal to the final executed action. This provides post-hoc verification that the action remained within the approved delegated scope at the time of execution.</p>
+<h3>10. Technical Advantages</h3>
+<p>The disclosed techniques provide several technical improvements over conventional authorization systems:</p>
+<ul>
+<li>task-bound delegated scope rather than broad standing permissions</li>
+<li>compound double-hop authorization combining principal, agent, and delegation decisions</li>
+<li>per-action runtime enforcement through a mediation layer</li>
+<li>narrowed child delegation for multi-agent systems</li>
+<li>classification-aware and resource-aware delegation boundaries</li>
+<li>revocation and adaptive narrowing for in-flight workflows</li>
+<li>provenance linking authorization, delegation, execution, and output generation</li>
+</ul>
+<h3>11. Example Embodiments</h3>
+<p>In one example, a research agent is allowed to search and summarize internal documents for a particular tenant but is prohibited from exporting underlying source documents to an external destination.</p>
+<p>In another example, a coding agent is allowed to read project files and propose code changes but is limited to a specified action tier and may not perform destructive operations without separate approval.</p>
+<p>In another example, a procurement workflow uses a planning agent and an execution agent. The planning agent may analyze purchase options, while the execution agent receives a narrowed child delegation artifact permitting creation of a purchase request below a monetary threshold.</p>
+<h3>12. Variations</h3>
+<p>Although certain embodiments describe a gateway-mediated architecture, enforcement may alternatively be performed by sidecars, service middleware, integrated policy hooks, or distributed adapters associated with specific tools. Likewise, the authorization artifact may be embodied as a signed token, server-side capability record, certificate-based delegation object, or hybrid representation.</p>
+<p>The foregoing description is illustrative and not limiting. Other embodiments consistent with the disclosed principles are within the scope of the invention.</p>
+<hr/>
+<h2>Source: <code>docs/patent/02-claim-set.md</code></h2>
+<h1>Claim Set: Agent Authorization Workflow</h1>
+<h2>Independent Claims</h2>
+<h3>Claim 1</h3>
+<p>A computer-implemented method for authorizing a software agent to act on behalf of a principal, the method comprising:</p>
+<p>receiving a task request associated with the principal;</p>
+<p>identifying the software agent designated to perform at least a portion of the task request;</p>
+<p>determining authorization constraints based on the task request, an identity of the principal, an identity of the software agent, and one or more policies;</p>
+<p>generating a scoped authorization artifact encoding a bounded permission set for the software agent;</p>
+<p>intercepting an action request generated by the software agent prior to execution of the action request;</p>
+<p>validating the action request against the scoped authorization artifact using a compound authorization decision that includes at least a principal decision, an agent decision, and a delegation decision; and</p>
+<p>selectively permitting, denying, modifying, or escalating execution of the action request based on the validating.</p>
+<h3>Claim 2</h3>
+<p>The method of claim 1, wherein the compound authorization decision permits execution only when the principal decision, the agent decision, and the delegation decision each resolve to allow.</p>
+<h3>Claim 3</h3>
+<p>The method of claim 1, wherein the scoped authorization artifact is bound to at least one of a task identifier, a tenant identifier, a permitted tool set, a permitted action set, a resource scope, a time window, an invocation limit, a spending threshold, a data sensitivity class, or a maximum delegation depth.</p>
+<h3>Claim 4</h3>
+<p>The method of claim 1, wherein generating the scoped authorization artifact comprises cryptographically signing the scoped authorization artifact.</p>
+<h3>Claim 5</h3>
+<p>The method of claim 1, wherein the scoped authorization artifact includes at least a delegation identifier and a root delegation identifier.</p>
+<h3>Claim 6</h3>
+<p>The method of claim 1, wherein the authorization constraints include one or more classification caps associated with one or more classification hierarchies.</p>
+<h3>Claim 7</h3>
+<p>The method of claim 1, wherein the authorization constraints include a maximum action sensitivity tier for the software agent.</p>
+<h3>Claim 8</h3>
+<p>The method of claim 1, wherein intercepting the action request comprises intercepting at least one of an API call, a database query, a document retrieval, a network request, a payment operation, a code execution request, or a downstream agent invocation.</p>
+<h3>Claim 9</h3>
+<p>The method of claim 1, further comprising computing a contextual risk value associated with the action request and dynamically narrowing the bounded permission set when the contextual risk value satisfies a threshold condition.</p>
+<h3>Claim 10</h3>
+<p>The method of claim 9, wherein dynamically narrowing the bounded permission set comprises reducing an allowed tool set, reducing a resource scope, lowering an action sensitivity tier, suspending execution, or requiring additional approval.</p>
+<h3>Claim 11</h3>
+<p>The method of claim 1, further comprising determining that the software agent requests delegation to a secondary software agent and, in response, generating a derivative authorization artifact for the secondary software agent, the derivative authorization artifact having a permission scope no broader than the scoped authorization artifact.</p>
+<h3>Claim 12</h3>
+<p>The method of claim 11, wherein the derivative authorization artifact includes a parent delegation identifier that references the scoped authorization artifact.</p>
+<h3>Claim 13</h3>
+<p>The method of claim 11, wherein generating the derivative authorization artifact comprises enforcing that at least one of classification caps, allowed actions, allowed tools, or resource constraints is narrowed relative to the scoped authorization artifact.</p>
+<h3>Claim 14</h3>
+<p>The method of claim 1, further comprising revoking the scoped authorization artifact before expiration in response to a policy change, anomaly detection event, principal withdrawal, trust-tier change, or attempted scope escalation.</p>
+<h3>Claim 15</h3>
+<p>The method of claim 14, further comprising revoking one or more derivative authorization artifacts associated with the scoped authorization artifact.</p>
+<h3>Claim 16</h3>
+<p>The method of claim 1, further comprising recording provenance data associating the principal, the software agent, the task request, the scoped authorization artifact, and one or more action requests.</p>
+<h3>Claim 17</h3>
+<p>The method of claim 16, wherein the provenance data further associates one or more delegation events and one or more generated outputs.</p>
+<h3>Claim 18</h3>
+<p>The method of claim 16, wherein the provenance data is stored in an append-only audit store or tamper-evident ledger.</p>
+<h3>Claim 19</h3>
+<p>A system comprising one or more processors and memory storing instructions that, when executed by the one or more processors, cause the system to:</p>
+<p>receive a task request for execution by a software agent on behalf of a principal;</p>
+<p>evaluate one or more policies and contextual factors associated with the principal, the software agent, and a delegated scope;</p>
+<p>issue a scoped authorization artifact bound to the task request;</p>
+<p>enforce the scoped authorization artifact during runtime across a plurality of tool or service invocations initiated by the software agent;</p>
+<p>dynamically update or revoke the scoped authorization artifact in response to changed execution conditions; and</p>
+<p>record provenance data associating the principal, the software agent, the scoped authorization artifact, and the plurality of tool or service invocations.</p>
+<h3>Claim 20</h3>
+<p>The system of claim 19, wherein the system comprises an identity service, an agent registry, a policy engine, an authorization issuer, an enforcement gateway, a delegation manager, a risk engine, and an audit subsystem.</p>
+<h3>Claim 21</h3>
+<p>The system of claim 19, wherein the enforcement gateway is configured to deny the plurality of tool or service invocations unless a principal decision, an agent decision, and a delegation decision each resolve to allow.</p>
+<h3>Claim 22</h3>
+<p>The system of claim 19, wherein the delegation manager is configured to issue derivative authorization artifacts for downstream agents and to enforce a maximum delegation depth.</p>
+<h3>Claim 23</h3>
+<p>A non-transitory computer-readable medium storing instructions that, when executed by one or more processors, cause the one or more processors to:</p>
+<p>receive a task request associated with a principal;</p>
+<p>generate a task-bound authorization artifact for a software agent;</p>
+<p>validate runtime actions of the software agent against the task-bound authorization artifact using a compound authorization decision;</p>
+<p>generate a derivative authorization artifact for a downstream software agent when delegation is permitted; and</p>
+<p>store provenance records linking principal approval, authorization issuance, runtime actions, delegation events, and generated outputs.</p>
+<h2>Optional Claim Themes for Later Expansion</h2>
+<ul>
+<li>claims focused on trust tiers and trust-tier-dependent scope</li>
+<li>claims focused on per-hierarchy classification caps</li>
+<li>claims focused on conversation-bound or session-bound delegation</li>
+<li>claims focused on action-tier gating for destructive operations</li>
+<li>claims focused on gateway-forwarded responses and denial attribution</li>
+<li>claims focused on delegation-chain visualization and audit reconstruction</li>
+</ul>
+<hr/>
+<h2>Source: <code>docs/patent/03-figure-descriptions.md</code></h2>
+<h1>Figure Descriptions: Agent Authorization Workflow</h1>
+<h2>Figure List</h2>
+<ul>
+<li><code>Fig. 1</code> — System architecture for task-bound agent authorization</li>
+<li><code>Fig. 2</code> — Delegation issuance workflow</li>
+<li><code>Fig. 3</code> — Runtime action enforcement workflow</li>
+<li><code>Fig. 4</code> — Multi-agent delegated authorization chain</li>
+<li><code>Fig. 5</code> — Dynamic narrowing and revocation workflow</li>
+<li><code>Fig. 6</code> — Provenance and audit lineage graph</li>
+</ul>
+<h2>Detailed Figure Descriptions</h2>
+<h3>Fig. 1 — System Architecture for Task-Bound Agent Authorization</h3>
+<p><code>Fig. 1</code> depicts an example system including a principal device or principal-facing interface, an identity service, an agent registry, a policy engine, an authorization issuer, an agent gateway, one or more protected platform services, a delegation manager, a risk engine, and an audit store.</p>
+<p>The figure should show that a principal submits or approves a task, an agent authenticates to the platform, and the platform issues a delegation artifact that is later enforced by the gateway before the gateway forwards permitted requests to protected services. The figure should also show that audit events and delegation lineage are preserved.</p>
+<p>Suggested drawing callouts:</p>
+<ul>
+<li><code>102</code> principal interface</li>
+<li><code>104</code> identity service</li>
+<li><code>106</code> agent registry</li>
+<li><code>108</code> policy engine</li>
+<li><code>110</code> authorization issuer</li>
+<li><code>112</code> agent gateway</li>
+<li><code>114</code> protected services</li>
+<li><code>116</code> delegation manager</li>
+<li><code>118</code> risk engine</li>
+<li><code>120</code> audit subsystem</li>
+</ul>
+<h3>Fig. 2 — Delegation Issuance Workflow</h3>
+<p><code>Fig. 2</code> depicts a flow in which a principal and an agent authenticate, a delegated authorization request is received, policy inputs are evaluated, requested scope is compared against permitted scope, and a short-lived delegation artifact is issued.</p>
+<p>Suggested sequence:</p>
+<ol>
+<li>Principal authenticates</li>
+<li>Agent authenticates</li>
+<li>Request for delegation is submitted</li>
+<li>Policy engine evaluates principal, agent, and requested scope</li>
+<li>Optional trust-tier and classification checks are applied</li>
+<li>Scoped delegation artifact is minted</li>
+<li>Delegation record is stored</li>
+<li>Artifact is returned to the agent runtime</li>
+</ol>
+<p>The figure should emphasize that the artifact is bound to a specific delegated context rather than broad standing permissions.</p>
+<h3>Fig. 3 — Runtime Action Enforcement Workflow</h3>
+<p><code>Fig. 3</code> depicts the runtime path for an agent-initiated action. The agent presents the delegation artifact with an action request. The gateway intercepts the request, validates token integrity and scope, computes a compound authorization decision, and either denies the action or forwards it to a protected service.</p>
+<p>Suggested decision branches:</p>
+<ul>
+<li>validate signature or integrity</li>
+<li>validate expiration and revocation status</li>
+<li>validate action against approved tools and actions</li>
+<li>validate resource and classification boundaries</li>
+<li>compute principal, agent, and delegation decisions</li>
+<li>allow, deny, modify, or escalate</li>
+<li>record audit event</li>
+</ul>
+<p>The figure should make clear that enforcement occurs before the target service executes the requested action.</p>
+<h3>Fig. 4 — Multi-Agent Delegated Authorization Chain</h3>
+<p><code>Fig. 4</code> depicts a parent agent delegating a subtask to a child agent through issuance of a derivative authorization artifact. The figure should show a root delegation identifier, parent delegation identifier, reduced child scope, and bounded delegation depth.</p>
+<p>Suggested elements:</p>
+<ul>
+<li>root principal approval</li>
+<li>parent delegation artifact</li>
+<li>child delegation request</li>
+<li>scope-subset validation</li>
+<li>child delegation artifact</li>
+<li>child agent execution</li>
+<li>lineage record written to audit store</li>
+</ul>
+<p>The figure should emphasize that child scope cannot exceed parent scope and that delegation chains remain traceable.</p>
+<h3>Fig. 5 — Dynamic Narrowing and Revocation Workflow</h3>
+<p><code>Fig. 5</code> depicts runtime risk monitoring and revocation. The figure should show an active delegation artifact being monitored by a risk engine or policy update path. Upon detection of an anomaly, policy change, trust-tier downgrade, or explicit revocation, the system marks the artifact as revoked or narrowed and distributes that state to enforcement points.</p>
+<p>Suggested flow:</p>
+<ol>
+<li>Active artifact is in use</li>
+<li>Risk or policy event is detected</li>
+<li>Revocation or narrowing decision is computed</li>
+<li>Artifact state is updated</li>
+<li>Child delegations are revoked or frozen</li>
+<li>Future actions are denied or constrained</li>
+<li>Revocation event is logged</li>
+</ol>
+<h3>Fig. 6 — Provenance and Audit Lineage Graph</h3>
+<p><code>Fig. 6</code> depicts a graph or linked-record structure connecting:</p>
+<ul>
+<li>principal approval</li>
+<li>agent registration</li>
+<li>delegation artifact issuance</li>
+<li>tool invocation events</li>
+<li>child delegation events</li>
+<li>target-service responses</li>
+<li>output generation</li>
+<li>revocation or expiration</li>
+</ul>
+<p>The figure should show that each node is linked by identifiers such as principal ID, agent ID, delegation ID, parent delegation ID, and root delegation ID, allowing reconstruction of the full authorization-to-execution chain.</p>
+<h2>Drafting Notes for Counsel or Illustrator</h2>
+<ul>
+<li>Prefer sequence diagrams for <code>Fig. 2</code> through <code>Fig. 5</code>.</li>
+<li>Prefer a component block diagram for <code>Fig. 1</code>.</li>
+<li>Prefer a graph or lineage diagram for <code>Fig. 6</code>.</li>
+<li>Keep labels technology-neutral enough for claim flexibility, but preserve the core concepts of task-bound scope, compound decisioning, derivative delegation, and audit lineage.</li>
+</ul>
+<hr/>
+<h2>Source: <code>docs/patent/04-invention-disclosure-form.md</code></h2>
+<h1>Invention Disclosure Form: Agent Authorization Workflow</h1>
+<h2>Invention Title</h2>
+<p>Task-Bound Runtime Authorization for Autonomous Software Agents</p>
+<h2>Inventor Information</h2>
+<ul>
+<li>Inventor name(s): <code>[insert legal names]</code></li>
+<li>Residence / citizenship: <code>[insert as needed by counsel]</code></li>
+<li>Primary contact: <code>[insert name, email, phone]</code></li>
+</ul>
+<h2>Business Context</h2>
+<ul>
+<li>Product / platform: <code>Stratium</code></li>
+<li>Functional area: agent authorization, delegated access control, platform security</li>
+<li>Related internal document: <code>docs/PRD_AGENT_AUTHORIZATION.md</code></li>
+</ul>
+<h2>Problem Statement</h2>
+<p>Autonomous and semi-autonomous agents need to act on behalf of users and other principals, but conventional authorization systems are user-centric or service-account-centric. Those systems do not reliably constrain an agent to a specific approved task, delegated scope, runtime context, or downstream delegation boundary.</p>
+<p>This causes several technical problems:</p>
+<ul>
+<li>privilege amplification when an agent&#39;s standing privileges exceed the user&#39;s intended authority</li>
+<li>inability to distinguish user authority from agent authority in a single runtime decision</li>
+<li>uncontrolled propagation of permissions across sub-agents</li>
+<li>weak linkage between approval, delegated token issuance, executed actions, and resulting outputs</li>
+<li>limited ability to revoke or narrow authorization during live agent execution</li>
+</ul>
+<h2>Core Invention</h2>
+<p>The invention issues a task-bound, machine-readable authorization artifact for an agent acting on behalf of a principal and enforces that artifact at runtime for each attempted action. Authorization is evaluated using a compound decision that includes at least principal authority, agent authority, and delegation authority. Child delegation is supported through derivative artifacts that cannot exceed parent scope. Audit and provenance records link approval, issuance, execution, delegation, and revocation.</p>
+<h2>Key Novel Features</h2>
+<ul>
+<li>double-hop or compound authorization combining principal, agent, and delegated scope</li>
+<li>short-lived delegation artifacts bound to a user-agent-session or task context</li>
+<li>runtime gateway enforcement for each tool or service invocation</li>
+<li>reduced-scope child delegation for multi-agent workflows</li>
+<li>per-hierarchy classification caps and resource constraints</li>
+<li>configurable maximum delegation depth</li>
+<li>dynamic narrowing or revocation during execution</li>
+<li>provenance linking approval, delegation chain, actions, and outputs</li>
+</ul>
+<h2>High-Level Workflow</h2>
+<ol>
+<li>A principal authenticates or otherwise approves a task.</li>
+<li>An agent authenticates using platform-recognized credentials.</li>
+<li>The platform evaluates policies using principal attributes, agent attributes, and requested delegated scope.</li>
+<li>The platform issues a bounded delegation artifact.</li>
+<li>The agent presents the artifact when invoking tools or protected services.</li>
+<li>A gateway or enforcement layer validates each request against the delegated scope and computes a compound authorization decision.</li>
+<li>The platform optionally issues narrowed child artifacts for downstream agents.</li>
+<li>The platform records provenance and supports revocation, expiration, or narrowing.</li>
+</ol>
+<h2>Technical Components</h2>
+<ul>
+<li>principal interface</li>
+<li>identity service</li>
+<li>agent registry</li>
+<li>policy engine</li>
+<li>authorization issuer</li>
+<li>gateway or enforcement layer</li>
+<li>delegation manager</li>
+<li>risk engine</li>
+<li>audit subsystem</li>
+</ul>
+<h2>Example Scope Fields in the Delegation Artifact</h2>
+<ul>
+<li>principal identifier</li>
+<li>agent identifier</li>
+<li>tenant identifier</li>
+<li>delegation identifier</li>
+<li>parent delegation identifier</li>
+<li>root delegation identifier</li>
+<li>approved tools</li>
+<li>approved actions</li>
+<li>maximum action tier</li>
+<li>classification caps</li>
+<li>resource constraints</li>
+<li>declared purpose</li>
+<li>conversation or session identifier</li>
+<li>issued-at and expiration timestamps</li>
+</ul>
+<h2>Example Use Cases</h2>
+<ul>
+<li>A research agent may search and summarize approved tenant documents but may not export original source content.</li>
+<li>A coding agent may inspect source files and generate proposed code changes while remaining prohibited from destructive operations.</li>
+<li>A support agent may access only records associated with a single tenant, case, or account.</li>
+<li>A planning agent may delegate a subtask to an execution agent using a narrower child delegation artifact.</li>
+</ul>
+<h2>Technical Advantages</h2>
+<ul>
+<li>enforces least privilege for autonomous agents</li>
+<li>prevents privilege amplification across user and agent identities</li>
+<li>enables safe multi-agent coordination</li>
+<li>supports real-time containment when behavior changes</li>
+<li>improves compliance, forensics, and explainability through lineage records</li>
+</ul>
+<h2>Alternative Embodiments</h2>
+<ul>
+<li>signed JWT-like artifact</li>
+<li>server-side capability record with opaque reference token</li>
+<li>gateway-based enforcement</li>
+<li>sidecar or middleware-based enforcement</li>
+<li>centralized revocation service</li>
+<li>distributed enforcement adapters for individual tools</li>
+</ul>
+<h2>Potential Claim Focus Areas</h2>
+<ul>
+<li>task-bound delegated authorization</li>
+<li>compound principal-agent-delegation decisioning</li>
+<li>derivative child authorization artifacts</li>
+<li>classification-aware delegated scope</li>
+<li>revocation propagation through delegation chains</li>
+<li>provenance graphs linking approval to action execution</li>
+</ul>
+<h2>Closest Known Approaches to Distinguish</h2>
+<ul>
+<li>role-based access control systems</li>
+<li>attribute-based access control systems</li>
+<li>OAuth and bearer-token delegation</li>
+<li>service-account authorization</li>
+<li>generic API gateway policy enforcement</li>
+<li>workflow approval systems without per-action delegated runtime checks</li>
+<li>agent frameworks without platform-enforced delegated scope lineage</li>
+</ul>
+<h2>Distinguishing Characteristics</h2>
+<ul>
+<li>authorization is bound to a specific task or delegated context rather than only identity or role</li>
+<li>every agent action is revalidated at runtime before execution</li>
+<li>child delegation is generated as a scope-reduced derivative, not a copy of broad credentials</li>
+<li>authorization decisions preserve lineage across multi-agent chains</li>
+<li>audit records connect policy issuance to resulting actions and outputs</li>
+</ul>
+<h2>Development and Reduction to Practice</h2>
+<ul>
+<li>Earliest concept date: <code>[insert date]</code></li>
+<li>Prototype date: <code>[insert date]</code></li>
+<li>First internal demo: <code>[insert date]</code></li>
+<li>Production readiness: <code>[insert status]</code></li>
+<li>Relevant repos / prototypes / demos: <code>[insert references]</code></li>
+</ul>
+<h2>Public Disclosure and Bar-Date Review</h2>
+<ul>
+<li>Any public disclosure? <code>[yes/no]</code></li>
+<li>If yes, date and venue: <code>[insert details]</code></li>
+<li>Any public code repository exposure? <code>[yes/no]</code></li>
+<li>Any customer demo, beta, or offer for sale? <code>[yes/no]</code></li>
+<li>Need immediate filing before additional disclosure? <code>[yes/no]</code></li>
+</ul>
+<h2>Commercial Relevance</h2>
+<ul>
+<li>enterprise AI governance</li>
+<li>agentic workflow orchestration</li>
+<li>regulated-industry automation</li>
+<li>zero-trust delegated execution</li>
+<li>secure tool-use platforms for LLM agents</li>
+</ul>
+<h2>Supporting Materials to Gather</h2>
+<ul>
+<li>architecture diagrams</li>
+<li>delegation token examples</li>
+<li>policy examples</li>
+<li>audit log samples</li>
+<li>screenshots or demos</li>
+<li>sequence diagrams for issuance and execution</li>
+<li>trust-tier documentation</li>
+</ul>
+<h2>Filing Notes</h2>
+<ul>
+<li>A provisional filing can usually be prepared quickly from the specification and figures if an early priority date is the immediate goal.</li>
+<li>A later nonprovisional can expand claim coverage after prior-art review and attorney refinement.</li>
+<li>Recommended USPTO references:</li>
+<li><a href="https://www.uspto.gov/patents/basics/apply/provisional-application">https://www.uspto.gov/patents/basics/apply/provisional-application</a></li>
+<li><a href="https://www.uspto.gov/patents/basics/types-patent-applications">https://www.uspto.gov/patents/basics/types-patent-applications</a></li>
+</ul>
+<hr/>
+<h2>Source: <code>docs/patent/05-provisional-ready-package.md</code></h2>
+<h1>Provisional-Ready Package: Agent Authorization Workflow</h1>
+<h2>Purpose</h2>
+<p>This document repackages the current invention materials into a provisional-oriented format for rapid attorney review and filing preparation. It is designed to support an early priority filing around Stratium&#39;s task-bound and delegated agent authorization architecture.</p>
+<h2>USPTO-Oriented Framing</h2>
+<p>For a U.S. provisional application, the USPTO states that a provisional application is not required to include formal claims or an oath or declaration, but it must include a written description that satisfies the disclosure requirement and should include any drawings necessary to understand the invention. The USPTO also states that the provisional must name all inventors and include a cover sheet and filing fee. This package is drafted to maximize disclosure support while keeping the package fast to finalize for filing.</p>
+<p>Official references:</p>
+<ul>
+<li><a href="https://www.uspto.gov/patents/basics/apply/provisional-application">https://www.uspto.gov/patents/basics/apply/provisional-application</a></li>
+<li><a href="https://www.uspto.gov/patents/basics/types-patent-applications">https://www.uspto.gov/patents/basics/types-patent-applications</a></li>
+</ul>
+<h2>Recommended Provisional Filing Set</h2>
+<p>Use the following as the filing-oriented package:</p>
+<ol>
+<li><code>docs/patent/01-patent-specification-draft.md</code></li>
+<li><code>docs/patent/03-figure-descriptions.md</code></li>
+<li>Drawings based on the figures described in <code>docs/patent/03-figure-descriptions.md</code></li>
+<li>Inventor and administrative details from <code>docs/patent/04-invention-disclosure-form.md</code></li>
+<li>This checklist document</li>
+</ol>
+<p>Optional but recommended for internal preservation of claim concepts:</p>
+<ol>
+<li><code>docs/patent/02-claim-set.md</code></li>
+</ol>
+<h2>Provisional Filing Checklist</h2>
+<h3>Administrative Items</h3>
+<ul>
+<li>confirm all inventors are identified</li>
+<li>confirm title of invention</li>
+<li>confirm correspondence address</li>
+<li>confirm inventor residence information</li>
+<li>confirm whether any U.S. government funding statement is required</li>
+<li>confirm whether any public disclosure has already occurred</li>
+<li>confirm target filing date</li>
+</ul>
+<h3>Disclosure Sufficiency Items</h3>
+<ul>
+<li>include full written description of the delegated authorization workflow</li>
+<li>include the double-hop or compound decision model</li>
+<li>include delegation artifact fields and scope boundaries</li>
+<li>include child delegation and scope narrowing behavior</li>
+<li>include runtime enforcement flow</li>
+<li>include revocation and dynamic narrowing behavior</li>
+<li>include provenance and audit lineage</li>
+<li>include alternative embodiments and implementation variations</li>
+</ul>
+<h3>Drawings Items</h3>
+<ul>
+<li>prepare at least one architecture diagram</li>
+<li>prepare at least one sequence diagram for delegation issuance</li>
+<li>prepare at least one sequence diagram for runtime enforcement</li>
+<li>prepare at least one sequence diagram for child delegation</li>
+<li>prepare at least one diagram for revocation or lineage</li>
+</ul>
+<h3>Bar-Date and Priority Items</h3>
+<ul>
+<li>confirm no public disclosure older than one year in the United States</li>
+<li>confirm whether any foreign filing strategy is contemplated</li>
+<li>confirm whether immediate filing is needed before demos, customer distribution, or repository publication</li>
+<li>confirm date by which nonprovisional follow-on must be filed to claim benefit</li>
+</ul>
+<h2>Provisional-Style Draft Text</h2>
+<h3>Title</h3>
+<p>Systems and Methods for Task-Bound Authorization of Autonomous Software Agents</p>
+<h3>Technical Field</h3>
+<p>The disclosure relates to computer security, identity and access management, distributed systems, and runtime control of autonomous or semi-autonomous software agents.</p>
+<h3>Problem Addressed</h3>
+<p>Autonomous agents increasingly perform actions on behalf of users, tenants, services, and other principals. Existing user-centric and service-account-centric authorization models do not adequately constrain agents to a particular approved task, execution scope, or delegation boundary. This can result in privilege amplification, overbroad tool access, poor containment of downstream delegation, and limited forensic traceability.</p>
+<h3>Summary of the Invention</h3>
+<p>In one embodiment, a platform receives a task request associated with a principal and identifies an agent authorized to act on the principal&#39;s behalf. The platform evaluates principal permissions, agent permissions, and explicitly delegated scope using a compound policy decision. The platform issues a short-lived authorization artifact that is bound to the delegated context and defines a bounded permission envelope for the agent.</p>
+<p>At runtime, a gateway or similar mediation layer intercepts each attempted tool or service invocation by the agent and validates the invocation against the authorization artifact. If the action is within scope and the compound decision resolves to allow, the request is forwarded to a protected service. If not, the request is denied, modified, or escalated.</p>
+<p>In some embodiments, a first agent delegates a subtask to a second agent only through issuance of a derivative authorization artifact that is equal to or narrower than the parent artifact. In some embodiments, the platform dynamically narrows or revokes authorization in response to anomaly detection, policy changes, trust-tier changes, or other execution conditions. The platform also records provenance linking approval, authorization issuance, delegation events, executed actions, and resulting outputs.</p>
+<h3>Representative Embodiments</h3>
+<h4>Embodiment 1: Compound Authorization</h4>
+<p>Authorization is computed from the intersection of:</p>
+<ul>
+<li>authority of the principal</li>
+<li>authority of the acting agent</li>
+<li>explicitly delegated scope</li>
+</ul>
+<p>This model prevents either the principal or the agent from unilaterally expanding effective permission.</p>
+<h4>Embodiment 2: Delegation Artifact</h4>
+<p>The system issues a machine-readable artifact containing one or more of:</p>
+<ul>
+<li>principal identifier</li>
+<li>agent identifier</li>
+<li>tenant identifier</li>
+<li>delegation identifier</li>
+<li>root delegation identifier</li>
+<li>parent delegation identifier</li>
+<li>approved tools</li>
+<li>approved actions</li>
+<li>maximum action tier</li>
+<li>classification caps</li>
+<li>resource constraints</li>
+<li>declared purpose</li>
+<li>session or conversation identifier</li>
+<li>issued-at and expiration timestamps</li>
+<li>chain depth and chain lineage fields</li>
+</ul>
+<h4>Embodiment 3: Runtime Enforcement</h4>
+<p>Each agent action is intercepted before execution. The system validates:</p>
+<ul>
+<li>integrity and authenticity of the delegation artifact</li>
+<li>expiration and revocation status</li>
+<li>allowed tool and action scope</li>
+<li>resource and classification boundaries</li>
+<li>compound authorization outcome</li>
+</ul>
+<h4>Embodiment 4: Child Delegation</h4>
+<p>The system allows multi-agent workflows by issuing child artifacts that remain within a subset of the parent scope. In some embodiments:</p>
+<ul>
+<li>tools can only be removed, not added</li>
+<li>action sensitivity can only narrow</li>
+<li>resource access can only narrow</li>
+<li>classification caps can only narrow</li>
+<li>delegation depth is bounded</li>
+</ul>
+<h4>Embodiment 5: Revocation and Provenance</h4>
+<p>The system supports revocation, narrowing, and post-hoc verification. Audit records may connect:</p>
+<ul>
+<li>principal approval</li>
+<li>agent registration</li>
+<li>policy evaluation</li>
+<li>artifact issuance</li>
+<li>runtime invocation</li>
+<li>child delegation</li>
+<li>revocation</li>
+<li>generated outputs</li>
+</ul>
+<h3>Example Use Cases</h3>
+<ul>
+<li>A research agent can search internal documents and produce summaries but cannot export source material.</li>
+<li>A coding agent can inspect and modify specified repositories but cannot perform destructive actions above its delegated action tier.</li>
+<li>A support agent can query records for a particular tenant and case but cannot access unrelated customer data.</li>
+<li>A planning agent can create a narrowed child delegation for an execution agent.</li>
+</ul>
+<h2>Information to Fill Before Filing</h2>
+<ul>
+<li>inventor legal names</li>
+<li>inventor residences</li>
+<li>filing entity status</li>
+<li>exact title to be used</li>
+<li>any government-interest statement</li>
+<li>public disclosure history</li>
+<li>target filing date</li>
+<li>whether draft figures will be line drawings or converted attorney figures</li>
+</ul>
+<h2>Internal Recommendation</h2>
+<p>For speed, file the provisional with the broad technical narrative, detailed architecture, and figures first. Preserve the richer claim ideas and prosecution variants from <code>docs/patent/02-claim-set.md</code> for follow-on nonprovisional work.</p>
+<hr/>
+<h2>Source: <code>docs/patent/06-nonprovisional-attorney-package.md</code></h2>
+<h1>Attorney-Style Nonprovisional Package: Agent Authorization Workflow</h1>
+<h2>Purpose</h2>
+<p>This document organizes the existing patent materials into a nonprovisional-oriented handoff package for patent counsel. It is intended to streamline preparation of a U.S. utility application based on Stratium&#39;s agent authorization workflow.</p>
+<h2>USPTO-Oriented Framing</h2>
+<p>The USPTO states that the elements of a nonprovisional utility application generally include an application transmittal form, fee transmittal form, application data sheet, specification, drawings, and executed oath or declaration. The USPTO also states that the specification should include, in order, the title, any cross-reference to related applications, any government-support statement, background, summary, brief description of drawings, detailed description, at least one claim, and an abstract.</p>
+<p>Official references:</p>
+<ul>
+<li><a href="https://www.uspto.gov/patents/basics/types-patent-applications">https://www.uspto.gov/patents/basics/types-patent-applications</a></li>
+<li><a href="https://www.uspto.gov/patents/basics/apply/provisional-application">https://www.uspto.gov/patents/basics/apply/provisional-application</a></li>
+</ul>
+<h2>Proposed Assembly Order</h2>
+<h3>Administrative Filing Materials</h3>
+<ul>
+<li>application transmittal form</li>
+<li>fee transmittal form</li>
+<li>application data sheet</li>
+<li>executed inventor oath or declaration</li>
+</ul>
+<h3>Technical Filing Materials</h3>
+<ul>
+<li>specification based on <code>docs/patent/01-patent-specification-draft.md</code></li>
+<li>claims based on <code>docs/patent/02-claim-set.md</code></li>
+<li>drawings based on <code>docs/patent/03-figure-descriptions.md</code></li>
+<li>abstract drawn from the specification summary</li>
+</ul>
+<h3>Counsel Support Materials</h3>
+<ul>
+<li>invention disclosure in <code>docs/patent/04-invention-disclosure-form.md</code></li>
+<li>provisional-oriented summary in <code>docs/patent/05-provisional-ready-package.md</code></li>
+<li>product and architecture context in <code>docs/PRD_AGENT_AUTHORIZATION.md</code></li>
+</ul>
+<h2>Suggested Nonprovisional Specification Structure</h2>
+<p>Patent counsel can assemble the nonprovisional specification in this order:</p>
+<ol>
+<li>Title</li>
+<li>Cross-reference to related applications</li>
+<li>Statement regarding federally sponsored research or development, if applicable</li>
+<li>Names of parties to any joint research agreement, if applicable</li>
+<li>Background</li>
+<li>Brief summary</li>
+<li>Brief description of drawings</li>
+<li>Detailed description</li>
+<li>Claims</li>
+<li>Abstract</li>
+</ol>
+<h2>Attorney Handoff Summary</h2>
+<h3>Invention Theme</h3>
+<p>The invention concerns task-bound authorization of autonomous or semi-autonomous agents, with runtime enforcement and delegation containment. The core novelty emphasis is not merely authorizing an AI agent, but enforcing a bounded, machine-readable delegation scope during actual execution and across downstream agent chains.</p>
+<h3>Likely Novelty Anchors</h3>
+<ul>
+<li>compound authorization requiring principal authority, agent authority, and delegated authority</li>
+<li>short-lived delegation artifacts tied to a task, session, or conversation context</li>
+<li>gateway-mediated runtime enforcement for each agent action</li>
+<li>derivative child delegation with strict subset enforcement</li>
+<li>per-hierarchy classification caps and resource constraints</li>
+<li>delegation lineage through root and parent delegation identifiers</li>
+<li>dynamic narrowing and revocation during execution</li>
+<li>provenance linking approval, action, delegation, and output</li>
+</ul>
+<h3>Implementation Context</h3>
+<p>The current Stratium model includes:</p>
+<ul>
+<li>registered agents with trust tiers</li>
+<li>short-lived, platform-minted delegation tokens</li>
+<li>compound policy evaluation</li>
+<li>bounded action sensitivity tiers</li>
+<li>classification caps by hierarchy</li>
+<li>delegation chain depth limits</li>
+<li>gateway-mediated forwarding to protected services</li>
+<li>audit logging and chain lineage</li>
+</ul>
+<h2>Draft Claim Strategy</h2>
+<h3>Primary Independent Method Claim</h3>
+<p>Focus on receiving a task request, identifying principal and agent, generating a bounded authorization artifact, intercepting agent actions, computing a compound decision, and selectively permitting or denying runtime execution.</p>
+<h3>Primary System Claim</h3>
+<p>Focus on a system including policy engine, issuer, gateway, delegation manager, risk engine, and audit subsystem that collectively enforce the delegated scope.</p>
+<h3>Primary Medium Claim</h3>
+<p>Focus on instructions causing a processor to generate task-bound authorization, validate runtime action requests, issue derivative child scope, and record provenance.</p>
+<h3>Dependent Claim Clusters</h3>
+<ul>
+<li>cryptographic signing and artifact integrity</li>
+<li>classification caps and resource constraints</li>
+<li>trust-tier-based action limits</li>
+<li>derivative child authorization</li>
+<li>maximum delegation depth</li>
+<li>dynamic revocation and narrowing</li>
+<li>audit lineage and tamper-evident records</li>
+<li>denial attribution identifying which policy component denied</li>
+</ul>
+<h2>Counsel Questions to Resolve</h2>
+<h3>Priority and Disclosure</h3>
+<ul>
+<li>Has any public disclosure already occurred?</li>
+<li>Is there a need to claim priority to an earlier provisional?</li>
+<li>Are there foreign filing considerations that affect timing?</li>
+</ul>
+<h3>Inventorship</h3>
+<ul>
+<li>Which contributors conceived of the compound authorization model?</li>
+<li>Which contributors conceived of child delegation narrowing and lineage?</li>
+<li>Which contributors conceived of classification-cap delegation and chain-depth controls?</li>
+</ul>
+<h3>Claim Breadth</h3>
+<ul>
+<li>Should claims emphasize AI agents specifically or remain software-agent neutral?</li>
+<li>Should the gateway be claimed as a required component or as one optional enforcement embodiment?</li>
+<li>Should classification caps be core claim language or a dependent fallback position?</li>
+</ul>
+<h3>Prior-Art Positioning</h3>
+<ul>
+<li>What prior internal or external systems used delegated tokens before this concept?</li>
+<li>How should OAuth, ABAC, and API-gateway prior art be distinguished most aggressively?</li>
+<li>Are there known agent frameworks with tool gating but without compound delegated runtime authorization?</li>
+</ul>
+<h2>Open Fact Fields for Counsel to Populate</h2>
+<ul>
+<li>inventor legal names</li>
+<li>residence information</li>
+<li>entity status</li>
+<li>assignee information</li>
+<li>government rights statement, if any</li>
+<li>related applications, if any</li>
+<li>earliest conception date</li>
+<li>earliest reduction-to-practice date</li>
+<li>disclosure history</li>
+</ul>
+<h2>Recommended Drawing Set</h2>
+<ul>
+<li>system architecture block diagram</li>
+<li>delegation issuance sequence diagram</li>
+<li>runtime enforcement sequence diagram</li>
+<li>multi-agent derivative delegation sequence diagram</li>
+<li>revocation or narrowing sequence diagram</li>
+<li>provenance lineage graph</li>
+</ul>
+<h2>Recommended Next Drafting Moves</h2>
+<ol>
+<li>Convert <code>docs/patent/01-patent-specification-draft.md</code> into full nonprovisional section ordering.</li>
+<li>Expand <code>docs/patent/02-claim-set.md</code> into a broader prosecution set with multiple fallback trees.</li>
+<li>Generate formal line-drawing figures from <code>docs/patent/03-figure-descriptions.md</code>.</li>
+<li>Complete inventor and disclosure facts in <code>docs/patent/04-invention-disclosure-form.md</code>.</li>
+<li>Run counsel-led prior-art review and revise claims before filing.</li>
+</ol>
+<h2>Internal Packaging Recommendation</h2>
+<p>For internal use, treat the following as the current attorney packet:</p>
+<ul>
+<li><code>docs/patent/01-patent-specification-draft.md</code></li>
+<li><code>docs/patent/02-claim-set.md</code></li>
+<li><code>docs/patent/03-figure-descriptions.md</code></li>
+<li><code>docs/patent/04-invention-disclosure-form.md</code></li>
+<li><code>docs/patent/05-provisional-ready-package.md</code></li>
+<li><code>docs/patent/06-nonprovisional-attorney-package.md</code></li>
+<li><code>docs/PRD_AGENT_AUTHORIZATION.md</code></li>
+</ul>
+<h2>Drafting Notes</h2>
+<ul>
+<li>Keep the specification broad enough to cover non-LLM agents, enterprise workflow agents, and service-side orchestration agents.</li>
+<li>Preserve alternative embodiments so counsel can support broader claims and fallback positions.</li>
+<li>Tie every claimed feature back to adequate written-description support in the specification and drawings.</li>
+</ul>
+<hr/>
+<h2>Source: <code>docs/patent/figures/README.md</code></h2>
+<h1>Draft Patent Figures: Agent Authorization Workflow</h1>
+<p>This directory contains draft figure diagrams for the patent package. The figures are provided as Markdown files with Mermaid diagrams so they can be reviewed, edited, and later converted into formal patent drawings.</p>
+<h2>Figures</h2>
+<ul>
+<li><code>docs/patent/figures/FIG-1-system-architecture.md</code></li>
+<li><code>docs/patent/figures/FIG-2-delegation-issuance-workflow.md</code></li>
+<li><code>docs/patent/figures/FIG-3-runtime-action-enforcement.md</code></li>
+<li><code>docs/patent/figures/FIG-4-multi-agent-delegation-chain.md</code></li>
+<li><code>docs/patent/figures/FIG-5-dynamic-narrowing-and-revocation.md</code></li>
+<li><code>docs/patent/figures/FIG-6-provenance-lineage-graph.md</code></li>
+<li><code>docs/patent/figures/FIG-1-system-architecture.svg</code></li>
+<li><code>docs/patent/figures/FIG-2-delegation-issuance-workflow.svg</code></li>
+<li><code>docs/patent/figures/FIG-3-runtime-action-enforcement.svg</code></li>
+<li><code>docs/patent/figures/FIG-4-multi-agent-delegation-chain.svg</code></li>
+<li><code>docs/patent/figures/FIG-5-dynamic-narrowing-and-revocation.svg</code></li>
+<li><code>docs/patent/figures/FIG-6-provenance-lineage-graph.svg</code></li>
+</ul>
+<h2>Notes</h2>
+<ul>
+<li>These are draft engineering diagrams, not formal patent drawings.</li>
+<li>Each figure is aligned to <code>docs/patent/03-figure-descriptions.md</code>.</li>
+<li>The <code>.svg</code> files are black-and-white drafts intended to be easier for counsel or a patent illustrator to refine for filing.</li>
+<li>A patent illustrator or counsel can later simplify line weights, labels, and callouts for final submission.</li>
+</ul>
+</body>
+</html>

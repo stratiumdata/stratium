@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="980" viewBox="0 0 1500 980">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#000"/>
+    </marker>
+    <style>
+      .box { fill:#fff; stroke:#000; stroke-width:2; }
+      .life { stroke:#000; stroke-width:1.5; stroke-dasharray:8 6; }
+      .arrow { stroke:#000; stroke-width:2; fill:none; marker-end:url(#arrow); }
+      .return { stroke:#000; stroke-width:2; fill:none; stroke-dasharray:8 6; marker-end:url(#arrow); }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:28px; font-weight:bold; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:18px; }
+      .small { font-family:Arial, Helvetica, sans-serif; font-size:15px; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1500" height="980" fill="#fff"/>
+  <text x="750" y="48" text-anchor="middle" class="title">FIG. 2 — Delegation Issuance Workflow</text>
+
+  <rect class="box" x="40" y="90" width="130" height="60"/>
+  <rect class="box" x="220" y="90" width="130" height="60"/>
+  <rect class="box" x="400" y="90" width="150" height="60"/>
+  <rect class="box" x="600" y="90" width="140" height="60"/>
+  <rect class="box" x="790" y="90" width="140" height="60"/>
+  <rect class="box" x="980" y="90" width="130" height="60"/>
+  <rect class="box" x="1160" y="90" width="160" height="60"/>
+  <rect class="box" x="1360" y="90" width="100" height="60"/>
+
+  <text x="105" y="127" text-anchor="middle" class="label">Principal</text>
+  <text x="285" y="127" text-anchor="middle" class="label">Agent</text>
+  <text x="475" y="127" text-anchor="middle" class="label">Agent Gateway</text>
+  <text x="670" y="127" text-anchor="middle" class="label">Identity</text>
+  <text x="860" y="127" text-anchor="middle" class="label">Registry</text>
+  <text x="1045" y="127" text-anchor="middle" class="label">Policy</text>
+  <text x="1240" y="127" text-anchor="middle" class="label">Issuer</text>
+  <text x="1410" y="127" text-anchor="middle" class="label">Audit</text>
+
+  <line class="life" x1="105" y1="150" x2="105" y2="900"/>
+  <line class="life" x1="285" y1="150" x2="285" y2="900"/>
+  <line class="life" x1="475" y1="150" x2="475" y2="900"/>
+  <line class="life" x1="670" y1="150" x2="670" y2="900"/>
+  <line class="life" x1="860" y1="150" x2="860" y2="900"/>
+  <line class="life" x1="1045" y1="150" x2="1045" y2="900"/>
+  <line class="life" x1="1240" y1="150" x2="1240" y2="900"/>
+  <line class="life" x1="1410" y1="150" x2="1410" y2="900"/>
+
+  <line class="arrow" x1="105" y1="220" x2="670" y2="220"/>
+  <text x="388" y="208" text-anchor="middle" class="small">1. Authenticate principal</text>
+
+  <line class="arrow" x1="285" y1="290" x2="670" y2="290"/>
+  <text x="478" y="278" text-anchor="middle" class="small">2. Authenticate agent credentials</text>
+
+  <line class="arrow" x1="105" y1="360" x2="475" y2="360"/>
+  <text x="290" y="348" text-anchor="middle" class="small">3. Approve task / request delegation</text>
+
+  <line class="arrow" x1="285" y1="430" x2="475" y2="430"/>
+  <text x="380" y="418" text-anchor="middle" class="small">4. CreateDelegation(requested scope)</text>
+
+  <line class="arrow" x1="475" y1="500" x2="860" y2="500"/>
+  <text x="668" y="488" text-anchor="middle" class="small">5. Load agent metadata and trust tier</text>
+
+  <line class="arrow" x1="475" y1="570" x2="1045" y2="570"/>
+  <text x="760" y="558" text-anchor="middle" class="small">6. Evaluate principal + agent + delegated scope</text>
+
+  <line class="return" x1="1045" y1="640" x2="475" y2="640"/>
+  <text x="760" y="628" text-anchor="middle" class="small">7. Compound decision and allowed bounds</text>
+
+  <line class="arrow" x1="475" y1="710" x2="1240" y2="710"/>
+  <text x="858" y="698" text-anchor="middle" class="small">8. Mint short-lived delegation artifact</text>
+
+  <line class="return" x1="1240" y1="780" x2="475" y2="780"/>
+  <text x="858" y="768" text-anchor="middle" class="small">9. Signed delegation artifact</text>
+
+  <line class="arrow" x1="475" y1="850" x2="1410" y2="850"/>
+  <text x="942" y="838" text-anchor="middle" class="small">10. Record delegation creation</text>
+
+  <line class="return" x1="475" y1="900" x2="285" y2="900"/>
+  <text x="380" y="888" text-anchor="middle" class="small">11. Return scoped artifact</text>
+</svg>

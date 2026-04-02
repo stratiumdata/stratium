@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1100" viewBox="0 0 1200 1100">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#000"/>
+    </marker>
+    <style>
+      .box { fill:#fff; stroke:#000; stroke-width:2; }
+      .line { fill:none; stroke:#000; stroke-width:2; marker-end:url(#arrow); }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:28px; font-weight:bold; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:18px; }
+      .small { font-family:Arial, Helvetica, sans-serif; font-size:16px; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="1100" fill="#fff"/>
+  <text x="600" y="48" text-anchor="middle" class="title">FIG. 3 — Runtime Action Enforcement Workflow</text>
+
+  <rect class="box" x="330" y="100" width="540" height="80"/>
+  <text x="600" y="135" text-anchor="middle" class="label">Agent sends action request with delegation artifact</text>
+
+  <rect class="box" x="360" y="230" width="480" height="70"/>
+  <text x="600" y="272" text-anchor="middle" class="label">Gateway intercepts request</text>
+
+  <rect class="box" x="360" y="350" width="480" height="70"/>
+  <text x="600" y="392" text-anchor="middle" class="label">Validate artifact integrity</text>
+
+  <rect class="box" x="360" y="470" width="480" height="70"/>
+  <text x="600" y="512" text-anchor="middle" class="label">Check expiration and revocation status</text>
+
+  <rect class="box" x="300" y="590" width="600" height="85"/>
+  <text x="600" y="626" text-anchor="middle" class="label">Validate tool, action, resource, and classification scope</text>
+  <text x="600" y="652" text-anchor="middle" class="small">against delegated bounds</text>
+
+  <rect class="box" x="280" y="730" width="640" height="85"/>
+  <text x="600" y="766" text-anchor="middle" class="label">Compute compound decision</text>
+  <text x="600" y="792" text-anchor="middle" class="small">principal AND agent AND delegation</text>
+
+  <polygon class="box" points="600,860 740,940 600,1020 460,940"/>
+  <text x="600" y="946" text-anchor="middle" class="label">Allow?</text>
+
+  <rect class="box" x="120" y="910" width="240" height="80"/>
+  <text x="240" y="946" text-anchor="middle" class="label">Return deny, modify,</text>
+  <text x="240" y="972" text-anchor="middle" class="label">or escalate</text>
+
+  <rect class="box" x="840" y="910" width="240" height="80"/>
+  <text x="960" y="946" text-anchor="middle" class="label">Forward request to</text>
+  <text x="960" y="972" text-anchor="middle" class="label">protected service</text>
+
+  <rect class="box" x="840" y="1010" width="240" height="65"/>
+  <text x="960" y="1050" text-anchor="middle" class="label">Return service response</text>
+
+  <rect class="box" x="440" y="1010" width="320" height="65"/>
+  <text x="600" y="1050" text-anchor="middle" class="label">Record audit event</text>
+
+  <line class="line" x1="600" y1="180" x2="600" y2="230"/>
+  <line class="line" x1="600" y1="300" x2="600" y2="350"/>
+  <line class="line" x1="600" y1="420" x2="600" y2="470"/>
+  <line class="line" x1="600" y1="540" x2="600" y2="590"/>
+  <line class="line" x1="600" y1="675" x2="600" y2="730"/>
+  <line class="line" x1="600" y1="815" x2="600" y2="860"/>
+
+  <line class="line" x1="460" y1="940" x2="360" y2="940"/>
+  <text x="400" y="926" text-anchor="middle" class="small">No</text>
+
+  <line class="line" x1="740" y1="940" x2="840" y2="940"/>
+  <text x="800" y="926" text-anchor="middle" class="small">Yes</text>
+
+  <line class="line" x1="960" y1="990" x2="960" y2="1010"/>
+  <line class="line" x1="240" y1="990" x2="440" y2="1042"/>
+  <line class="line" x1="960" y1="1075" x2="760" y2="1042"/>
+</svg>

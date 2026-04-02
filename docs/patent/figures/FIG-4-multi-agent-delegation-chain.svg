@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#000"/>
+    </marker>
+    <style>
+      .box { fill:#fff; stroke:#000; stroke-width:2; }
+      .line { fill:none; stroke:#000; stroke-width:2; marker-end:url(#arrow); }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:28px; font-weight:bold; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:18px; }
+      .small { font-family:Arial, Helvetica, sans-serif; font-size:15px; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1400" height="900" fill="#fff"/>
+  <text x="700" y="48" text-anchor="middle" class="title">FIG. 4 — Multi-Agent Delegated Authorization Chain</text>
+
+  <rect class="box" x="90" y="140" width="220" height="80"/>
+  <text x="200" y="176" text-anchor="middle" class="label">Principal Approval</text>
+
+  <rect class="box" x="90" y="330" width="220" height="80"/>
+  <text x="200" y="366" text-anchor="middle" class="label">Parent Agent</text>
+
+  <rect class="box" x="420" y="230" width="300" height="100"/>
+  <text x="570" y="270" text-anchor="middle" class="label">Delegation Manager / Gateway</text>
+
+  <rect class="box" x="820" y="120" width="260" height="100"/>
+  <text x="950" y="158" text-anchor="middle" class="label">Root Delegation Artifact</text>
+  <text x="950" y="186" text-anchor="middle" class="small">Root ID = R1</text>
+
+  <rect class="box" x="1120" y="120" width="180" height="100"/>
+  <text x="1210" y="176" text-anchor="middle" class="label">Audit / Lineage</text>
+  <text x="1210" y="204" text-anchor="middle" class="label">Store</text>
+
+  <rect class="box" x="820" y="320" width="260" height="100"/>
+  <text x="950" y="356" text-anchor="middle" class="label">Child Delegation Artifact</text>
+  <text x="950" y="382" text-anchor="middle" class="small">Parent ID = D1; Root ID = R1</text>
+
+  <rect class="box" x="1120" y="320" width="180" height="100"/>
+  <text x="1210" y="376" text-anchor="middle" class="label">Child Agent</text>
+
+  <rect class="box" x="820" y="520" width="260" height="100"/>
+  <text x="950" y="556" text-anchor="middle" class="label">Grandchild Artifact</text>
+  <text x="950" y="582" text-anchor="middle" class="small">Parent ID = D2; Root ID = R1</text>
+
+  <rect class="box" x="1120" y="520" width="180" height="100"/>
+  <text x="1210" y="576" text-anchor="middle" class="label">Grandchild Agent</text>
+
+  <line class="line" x1="200" y1="220" x2="200" y2="330"/>
+  <line class="line" x1="310" y1="370" x2="420" y2="280"/>
+  <text x="355" y="332" class="small">Request delegation</text>
+
+  <line class="line" x1="720" y1="250" x2="820" y2="170"/>
+  <text x="760" y="196" class="small">Issue root scope</text>
+
+  <line class="line" x1="820" y1="220" x2="310" y2="350"/>
+  <text x="610" y="255" class="small">Scoped artifact returned</text>
+
+  <line class="line" x1="310" y1="390" x2="420" y2="390"/>
+  <text x="365" y="378" text-anchor="middle" class="small">Request narrowed child scope</text>
+
+  <line class="line" x1="720" y1="390" x2="820" y2="370"/>
+  <text x="765" y="372" class="small">Subset validation</text>
+
+  <line class="line" x1="1080" y1="370" x2="1120" y2="370"/>
+  <line class="line" x1="1210" y1="420" x2="1210" y2="520"/>
+  <text x="1230" y="472" class="small">Request further narrowed scope</text>
+
+  <line class="line" x1="1120" y1="570" x2="1080" y2="570"/>
+  <text x="1090" y="552" class="small">Depth + subset</text>
+
+  <line class="line" x1="1080" y1="170" x2="1120" y2="170"/>
+  <line class="line" x1="1080" y1="370" x2="1120" y2="170"/>
+  <line class="line" x1="1080" y1="570" x2="1120" y2="170"/>
+  <text x="1128" y="110" class="small">Lineage records</text>
+</svg>
