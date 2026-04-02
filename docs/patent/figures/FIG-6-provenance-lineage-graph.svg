@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="860" viewBox="0 0 1300 860">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#000"/>
+    </marker>
+    <style>
+      .box { fill:#fff; stroke:#000; stroke-width:2; }
+      .line { fill:none; stroke:#000; stroke-width:2; marker-end:url(#arrow); }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:28px; font-weight:bold; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:18px; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1300" height="860" fill="#fff"/>
+  <text x="650" y="48" text-anchor="middle" class="title">FIG. 6 — Provenance and Audit Lineage Graph</text>
+
+  <rect class="box" x="80" y="140" width="220" height="80"/>
+  <text x="190" y="186" text-anchor="middle" class="label">Principal Approval</text>
+
+  <rect class="box" x="80" y="300" width="220" height="80"/>
+  <text x="190" y="346" text-anchor="middle" class="label">Agent Registration</text>
+
+  <rect class="box" x="450" y="220" width="260" height="100"/>
+  <text x="580" y="266" text-anchor="middle" class="label">Delegation Issuance</text>
+
+  <rect class="box" x="860" y="110" width="220" height="80"/>
+  <text x="970" y="156" text-anchor="middle" class="label">Tool Invocation 1</text>
+
+  <rect class="box" x="860" y="240" width="220" height="80"/>
+  <text x="970" y="286" text-anchor="middle" class="label">Tool Invocation 2</text>
+
+  <rect class="box" x="860" y="370" width="220" height="80"/>
+  <text x="970" y="416" text-anchor="middle" class="label">Child Delegation</text>
+
+  <rect class="box" x="860" y="500" width="220" height="80"/>
+  <text x="970" y="546" text-anchor="middle" class="label">Child Agent Invocation</text>
+
+  <rect class="box" x="470" y="620" width="240" height="80"/>
+  <text x="590" y="666" text-anchor="middle" class="label">Output / Result</text>
+
+  <rect class="box" x="860" y="650" width="220" height="80"/>
+  <text x="970" y="696" text-anchor="middle" class="label">Revocation / Expiration</text>
+
+  <line class="line" x1="300" y1="180" x2="450" y2="250"/>
+  <line class="line" x1="300" y1="340" x2="450" y2="290"/>
+  <line class="line" x1="710" y1="250" x2="860" y2="150"/>
+  <line class="line" x1="710" y1="260" x2="860" y2="280"/>
+  <line class="line" x1="710" y1="280" x2="860" y2="410"/>
+  <line class="line" x1="1080" y1="410" x2="1080" y2="540"/>
+  <line class="line" x1="970" y1="190" x2="650" y2="620"/>
+  <line class="line" x1="970" y1="320" x2="620" y2="620"/>
+  <line class="line" x1="970" y1="580" x2="610" y2="620"/>
+  <line class="line" x1="710" y1="310" x2="860" y2="690"/>
+  <line class="line" x1="1080" y1="450" x2="900" y2="650"/>
+</svg>
