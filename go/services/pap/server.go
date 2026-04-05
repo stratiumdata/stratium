@@ -10,6 +10,7 @@ import (
 
 	"stratium/middleware"
 	"stratium/pkg/cache"
+	"stratium/pkg/cedar"
 	"stratium/pkg/models"
 	"stratium/pkg/policy_engine"
 	"stratium/pkg/repository"
@@ -21,14 +22,16 @@ import (
 
 // Server represents the PAP API server
 type Server struct {
-	router           *gin.Engine
-	repo             *repository.Repository
-	engineFactory    *policy_engine.EngineFactory
-	authService      *AuthService
-	cacheInvalidator cache.CacheInvalidator
-	licenseEnforcer  *middleware.LicenseEnforcer
-	tlsEnabled       bool
-	tlsConfig        *tls.Config
+	router             *gin.Engine
+	repo               *repository.Repository
+	engineFactory      *policy_engine.EngineFactory
+	authService        *AuthService
+	cacheInvalidator   cache.CacheInvalidator
+	licenseEnforcer    *middleware.LicenseEnforcer
+	cedarSchemaStore   cedar.SchemaStore
+	cedarTemplateStore cedar.TemplateStore
+	tlsEnabled         bool
+	tlsConfig          *tls.Config
 }
 
 // ConfigureTLS sets the server TLS configuration.
@@ -40,12 +43,14 @@ func (s *Server) ConfigureTLS(tlsConfig *tls.Config) {
 // NewServer creates a new PAP server instance
 func NewServer(repo *repository.Repository, authService *AuthService, corsConfig config.CORSConfig, licenseEnforcer *middleware.LicenseEnforcer) *Server {
 	s := &Server{
-		router:           gin.Default(),
-		repo:             repo,
-		engineFactory:    policy_engine.NewEngineFactory(),
-		authService:      authService,
-		cacheInvalidator: cache.NewNoOpCacheInvalidator(), // Default to no-op
-		licenseEnforcer:  licenseEnforcer,
+		router:             gin.Default(),
+		repo:               repo,
+		engineFactory:      policy_engine.NewEngineFactory(),
+		authService:        authService,
+		cacheInvalidator:   cache.NewNoOpCacheInvalidator(), // Default to no-op
+		licenseEnforcer:    licenseEnforcer,
+		cedarSchemaStore:   cedar.NewMemorySchemaStore(),
+		cedarTemplateStore: cedar.NewMemoryTemplateStore(),
 	}
 
 	s.setupRoutes(corsConfig)
@@ -55,16 +60,25 @@ func NewServer(repo *repository.Repository, authService *AuthService, corsConfig
 // NewServerWithCacheInvalidator creates a new PAP server instance with cache invalidation
 func NewServerWithCacheInvalidator(repo *repository.Repository, authService *AuthService, cacheInvalidator cache.CacheInvalidator, corsConfig config.CORSConfig, licenseEnforcer *middleware.LicenseEnforcer) *Server {
 	s := &Server{
-		router:           gin.Default(),
-		repo:             repo,
-		engineFactory:    policy_engine.NewEngineFactory(),
-		authService:      authService,
-		cacheInvalidator: cacheInvalidator,
-		licenseEnforcer:  licenseEnforcer,
+		router:             gin.Default(),
+		repo:               repo,
+		engineFactory:      policy_engine.NewEngineFactory(),
+		authService:        authService,
+		cacheInvalidator:   cacheInvalidator,
+		licenseEnforcer:    licenseEnforcer,
+		cedarSchemaStore:   cedar.NewMemorySchemaStore(),
+		cedarTemplateStore: cedar.NewMemoryTemplateStore(),
 	}
 
 	s.setupRoutes(corsConfig)
 	return s
+}
+
+// SetCedarStores replaces the default in-memory Cedar stores with persistent implementations.
+// Call this before Start() when PostgreSQL-backed stores are available.
+func (s *Server) SetCedarStores(schemaStore cedar.SchemaStore, templateStore cedar.TemplateStore) {
+	s.cedarSchemaStore = schemaStore
+	s.cedarTemplateStore = templateStore
 }
 
 // setupRoutes configures all API routes
@@ -138,6 +152,9 @@ func (s *Server) setupRoutes(config config.CORSConfig) {
 			auditLogs.GET("", s.listAuditLogs)
 			auditLogs.GET("/:id", s.getAuditLog)
 		}
+
+		// Cedar policy language routes
+		s.registerCedarRoutes(v1)
 
 		// Agent registry routes (only when agent-auth feature is enabled)
 		s.registerAgentRoutes(v1)

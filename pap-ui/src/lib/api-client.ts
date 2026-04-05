@@ -4,9 +4,9 @@
  */
 
 import Keycloak from 'keycloak-js';
-import type { Policy, Entitlement, AuditLog } from '@/types/models';
+import type { Policy, Entitlement, AuditLog, CedarSchema, CedarTemplate, CedarLinkedPolicy, CedarTestResult } from '@/types/models';
 
-const API_BASE_URL = import.meta.env.VITE_PAP_API_URL || 'http://localhost:8090';
+const API_BASE_URL = import.meta.env.VITE_PAP_API_URL || '';
 
 export class ApiClient {
   private keycloak: Keycloak;
@@ -16,12 +16,13 @@ export class ApiClient {
   }
 
   private async getAuthHeaders(): Promise<HeadersInit> {
-    // Ensure token is fresh
-    await this.keycloak.updateToken(30);
+    if (this.keycloak?.updateToken) {
+      await this.keycloak.updateToken(30);
+    }
 
     return {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.keycloak.token}`,
+      ...(this.keycloak?.token ? { 'Authorization': `Bearer ${this.keycloak.token}` } : {}),
     };
   }
 
@@ -78,7 +79,7 @@ export class ApiClient {
   async createPolicy(data: {
     name: string;
     description: string;
-    language: 'json' | 'opa' | 'xacml';
+    language: 'json' | 'opa' | 'xacml' | 'cedar';
     policy_content: string;
     effect: 'allow' | 'deny';
     priority: number;
@@ -93,7 +94,7 @@ export class ApiClient {
   async updatePolicy(id: string, data: Partial<{
     name: string;
     description: string;
-    language: 'json' | 'opa' | 'xacml';
+    language: 'json' | 'opa' | 'xacml' | 'cedar';
     policy_content: string;
     effect: 'allow' | 'deny';
     priority: number;
@@ -241,6 +242,155 @@ export class ApiClient {
 
   async getAuditLog(id: string) {
     return this.request<AuditLog>(`/api/v1/audit-logs/${id}`);
+  }
+  // ==================== Cedar Schemas ====================
+
+  async listCedarSchemas(namespace?: string) {
+    const query = new URLSearchParams();
+    if (namespace) query.append('namespace', namespace);
+
+    return this.request<{
+      schemas: CedarSchema[];
+      total: number;
+    }>(`/api/v1/cedar/schemas?${query}`);
+  }
+
+  async getCedarSchema(id: string) {
+    return this.request<CedarSchema>(`/api/v1/cedar/schemas/${id}`);
+  }
+
+  async createCedarSchema(data: {
+    namespace: string;
+    name: string;
+    description: string;
+    schema_content: string;
+    schema_format: 'json' | 'cedar';
+    version: string;
+  }) {
+    return this.request<CedarSchema>('/api/v1/cedar/schemas', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateCedarSchema(id: string, data: Partial<{
+    name: string;
+    description: string;
+    schema_content: string;
+    schema_format: 'json' | 'cedar';
+    version: string;
+    is_active: boolean;
+  }>) {
+    return this.request<CedarSchema>(`/api/v1/cedar/schemas/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteCedarSchema(id: string) {
+    return this.request<{ message: string }>(`/api/v1/cedar/schemas/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async validateAgainstSchema(schemaId: string, policyContent: string) {
+    return this.request<{ valid: boolean; error?: string; schema_id: string }>(
+      `/api/v1/cedar/schemas/${schemaId}/validate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ policy_content: policyContent }),
+      }
+    );
+  }
+
+  // ==================== Cedar Templates ====================
+
+  async listCedarTemplates(namespace?: string) {
+    const query = new URLSearchParams();
+    if (namespace) query.append('namespace', namespace);
+
+    return this.request<{
+      templates: CedarTemplate[];
+      total: number;
+    }>(`/api/v1/cedar/templates?${query}`);
+  }
+
+  async getCedarTemplate(id: string) {
+    return this.request<CedarTemplate>(`/api/v1/cedar/templates/${id}`);
+  }
+
+  async createCedarTemplate(data: {
+    name: string;
+    description: string;
+    template_content: string;
+    schema_id?: string;
+    namespace: string;
+  }) {
+    return this.request<CedarTemplate>('/api/v1/cedar/templates', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteCedarTemplate(id: string) {
+    return this.request<{ message: string }>(`/api/v1/cedar/templates/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async instantiateTemplate(templateId: string, data: {
+    principal_entity: string;
+    resource_entity: string;
+  }) {
+    return this.request<{
+      linked_policy: CedarLinkedPolicy;
+      policy: Policy;
+    }>(`/api/v1/cedar/templates/${templateId}/instantiate`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async listLinkedPolicies(templateId: string) {
+    return this.request<{
+      linked_policies: CedarLinkedPolicy[];
+      total: number;
+    }>(`/api/v1/cedar/templates/${templateId}/linked`);
+  }
+
+  // ==================== Cedar Testing ====================
+
+  async testCedarPolicy(data: {
+    policy_content: string;
+    subject_attributes: Record<string, any>;
+    resource_attributes: Record<string, any>;
+    action: string;
+    environment?: Record<string, any>;
+    namespace?: string;
+  }) {
+    return this.request<CedarTestResult>('/api/v1/cedar/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async batchTestCedarPolicy(data: {
+    policy_content: string;
+    requests: Array<{
+      subject_attributes: Record<string, any>;
+      resource_attributes: Record<string, any>;
+      action: string;
+      environment?: Record<string, any>;
+      namespace?: string;
+    }>;
+  }) {
+    return this.request<{
+      results: CedarTestResult[];
+      total: number;
+    }>('/api/v1/cedar/batch-test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   }
 }
 

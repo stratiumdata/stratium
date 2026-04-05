@@ -2,7 +2,7 @@ import { ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
-import { Shield, FileText, Award, ClipboardList, LogOut } from 'lucide-react';
+import { Shield, FileText, Award, ClipboardList, LogOut, TreePine, Blocks, FlaskConical } from 'lucide-react';
 
 interface LayoutProps {
   children: ReactNode;
@@ -17,6 +17,9 @@ export const Layout = ({ children }: LayoutProps) => {
     { name: 'Dashboard', href: '/', icon: ClipboardList },
     { name: 'Policies', href: '/policies', icon: Shield },
     { name: 'Entitlements', href: '/entitlements', icon: Award },
+    { name: 'Cedar Schemas', href: '/cedar/schemas', icon: TreePine },
+    { name: 'Cedar Templates', href: '/cedar/templates', icon: Blocks },
+    { name: 'Cedar Tester', href: '/cedar/test', icon: FlaskConical },
     { name: 'Audit Logs', href: '/audit-logs', icon: FileText },
   ];
 
@@ -36,7 +39,9 @@ export const Layout = ({ children }: LayoutProps) => {
         
         <nav className="flex flex-col gap-1 p-4">
           {navigation.map((item) => {
-            const isActive = location.pathname === item.href;
+            const isActive = item.href === '/'
+              ? location.pathname === '/'
+              : location.pathname.startsWith(item.href);
             const Icon = item.icon;
             return (
               <Link

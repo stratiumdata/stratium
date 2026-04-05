@@ -9,6 +9,13 @@ export default defineConfig(({ mode }) => ({
     host: "::",
     port: 3000,
     open: true,
+    proxy: {
+      '/api': {
+        target: 'https://localhost:8090',
+        changeOrigin: true,
+        secure: false,
+      },
+    },
   },
   build: {
     outDir: 'build',

@@ -1,0 +1,133 @@
+// Stratium ZTDF Base Cedar Schema
+// This schema defines the entity types, actions, and relationships
+// for the Stratium Zero-Trust Data Format platform.
+
+namespace Stratium {
+
+    // --- Principal Types ---
+
+    entity User in [Group, Role] {
+        email: String,
+        clearance: Classification,
+        department: String,
+        mfa_enabled: Bool,
+    };
+
+    entity Group in [Group] {
+        description: String,
+    };
+
+    entity Role in [Role] {
+        permissions: Set<String>,
+    };
+
+    entity ServiceAccount in [Group, Role] {
+        service_name: String,
+        trust_level: String,
+    };
+
+    // --- Resource Types ---
+
+    entity Key {
+        key_type: String,
+        status: String,
+        classification: Classification,
+    };
+
+    entity Resource {
+        classification: Classification,
+        compartments: Set<String>,
+        caveats: Set<String>,
+        domain: String,
+    };
+
+    entity Policy {
+        language: String,
+        effect: String,
+    };
+
+    entity Schema {
+        version: String,
+    };
+
+    entity Entitlement {
+        scope: String,
+    };
+
+    // --- Classification Hierarchy ---
+
+    entity Classification in [Classification] {
+        level: Long,
+        hierarchy: String,
+    };
+
+    // --- Actions ---
+
+    // ZTDF Key Operations
+    action WrapDEK appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Key, Resource],
+    };
+
+    action UnwrapDEK appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Key, Resource],
+    };
+
+    action CreateKey appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Key],
+    };
+
+    action RotateKey appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Key],
+    };
+
+    action RegisterClientKey appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Key],
+    };
+
+    // PAP Policy Management
+    action CreatePolicy appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Policy],
+    };
+
+    action UpdatePolicy appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Policy],
+    };
+
+    action DeletePolicy appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Policy],
+    };
+
+    action CreateEntitlement appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Entitlement],
+    };
+
+    action UpdateEntitlement appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Entitlement],
+    };
+
+    action DeleteEntitlement appliesTo {
+        principal: [User, ServiceAccount],
+        resource: [Entitlement],
+    };
+
+    // Administrative
+    action ViewAuditLogs appliesTo {
+        principal: [User],
+        resource: [Resource],
+    };
+
+    action ManageSchemas appliesTo {
+        principal: [User],
+        resource: [Schema],
+    };
+}
