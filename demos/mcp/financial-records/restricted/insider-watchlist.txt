@@ -1,0 +1,37 @@
+ACME CORP — INSIDER TRADING WATCH LIST
+Classification: RESTRICTED
+Maintained by: General Counsel's Office
+Date: Updated December 1, 2025
+
+=== STRICTLY CONFIDENTIAL — LEGAL PRIVILEGE ===
+=== UNAUTHORIZED DISCLOSURE IS A FEDERAL CRIME ===
+
+ACTIVE BLACKOUT PERIOD: November 15, 2025 — January 20, 2026
+REASON: Q4 earnings + Project Phoenix M&A
+
+INDIVIDUALS SUBJECT TO TRADING RESTRICTIONS:
+
+EXECUTIVE OFFICERS:
+- Jane Smith, CEO — All securities, options, RSUs
+- Robert Chen, CFO — All securities, options, RSUs
+- Maria Garcia, CTO — All securities, options, RSUs
+- David Kim, General Counsel — All securities, options, RSUs
+- Sarah Williams, COO — All securities, options, RSUs
+
+BOARD MEMBERS:
+- [All 9 board members subject to standard restrictions]
+
+PROJECT PHOENIX ACCESS LIST:
+- Corp Dev team (4 individuals)
+- External counsel: Wilson Sonsini
+- Financial advisor: Goldman Sachs
+- Due diligence team (6 individuals, names on file)
+
+MNPI IN SCOPE:
+1. Q4 2025 preliminary revenue ($625M-$640M, not yet announced)
+2. Project Phoenix acquisition ($1.95B offer for CipherGuard)
+3. FY2026 guidance (18-22% growth, not yet released)
+4. Board authorization of $150M stock buyback
+
+PREVIOUS VIOLATIONS: None in trailing 36 months
+NEXT REVIEW: January 25, 2026 (post-earnings)

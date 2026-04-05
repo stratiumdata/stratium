@@ -1,0 +1,28 @@
+ACME CORP — ANNUAL REPORT 2025
+Classification: PUBLIC
+
+FINANCIAL HIGHLIGHTS
+- Total Revenue: $2.3 billion (up 15% YoY)
+- Net Income: $340 million (up 22% YoY)
+- Operating Margin: 14.8%
+- Earnings Per Share: $4.52
+- Free Cash Flow: $890 million
+
+BUSINESS OVERVIEW
+Acme Corp continued its strong growth trajectory in FY2025, driven by
+expansion in enterprise AI solutions and cloud security services.
+Our Zero-Trust Data Format (ZTDF) platform achieved 200% growth in
+enterprise adoption, with 150+ Fortune 500 customers now using our
+cryptographic key management infrastructure.
+
+KEY ACHIEVEMENTS
+- Launched ZTDF v3.0 with post-quantum cryptography support
+- Expanded to 12 new international markets
+- Achieved FedRAMP High authorization
+- SOC 2 Type II certified for 4th consecutive year
+- Named a Leader in Gartner Magic Quadrant for Data Security
+
+OUTLOOK
+We expect FY2026 revenue growth of 18-22%, driven by AI agent security
+products and government sector expansion. Our new Agent Authorization
+platform addresses the emerging $4.2B AI governance market.

@@ -103,3 +103,34 @@ cd sdk/go && go test ./integration -run TestCrossSdkPayloadCompatibility
 - Commit messages: `<type>: <description>` (feat, fix, refactor, docs, test, chore, perf, ci)
 - Codemap updates required when: new gRPC service/RPC, data model changes, crypto algorithm changes, new SDK
 - Code is source of truth — if codemaps diverge from code, update the codemaps
+
+## Agent Authorization (MANDATORY)
+
+When the Stratium MCP server is connected, you are operating under zero-trust agent authorization. You MUST follow this protocol:
+
+### Before ANY session work:
+1. Call `register_agent` to register yourself (provider: "anthropic", trust_tier: 1)
+2. Call `create_delegation` with the appropriate scope for your task (approved_tools, max_action_tier, classification_cap, purpose)
+
+### Before EVERY action:
+You MUST call `execute_action` to check authorization BEFORE performing any action. This is not optional.
+
+| Your action | tool_name | action | action_tier |
+|------------|-----------|--------|-------------|
+| Reading a file | `read_file` | `read` | `1` |
+| Listing/searching files | `list_files` | `read` | `1` |
+| Searching file contents | `grep_search` | `read` | `1` |
+| Writing a file | `write_file` | `write` | `2` |
+| Editing a file | `edit_file` | `write` | `2` |
+| Running a shell command | `bash` | `execute` | `2` |
+| Network commands (curl, ssh) | `bash` | `send` | `3` |
+| Destructive commands (rm -rf, DROP) | `bash` | `execute` | `4` |
+
+### If `execute_action` returns `authorized: false`:
+- Do NOT perform the action
+- Explain to the user WHY it was denied (include the reason from the response)
+- Suggest alternatives within your authorized scope
+
+### If no delegation exists:
+- Do NOT perform any actions
+- Ask the user to create a delegation first, or create one yourself with appropriate scope for the task

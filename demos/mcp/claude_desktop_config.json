@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "stratium": {
+      "command": "/Users/benjaminparrish/Development/stratium/bin/stratium-mcp",
+      "args": [],
+      "env": {
+        "STRATIUM_GATEWAY_ADDRESS": "localhost:50054",
+        "STRATIUM_KEYCLOAK_URL": "http://localhost:8080/realms/stratium",
+        "STRATIUM_CLIENT_ID": "stratium-mcp",
+        "STRATIUM_TLS_CA": "/Users/benjaminparrish/Development/stratium/config/examples/certs/ca.crt"
+      }
+    }
+  }
+}
