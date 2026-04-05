@@ -1,0 +1,30 @@
+ACME CORP — STRATEGIC PLAN 2027
+Classification: CONFIDENTIAL
+Prepared for: Board of Directors
+Date: December 2025
+
+=== DIRECTORS AND ABOVE ONLY ===
+
+VISION: Become the dominant platform for AI agent security by 2027.
+
+THREE-YEAR FINANCIAL TARGETS:
+  FY2025 (actual): $2.3B revenue, 14.8% margin
+  FY2026 (plan):   $2.8B revenue, 16.5% margin
+  FY2027 (target): $3.5B revenue, 19.0% margin
+
+STRATEGIC PILLARS:
+1. Agent Authorization Platform — $500M ARR by 2027
+2. Post-Quantum Crypto — First-mover advantage
+3. Government Expansion — $400M ARR from public sector
+4. International — 40% of revenue from non-US by 2027
+
+CAPITAL ALLOCATION:
+- R&D: 22% of revenue (up from 20%)
+- M&A: $200M annual acquisition budget
+- Buybacks: $150M authorized
+
+KEY RISKS:
+- Regulatory uncertainty around AI governance
+- Post-quantum migration timeline
+- Talent competition in AI security
+- Potential antitrust scrutiny if market share exceeds 30%

@@ -59,7 +59,7 @@ GO_BUILD_TAGS :=
 GO_BUILD_TAGS_RAW :=
 endif
 
-build: build-platform build-key-manager build-key-access build-pap build-agent-gateway ## Build all binaries
+build: build-platform build-key-manager build-key-access build-pap build-agent-gateway build-mcp build-audit ## Build all binaries
 
 build-platform: ## Build platform service binaries
 	@echo "Building platform server..."
@@ -98,6 +98,19 @@ build-agent-gateway: ## Build agent gateway service binary
 		-ldflags "-X stratium/features.BuildFeatures=agent-auth" \
 		-o ../bin/agent-gateway-server ./cmd/agent-gateway-server
 	@echo "Agent gateway build complete!"
+
+build-mcp: ## Build Stratium MCP server for Claude Code integration
+	@echo "Building stratium-mcp server..."
+	cd go && go build -o ../bin/stratium-mcp ./cmd/stratium-mcp
+	@echo "stratium-mcp build complete!"
+
+build-audit: ## Build Stratium audit CLI for admin audit trail access
+	@echo "Building stratium-audit CLI..."
+	cd go && go build -o ../bin/stratium-audit ./cmd/stratium-audit
+	@echo "stratium-audit build complete!"
+
+seed-demo: ## Seed demo data for MCP agent auth demo
+	@./demos/mcp/seed-demo-data.sh
 
 build-license-signer: ## Build license signer CLI
 	@echo "Building license signer CLI..."

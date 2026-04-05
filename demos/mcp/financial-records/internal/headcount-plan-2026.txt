@@ -1,0 +1,30 @@
+ACME CORP — HEADCOUNT PLAN FY2026
+Classification: INTERNAL
+Prepared by: People Operations
+Date: November 2025
+
+=== FOR INTERNAL USE ONLY ===
+
+CURRENT STATE (EOY 2025): 1,950 employees
+
+FY2026 PLANNED ADDITIONS BY DEPARTMENT:
+
+Engineering:          +120 (focus: AI security, post-quantum crypto)
+Sales:                +65  (focus: enterprise, government)
+Customer Success:     +40  (focus: onboarding, technical advisory)
+Marketing:            +25  (focus: content, developer relations)
+G&A:                  +15  (focus: legal, compliance)
+Product Management:   +10
+Security Operations:  +8
+
+TOTAL FY2026 TARGET: 2,233 employees (+283, +14.5%)
+
+COMPENSATION BUDGET IMPACT:
+  Base salary increase pool: 4.5%
+  New hire cost: $48.2M
+  Total comp budget FY2026: $312M (up from $268M)
+
+KEY INITIATIVES:
+- Open Zurich engineering office (Q1)
+- Expand Singapore sales team (Q2)
+- Launch AI Agent Security Center of Excellence (Q1)

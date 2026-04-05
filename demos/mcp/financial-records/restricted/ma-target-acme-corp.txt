@@ -1,0 +1,40 @@
+ACME CORP — M&A TARGET ANALYSIS: PROJECT PHOENIX
+Classification: RESTRICTED
+Prepared by: Corporate Development
+Date: November 2025
+
+=== MNPI — INSIDER TRADING RESTRICTIONS APPLY ===
+=== DISTRIBUTION: CEO, CFO, General Counsel, Corp Dev ONLY ===
+
+TARGET: CipherGuard Inc. (Private)
+CODENAME: Project Phoenix
+
+OVERVIEW:
+- ARR: $120M (growing 45% YoY)
+- Employees: 380
+- HQ: Austin, TX
+- Product: AI-native security analytics with real-time threat detection
+
+VALUATION:
+- Estimated fair value: $1.8B - $2.2B (15-18x ARR)
+- Comparable transactions: DataVisor ($2.1B/14x), Abnormal Security ($5.1B/25x)
+- Recommended offer: $1.95B (16.25x ARR)
+
+DEAL STRUCTURE:
+- 70% cash / 30% stock
+- $150M earnout tied to FY2026 retention
+- Key person retention packages: $45M total
+- Breakup fee: 3% ($58.5M)
+
+TIMELINE:
+- LOI signed: October 28, 2025
+- Due diligence: Nov 1 - Dec 15, 2025
+- Board approval: December board meeting
+- Signing: January 15, 2026
+- HSR filing: January 20, 2026
+- Expected close: March 2026
+
+RISK FACTORS:
+- CipherGuard has pending patent litigation (est. exposure: $15M)
+- 3 key engineers have non-competes expiring Q2 2026
+- Customer concentration: top 5 customers = 35% of ARR

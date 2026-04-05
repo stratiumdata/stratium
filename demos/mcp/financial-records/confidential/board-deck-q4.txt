@@ -1,0 +1,30 @@
+ACME CORP — Q4 BOARD MEETING DECK
+Classification: CONFIDENTIAL
+Date: December 2025
+
+=== BOARD MEMBERS AND EXECUTIVE TEAM ONLY ===
+
+AGENDA:
+1. FY2025 Final Results
+2. FY2026 Strategic Plan
+3. M&A Pipeline Update
+4. Compensation Committee Report
+5. AI Governance Market Opportunity
+
+SLIDE 3: M&A PIPELINE (CONFIDENTIAL)
+
+Active targets under evaluation:
+- Target Alpha: $120M ARR security analytics company
+  Status: LOI signed, due diligence in progress
+  Expected close: Q1 2026
+  Strategic value: Fills SIEM integration gap
+
+- Target Beta: $45M ARR identity provider
+  Status: Preliminary discussions
+  Strategic value: Native identity for Agent Authorization
+
+SLIDE 5: AI GOVERNANCE MARKET
+- TAM estimate: $12B by 2028 (Gartner)
+- SAM: $4.2B (enterprise security segment)
+- Acme target: 15% market share by 2027
+- Investment required: $85M over 24 months

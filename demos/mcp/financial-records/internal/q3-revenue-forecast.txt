@@ -1,0 +1,34 @@
+ACME CORP — Q3 REVENUE FORECAST (INTERNAL)
+Classification: INTERNAL
+Prepared by: FP&A Team
+Date: July 2025
+
+=== FOR INTERNAL USE ONLY — DO NOT DISTRIBUTE ===
+
+REVENUE FORECAST BY SEGMENT
+
+Enterprise Platform:
+  Q3 Forecast: $380M (base case) / $410M (upside)
+  Key Drivers: ZTDF v3.0 upgrades, 35 new enterprise deals in pipeline
+  Risk: 3 large deals ($15M+) may slip to Q4
+
+Cloud Security:
+  Q3 Forecast: $165M (base case) / $175M (upside)
+  Key Drivers: FedRAMP certification driving government adoption
+  Risk: Competitor pricing pressure in mid-market
+
+Agent Authorization (NEW):
+  Q3 Forecast: $42M (base case) / $55M (upside)
+  Key Drivers: 50+ enterprise pilots converting, strong demand signal
+  Risk: Product maturity — some features still in beta
+
+Professional Services:
+  Q3 Forecast: $25M
+  Stable, no significant variance expected
+
+TOTAL Q3 FORECAST: $612M (base) / $665M (upside)
+
+HEADCOUNT PLAN:
+  Current: 1,847
+  Q3 Target: 1,920 (+73)
+  Focus: Engineering (40), Sales (20), Customer Success (13)
