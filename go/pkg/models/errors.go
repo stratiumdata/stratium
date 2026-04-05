@@ -43,6 +43,13 @@ var (
 	ErrDelegationScopeExceeded = errors.New("child delegation scope exceeds parent")
 	ErrDelegationInvalidToken  = errors.New("invalid delegation token")
 
+	// Cedar errors
+	ErrCedarSchemaNotFound      = errors.New("cedar schema not found")
+	ErrCedarSchemaAlreadyExists = errors.New("cedar schema already exists")
+	ErrCedarTemplateNotFound    = errors.New("cedar template not found")
+	ErrCedarEntityNotFound      = errors.New("cedar entity not found")
+	ErrCedarValidationFailed    = errors.New("cedar policy validation against schema failed")
+
 	// General errors
 	ErrNotFound          = errors.New("not found")
 	ErrInvalidInput      = errors.New("invalid input")

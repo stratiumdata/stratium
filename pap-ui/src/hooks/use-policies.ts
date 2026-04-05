@@ -41,7 +41,7 @@ export const useCreatePolicy = () => {
     mutationFn: (data: {
       name: string;
       description: string;
-      language: 'json' | 'opa' | 'xacml';
+      language: 'json' | 'opa' | 'xacml' | 'cedar';
       policy_content: string;
       effect: 'allow' | 'deny';
       priority: number;
@@ -75,7 +75,7 @@ export const useUpdatePolicy = () => {
       data: Partial<{
         name: string;
         description: string;
-        language: 'json' | 'opa' | 'xacml';
+        language: 'json' | 'opa' | 'xacml' | 'cedar';
         policy_content: string;
         effect: 'allow' | 'deny';
         priority: number;

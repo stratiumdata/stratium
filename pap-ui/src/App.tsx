@@ -12,6 +12,11 @@ import PolicyForm from "./pages/PolicyForm";
 import Entitlements from "./pages/Entitlements";
 import EntitlementForm from "./pages/EntitlementForm";
 import AuditLogs from "./pages/AuditLogs";
+import CedarSchemas from "./pages/CedarSchemas";
+import CedarSchemaForm from "./pages/CedarSchemaForm";
+import CedarTemplates from "./pages/CedarTemplates";
+import CedarTemplateForm from "./pages/CedarTemplateForm";
+import CedarTest from "./pages/CedarTest";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -31,6 +36,11 @@ const App = () => (
             <Route path="/entitlements" element={<ProtectedRoute><Entitlements /></ProtectedRoute>} />
             <Route path="/entitlements/:id" element={<ProtectedRoute><EntitlementForm /></ProtectedRoute>} />
             <Route path="/audit-logs" element={<ProtectedRoute><AuditLogs /></ProtectedRoute>} />
+            <Route path="/cedar/schemas" element={<ProtectedRoute><CedarSchemas /></ProtectedRoute>} />
+            <Route path="/cedar/schemas/:id" element={<ProtectedRoute><CedarSchemaForm /></ProtectedRoute>} />
+            <Route path="/cedar/templates" element={<ProtectedRoute><CedarTemplates /></ProtectedRoute>} />
+            <Route path="/cedar/templates/:id" element={<ProtectedRoute><CedarTemplateForm /></ProtectedRoute>} />
+            <Route path="/cedar/test" element={<ProtectedRoute><CedarTest /></ProtectedRoute>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

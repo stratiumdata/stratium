@@ -43,7 +43,7 @@ const PolicyForm = () => {
     const policyData = {
       name: formData.name || '',
       description: formData.description || '',
-      language: formData.language as 'json' | 'opa' | 'xacml',
+      language: formData.language as 'json' | 'opa' | 'xacml' | 'cedar',
       policy_content: formData.policy_content || '',
       effect: formData.effect as 'allow' | 'deny',
       priority: formData.priority || 0,
@@ -131,6 +131,7 @@ const PolicyForm = () => {
                       <SelectItem value="json">JSON</SelectItem>
                       <SelectItem value="opa">OPA</SelectItem>
                       <SelectItem value="xacml">XACML</SelectItem>
+                      <SelectItem value="cedar">Cedar</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

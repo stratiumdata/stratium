@@ -5,13 +5,13 @@
 .PHONY: build-key-manager test-key-manager run-key-manager-server run-key-manager-client
 .PHONY: build-key-access test-key-access run-key-access-server run-key-access-client
 .PHONY: build-pap test-pap run-pap-server build-pap-cli install-pap-cli
-.PHONY: docker-build docker-up docker-down docker-logs test-integration
+.PHONY: docker-build docker-up docker-down docker-logs test-integration test-cedar test-agent-gateway test-ui test-ui-e2e test-ui-component
 .PHONY: build-demo build-demo-platform build-demo-key-manager build-demo-key-access build-demo-pap
 .PHONY: docker-demo-up docker-demo-down docker-demo-logs verify-demo test-features
 .PHONY: build-customer build-customer-platform build-customer-key-manager build-customer-key-access build-customer-pap
 .PHONY: docker-customer-up docker-customer-down docker-customer-logs verify-customer
 .PHONY: push-customer push-customer-platform push-customer-key-manager push-customer-key-access push-customer-pap
-.PHONY: setup-buildx build-customer-multiplatform build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access
+.PHONY: setup-buildx build-customer-multiplatform build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access build-customer-multiplatform-agent-gateway
 .PHONY: build-postgres push-postgres fmt-all tests-unit tests-integration tests-e2e tests-all fips-validate build-all docker-build-images docker-push-images \
 	docker-compose-up docker-compose-down docker-compose-logs helm-minikube helm-eks eks-create eks-delete aws-ecr-login
 
@@ -38,7 +38,7 @@ DOCKER_VERSION ?= $(shell git rev-parse --short HEAD)
 DEPLOY_ENV ?= production
 COMPOSE_FILE ?= deployment/docker/docker-compose.yml
 COMPOSE_PROJECT_NAME ?= $(notdir $(CURDIR))
-COMPOSE_SERVICE_TAGS := platform:platform-server key-manager:key-manager-server key-access:key-access-server pap:pap-server pap-ui:pap-ui
+COMPOSE_SERVICE_TAGS := platform:platform-server key-manager:key-manager-server key-access:key-access-server pap:pap-server pap-ui:pap-ui agent-gateway:agent-gateway-server
 DOCKER_SERVICES := key-manager-server:50052 key-access-server:50053 pap-server:8090
 AWS_REGION ?= us-east-2
 AWS_ACCOUNT_ID ?= 
@@ -136,10 +136,28 @@ test-pap: ## Run PAP service tests
 	@echo "Running PAP service tests..."
 	cd go && go test -v ./services/pap ./pkg/...
 
+test-cedar: ## Run Cedar policy engine tests
+	@echo "Running Cedar policy engine tests..."
+	cd go && go test -v ./pkg/cedar ./pkg/policy_engine -run Cedar
+
+test-agent-gateway: ## Run agent gateway tests
+	@echo "Running agent gateway tests..."
+	cd go && go test -v ./services/agent-gateway/...
+
 tests-integration: ## Run integration tests for services and SDK
 	@echo "Running integration tests..."
 	cd go && go test ./services/...
 	cd sdk/go && go test ./...
+
+test-ui: test-ui-component test-ui-e2e ## Run all PAP UI Cypress tests
+
+test-ui-e2e: ## Run PAP UI E2E tests (requires running services + dev server)
+	@echo "Running PAP UI E2E tests..."
+	cd pap-ui && npx cypress run --e2e
+
+test-ui-component: ## Run PAP UI component tests
+	@echo "Running PAP UI component tests..."
+	cd pap-ui && npx cypress run --component
 
 tests-e2e: test-platform-pdp test-pap-auth ## Run end-to-end shell-based tests
 
@@ -161,6 +179,8 @@ fips-validate: ## Validate runtime FIPS crypto modules (STRICT=1 to fail on skip
 docker-migrate: ## Apply database migrations (safe to re-run)
 	@echo "Applying database migrations..."
 	docker exec -i stratium-postgres psql -U keycloak -d stratium_pap < deployment/postgres/04-init-agent-auth.sql
+	@echo "Applying Cedar policy tables migration..."
+	docker exec -i stratium-postgres psql -U keycloak -d stratium_pap < go/migrations/001_cedar_tables.sql
 	@echo "Migrations applied!"
 
 full: generate build docker-down docker-build docker-up docker-migrate ## Rebuilds artifacts, docker images, and runs migrations
@@ -175,6 +195,8 @@ bench: ## Run all benchmarks
 	cd go && go test -bench=. ./services/platform
 	@echo "Running key manager benchmarks..."
 	cd go && go test -bench=. ./services/key-manager
+	@echo "Running Cedar policy engine benchmarks..."
+	cd go && go test -bench=. -benchmem ./pkg/cedar
 
 # Docker commands
 docker-build: ## Build all Docker images (production)
@@ -255,15 +277,17 @@ docker-push: ## Push Docker images to registry/ECR
 		docker tag $(DOCKER_REGISTRY)/$$svc:$(DOCKER_VERSION) $$REGISTRY/$$repo_name:$(DOCKER_VERSION); \
 		docker push $$REGISTRY/$$repo_name:$(DOCKER_VERSION); \
 	done; \
-	WEB_REPO=$${REPO_PREFIX}pap-ui; \
-	if [ "$(PUSH_TO_ECR)" = "true" ]; then \
-		if ! aws ecr describe-repositories --region $(AWS_REGION) --repository-name $$WEB_REPO >/dev/null 2>&1; then \
-			echo "Creating ECR repository $$WEB_REPO"; \
-			aws ecr create-repository --region $(AWS_REGION) --repository-name $$WEB_REPO >/dev/null; \
+	for extra_svc in platform-server agent-gateway-server pap-ui; do \
+		repo_name=$${REPO_PREFIX}$$extra_svc; \
+		if [ "$(PUSH_TO_ECR)" = "true" ]; then \
+			if ! aws ecr describe-repositories --region $(AWS_REGION) --repository-name $$repo_name >/dev/null 2>&1; then \
+				echo "Creating ECR repository $$repo_name"; \
+				aws ecr create-repository --region $(AWS_REGION) --repository-name $$repo_name >/dev/null; \
+			fi; \
 		fi; \
-	fi; \
-	docker tag $(DOCKER_REGISTRY)/pap-ui:$(DOCKER_VERSION) $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION); \
-	docker push $$REGISTRY/$$WEB_REPO:$(DOCKER_VERSION)
+		docker tag $(DOCKER_REGISTRY)/$$extra_svc:$(DOCKER_VERSION) $$REGISTRY/$$repo_name:$(DOCKER_VERSION); \
+		docker push $$REGISTRY/$$repo_name:$(DOCKER_VERSION); \
+	done
 
 docker-up: ## Start all services with Docker Compose (including agent-gateway)
 	@echo "Starting all services with Docker Compose..."
@@ -279,6 +303,7 @@ docker-up: ## Start all services with Docker Compose (including agent-gateway)
 	@echo "  Key Access:     localhost:50053 (gRPC)"
 	@echo "  Agent Gateway:  localhost:50054 (gRPC)"
 	@echo "  PAP API:        https://localhost:8090"
+	@echo "  PAP UI:         http://localhost:3000"
 	@echo "  Keycloak:       http://localhost:8080"
 	@echo "  PostgreSQL:     localhost:5432"
 	@echo "  Redis:          localhost:6379"
@@ -311,7 +336,7 @@ helm-minikube: ## Install Stratium via Helm on Minikube
 	deployment/helm/setup-minikube-ingress.sh
 
 # Multi-platform builds using buildx (for both ARM64 and AMD64)
-build-customer-multiplatform: setup-buildx build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access ## Build and push all images for ARM64+AMD64
+build-customer-multiplatform: setup-buildx build-customer-multiplatform-platform build-customer-multiplatform-key-manager build-customer-multiplatform-key-access build-customer-multiplatform-agent-gateway ## Build and push all images for ARM64+AMD64
 	@echo ""
 	@echo "✓ All multi-platform customer images built and pushed!"
 	@echo ""
@@ -375,6 +400,23 @@ build-customer-multiplatform-key-access: ## Build and push key-access (ARM64+AMD
 		--push \
 		.
 	@echo "✓ Multi-platform key-access-server customer image built and pushed"
+
+build-customer-multiplatform-agent-gateway: ## Build and push agent-gateway (ARM64+AMD64)
+	@echo "Building multi-platform agent-gateway-server customer image..."
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		--build-arg SERVICE_NAME=agent-gateway-server \
+		--build-arg SERVICE_PORT=50054 \
+		--build-arg BUILD_MODE=$(BUILD_MODE) \
+		--build-arg BUILD_FEATURES=agent-auth \
+		--build-arg BUILD_VERSION=$(CUSTOMER_VERSION) \
+		-t stratiumdata/agent-gateway:customer \
+		-t stratiumdata/agent-gateway:eval \
+		-t stratiumdata/agent-gateway:$(CUSTOMER_VERSION) \
+		-f deployment/docker/Dockerfile \
+		--push \
+		.
+	@echo "✓ Multi-platform agent-gateway-server customer image built and pushed"
 
 # Quick start
 quickstart: docker-down docker-build docker-up ## Rebuilds and restarts docker containers
@@ -448,4 +490,5 @@ clean: ## Clean build artifacts
 	rm -f go/cmd/key-access-client/key-access-client
 	rm -f go/cmd/pap-server/pap-server
 	rm -f go/cmd/pap-cli/pap-cli
+	rm -f go/cmd/agent-gateway-server/agent-gateway-server
 	@echo "Clean complete!"

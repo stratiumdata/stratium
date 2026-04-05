@@ -15,6 +15,7 @@ const (
 	PolicyLanguageXACML PolicyLanguage = "xacml"
 	PolicyLanguageOPA   PolicyLanguage = "opa"
 	PolicyLanguageJSON  PolicyLanguage = "json"
+	PolicyLanguageCedar PolicyLanguage = "cedar"
 )
 
 // PolicyEffect represents whether a policy allows or denies access
@@ -147,7 +148,7 @@ func (p *Policy) Validate() error {
 	if p.PolicyContent == "" {
 		return ErrInvalidPolicyContent
 	}
-	if p.Language != PolicyLanguageXACML && p.Language != PolicyLanguageOPA && p.Language != PolicyLanguageJSON {
+	if p.Language != PolicyLanguageXACML && p.Language != PolicyLanguageOPA && p.Language != PolicyLanguageJSON && p.Language != PolicyLanguageCedar {
 		return ErrInvalidPolicyLanguage
 	}
 	if p.Effect != PolicyEffectAllow && p.Effect != PolicyEffectDeny {

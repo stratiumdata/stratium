@@ -39,6 +39,7 @@ type EngineFactory struct {
 	opaEngine   PolicyEngine
 	xacmlEngine PolicyEngine
 	jsonEngine  PolicyEngine
+	cedarEngine PolicyEngine
 }
 
 // NewEngineFactory creates a new engine factory
@@ -47,6 +48,7 @@ func NewEngineFactory() *EngineFactory {
 		opaEngine:   NewOPAEngine(),
 		xacmlEngine: NewXACMLEngine(),
 		jsonEngine:  NewJSONEngine(),
+		cedarEngine: NewCedarEngine("Stratium"),
 	}
 }
 
@@ -62,6 +64,8 @@ func (f *EngineFactory) GetEngine(language models.PolicyLanguage) (PolicyEngine,
 		return f.xacmlEngine, nil
 	case models.PolicyLanguageJSON:
 		return f.jsonEngine, nil
+	case models.PolicyLanguageCedar:
+		return f.cedarEngine, nil
 	default:
 		return nil, models.ErrInvalidPolicyLanguage
 	}

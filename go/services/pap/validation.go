@@ -88,10 +88,10 @@ func validateEntitlementMatchRequest(req *models.EntitlementMatchRequest) error 
 
 func validatePolicyLanguage(language models.PolicyLanguage) error {
 	switch language {
-	case models.PolicyLanguageXACML, models.PolicyLanguageOPA, models.PolicyLanguageJSON:
+	case models.PolicyLanguageXACML, models.PolicyLanguageOPA, models.PolicyLanguageJSON, models.PolicyLanguageCedar:
 		return nil
 	default:
-		return fmt.Errorf("language must be one of xacml, opa, json")
+		return fmt.Errorf("language must be one of xacml, opa, json, cedar")
 	}
 }
 
