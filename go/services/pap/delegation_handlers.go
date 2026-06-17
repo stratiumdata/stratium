@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"stratium/features"
+	"stratium/pkg/classification"
 	"stratium/pkg/models"
 
 	"github.com/gin-gonic/gin"
@@ -113,24 +114,24 @@ func (s *Server) createDelegation(c *gin.Context) {
 	}
 
 	claims := jwt.MapClaims{
-		"sub":                   actor,
-		"agent_id":              agentID.String(),
-		"agent_trust_tier":      int(agent.TrustTier),
-		"tenant_id":             agent.TenantID,
-		"delegation_id":         delegationID.String(),
-		"approved_tools":        req.ApprovedTools,
-		"approved_actions":      approvedActions,
-		"max_action_tier":       req.MaxActionTier,
-		"classification_caps":   req.ClassificationCaps,
-		"resource_constraints":  nil,
-		"purpose":               req.Purpose,
-		"conversation_id":       req.ConversationID,
-		"parent_delegation_id":  "",
-		"root_delegation_id":    delegationID.String(),
-		"depth":                 0,
-		"chain_agent_ids":       []string{agentID.String()},
-		"iat":                   now.Unix(),
-		"exp":                   expiresAt.Unix(),
+		"sub":                  actor,
+		"agent_id":             agentID.String(),
+		"agent_trust_tier":     int(agent.TrustTier),
+		"tenant_id":            agent.TenantID,
+		"delegation_id":        delegationID.String(),
+		"approved_tools":       req.ApprovedTools,
+		"approved_actions":     approvedActions,
+		"max_action_tier":      req.MaxActionTier,
+		"classification_caps":  req.ClassificationCaps,
+		"resource_constraints": nil,
+		"purpose":              req.Purpose,
+		"conversation_id":      req.ConversationID,
+		"parent_delegation_id": "",
+		"root_delegation_id":   delegationID.String(),
+		"depth":                0,
+		"chain_agent_ids":      []string{agentID.String()},
+		"iat":                  now.Unix(),
+		"exp":                  expiresAt.Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -164,11 +165,11 @@ func (s *Server) createDelegation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"delegation_token":  tokenString,
-		"delegation_id":     delegationID.String(),
-		"expires_at":        expiresAt.Format(time.RFC3339),
+		"delegation_token":   tokenString,
+		"delegation_id":      delegationID.String(),
+		"expires_at":         expiresAt.Format(time.RFC3339),
 		"root_delegation_id": delegationID.String(),
-		"depth":             0,
+		"depth":              0,
 	})
 }
 
@@ -180,6 +181,7 @@ type checkActionRequest struct {
 	ActionTier             int    `json:"action_tier"`
 	ResourceID             string `json:"resource_id"`
 	ResourceClassification string `json:"resource_classification"`
+	ResourceHierarchy      string `json:"resource_hierarchy"`
 }
 
 // checkAction validates an action against a delegation's scope.
@@ -291,27 +293,22 @@ func (s *Server) checkAction(c *gin.Context) {
 		return
 	}
 
-	// Check classification caps
-	if req.ResourceClassification != "" {
-		caps := getClaimStringMap(claims, "classification_caps")
-		if len(caps) > 0 {
-			// Simple level comparison for commercial hierarchy
-			levels := map[string]int{"PUBLIC": 0, "INTERNAL": 1, "CONFIDENTIAL": 2, "RESTRICTED": 3}
-			for _, capLevel := range caps {
-				capNum := levels[capLevel]
-				resNum := levels[req.ResourceClassification]
-				if resNum > capNum {
-					c.JSON(http.StatusOK, gin.H{
-						"authorized": false,
-						"decision": gin.H{
-							"delegation_decision": "DENY",
-							"delegation_reason":   fmt.Sprintf("classification %s exceeds cap %s", req.ResourceClassification, capLevel),
-						},
-					})
-					return
-				}
-			}
-		}
+	// Classification caps — fail-closed, hierarchy-aware (shared canonical logic).
+	if allowed, reason := classification.CheckCap(
+		getClaimStringMap(claims, "classification_caps"),
+		map[string]string{
+			"classification": req.ResourceClassification,
+			"hierarchy":      req.ResourceHierarchy,
+		},
+	); !allowed {
+		c.JSON(http.StatusOK, gin.H{
+			"authorized": false,
+			"decision": gin.H{
+				"delegation_decision": "DENY",
+				"delegation_reason":   reason,
+			},
+		})
+		return
 	}
 
 	// All checks passed

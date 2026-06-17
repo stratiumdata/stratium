@@ -9,11 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"stratium/config"
 	"stratium/logging"
+	"stratium/pkg/classification"
 	"stratium/pkg/models"
 	"stratium/pkg/repository"
 
@@ -818,92 +818,10 @@ func (s *Server) evaluateDelegationScope(delegation *models.Delegation, req *Int
 		return false, fmt.Sprintf("tool %q not in delegation approved_tools", req.ToolName)
 	}
 
-	if allowed, reason := checkClassificationCap(delegation.ClassificationCaps, req.ResourceAttributes); !allowed {
+	if allowed, reason := classification.CheckCap(delegation.ClassificationCaps, req.ResourceAttributes); !allowed {
 		return false, reason
 	}
 
-	return true, ""
-}
-
-// classificationLevels mirrors the canonical hierarchies in pkg/cedar/hierarchy.go
-// (NATOHierarchy, CommercialHierarchy). Kept inline to avoid coupling the
-// agent-gateway runtime to the cedar policy-construction package. Update both
-// in lockstep if levels change.
-var classificationLevels = map[string][]string{
-	"nato":       {"UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET", "TOP-SECRET"},
-	"commercial": {"PUBLIC", "INTERNAL", "CONFIDENTIAL-COMMERCIAL", "RESTRICTED-COMMERCIAL", "HIGHLY-CONFIDENTIAL"},
-}
-
-// classificationIndex returns the integer rank of a level within a hierarchy
-// (case-insensitive). Returns -1 if the hierarchy or level is unknown.
-func classificationIndex(hierarchy, level string) int {
-	levels, ok := classificationLevels[strings.ToLower(hierarchy)]
-	if !ok {
-		return -1
-	}
-	for i, lvl := range levels {
-		if strings.EqualFold(lvl, level) {
-			return i
-		}
-	}
-	return -1
-}
-
-// checkClassificationCap enforces a delegation's per-hierarchy classification
-// caps against the resource being accessed.
-//
-// Semantics:
-//   - No caps on the delegation → allow.
-//   - Resource has no classification declared → allow (caller is not making a
-//     classification claim).
-//   - Classification declared but no hierarchy → DENY (ambiguity = deny; an
-//     attacker mustn't bypass caps by omitting the hierarchy attribute).
-//   - Cap exists for the resource's hierarchy → enforce
-//     resource_level ≤ cap_level using the canonical hierarchy ordering.
-//   - No cap for the resource's hierarchy → allow (delegation didn't constrain
-//     that hierarchy).
-//
-// Unknown hierarchy or level names produce a DENY with an explanatory reason
-// rather than silently allowing.
-func checkClassificationCap(caps map[string]string, resourceAttrs map[string]string) (bool, string) {
-	if len(caps) == 0 {
-		return true, ""
-	}
-
-	resourceLevel, hasLevel := resourceAttrs["classification"]
-	resourceHierarchy, hasHierarchy := resourceAttrs["hierarchy"]
-
-	if !hasLevel {
-		return true, ""
-	}
-	if !hasHierarchy {
-		return false, "resource classification declared without a hierarchy attribute (ambiguous)"
-	}
-
-	capLevel, hasCap := caps[strings.ToLower(resourceHierarchy)]
-	if !hasCap {
-		// Try original case as fallback (caps are stored as-supplied by caller).
-		capLevel, hasCap = caps[resourceHierarchy]
-	}
-	if !hasCap {
-		return true, ""
-	}
-
-	resourceIdx := classificationIndex(resourceHierarchy, resourceLevel)
-	if resourceIdx < 0 {
-		return false, fmt.Sprintf("unknown classification level %q for hierarchy %q",
-			resourceLevel, resourceHierarchy)
-	}
-	capIdx := classificationIndex(resourceHierarchy, capLevel)
-	if capIdx < 0 {
-		return false, fmt.Sprintf("delegation cap %q is not a known level in hierarchy %q",
-			capLevel, resourceHierarchy)
-	}
-
-	if resourceIdx > capIdx {
-		return false, fmt.Sprintf("resource classification %s exceeds delegation cap %s (hierarchy %q)",
-			resourceLevel, capLevel, resourceHierarchy)
-	}
 	return true, ""
 }
 
