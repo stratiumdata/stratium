@@ -23,3 +23,19 @@ the Agent Gateway and credentialed via Keycloak identity brokering.
 ## Walkthrough
 
 Run `bash seed-catalog-demo.sh` for the scoped delegation and expected allow/deny outcomes.
+
+## Security notes
+
+- **Brokered token storage is intentional.** The GitHub IdP sets `storeToken: true` and
+  `addReadTokenRoleOnCreate: true` so the catalog can retrieve the user's GitHub token via
+  `/realms/stratium/broker/github/token`. This means GitHub access tokens are stored in
+  Keycloak's federated-identity store. This is the documented trade-off of the Keycloak
+  brokering approach (the tokens live in the same trust boundary that already holds identity
+  tokens). For a production/regulated tier, scope the `broker` `read-token` role to the
+  specific client(s) that need it instead of auto-granting on creation, and define a token
+  rotation/revocation policy.
+- **`trustEmail` is off.** First-broker-login verifies account ownership before linking a
+  GitHub identity to an existing user — do not enable `trustEmail` for this IdP.
+- **Scope is `repo`.** The catalog's write/delete tools require the classic `repo` scope.
+  Restrict the catalog delegation's `approved_tools` to read-only tools where write access
+  is not needed, so the ExecuteAction gate — not the OAuth scope — bounds what agents can do.

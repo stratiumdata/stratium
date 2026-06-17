@@ -26,7 +26,7 @@ type GitHubConfig struct {
 
 // Load reads and validates the catalog config file, applying defaults.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- operator-supplied config path (CLI flag), not untrusted input
 	if err != nil {
 		return nil, fmt.Errorf("read catalog config: %w", err)
 	}

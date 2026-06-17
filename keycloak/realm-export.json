@@ -2237,12 +2237,12 @@
       "enabled": true,
       "storeToken": true,
       "addReadTokenRoleOnCreate": true,
-      "trustEmail": true,
+      "trustEmail": false,
       "firstBrokerLoginFlowAlias": "first broker login",
       "config": {
         "clientId": "${GITHUB_OAUTH_CLIENT_ID}",
         "clientSecret": "${GITHUB_OAUTH_CLIENT_SECRET}",
-        "defaultScope": "repo read:org",
+        "defaultScope": "repo",
         "useJwksUrl": "true"
       }
     }
