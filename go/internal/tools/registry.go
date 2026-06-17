@@ -9,17 +9,25 @@ import (
 	"path/filepath"
 
 	"stratium/internal/auth"
+	"stratium/internal/catalog"
+	"stratium/internal/catalog/github"
 	"stratium/internal/gateway"
 	"stratium/internal/mcp"
 )
 
 // Registry holds tool definitions and the shared dependencies they need.
 type Registry struct {
-	gateway      *gateway.Client
-	auth         *auth.Provider
-	logger       *log.Logger
-	session      *Session
-	subAgentCfg  *SubAgentConfig
+	gateway     *gateway.Client
+	auth        *auth.Provider
+	logger      *log.Logger
+	session     *Session
+	subAgentCfg *SubAgentConfig
+
+	// SaaS tool catalog (opt-in; nil/disabled by default)
+	catalog    *catalog.Config
+	creds      catalog.CredentialProvider
+	classifier *catalog.Classifier
+	gh         github.Client
 }
 
 // Session holds per-session state (cached tokens, delegation info).
@@ -73,6 +81,7 @@ func (r *Registry) RegisterAll(server *mcp.Server) {
 	r.registerDelegationTools(server)
 	r.registerActionTools(server)
 	r.registerSubAgentTools(server)
+	r.registerCatalogTools(server)
 }
 
 // parseArgs is a helper to unmarshal tool arguments into a typed struct.

@@ -5,10 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	"stratium/internal/auth"
+	"stratium/internal/catalog"
+	"stratium/internal/catalog/github"
 	"stratium/internal/gateway"
 	"stratium/internal/mcp"
 	"stratium/internal/tools"
@@ -21,6 +24,7 @@ func main() {
 	clientID := flag.String("client-id", envOrDefault("STRATIUM_CLIENT_ID", "stratium-mcp"), "OIDC client ID")
 	tokenCache := flag.String("token-cache", envOrDefault("STRATIUM_TOKEN_CACHE", ""), "Token cache file path (default: ~/.stratium/token.json)")
 	tlsCA := flag.String("tls-ca", envOrDefault("STRATIUM_TLS_CA", ""), "TLS CA certificate file (empty = insecure)")
+	catalogCfg := flag.String("catalog-config", envOrDefault("STRATIUM_CATALOG_CONFIG", ""), "Path to SaaS tool catalog config (JSON). Empty = catalog disabled.")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "[stratium-mcp] ", log.LstdFlags)
@@ -42,12 +46,12 @@ func main() {
 	case "audit":
 		runAuditMode(gwClient, logger)
 	default:
-		runMCPMode(gwClient, logger, *keycloakURL, *clientID, *tokenCache, *gatewayAddr)
+		runMCPMode(gwClient, logger, *keycloakURL, *clientID, *tokenCache, *gatewayAddr, *catalogCfg)
 	}
 }
 
 // runMCPMode runs the full interactive MCP server (default mode).
-func runMCPMode(gwClient *gateway.Client, logger *log.Logger, keycloakURL, clientID, tokenCache, gatewayAddr string) {
+func runMCPMode(gwClient *gateway.Client, logger *log.Logger, keycloakURL, clientID, tokenCache, gatewayAddr, catalogCfgPath string) {
 	authProvider := auth.NewProvider(auth.Config{
 		KeycloakURL: keycloakURL,
 		ClientID:    clientID,
@@ -57,9 +61,22 @@ func runMCPMode(gwClient *gateway.Client, logger *log.Logger, keycloakURL, clien
 	server := mcp.NewServer(logger)
 
 	registry := tools.NewRegistry(gwClient, authProvider, logger)
+
+	if catalogCfgPath != "" {
+		cfg, err := catalog.Load(catalogCfgPath)
+		if err != nil {
+			logger.Fatalf("failed to load catalog config: %v", err)
+		}
+		if cfg.Enabled {
+			broker := &catalog.KeycloakBroker{RealmURL: keycloakURL, HTTP: http.DefaultClient}
+			ghClient := github.NewRESTClient(cfg.GitHub.BaseURL, http.DefaultClient)
+			registry.SetCatalog(cfg, broker, cfg.Classifier(), ghClient)
+		}
+	}
+
 	registry.RegisterAll(server)
 
-	logger.Printf("stratium-mcp ready (gateway=%s, tools=%d)", gatewayAddr, 14)
+	logger.Printf("stratium-mcp ready (gateway=%s)", gatewayAddr)
 
 	if err := server.Run(); err != nil {
 		logger.Fatalf("server error: %v", err)
