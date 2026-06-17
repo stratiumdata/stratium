@@ -67,3 +67,38 @@ func TestRESTClientAPIError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "404")
 }
+
+func TestRESTClientSearchCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Contains(t, r.URL.RawQuery, "repo:acme/app")
+		_, _ = w.Write([]byte(`{"items":[{"path":"main.go","repository":{"full_name":"acme/app"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewRESTClient(srv.URL, srv.Client())
+	hits, err := c.SearchCode(context.Background(), "gho_live", "acme/app", "func+main")
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "main.go", hits[0].Path)
+	assert.Equal(t, "acme/app", hits[0].Repo)
+}
+
+func TestRESTClientSearchCodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewRESTClient(srv.URL, srv.Client())
+	_, err := c.SearchCode(context.Background(), "gho_live", "acme/app", "funcmain")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "422")
+}
+
+func TestRESTClientNilHTTPClient(t *testing.T) {
+	// NewRESTClient with nil http client should use http.DefaultClient (not panic).
+	c := NewRESTClient("https://api.github.com", nil)
+	assert.NotNil(t, c)
+}

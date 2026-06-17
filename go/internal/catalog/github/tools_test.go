@@ -131,3 +131,110 @@ func TestMissingRequiredArgErrors(t *testing.T) {
 	_, err := specByName(t, "github_read_file").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
 	require.Error(t, err)
 }
+
+func TestSearchCodeAllowed(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: true}}
+	gh := &fakeGH{}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "query": "func main"})
+	out, err := specByName(t, "github_search_code").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+	assert.Equal(t, true, out["authorized"])
+	assert.Equal(t, "github_search_code", auth.got.ToolName)
+	assert.Equal(t, 1, auth.got.ActionTier)
+}
+
+func TestSearchCodeDenied(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: false, Reason: "tier exceeds cap"}}
+	gh := &fakeGH{}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/secret": {Classification: "CONFIDENTIAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/secret", "query": "password"})
+	out, err := specByName(t, "github_search_code").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+	assert.Equal(t, false, out["authorized"])
+}
+
+func TestSearchCodeMissingArgs(t *testing.T) {
+	deps := newDeps(&fakeAuth{dec: catalog.AuthDecision{Authorized: true}}, &fakeGH{}, nil, nil)
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app"}) // no query
+	_, err := specByName(t, "github_search_code").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.Error(t, err)
+}
+
+func TestCreateIssueAllowed(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: true}}
+	gh := &fakeGH{}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "title": "Bug report", "body": "details"})
+	out, err := specByName(t, "github_create_issue").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+	assert.Equal(t, true, out["authorized"])
+	assert.Equal(t, 1, out["issue_number"])
+	assert.Equal(t, "github_create_issue", auth.got.ToolName)
+	assert.Equal(t, 2, auth.got.ActionTier)
+}
+
+func TestCreateIssueDenied(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: false, Reason: "tool not in approved scope"}}
+	gh := &fakeGH{}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "title": "Bug"})
+	out, err := specByName(t, "github_create_issue").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+	assert.Equal(t, false, out["authorized"])
+}
+
+func TestCreateIssueMissingArgs(t *testing.T) {
+	deps := newDeps(&fakeAuth{dec: catalog.AuthDecision{Authorized: true}}, &fakeGH{}, nil, nil)
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app"}) // no title
+	_, err := specByName(t, "github_create_issue").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.Error(t, err)
+}
+
+func TestDeleteBranchAllowed(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: true}}
+	gh := &fakeGH{}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "branch": "feature-x"})
+	out, err := specByName(t, "github_delete_branch").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+	assert.Equal(t, true, out["authorized"])
+	assert.Equal(t, "feature-x", out["deleted_branch"])
+	assert.Equal(t, "github_delete_branch", auth.got.ToolName)
+	assert.Equal(t, 4, auth.got.ActionTier)
+}
+
+func TestDeleteBranchDenied(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: false, Reason: "tier 4 exceeds cap 2"}}
+	gh := &fakeGH{}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "branch": "main"})
+	out, err := specByName(t, "github_delete_branch").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+	assert.Equal(t, false, out["authorized"])
+}
+
+func TestDeleteBranchMissingArgs(t *testing.T) {
+	deps := newDeps(&fakeAuth{dec: catalog.AuthDecision{Authorized: true}}, &fakeGH{}, nil, nil)
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app"}) // no branch
+	_, err := specByName(t, "github_delete_branch").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.Error(t, err)
+}
