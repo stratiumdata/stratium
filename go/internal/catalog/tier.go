@@ -25,7 +25,11 @@ func AssessTier(action string) int {
 // action assesses to. A tool may declare a higher tier than necessary, but never
 // a lower one — that would let it slip a sensitive action under a delegation cap.
 func GuardTier(action string, declared int) error {
-	if assessed := AssessTier(action); declared < assessed {
+	assessed := AssessTier(action)
+	if assessed == 0 {
+		return fmt.Errorf("action %q is not a recognized catalog action", action)
+	}
+	if declared < assessed {
 		return fmt.Errorf("tool declares tier %d but action %q assesses to tier %d", declared, action, assessed)
 	}
 	return nil

@@ -31,4 +31,7 @@ func TestGuardTier(t *testing.T) {
 	t.Run("declared below assessed fails (anti-spoofing)", func(t *testing.T) {
 		require.Error(t, GuardTier("delete", 1))
 	})
+	t.Run("unknown action is rejected", func(t *testing.T) {
+		require.Error(t, GuardTier("frobnicate", 0))
+	})
 }

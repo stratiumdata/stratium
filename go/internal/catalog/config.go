@@ -10,6 +10,7 @@ import (
 // Config is the opt-in SaaS catalog configuration, loaded from a JSON file
 // (default off). Path comes from the -catalog-config flag / STRATIUM_CATALOG_CONFIG.
 type Config struct {
+	// Enabled controls whether the catalog is active; callers MUST check Enabled before using the catalog.
 	Enabled   bool         `json:"enabled"`
 	Providers []string     `json:"providers"`
 	GitHub    GitHubConfig `json:"github"`

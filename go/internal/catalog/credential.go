@@ -46,8 +46,9 @@ type KeycloakBroker struct {
 }
 
 func (b *KeycloakBroker) GetToken(ctx context.Context, subjectToken, provider string) (string, error) {
-	if b.HTTP == nil {
-		b.HTTP = http.DefaultClient
+	client := b.HTTP
+	if client == nil {
+		client = http.DefaultClient
 	}
 	endpoint := strings.TrimRight(b.RealmURL, "/") + "/broker/" + url.PathEscape(provider) + "/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -57,13 +58,16 @@ func (b *KeycloakBroker) GetToken(ctx context.Context, subjectToken, provider st
 	req.Header.Set("Authorization", "Bearer "+subjectToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := b.HTTP.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("broker request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read broker response body: %w", err)
+	}
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return parseBrokerToken(resp.Header.Get("Content-Type"), body)

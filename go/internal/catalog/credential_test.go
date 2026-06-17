@@ -4,6 +4,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,17 +41,20 @@ func TestKeycloakBrokerGetToken(t *testing.T) {
 		assert.Equal(t, "gho_live", tok)
 	})
 
-	t.Run("401 maps to ErrCredentialUnavailable", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-		}))
-		defer srv.Close()
+	for _, status := range []int{401, 403, 404} {
+		status := status
+		t.Run(fmt.Sprintf("%d maps to ErrCredentialUnavailable", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
 
-		b := &KeycloakBroker{RealmURL: srv.URL, HTTP: srv.Client()}
-		_, err := b.GetToken(context.Background(), "kc-access-token", "github")
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, ErrCredentialUnavailable))
-	})
+			b := &KeycloakBroker{RealmURL: srv.URL, HTTP: srv.Client()}
+			_, err := b.GetToken(context.Background(), "kc-access-token", "github")
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrCredentialUnavailable))
+		})
+	}
 }
 
 func TestParseBrokerToken(t *testing.T) {
@@ -72,5 +76,6 @@ func TestParseBrokerToken(t *testing.T) {
 	t.Run("empty body errors", func(t *testing.T) {
 		_, err := parseBrokerToken("application/json", []byte(`{}`))
 		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrCredentialUnavailable))
 	})
 }
