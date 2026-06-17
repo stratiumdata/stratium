@@ -19,6 +19,10 @@ func getTestConfig() *config.Config {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	// Tests rely on the in-memory sample dataset; ensure seeding is on even when
+	// LoadFromEnv falls back to a zero-value config (e.g. CORS validation fails
+	// in the bare test environment).
+	cfg.Platform.SeedSampleData = true
 	return cfg
 }
 
