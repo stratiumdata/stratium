@@ -70,21 +70,27 @@ func (r *Registry) registerCatalogTools(server *mcp.Server) {
 		Class:  r.classifier,
 		Client: r.gh,
 	}
-	for _, spec := range github.Specs() {
+	specs := github.Specs()
+	for _, spec := range specs {
 		if err := catalog.GuardTier(spec.Action, spec.Tier); err != nil {
 			r.logger.Fatalf("catalog tool %s failed tier guard: %v", spec.Tool.Name, err)
 		}
 		spec := spec // capture
 		server.RegisterTool(spec.Tool, func(args json.RawMessage) (*mcp.ToolCallResult, error) {
-			if err := r.ensureAuth(context.Background()); err != nil {
+			// MCP tool handlers receive no context; use Background like the other
+			// stratium-mcp tools. TODO: plumb a deadline if the transport exposes one.
+			ctx := context.Background()
+			if err := r.ensureAuth(ctx); err != nil {
 				return nil, err
 			}
-			out, err := spec.Handler(context.Background(), deps, r.accessToken(), r.session.DelegationToken, args)
+			out, err := spec.Handler(ctx, deps, r.accessToken(), r.session.DelegationToken, args)
 			if err != nil {
 				return nil, err
 			}
+			// Denial (authorized:false) is returned as a SUCCESS result so the LLM
+			// sees the structured reason; check out["authorized"] to detect denial.
 			return mcp.SuccessResult(out)
 		})
 	}
-	r.logger.Printf("catalog enabled: registered %d GitHub tools", len(github.Specs()))
+	r.logger.Printf("catalog enabled: registered %d GitHub tools", len(specs))
 }
