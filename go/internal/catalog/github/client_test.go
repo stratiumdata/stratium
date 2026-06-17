@@ -102,3 +102,42 @@ func TestRESTClientNilHTTPClient(t *testing.T) {
 	c := NewRESTClient("https://api.github.com", nil)
 	assert.NotNil(t, c)
 }
+
+func TestRESTClientCreateIssueError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewRESTClient(srv.URL, srv.Client())
+	_, err := c.CreateIssue(context.Background(), "gho_live", "acme/app", "Bug", "body")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "422")
+}
+
+func TestRESTClientDeleteBranchError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewRESTClient(srv.URL, srv.Client())
+	err := c.DeleteBranch(context.Background(), "gho_live", "acme/app", "missing-branch")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "404")
+}
+
+func TestRESTClientReadFileNoRef(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "", r.URL.Query().Get("ref"))
+		_, _ = w.Write([]byte(`{"content":"world","encoding":""}`))
+	}))
+	defer srv.Close()
+
+	c := NewRESTClient(srv.URL, srv.Client())
+	content, err := c.ReadFile(context.Background(), "gho_live", "acme/app", "README.md", "")
+	require.NoError(t, err)
+	assert.Equal(t, "world", content)
+}
