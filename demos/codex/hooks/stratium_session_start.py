@@ -24,8 +24,25 @@ import os
 import ssl
 import sys
 import urllib.request
+from urllib.parse import urlparse
 
 DELEGATION_FILE = "/tmp/.stratium-delegation.json"
+
+
+def _ssl_context_for(url: str) -> ssl.SSLContext:
+    """Return an SSL context for *url*.
+
+    For loopback hosts (local dev with self-signed certs) verification is
+    disabled. For all other hosts, the system trust store is used unless
+    STRATIUM_TLS_CA points to a custom CA bundle.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    ctx = ssl.create_default_context(cafile=os.environ.get("STRATIUM_TLS_CA"))
+    if host in ("localhost", "127.0.0.1", "::1"):
+        # Local dev only: self-signed loopback certs are expected.
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def main():
@@ -78,10 +95,7 @@ def main():
         "ttl_seconds": ttl,
     }).encode()
 
-    # Create SSL context that skips verification (self-signed certs in dev)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = _ssl_context_for(f"{pap_url}/api/v1/delegations")
 
     try:
         req = urllib.request.Request(
@@ -127,11 +141,15 @@ def main():
 
 
 def _write_delegation_file(token: str):
-    """Write delegation token to a file readable by PreToolUse hook."""
+    """Write delegation token to a file readable by PreToolUse hook.
+
+    Uses O_CREAT with mode 0o600 so the file is never briefly world-readable
+    (avoids the TOCTOU window between open() and a subsequent chmod).
+    """
     try:
-        with open(DELEGATION_FILE, "w") as f:
+        fd = os.open(DELEGATION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump({"delegation_token": token}, f)
-        os.chmod(DELEGATION_FILE, 0o600)
     except Exception:
         pass  # Best effort
 

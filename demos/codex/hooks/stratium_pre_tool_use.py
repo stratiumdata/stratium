@@ -19,8 +19,25 @@ import os
 import ssl
 import sys
 import urllib.request
+from urllib.parse import urlparse
 
 DELEGATION_FILE = "/tmp/.stratium-delegation.json"
+
+
+def _ssl_context_for(url: str) -> ssl.SSLContext:
+    """Return an SSL context for *url*.
+
+    For loopback hosts (local dev with self-signed certs) verification is
+    disabled. For all other hosts, the system trust store is used unless
+    STRATIUM_TLS_CA points to a custom CA bundle.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    ctx = ssl.create_default_context(cafile=os.environ.get("STRATIUM_TLS_CA"))
+    if host in ("localhost", "127.0.0.1", "::1"):
+        # Local dev only: self-signed loopback certs are expected.
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 # Patterns for classifying shell commands into action tiers.
@@ -129,10 +146,7 @@ def main():
         "resource_id": command[:200],
     }).encode()
 
-    # SSL context (skip verification for self-signed certs)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = _ssl_context_for(f"{pap_url}/api/v1/actions/check")
 
     try:
         req = urllib.request.Request(

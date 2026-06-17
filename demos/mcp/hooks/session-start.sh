@@ -59,8 +59,7 @@ emit_success() {
 # If a delegation token already exists (pre-created or from MCP server), validate and keep it
 if [ -n "${STRATIUM_DELEGATION_TOKEN:-}" ]; then
     mkdir -p "$(dirname "$DELEGATION_FILE")"
-    echo "{\"delegation_token\": \"$STRATIUM_DELEGATION_TOKEN\"}" > "$DELEGATION_FILE"
-    chmod 600 "$DELEGATION_FILE"
+    ( umask 077; printf '{"delegation_token": "%s"}\n' "$STRATIUM_DELEGATION_TOKEN" > "$DELEGATION_FILE" )
     emit_success "preset" "see token" "env-var"
     exit 0
 fi
@@ -153,15 +152,8 @@ fi
 
 # Write delegation file
 mkdir -p "$(dirname "$DELEGATION_FILE")"
-cat > "$DELEGATION_FILE" << EOF
-{
-  "delegation_token": "$TOKEN",
-  "delegation_id": "$DELEGATION_ID",
-  "agent_id": "$AGENT_ID",
-  "expires_at": "$EXPIRES"
-}
-EOF
-chmod 600 "$DELEGATION_FILE"
+( umask 077; printf '{"delegation_token": "%s", "delegation_id": "%s", "agent_id": "%s", "expires_at": "%s"}\n' \
+    "$TOKEN" "$DELEGATION_ID" "$AGENT_ID" "$EXPIRES" > "$DELEGATION_FILE" )
 
 echo "[stratium] SessionStart: delegation created (id: ${DELEGATION_ID:0:8}..., expires: $EXPIRES)" >&2
 emit_success "$DELEGATION_ID" "$EXPIRES" "newly-created"
