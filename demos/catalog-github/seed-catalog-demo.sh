@@ -15,7 +15,7 @@ This demo expects a delegation scoped to:
 
 Expected outcomes:
   1. github_read_file on an INTERNAL repo  -> ALLOWED
-  2. github_read_file on a CONFIDENTIAL repo -> DENIED (classification > cap)
+  2. github_read_file on a CONFIDENTIAL-COMMERCIAL repo -> DENIED (classification > cap)
   3. github_delete_branch on any repo      -> DENIED (tool not in scope; tier 4 > cap)
 EOF
 
@@ -31,7 +31,7 @@ cat <<'EOF'
   "github": {
     "repo_classifications": {
       "your-org/internal-svc":  { "classification": "INTERNAL",     "hierarchy": "commercial" },
-      "your-org/secret-svc":    { "classification": "CONFIDENTIAL", "hierarchy": "commercial" }
+      "your-org/secret-svc":    { "classification": "CONFIDENTIAL-COMMERCIAL", "hierarchy": "commercial" }
     },
     "default_classification": { "classification": "INTERNAL", "hierarchy": "commercial" }
   }
