@@ -17,8 +17,8 @@ type Config struct {
 }
 
 // GitHubConfig configures the GitHub catalog provider.
+// Note: in v1 the Keycloak IdP alias and the resource "provider" name are fixed to "github".
 type GitHubConfig struct {
-	BrokerAlias           string                    `json:"broker_alias"`
 	BaseURL               string                    `json:"base_url"`
 	DefaultClassification *Classification           `json:"default_classification"`
 	RepoClassifications   map[string]Classification `json:"repo_classifications"`
@@ -33,9 +33,6 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse catalog config: %w", err)
-	}
-	if cfg.GitHub.BrokerAlias == "" {
-		cfg.GitHub.BrokerAlias = "github"
 	}
 	if cfg.GitHub.BaseURL == "" {
 		cfg.GitHub.BaseURL = "https://api.github.com"

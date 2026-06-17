@@ -27,7 +27,6 @@ func TestLoadConfig(t *testing.T) {
 	cfg, err := Load(path)
 	require.NoError(t, err)
 	assert.True(t, cfg.Enabled)
-	assert.Equal(t, "github", cfg.GitHub.BrokerAlias)             // default applied
 	assert.Equal(t, "https://api.github.com", cfg.GitHub.BaseURL) // default applied
 
 	c := cfg.Classifier()
