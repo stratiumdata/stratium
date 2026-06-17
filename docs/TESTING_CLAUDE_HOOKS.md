@@ -1387,6 +1387,118 @@ console.log('PASS: version', pkg.version, 'matches tag', process.env.GITHUB_REF_
 
 ---
 
+## Bash-Based Hooks (Alternative to Node.js Package)
+
+In addition to the `sdk/claude-hooks` Node.js package, there are lightweight bash-based hooks in `demos/mcp/hooks/` that provide the same enforcement without requiring npm install. These are especially useful for quick testing or environments where Node.js isn't available.
+
+### Files
+
+| Hook | Script | Description |
+|------|--------|-------------|
+| `SessionStart` | `demos/mcp/hooks/session-start.sh` | Bootstraps delegation via PAP REST API, writes token to `~/.stratium/delegation.json` |
+| `PreToolUse` | `demos/mcp/hooks/pre-tool-use.sh` | Reads delegation from file, checks authorization via Agent Gateway gRPC |
+
+### Key Differences from Node.js Package
+
+| Aspect | `sdk/claude-hooks` (Node.js) | `demos/mcp/hooks/` (Bash) |
+|--------|------------------------------|---------------------------|
+| Session init | `UserPromptSubmit` hook (runs on first prompt) | `SessionStart` hook (runs on session start/resume) |
+| Delegation creation | Via gRPC (`createDelegation`) | Via PAP REST (`POST /api/v1/delegations`) |
+| Auth check | Via gRPC (`ExecuteAction`) | Via gRPC (`grpcurl`) |
+| Dependencies | Node.js, npm | bash, curl, jq, grpcurl |
+| Fail behavior | Configurable (fail_open/fail_closed per project) | **Always fail-closed** |
+| Delegation storage | `/tmp/stratium-session-<id>.json` | `~/.stratium/delegation.json` |
+| CLAUDE.md parsing | Full `stratium:` block parsing | None (uses env vars) |
+
+### Quick Test (Bash Hooks)
+
+> **All commands must run from the stratium project root** (the directory containing `demos/`).
+> Run `cd /path/to/stratium` (e.g., `cd ~/Development/stratium`) before starting.
+
+```bash
+cd ~/Development/stratium   # adjust to your clone location
+
+# 1. SessionStart — creates delegation via PAP REST
+echo '{"hook_event_name":"SessionStart"}' \
+  | STRATIUM_PAP_URL="https://localhost:8090" \
+    STRATIUM_AGENT_ID="$(curl -sk https://localhost:8090/api/v1/agents \
+      -H "Authorization: Bearer $(cat ~/.stratium/token.json | jq -r '.access_token')" \
+      | jq -r '.agents[0].id')" \
+    STRATIUM_AUTH_TOKEN="$(cat ~/.stratium/token.json | jq -r '.access_token')" \
+    bash demos/mcp/hooks/session-start.sh 2>&1
+# Expected: "[stratium] SessionStart: delegation created (id: ...)"
+
+# 2. Verify delegation file
+cat ~/.stratium/delegation.json | jq .
+
+# 3. PreToolUse ALLOW — read file
+echo '{"tool_name":"Read","tool_input":{"path":"README.md"}}' \
+  | STRATIUM_GATEWAY_ADDRESS="localhost:50054" \
+    STRATIUM_TLS_CA="config/examples/certs/ca.crt" \
+    bash demos/mcp/hooks/pre-tool-use.sh 2>/dev/null
+echo "Exit: $?"  # → 0 (ALLOW)
+
+# 4. PreToolUse DENY — destructive command
+echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' \
+  | STRATIUM_GATEWAY_ADDRESS="localhost:50054" \
+    STRATIUM_TLS_CA="config/examples/certs/ca.crt" \
+    bash demos/mcp/hooks/pre-tool-use.sh 2>/dev/null
+echo "Exit: $?"  # → 2 (DENY)
+
+# 5. PreToolUse DENY — no delegation file (fail-closed)
+mv ~/.stratium/delegation.json ~/.stratium/delegation.json.bak
+echo '{"tool_name":"Read","tool_input":{}}' \
+  | STRATIUM_DELEGATION_TOKEN="" \
+    bash demos/mcp/hooks/pre-tool-use.sh 2>/dev/null
+echo "Exit: $?"  # → 2 (DENY — SessionStart never ran)
+mv ~/.stratium/delegation.json.bak ~/.stratium/delegation.json
+```
+
+### Environment Variables (Bash Hooks)
+
+**SessionStart (`session-start.sh`):**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `STRATIUM_PAP_URL` | Yes | PAP server URL (e.g., `https://localhost:8090`) |
+| `STRATIUM_AGENT_ID` | Yes | Registered agent UUID |
+| `STRATIUM_AUTH_TOKEN` | Yes* | OIDC access token (*falls back to `~/.stratium/token.json`) |
+| `STRATIUM_APPROVED_TOOLS` | No | Comma-separated tools (default: `read_file,write_file,edit_file,bash,list_files,grep_search`) |
+| `STRATIUM_MAX_ACTION_TIER` | No | 0-4 (default: 2) |
+| `STRATIUM_CLASSIFICATION_CAP` | No | Default: `INTERNAL` |
+| `STRATIUM_TTL_SECONDS` | No | Delegation TTL (default: 14400 / 4 hours) |
+| `STRATIUM_DELEGATION_TOKEN` | No | Pre-created token (skips PAP call) |
+
+**PreToolUse (`pre-tool-use.sh`):**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `STRATIUM_GATEWAY_ADDRESS` | Yes | Agent Gateway gRPC address (default: `localhost:50054`) |
+| `STRATIUM_TLS_CA` | No | TLS CA cert path (empty = plaintext) |
+
+### Important: Fail-Closed Behavior
+
+The bash `pre-tool-use.sh` now fails **closed** in all error cases:
+
+- No delegation file → DENY
+- Gateway unreachable → DENY
+- Token expired → DENY
+
+This differs from the original demo behavior (fail-open). If you register PreToolUse without also registering SessionStart, **all tool calls will be denied** because the delegation file won't exist.
+
+**Always register both hooks together:**
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/demos/mcp/hooks/session-start.sh" }] }],
+    "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/demos/mcp/hooks/pre-tool-use.sh" }] }]
+  }
+}
+```
+
+---
+
 ## Cleanup
 
 ```bash
@@ -1401,6 +1513,9 @@ rm -rf /tmp/stratium-test-project /tmp/CLAUDE.md /tmp/mcp-test-claude.md
 rm -f ~/.claude/stratium.json
 rm -f ~/.claude/stratium-agent.json
 rm -f ~/.claude/stratium-tokens.json
+
+# Remove bash hook delegation file
+rm -f ~/.stratium/delegation.json
 
 # Remove keychain entries (Phase 2)
 # macOS Keychain — remove via Keychain Access app or:
@@ -1445,3 +1560,9 @@ stratium-hooks configure --gateway localhost:50054  # re-run reconfigure to clea
 | Webhook on DENY (Slack) | background curl spawned | 2b.7 |
 | OS keychain available | tokens stored in keychain + file | 2b.1 |
 | OS keychain unavailable | tokens stored in file only | 2b.1 |
+| **Bash hooks** | | |
+| SessionStart creates delegation via PAP REST | delegation.json written | Bash |
+| PreToolUse reads delegation file, ALLOW | 0 | Bash |
+| PreToolUse reads delegation file, DENY (tier exceeded) | 2 | Bash |
+| PreToolUse no delegation file (fail-closed) | 2 | Bash |
+| PreToolUse gateway unreachable (fail-closed) | 2 | Bash |

@@ -33,18 +33,35 @@ case "$TOOL_NAME" in
         ;;
 esac
 
-# Read session state from the MCP server's token cache
-SESSION_FILE="$HOME/.stratium/token.json"
-if [ ! -f "$SESSION_FILE" ]; then
-    # No session — can't enforce. Fail open for now.
-    exit 0
+# Read delegation token from session state (written by SessionStart hook or MCP server)
+DELEGATION_FILE="$HOME/.stratium/delegation.json"
+DELEGATION_TOKEN=""
+
+if [ -f "$DELEGATION_FILE" ]; then
+    DELEGATION_TOKEN=$(jq -r '.delegation_token // empty' "$DELEGATION_FILE" 2>/dev/null)
 fi
 
-DELEGATION_TOKEN=$(cat "$HOME/.stratium/delegation.json" 2>/dev/null | jq -r '.delegation_token // empty')
+# Also check env var (backward compat with MCP server flow)
 if [ -z "$DELEGATION_TOKEN" ]; then
-    # No active delegation — can't enforce. Fail open.
-    exit 0
+    DELEGATION_TOKEN="${STRATIUM_DELEGATION_TOKEN:-}"
 fi
+
+if [ -z "$DELEGATION_TOKEN" ]; then
+    # No delegation — fail closed. SessionStart hook may not have run.
+    cat << 'DENY_EOF'
+{
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "No Stratium delegation token. SessionStart hook may not have run. All actions denied (fail-closed)."
+    }
+}
+DENY_EOF
+    exit 2
+fi
+
+# Load OIDC token for gRPC auth headers
+SESSION_FILE="$HOME/.stratium/token.json"
 
 # Map tool name to action tier
 classify_tool() {
@@ -165,8 +182,17 @@ RESULT=$(grpcurl $GRPC_FLAGS \
     "$GATEWAY" agent_gateway.AgentGatewayService/ExecuteAction 2>/dev/null)
 
 if [ $? -ne 0 ]; then
-    # Gateway unreachable — fail open for demo
-    exit 0
+    # Gateway unreachable — fail closed
+    cat << 'DENY_EOF'
+{
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "Stratium Agent Gateway unreachable. All actions denied (fail-closed)."
+    }
+}
+DENY_EOF
+    exit 2
 fi
 
 AUTHORIZED=$(echo "$RESULT" | jq -r '.authorized // false')

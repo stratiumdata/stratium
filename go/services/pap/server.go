@@ -158,6 +158,9 @@ func (s *Server) setupRoutes(config config.CORSConfig) {
 
 		// Agent registry routes (only when agent-auth feature is enabled)
 		s.registerAgentRoutes(v1)
+
+		// Delegation management + action check routes (REST interface for Codex hooks)
+		s.registerDelegationRoutes(v1)
 	}
 }
 

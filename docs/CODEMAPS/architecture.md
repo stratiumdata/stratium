@@ -185,6 +185,32 @@ See `/Users/benjaminparrish/Development/stratium/docs/CONFIGURATION.md` for full
 ### Vendored Dependencies
 - `third_party/gin/` — Vendored Gin web framework
 
+### Multi-Provider Agent Authorization
+
+Stratium supports agent authorization across multiple AI providers using two provider-agnostic integration layers:
+
+**MCP Layer** (Desktop agents):
+- Binary: `bin/stratium-mcp` — stdio/JSON-RPC MCP server
+- Used by: Claude Desktop, ChatGPT Desktop (when MCP ships)
+- Source: `go/cmd/stratium-mcp/`, `go/internal/mcp/`, `go/internal/tools/`
+- Transport: stdio → gRPC to Agent Gateway (:50054)
+
+**Hooks Layer** (CLI agents):
+- Claude Code: `demos/mcp/hooks/pre-tool-use.sh` (Bash, uses grpcurl)
+- OpenAI Codex: `demos/codex/hooks/stratium_pre_tool_use.py` (Python, uses `stratium-mcp --mode=check`)
+- Config: `.claude/settings.json` (Claude) / `.codex/hooks.json` (Codex)
+- Both call Agent Gateway for every tool action via PreToolUse hooks
+
+**Single-Shot Check Mode** (`stratium-mcp --mode=check`):
+- Source: `go/internal/mcp/check.go`
+- Reads JSON action from stdin, calls Agent Gateway, writes authorization result to stdout
+- Used by Codex hook scripts as a subprocess
+- Same gRPC client and delegation token model as full MCP mode
+
+**Supported Providers**: `anthropic`, `openai`, `custom` (stored in `agents.provider` column)
+
+See `docs/PRD_OPENAI_AGENT_AUTHORIZATION.md` for full architecture and `docs/TESTING_OPENAI_AGENT_AUTH.md` for testing guide.
+
 ## Related Documentation
 
 - **Backend API**: `/docs/CODEMAPS/backend.md`

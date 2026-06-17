@@ -293,6 +293,8 @@ services:
       - STRATIUM_DATABASE_PASSWORD=stratium
       # Enable agent authorization (when built with agent-auth feature flag)
       - STRATIUM_AGENT_GATEWAY_ENABLED=true
+      # Shared delegation signing key (must match agent-gateway for token interop)
+      - STRATIUM_AGENT_GATEWAY_DELEGATION_SIGNING_KEY=${STRATIUM_DELEGATION_SIGNING_KEY:-stratium-dev-signing-key-change-in-prod}
       # Cache password if needed
       - STRATIUM_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
       # OIDC client secret (if enabling OIDC)
@@ -381,6 +383,7 @@ services:
       - STRATIUM_AGENT_GATEWAY_GRPC_PORT=50054
       - STRATIUM_AGENT_GATEWAY_DELEGATION_TOKEN_TTL=15m
       - STRATIUM_AGENT_GATEWAY_DELEGATION_MAX_DEPTH=5
+      - STRATIUM_AGENT_GATEWAY_DELEGATION_SIGNING_KEY=${STRATIUM_DELEGATION_SIGNING_KEY:-stratium-dev-signing-key-change-in-prod}
       - STRATIUM_SERVICES_PLATFORM_ADDRESS=platform:50051
       - STRATIUM_SERVICES_KEY_MANAGER_ADDRESS=key-manager:50052
       - STRATIUM_SERVICES_KEY_ACCESS_ADDRESS=key-access:50053

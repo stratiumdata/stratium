@@ -46,11 +46,13 @@ func main() {
 
 func logsCmd() *cobra.Command {
 	var (
-		limit    int
-		since    string
-		agentID  string
-		decision string
-		tierMin  int
+		limit     int
+		since     string
+		agentID   string
+		decision  string
+		tierMin   int
+		provider  string
+		transport string
 	)
 
 	cmd := &cobra.Command{
@@ -73,6 +75,12 @@ func logsCmd() *cobra.Command {
 			if decision != "" {
 				params.Set("action", decision)
 			}
+			if provider != "" {
+				params.Set("provider", provider)
+			}
+			if transport != "" {
+				params.Set("transport", transport)
+			}
 
 			logs, err := fetchAuditLogs(params)
 			if err != nil {
@@ -89,6 +97,8 @@ func logsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&agentID, "agent-id", "", "Filter by agent ID")
 	cmd.Flags().StringVar(&decision, "decision", "", "Filter by decision (ALLOW, DENY)")
 	cmd.Flags().IntVar(&tierMin, "action-tier", -1, "Filter by minimum action tier")
+	cmd.Flags().StringVar(&provider, "provider", "", "Filter by provider (anthropic, openai, custom)")
+	cmd.Flags().StringVar(&transport, "transport", "", "Filter by transport layer (mcp, mcp-check, grpc)")
 
 	return cmd
 }
@@ -272,10 +282,11 @@ func printLogs(logs []map[string]any) error {
 		return nil
 
 	case "csv":
-		fmt.Println("timestamp,agent,tool,tier,decision,reason")
+		fmt.Println("timestamp,agent,provider,transport,tool,tier,decision,reason")
 		for _, l := range logs {
-			fmt.Printf("%s,%s,%s,%v,%s,%s\n",
+			fmt.Printf("%s,%s,%s,%s,%s,%v,%s,%s\n",
 				getStr(l, "timestamp"), getStr(l, "actor"),
+				getStr(l, "provider"), getStr(l, "transport"),
 				getStr(l, "tool"), l["tier"],
 				getStr(l, "decision"), getStr(l, "reason"))
 		}
@@ -283,15 +294,17 @@ func printLogs(logs []map[string]any) error {
 
 	default: // table
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "TIMESTAMP\tAGENT\tTOOL\tTIER\tDECISION\tREASON")
+		fmt.Fprintln(w, "TIMESTAMP\tAGENT\tPROVIDER\tLAYER\tTOOL\tTIER\tDECISION\tREASON")
 		for _, l := range logs {
 			ts := getStr(l, "timestamp")
 			if len(ts) > 19 {
 				ts = ts[:19]
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%v\t%s\t%s\n",
-				ts, truncate(getStr(l, "actor"), 24),
-				truncate(getStr(l, "tool"), 16), l["tier"],
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%v\t%s\t%s\n",
+				ts, truncate(getStr(l, "actor"), 20),
+				truncate(getStr(l, "provider"), 10),
+				truncate(getStr(l, "transport"), 10),
+				truncate(getStr(l, "tool"), 14), l["tier"],
 				getStr(l, "decision"), truncate(getStr(l, "reason"), 40))
 		}
 		return w.Flush()

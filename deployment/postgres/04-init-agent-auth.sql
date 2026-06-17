@@ -94,6 +94,14 @@ ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_entity_type_check;
 ALTER TABLE audit_logs ADD CONSTRAINT audit_logs_entity_type_check
     CHECK (entity_type IN ('policy', 'entitlement', 'agent', 'delegation'));
 
+-- Extend action check to include agent-authorization actions written by the
+-- agent-gateway: CreateDelegation -> 'create', ExecuteAction -> 'authorize',
+-- RevokeDelegation -> 'revoke', SuspendAgent -> 'suspend'.
+ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_action_check;
+ALTER TABLE audit_logs ADD CONSTRAINT audit_logs_action_check
+    CHECK (action IN ('create', 'update', 'delete', 'evaluate', 'test',
+                      'authorize', 'revoke', 'suspend'));
+
 -- Add agent authorization audit columns
 ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS agent_id UUID;
 ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS delegation_id UUID;

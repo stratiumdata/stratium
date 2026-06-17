@@ -22,7 +22,12 @@ func NewAuditRepository(db sqlx.ExtContext) *AuditRepository {
 	return &AuditRepository{db: db}
 }
 
-// Create creates a new audit log entry
+// Create creates a new audit log entry.
+//
+// Writes both the original PAP/entitlement columns and the optional
+// agent-authorization extension columns (added by migration 04-init-agent-auth.sql).
+// Callers from PAP/platform leave the Agent* fields nil; they'll be persisted
+// as NULL. Callers from agent-gateway populate them.
 func (r *AuditRepository) Create(ctx context.Context, auditLog *models.AuditLog) error {
 	changes, err := json.Marshal(auditLog.Changes)
 	if err != nil {
@@ -34,9 +39,31 @@ func (r *AuditRepository) Create(ctx context.Context, auditLog *models.AuditLog)
 		return fmt.Errorf("failed to marshal result: %w", err)
 	}
 
+	// chain_agent_ids is JSONB. lib/pq sends nil []byte as an empty string,
+	// which fails JSON parsing — must send untyped nil (interface{}(nil)) to
+	// produce a true SQL NULL. So we keep this as interface{} rather than []byte.
+	var chainAgentIDsArg interface{}
+	if len(auditLog.ChainAgentIDs) > 0 {
+		bytes, err := json.Marshal(auditLog.ChainAgentIDs)
+		if err != nil {
+			return fmt.Errorf("failed to marshal chain_agent_ids: %w", err)
+		}
+		chainAgentIDsArg = bytes
+	}
+
 	query := `
-		INSERT INTO audit_logs (id, entity_type, entity_id, action, actor, changes, result, timestamp, ip_address, user_agent)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO audit_logs (
+			id, entity_type, entity_id, action, actor, changes, result, timestamp, ip_address, user_agent,
+			agent_id, delegation_id, agent_trust_tier, tool_name, action_tier, execution_mode, conversation_id,
+			user_decision, agent_decision, delegation_decision, chain_depth, chain_agent_ids,
+			root_delegation_id, denied_at_depth, denied_principal
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			$11, $12, $13, $14, $15, $16, $17,
+			$18, $19, $20, $21, $22,
+			$23, $24, $25
+		)
 	`
 	_, err = r.db.ExecContext(ctx, query,
 		auditLog.ID,
@@ -49,6 +76,21 @@ func (r *AuditRepository) Create(ctx context.Context, auditLog *models.AuditLog)
 		auditLog.Timestamp,
 		auditLog.IPAddress,
 		auditLog.UserAgent,
+		auditLog.AgentID,
+		auditLog.DelegationID,
+		auditLog.AgentTrustTier,
+		auditLog.ToolName,
+		auditLog.ActionTier,
+		auditLog.ExecutionMode,
+		auditLog.ConversationID,
+		auditLog.UserDecision,
+		auditLog.AgentDecision,
+		auditLog.DelegationDecision,
+		auditLog.ChainDepth,
+		chainAgentIDsArg,
+		auditLog.RootDelegationID,
+		auditLog.DeniedAtDepth,
+		auditLog.DeniedPrincipal,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create audit log: %w", err)

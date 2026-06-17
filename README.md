@@ -17,6 +17,15 @@ Stratium is a comprehensive access control and data protection platform that imp
 - **Multi-Hierarchy Support**: NATO/DoD classification, Commercial sensitivity, and custom hierarchies
 - **Audit Logging**: Comprehensive audit trail for all access decisions
 
+### AI Agent Authorization
+
+- **Multi-Provider Agent Authorization**: Enforce zero-trust authorization on AI agents from any provider (Anthropic Claude, OpenAI Codex/ChatGPT, custom)
+- **Double-Hop Policy Evaluation**: Every agent action is evaluated against both user permissions and agent permissions within a delegation context
+- **Delegation Chains**: Cryptographically verifiable chains where parent agents delegate narrower scope to sub-agents (cross-provider supported)
+- **MCP Integration**: `stratium-mcp` server provides native tool integration for Claude Desktop and ChatGPT Desktop
+- **Hook-Based Enforcement**: PreToolUse hooks for Claude Code and OpenAI Codex intercept every tool call for authorization
+- **4-Tier Trust Model**: Unverified → Registered → Certified → Platform-Trusted with corresponding action tier limits
+
 ### Advanced Features
 
 - **Policy Caching**: In-memory caching with TTL for high-performance policy evaluation

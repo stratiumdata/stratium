@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(git rev-parse --show-toplevel)/demos/codex/hooks/stratium_session_start.py",
+            "statusMessage": "Initializing Stratium agent authorization...",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(git rev-parse --show-toplevel)/demos/codex/hooks/stratium_pre_tool_use.py",
+            "statusMessage": "Checking Stratium authorization...",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(git rev-parse --show-toplevel)/demos/codex/hooks/stratium_post_tool_use.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

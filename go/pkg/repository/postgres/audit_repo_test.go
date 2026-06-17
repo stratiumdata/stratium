@@ -72,6 +72,9 @@ func TestAuditRepository_Create(t *testing.T) {
 	changesJSON, _ := json.Marshal(changes)
 	resultJSON, _ := json.Marshal(result)
 
+	// PAP/entitlement callers leave the agent-extension fields nil; the INSERT
+	// still writes 25 columns, with the agent ones supplied as typed-nil pointers
+	// and chain_agent_ids as a nil []byte (JSON-marshalled later).
 	mock.ExpectExec("INSERT INTO audit_logs").
 		WithArgs(
 			auditLog.ID,
@@ -84,6 +87,21 @@ func TestAuditRepository_Create(t *testing.T) {
 			auditLog.Timestamp,
 			auditLog.IPAddress,
 			auditLog.UserAgent,
+			(*uuid.UUID)(nil),      // agent_id
+			(*uuid.UUID)(nil),      // delegation_id
+			(*int16)(nil),          // agent_trust_tier
+			(*string)(nil),         // tool_name
+			(*int16)(nil),          // action_tier
+			(*string)(nil),         // execution_mode
+			(*string)(nil),         // conversation_id
+			(*string)(nil),         // user_decision
+			(*string)(nil),         // agent_decision
+			(*string)(nil),         // delegation_decision
+			(*int16)(nil),          // chain_depth
+			nil,                    // chain_agent_ids (JSONB NULL via untyped nil)
+			(*uuid.UUID)(nil),      // root_delegation_id
+			(*int16)(nil),          // denied_at_depth
+			(*string)(nil),         // denied_principal
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 

@@ -3,9 +3,11 @@ package agent_gateway
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"stratium/pkg/models"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -265,12 +267,42 @@ func extractUserID(ctx context.Context) (string, error) {
 		return userIDs[0], nil
 	}
 
-	// Fallback: extract from authorization header (JWT sub claim)
 	if auth := md.Get("authorization"); len(auth) > 0 {
-		return auth[0], nil
+		return subjectFromBearer(auth[0])
 	}
 
 	return "", fmt.Errorf("no user identity found in request metadata")
+}
+
+// subjectFromBearer parses a "Bearer <jwt>" header and returns the "sub" claim.
+// The signature is NOT verified here — verification belongs at the OIDC ingress
+// (a verifying interceptor or an upstream proxy that strips/replaces tokens).
+// Swap to jwt.ParseWithClaims + a JWKS-backed keyfunc to enforce verification
+// at this layer.
+func subjectFromBearer(authHeader string) (string, error) {
+	token := strings.TrimSpace(authHeader)
+	token = strings.TrimPrefix(token, "Bearer ")
+	token = strings.TrimPrefix(token, "bearer ")
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", fmt.Errorf("empty bearer token")
+	}
+
+	parsed, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
+	if err != nil {
+		return "", fmt.Errorf("failed to parse bearer token: %w", err)
+	}
+
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", fmt.Errorf("bearer token claims have unexpected type")
+	}
+
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		return "", fmt.Errorf("bearer token has no sub claim")
+	}
+	return sub, nil
 }
 
 func agentToProto(a *models.Agent) *AgentInfo {

@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
-
 	"strconv"
+	"strings"
+	"time"
 
 	"stratium/config"
 	"stratium/logging"
@@ -167,6 +167,28 @@ func (s *Server) CreateDelegation(ctx context.Context, req *InternalCreateDelega
 	agentDelegationsActive.Inc()
 	agentChainDepth.Observe(float64(delegation.Depth))
 
+	s.recordAudit(ctx, &models.AuditLog{
+		EntityType: models.EntityTypeDelegation,
+		EntityID:   uuidPtr(delegationID),
+		Action:     models.AuditActionCreate,
+		Actor:      delegation.UserID,
+		Changes: map[string]interface{}{
+			"approved_tools":      delegation.ApprovedTools,
+			"approved_actions":    delegation.ApprovedActions,
+			"max_action_tier":     delegation.MaxActionTier,
+			"classification_caps": delegation.ClassificationCaps,
+			"purpose":             delegation.Purpose,
+			"ttl_seconds":         int(ttl.Seconds()),
+		},
+		AgentID:          uuidPtr(agentID),
+		DelegationID:     uuidPtr(delegationID),
+		AgentTrustTier:   int16Ptr(int16(agent.TrustTier)),
+		ConversationID:   strPtr(delegation.ConversationID),
+		ChainDepth:       int16Ptr(int16(delegation.Depth)),
+		ChainAgentIDs:    chainAgentIDsToStrings(delegation.ChainAgentIDs),
+		RootDelegationID: uuidPtr(delegation.RootDelegationID),
+	})
+
 	return &CreateDelegationResponse{
 		DelegationToken:  token,
 		DelegationId:     delegationID.String(),
@@ -197,6 +219,20 @@ func (s *Server) RevokeDelegation(ctx context.Context, delegationID string, reas
 
 	agentChainRevocationsTotal.Inc()
 	agentDelegationsActive.Sub(float64(count))
+
+	actor, _ := extractUserID(ctx)
+	s.recordAudit(ctx, &models.AuditLog{
+		EntityType: models.EntityTypeDelegation,
+		EntityID:   uuidPtr(id),
+		Action:     models.AuditActionRevoke,
+		Actor:      actor,
+		Changes:    map[string]interface{}{"reason": reason},
+		Result: map[string]interface{}{
+			"revoked_count":          count,
+			"revoked_delegation_ids": revokedStrings,
+		},
+		DelegationID: uuidPtr(id),
+	})
 
 	return &RevokeDelegationResponse{
 		Success:              true,
@@ -260,6 +296,9 @@ func (s *Server) ExecuteAction(ctx context.Context, req *InternalExecuteActionPa
 		agentAuthDecisionsTotal.WithLabelValues("deny", compound.DeniedPrincipal).Inc()
 		agentActionsTotal.WithLabelValues(req.ToolName, req.ActionTier.String(), "deny").Inc()
 		agentChainDeniedAtDepth.WithLabelValues(strconv.Itoa(compound.DeniedAtDepth)).Inc()
+
+		s.recordExecutionAudit(ctx, chain, claims, req, compound, "deny")
+
 		return &ExecuteActionResponse{
 			Authorized: false,
 			Decision:   internalToProtoCompound(compound),
@@ -272,6 +311,8 @@ func (s *Server) ExecuteAction(ctx context.Context, req *InternalExecuteActionPa
 
 	logger.Info("Action authorized: user=%s chain_depth=%d tool=%s action=%s",
 		claims.Subject, len(chain), req.ToolName, req.Action)
+
+	s.recordExecutionAudit(ctx, chain, claims, req, compound, "allow")
 
 	// Forward the authorized request to the target service
 	var responsePayload []byte
@@ -468,10 +509,168 @@ func (s *Server) SuspendAgent(ctx context.Context, agentID string, reason string
 	}
 
 	logger.Info("Suspended agent %s (reason: %s, revoked delegations: %d)", agentID, reason, revokedCount)
+
+	actor, _ := extractUserID(ctx)
+	s.recordAudit(ctx, &models.AuditLog{
+		EntityType: models.EntityTypeAgent,
+		EntityID:   uuidPtr(id),
+		Action:     models.AuditActionSuspend,
+		Actor:      actor,
+		Changes:    map[string]interface{}{"reason": reason},
+		Result:     map[string]interface{}{"revoked_delegations": revokedCount},
+		AgentID:    uuidPtr(id),
+	})
+
 	return revokedCount, nil
 }
 
 // --- Internal Helpers ---
+
+// recordAudit persists an audit row best-effort. Failures are logged at WARN
+// level and do NOT propagate back to the caller — the request that triggered
+// the audit attempt has already succeeded (or already failed) by the time we
+// reach here. Auditing must never break the request flow.
+func (s *Server) recordAudit(ctx context.Context, log *models.AuditLog) {
+	if log.ID == uuid.Nil {
+		log.ID = uuid.New()
+	}
+	if log.Timestamp.IsZero() {
+		log.Timestamp = time.Now()
+	}
+	if err := s.repo.Audit.Create(ctx, log); err != nil {
+		logger.Warn("audit write failed (action=%s entity=%s): %v", log.Action, log.EntityType, err)
+	}
+}
+
+// strPtr returns a pointer to the given string (helper for optional audit fields).
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// int16Ptr returns a pointer to the given int16 (helper for optional audit fields).
+func int16Ptr(v int16) *int16 { return &v }
+
+// uuidPtr returns a pointer to the given UUID, or nil if it's the zero value.
+func uuidPtr(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
+
+// executionModeString returns a stable, human-readable name for the execution
+// mode. ExecutionMode is an int alias without a String() method.
+func executionModeString(m models.ExecutionMode) string {
+	switch m {
+	case models.ExecutionModeDelegated:
+		return "DELEGATED"
+	case models.ExecutionModeSystem:
+		return "SYSTEM"
+	default:
+		return ""
+	}
+}
+
+// chainAgentIDsToStrings converts a delegation's chain_agent_ids to a string slice.
+func chainAgentIDsToStrings(ids []uuid.UUID) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
+// recordExecutionAudit writes a single audit row for an ExecuteAction call.
+// outcome is "allow" or "deny".
+//
+// Chain semantics:
+//   - For deny outcomes, the denied hop is at compound.DeniedAtDepth. We mark
+//     agent_decision / delegation_decision based on that hop's result.
+//   - For allow outcomes, all hops are ALLOW (loop terminates only on denial).
+func (s *Server) recordExecutionAudit(
+	ctx context.Context,
+	chain []*models.Delegation,
+	claims *models.DelegationTokenClaims,
+	req *InternalExecuteActionParams,
+	compound *InternalCompoundDecisionResult,
+	outcome string,
+) {
+	if len(chain) == 0 {
+		return
+	}
+	leaf := chain[len(chain)-1]
+
+	var agentDecision, delegationDecision *string
+	if outcome == "allow" {
+		a := "allow"
+		agentDecision = &a
+		delegationDecision = &a
+	} else {
+		// Find the denied hop and surface its decisions.
+		for _, hop := range compound.ChainDecisions {
+			if hop.AgentDecision == "DENY" {
+				v := "deny"
+				agentDecision = &v
+			} else if hop.AgentDecision == "ALLOW" {
+				v := "allow"
+				agentDecision = &v
+			}
+			if hop.DelegationDecision == "DENY" {
+				v := "deny"
+				delegationDecision = &v
+			} else if hop.DelegationDecision == "ALLOW" {
+				v := "allow"
+				delegationDecision = &v
+			}
+			if hop.AgentDecision == "DENY" || hop.DelegationDecision == "DENY" {
+				break
+			}
+		}
+	}
+
+	var deniedAtDepth *int16
+	var deniedPrincipal *string
+	if compound.DeniedAtDepth >= 0 {
+		d := int16(compound.DeniedAtDepth)
+		deniedAtDepth = &d
+		deniedPrincipal = strPtr(compound.DeniedPrincipal)
+	}
+
+	s.recordAudit(ctx, &models.AuditLog{
+		EntityType: models.EntityTypeDelegation,
+		EntityID:   uuidPtr(leaf.ID),
+		Action:     models.AuditActionAuthorize,
+		Actor:      claims.Subject,
+		Changes: map[string]interface{}{
+			"target_service": req.TargetService,
+			"method":         req.Method,
+			"action":         req.Action,
+			"resource":       req.ResourceAttributes,
+		},
+		Result: map[string]interface{}{
+			"outcome": outcome,
+		},
+		AgentID:            uuidPtr(leaf.AgentID),
+		DelegationID:       uuidPtr(leaf.ID),
+		ToolName:           strPtr(req.ToolName),
+		ActionTier:         int16Ptr(int16(req.ActionTier)),
+		ExecutionMode:      strPtr(executionModeString(req.ExecutionMode)),
+		ConversationID:     strPtr(leaf.ConversationID),
+		AgentDecision:      agentDecision,
+		DelegationDecision: delegationDecision,
+		ChainDepth:         int16Ptr(int16(len(chain))),
+		ChainAgentIDs:      chainAgentIDsToStrings(leaf.ChainAgentIDs),
+		RootDelegationID:   uuidPtr(leaf.RootDelegationID),
+		DeniedAtDepth:      deniedAtDepth,
+		DeniedPrincipal:    deniedPrincipal,
+	})
+}
 
 func (s *Server) mintDelegationToken(delegation *models.Delegation, agent *models.Agent) (string, error) {
 	chainAgentStrings := make([]string, len(delegation.ChainAgentIDs))
@@ -619,6 +818,92 @@ func (s *Server) evaluateDelegationScope(delegation *models.Delegation, req *Int
 		return false, fmt.Sprintf("tool %q not in delegation approved_tools", req.ToolName)
 	}
 
+	if allowed, reason := checkClassificationCap(delegation.ClassificationCaps, req.ResourceAttributes); !allowed {
+		return false, reason
+	}
+
+	return true, ""
+}
+
+// classificationLevels mirrors the canonical hierarchies in pkg/cedar/hierarchy.go
+// (NATOHierarchy, CommercialHierarchy). Kept inline to avoid coupling the
+// agent-gateway runtime to the cedar policy-construction package. Update both
+// in lockstep if levels change.
+var classificationLevels = map[string][]string{
+	"nato":       {"UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET", "TOP-SECRET"},
+	"commercial": {"PUBLIC", "INTERNAL", "CONFIDENTIAL-COMMERCIAL", "RESTRICTED-COMMERCIAL", "HIGHLY-CONFIDENTIAL"},
+}
+
+// classificationIndex returns the integer rank of a level within a hierarchy
+// (case-insensitive). Returns -1 if the hierarchy or level is unknown.
+func classificationIndex(hierarchy, level string) int {
+	levels, ok := classificationLevels[strings.ToLower(hierarchy)]
+	if !ok {
+		return -1
+	}
+	for i, lvl := range levels {
+		if strings.EqualFold(lvl, level) {
+			return i
+		}
+	}
+	return -1
+}
+
+// checkClassificationCap enforces a delegation's per-hierarchy classification
+// caps against the resource being accessed.
+//
+// Semantics:
+//   - No caps on the delegation → allow.
+//   - Resource has no classification declared → allow (caller is not making a
+//     classification claim).
+//   - Classification declared but no hierarchy → DENY (ambiguity = deny; an
+//     attacker mustn't bypass caps by omitting the hierarchy attribute).
+//   - Cap exists for the resource's hierarchy → enforce
+//     resource_level ≤ cap_level using the canonical hierarchy ordering.
+//   - No cap for the resource's hierarchy → allow (delegation didn't constrain
+//     that hierarchy).
+//
+// Unknown hierarchy or level names produce a DENY with an explanatory reason
+// rather than silently allowing.
+func checkClassificationCap(caps map[string]string, resourceAttrs map[string]string) (bool, string) {
+	if len(caps) == 0 {
+		return true, ""
+	}
+
+	resourceLevel, hasLevel := resourceAttrs["classification"]
+	resourceHierarchy, hasHierarchy := resourceAttrs["hierarchy"]
+
+	if !hasLevel {
+		return true, ""
+	}
+	if !hasHierarchy {
+		return false, "resource classification declared without a hierarchy attribute (ambiguous)"
+	}
+
+	capLevel, hasCap := caps[strings.ToLower(resourceHierarchy)]
+	if !hasCap {
+		// Try original case as fallback (caps are stored as-supplied by caller).
+		capLevel, hasCap = caps[resourceHierarchy]
+	}
+	if !hasCap {
+		return true, ""
+	}
+
+	resourceIdx := classificationIndex(resourceHierarchy, resourceLevel)
+	if resourceIdx < 0 {
+		return false, fmt.Sprintf("unknown classification level %q for hierarchy %q",
+			resourceLevel, resourceHierarchy)
+	}
+	capIdx := classificationIndex(resourceHierarchy, capLevel)
+	if capIdx < 0 {
+		return false, fmt.Sprintf("delegation cap %q is not a known level in hierarchy %q",
+			capLevel, resourceHierarchy)
+	}
+
+	if resourceIdx > capIdx {
+		return false, fmt.Sprintf("resource classification %s exceeds delegation cap %s (hierarchy %q)",
+			resourceLevel, capLevel, resourceHierarchy)
+	}
 	return true, ""
 }
 
