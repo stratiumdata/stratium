@@ -1,0 +1,21 @@
+{
+  "name": "github-catalog-default",
+  "description": "Default classification-aware policy for the GitHub catalog tools.",
+  "rules": [
+    {
+      "tools": ["github_read_file", "github_search_code"],
+      "effect": "allow",
+      "conditions": { "max_action_tier": ">=1", "classification": "<=subject_cap" }
+    },
+    {
+      "tools": ["github_create_issue"],
+      "effect": "allow",
+      "conditions": { "min_trust_tier": 1, "max_action_tier": ">=2", "classification": "<=subject_cap" }
+    },
+    {
+      "tools": ["github_delete_branch"],
+      "effect": "allow",
+      "conditions": { "min_trust_tier": 2, "max_action_tier": ">=4", "classification": "<=subject_cap" }
+    }
+  ]
+}
