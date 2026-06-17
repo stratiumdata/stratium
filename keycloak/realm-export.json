@@ -2229,5 +2229,22 @@
   "registrationFlow": "registration",
   "directGrantFlow": "direct grant",
   "resetCredentialsFlow": "reset credentials",
-  "clientAuthenticationFlow": "clients"
+  "clientAuthenticationFlow": "clients",
+  "identityProviders": [
+    {
+      "alias": "github",
+      "providerId": "github",
+      "enabled": true,
+      "storeToken": true,
+      "addReadTokenRoleOnCreate": true,
+      "trustEmail": true,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "clientId": "${GITHUB_OAUTH_CLIENT_ID}",
+        "clientSecret": "${GITHUB_OAUTH_CLIENT_SECRET}",
+        "defaultScope": "repo read:org",
+        "useJwksUrl": "true"
+      }
+    }
+  ]
 }
