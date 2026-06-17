@@ -1,0 +1,133 @@
+// go/internal/catalog/github/tools_test.go
+package github
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"stratium/internal/catalog"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// --- fakes ---
+
+type fakeAuth struct {
+	dec catalog.AuthDecision
+	got catalog.AuthRequest
+}
+
+func (f *fakeAuth) Authorize(_ context.Context, req catalog.AuthRequest) (catalog.AuthDecision, error) {
+	f.got = req
+	return f.dec, nil
+}
+
+type fakeCreds struct{ token string }
+
+func (f fakeCreds) GetToken(_ context.Context, _ string, _ string) (string, error) {
+	return f.token, nil
+}
+
+type fakeGH struct {
+	content    string
+	readCalled bool
+}
+
+func (f *fakeGH) ReadFile(_ context.Context, _, _, _, _ string) (string, error) {
+	f.readCalled = true
+	return f.content, nil
+}
+func (f *fakeGH) SearchCode(context.Context, string, string, string) ([]Hit, error) { return nil, nil }
+func (f *fakeGH) CreateIssue(context.Context, string, string, string, string) (Issue, error) {
+	return Issue{Number: 1, URL: "u"}, nil
+}
+func (f *fakeGH) DeleteBranch(context.Context, string, string, string) error { return nil }
+
+func specByName(t *testing.T, name string) ToolSpec {
+	t.Helper()
+	for _, s := range Specs() {
+		if s.Tool.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("spec %s not found", name)
+	return ToolSpec{}
+}
+
+func newDeps(auth catalog.Authorizer, gh Client, repos map[string]catalog.Classification, def *catalog.Classification) Deps {
+	return Deps{
+		Auth:   auth,
+		Creds:  fakeCreds{token: "gho_live"},
+		Class:  catalog.NewClassifier(repos, def),
+		Client: gh,
+	}
+}
+
+func TestSpecsCoverFourTools(t *testing.T) {
+	names := map[string]bool{}
+	for _, s := range Specs() {
+		names[s.Tool.Name] = true
+	}
+	for _, want := range []string{"github_read_file", "github_search_code", "github_create_issue", "github_delete_branch"} {
+		assert.Truef(t, names[want], "missing tool %s", want)
+	}
+}
+
+func TestReadFileAllowed(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: true}}
+	gh := &fakeGH{content: "hello"}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "path": "README.md"})
+	out, err := specByName(t, "github_read_file").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+
+	assert.Equal(t, true, out["authorized"])
+	assert.Equal(t, "hello", out["content"])
+	assert.True(t, gh.readCalled)
+	// classification flowed into the authorize request
+	assert.Equal(t, "INTERNAL", auth.got.ResourceAttributes["classification"])
+	assert.Equal(t, "github_read_file", auth.got.ToolName)
+	assert.Equal(t, 1, auth.got.ActionTier)
+}
+
+func TestReadFileDeniedDoesNotCallGitHub(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: false, Reason: "classification CONFIDENTIAL exceeds cap INTERNAL"}}
+	gh := &fakeGH{content: "secret"}
+	deps := newDeps(auth, gh, map[string]catalog.Classification{
+		"acme/secret": {Classification: "CONFIDENTIAL", Hierarchy: "commercial"},
+	}, nil)
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/secret", "path": "README.md"})
+	out, err := specByName(t, "github_read_file").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+
+	assert.Equal(t, false, out["authorized"])
+	assert.Contains(t, out["reason"], "exceeds cap")
+	assert.False(t, gh.readCalled, "GitHub must NOT be called when denied")
+}
+
+func TestReadFileUnclassifiedFailsClosed(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: true}} // even if gateway would allow
+	gh := &fakeGH{content: "x"}
+	deps := newDeps(auth, gh, nil, nil) // no map, no default → fail closed
+
+	args, _ := json.Marshal(map[string]string{"repo": "acme/unknown", "path": "README.md"})
+	out, err := specByName(t, "github_read_file").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.NoError(t, err)
+
+	assert.Equal(t, false, out["authorized"])
+	assert.Contains(t, out["reason"], "classification")
+	assert.False(t, gh.readCalled)
+}
+
+func TestMissingRequiredArgErrors(t *testing.T) {
+	deps := newDeps(&fakeAuth{dec: catalog.AuthDecision{Authorized: true}}, &fakeGH{}, nil, nil)
+	args, _ := json.Marshal(map[string]string{"path": "README.md"}) // no repo
+	_, err := specByName(t, "github_read_file").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
+	require.Error(t, err)
+}
