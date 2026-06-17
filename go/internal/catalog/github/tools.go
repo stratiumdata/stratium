@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"stratium/internal/catalog"
 	"stratium/internal/mcp"
@@ -56,6 +57,20 @@ type deleteBranchArgs struct {
 
 func strProp(desc string) mcp.PropertySchema {
 	return mcp.PropertySchema{Type: "string", Description: desc}
+}
+
+// validateRepo rejects repo identifiers that aren't a clean owner/repo or that
+// contain whitespace or path-traversal sequences. Dots are allowed (legitimate
+// repo names like "owner/repo.js").
+func validateRepo(repo string) error {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("repo must be owner/repo, got %q", repo)
+	}
+	if strings.ContainsAny(repo, " \t\n\r") || strings.Contains(repo, "..") {
+		return fmt.Errorf("repo contains invalid characters: %q", repo)
+	}
+	return nil
 }
 
 // Specs returns the GitHub catalog tools. Tiers: read/search=1, create=2, delete=4.
@@ -167,6 +182,9 @@ func handleReadFile(ctx context.Context, deps Deps, subjectToken, delegationToke
 	if a.Repo == "" || a.Path == "" {
 		return nil, fmt.Errorf("repo and path are required")
 	}
+	if err := validateRepo(a.Repo); err != nil {
+		return nil, err
+	}
 	token, deny, ok, err := authorize(ctx, deps, "github_read_file", "read", 1, a.Repo, subjectToken, delegationToken)
 	if err != nil {
 		return nil, err
@@ -188,6 +206,9 @@ func handleSearchCode(ctx context.Context, deps Deps, subjectToken, delegationTo
 	}
 	if a.Repo == "" || a.Query == "" {
 		return nil, fmt.Errorf("repo and query are required")
+	}
+	if err := validateRepo(a.Repo); err != nil {
+		return nil, err
 	}
 	token, deny, ok, err := authorize(ctx, deps, "github_search_code", "search", 1, a.Repo, subjectToken, delegationToken)
 	if err != nil {
@@ -211,6 +232,9 @@ func handleCreateIssue(ctx context.Context, deps Deps, subjectToken, delegationT
 	if a.Repo == "" || a.Title == "" {
 		return nil, fmt.Errorf("repo and title are required")
 	}
+	if err := validateRepo(a.Repo); err != nil {
+		return nil, err
+	}
 	token, deny, ok, err := authorize(ctx, deps, "github_create_issue", "create", 2, a.Repo, subjectToken, delegationToken)
 	if err != nil {
 		return nil, err
@@ -232,6 +256,9 @@ func handleDeleteBranch(ctx context.Context, deps Deps, subjectToken, delegation
 	}
 	if a.Repo == "" || a.Branch == "" {
 		return nil, fmt.Errorf("repo and branch are required")
+	}
+	if err := validateRepo(a.Repo); err != nil {
+		return nil, err
 	}
 	token, deny, ok, err := authorize(ctx, deps, "github_delete_branch", "delete", 4, a.Repo, subjectToken, delegationToken)
 	if err != nil {

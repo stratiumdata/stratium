@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 )
 
@@ -70,11 +71,15 @@ func apiError(resp *http.Response) error {
 }
 
 func (c *RESTClient) ReadFile(ctx context.Context, token, repo, path, ref string) (string, error) {
-	url := fmt.Sprintf("/repos/%s/contents/%s", repo, path)
-	if ref != "" {
-		url += "?ref=" + ref
+	segments := strings.Split(path, "/")
+	for i, s := range segments {
+		segments[i] = neturl.PathEscape(s)
 	}
-	resp, err := c.do(ctx, http.MethodGet, token, url, nil)
+	endpoint := fmt.Sprintf("/repos/%s/contents/%s", repo, strings.Join(segments, "/"))
+	if ref != "" {
+		endpoint += "?ref=" + neturl.QueryEscape(ref)
+	}
+	resp, err := c.do(ctx, http.MethodGet, token, endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -100,8 +105,10 @@ func (c *RESTClient) ReadFile(ctx context.Context, token, repo, path, ref string
 }
 
 func (c *RESTClient) SearchCode(ctx context.Context, token, repo, query string) ([]Hit, error) {
-	url := fmt.Sprintf("/search/code?q=%s+repo:%s", query, repo)
-	resp, err := c.do(ctx, http.MethodGet, token, url, nil)
+	params := neturl.Values{}
+	params.Set("q", query+" repo:"+repo)
+	endpoint := "/search/code?" + params.Encode()
+	resp, err := c.do(ctx, http.MethodGet, token, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +135,10 @@ func (c *RESTClient) SearchCode(ctx context.Context, token, repo, query string) 
 }
 
 func (c *RESTClient) CreateIssue(ctx context.Context, token, repo, title, body string) (Issue, error) {
-	payload, _ := json.Marshal(map[string]string{"title": title, "body": body})
+	payload, err := json.Marshal(map[string]string{"title": title, "body": body})
+	if err != nil {
+		return Issue{}, fmt.Errorf("marshal issue payload: %w", err)
+	}
 	resp, err := c.do(ctx, http.MethodPost, token, fmt.Sprintf("/repos/%s/issues", repo), payload)
 	if err != nil {
 		return Issue{}, err
@@ -145,7 +155,7 @@ func (c *RESTClient) CreateIssue(ctx context.Context, token, repo, title, body s
 }
 
 func (c *RESTClient) DeleteBranch(ctx context.Context, token, repo, branch string) error {
-	resp, err := c.do(ctx, http.MethodDelete, token, fmt.Sprintf("/repos/%s/git/refs/heads/%s", repo, branch), nil)
+	resp, err := c.do(ctx, http.MethodDelete, token, fmt.Sprintf("/repos/%s/git/refs/heads/%s", repo, neturl.PathEscape(branch)), nil)
 	if err != nil {
 		return err
 	}

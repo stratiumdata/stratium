@@ -30,6 +30,12 @@ func (f fakeCreds) GetToken(_ context.Context, _ string, _ string) (string, erro
 	return f.token, nil
 }
 
+type errCreds struct{}
+
+func (errCreds) GetToken(_ context.Context, _ string, _ string) (string, error) {
+	return "", catalog.ErrCredentialUnavailable
+}
+
 type fakeGH struct {
 	content    string
 	readCalled bool
@@ -237,4 +243,16 @@ func TestDeleteBranchMissingArgs(t *testing.T) {
 	args, _ := json.Marshal(map[string]string{"repo": "acme/app"}) // no branch
 	_, err := specByName(t, "github_delete_branch").Handler(context.Background(), deps, "kc-tok", "deleg-tok", args)
 	require.Error(t, err)
+}
+
+func TestReadFileCredentialErrorReturnsError(t *testing.T) {
+	auth := &fakeAuth{dec: catalog.AuthDecision{Authorized: true}}
+	gh := &fakeGH{content: "x"}
+	deps := Deps{Auth: auth, Creds: errCreds{}, Class: catalog.NewClassifier(map[string]catalog.Classification{
+		"acme/app": {Classification: "INTERNAL", Hierarchy: "commercial"},
+	}, nil), Client: gh}
+	args, _ := json.Marshal(map[string]string{"repo": "acme/app", "path": "README.md"})
+	_, err := specByName(t, "github_read_file").Handler(context.Background(), deps, "kc", "deleg", args)
+	require.Error(t, err)
+	assert.False(t, gh.readCalled)
 }
