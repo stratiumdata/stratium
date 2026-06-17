@@ -42,13 +42,17 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 		return true, ""
 	}
 
-	resourceLevel, hasLevel := resourceAttrs["classification"]
-	resourceHierarchy, hasHierarchy := resourceAttrs["hierarchy"]
+	// Treat empty-string values the same as absent keys. A caller that always
+	// inserts the keys (e.g. building the map from request fields that may be
+	// empty) must not be able to bypass the ambiguity-deny below by supplying an
+	// empty hierarchy alongside a non-empty classification.
+	resourceLevel := resourceAttrs["classification"]
+	resourceHierarchy := resourceAttrs["hierarchy"]
 
-	if !hasLevel {
+	if resourceLevel == "" {
 		return true, ""
 	}
-	if !hasHierarchy {
+	if resourceHierarchy == "" {
 		return false, "resource classification declared without a hierarchy attribute (ambiguous)"
 	}
 

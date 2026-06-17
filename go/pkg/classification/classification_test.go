@@ -72,6 +72,21 @@ func TestCheckCap(t *testing.T) {
 			wantReasonContains: "ambiguous",
 		},
 		{
+			// Regression: a caller that always inserts both keys must not bypass
+			// the ambiguity-deny by supplying an empty-string hierarchy.
+			name:               "classification with empty-string hierarchy key → DENY",
+			caps:               map[string]string{"nato": "CONFIDENTIAL"},
+			resourceAttr:       map[string]string{"classification": "SECRET", "hierarchy": ""},
+			wantAllowed:        false,
+			wantReasonContains: "ambiguous",
+		},
+		{
+			name:         "empty-string classification key → allow (no claim made)",
+			caps:         map[string]string{"nato": "CONFIDENTIAL"},
+			resourceAttr: map[string]string{"classification": "", "hierarchy": ""},
+			wantAllowed:  true,
+		},
+		{
 			name:               "nato SECRET vs cap CONFIDENTIAL → DENY",
 			caps:               map[string]string{"nato": "CONFIDENTIAL"},
 			resourceAttr:       map[string]string{"classification": "SECRET", "hierarchy": "nato"},
