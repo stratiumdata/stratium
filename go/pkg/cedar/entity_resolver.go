@@ -52,6 +52,13 @@ func (r *EntityResolver) Resolve(
 	resource map[string]interface{},
 	action string,
 ) types.EntityMap {
+	// Fall back to the resolver's configured default namespace when the caller
+	// passes an empty namespace, so entity types are qualified consistently
+	// (e.g. "Default::User" rather than a bare "User").
+	if namespace == "" {
+		namespace = r.defaultNS
+	}
+
 	entities := types.EntityMap{}
 
 	// 1. Add cached static entities (classification hierarchies, etc.)
