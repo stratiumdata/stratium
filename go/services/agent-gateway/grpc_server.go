@@ -3,14 +3,11 @@ package agent_gateway
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"stratium/pkg/models"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -257,52 +254,14 @@ func (g *GRPCServer) SuspendAgent(ctx context.Context, req *SuspendAgentRequest)
 
 // --- Helpers ---
 
+// extractUserID returns the verified caller identity established by the
+// IdentityVerificationInterceptor. It never trusts client-supplied metadata
+// (e.g. x-user-id) or unverified tokens.
 func extractUserID(ctx context.Context) (string, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", fmt.Errorf("no metadata in context")
+	if id, ok := identityFromContext(ctx); ok {
+		return id, nil
 	}
-
-	if userIDs := md.Get("x-user-id"); len(userIDs) > 0 {
-		return userIDs[0], nil
-	}
-
-	if auth := md.Get("authorization"); len(auth) > 0 {
-		return subjectFromBearer(auth[0])
-	}
-
-	return "", fmt.Errorf("no user identity found in request metadata")
-}
-
-// subjectFromBearer parses a "Bearer <jwt>" header and returns the "sub" claim.
-// The signature is NOT verified here — verification belongs at the OIDC ingress
-// (a verifying interceptor or an upstream proxy that strips/replaces tokens).
-// Swap to jwt.ParseWithClaims + a JWKS-backed keyfunc to enforce verification
-// at this layer.
-func subjectFromBearer(authHeader string) (string, error) {
-	token := strings.TrimSpace(authHeader)
-	token = strings.TrimPrefix(token, "Bearer ")
-	token = strings.TrimPrefix(token, "bearer ")
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", fmt.Errorf("empty bearer token")
-	}
-
-	parsed, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
-	if err != nil {
-		return "", fmt.Errorf("failed to parse bearer token: %w", err)
-	}
-
-	claims, ok := parsed.Claims.(jwt.MapClaims)
-	if !ok {
-		return "", fmt.Errorf("bearer token claims have unexpected type")
-	}
-
-	sub, _ := claims["sub"].(string)
-	if sub == "" {
-		return "", fmt.Errorf("bearer token has no sub claim")
-	}
-	return sub, nil
+	return "", fmt.Errorf("no verified user identity in request context")
 }
 
 func agentToProto(a *models.Agent) *AgentInfo {

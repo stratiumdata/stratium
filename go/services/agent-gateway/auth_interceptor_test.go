@@ -102,3 +102,12 @@ func TestInterceptorIgnoresXUserID(t *testing.T) {
 	assert.False(t, hadIdentity, "x-user-id must NOT establish identity")
 	assert.False(t, fv.called)
 }
+
+func TestExtractUserIDFromContext(t *testing.T) {
+	id, err := extractUserID(withIdentity(context.Background(), "bob"))
+	require.NoError(t, err)
+	assert.Equal(t, "bob", id)
+
+	_, err = extractUserID(context.Background())
+	require.Error(t, err)
+}
