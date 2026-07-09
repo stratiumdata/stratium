@@ -64,6 +64,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Fail-closed: identity verification requires an OIDC issuer. Without it the
+	// gateway would have no way to verify caller identity — refuse to start.
+	if cfg.OIDC.IssuerURL == "" {
+		logger.Error("Agent Gateway requires OIDC issuer configuration for token verification (set oidc.issuer_url)")
+		os.Exit(1)
+	}
+	tokenVerifier, err := agent_gateway.NewOIDCVerifier(&cfg.OIDC)
+	if err != nil {
+		logger.Error("Failed to initialize token verifier (is the OIDC issuer reachable?): %v", err)
+		os.Exit(1)
+	}
+
 	cfg.Service.Name = ServiceName
 	cfg.Service.Version = ServiceVersion
 
@@ -135,6 +147,7 @@ func main() {
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		licenseEnforcer.UnaryServerInterceptor(),
 		rateLimiter.UnaryServerInterceptor(),
+		agent_gateway.IdentityVerificationInterceptor(tokenVerifier),
 	}
 	streamInterceptors := []grpc.StreamServerInterceptor{
 		licenseEnforcer.StreamServerInterceptor(),
