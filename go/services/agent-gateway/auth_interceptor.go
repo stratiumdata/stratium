@@ -2,6 +2,7 @@ package agent_gateway
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"stratium/config"
@@ -47,7 +48,7 @@ type oidcVerifier struct {
 func NewOIDCVerifier(oidcCfg *config.OIDCConfig) (TokenVerifier, error) {
 	svc, err := auth.NewAuthService(oidcCfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create OIDC verifier: %w", err)
 	}
 	return &oidcVerifier{svc: svc}, nil
 }
@@ -74,7 +75,7 @@ func IdentityVerificationInterceptor(v TokenVerifier) grpc.UnaryServerIntercepto
 				if raw := stripBearer(authz[0]); raw != "" {
 					identity, err := v.Verify(ctx, raw)
 					if err != nil {
-						return nil, status.Errorf(codes.Unauthenticated, "token verification failed: %v", err)
+						return nil, status.Error(codes.Unauthenticated, "token verification failed")
 					}
 					ctx = withIdentity(ctx, identity)
 				}
@@ -85,8 +86,12 @@ func IdentityVerificationInterceptor(v TokenVerifier) grpc.UnaryServerIntercepto
 }
 
 func stripBearer(header string) string {
-	h := strings.TrimSpace(header)
-	h = strings.TrimPrefix(h, "Bearer ")
-	h = strings.TrimPrefix(h, "bearer ")
+	// Trim only leading whitespace before the prefix check so trailing spaces
+	// in "Bearer    " don't collapse the value to "Bearer" (no space → no match).
+	h := strings.TrimLeft(header, " \t\r\n")
+	const prefix = "bearer "
+	if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
+		return strings.TrimSpace(h[len(prefix):])
+	}
 	return strings.TrimSpace(h)
 }

@@ -103,6 +103,37 @@ func TestInterceptorIgnoresXUserID(t *testing.T) {
 	assert.False(t, fv.called)
 }
 
+func TestInterceptorWhitespaceOnlyTokenIsAbsent(t *testing.T) {
+	fv := &fakeVerifier{}
+	var hadIdentity bool
+	handler := func(ctx context.Context, _ any) (any, error) {
+		_, hadIdentity = identityFromContext(ctx)
+		return "ok", nil
+	}
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("authorization", "Bearer    "))
+	resp, err := IdentityVerificationInterceptor(fv)(ctx, nil, &grpc.UnaryServerInfo{}, handler)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp)
+	assert.False(t, hadIdentity)
+	assert.False(t, fv.called, "whitespace-only bearer must be treated as absent")
+}
+
+func TestInterceptorCaseInsensitiveBearer(t *testing.T) {
+	fv := &fakeVerifier{identity: "alice"}
+	var gotIdentity string
+	handler := func(ctx context.Context, _ any) (any, error) {
+		gotIdentity, _ = identityFromContext(ctx)
+		return "ok", nil
+	}
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("authorization", "BEARER good.jwt.token"))
+	_, err := IdentityVerificationInterceptor(fv)(ctx, nil, &grpc.UnaryServerInfo{}, handler)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", gotIdentity)
+	assert.True(t, fv.called)
+}
+
 func TestExtractUserIDFromContext(t *testing.T) {
 	id, err := extractUserID(withIdentity(context.Background(), "bob"))
 	require.NoError(t, err)
