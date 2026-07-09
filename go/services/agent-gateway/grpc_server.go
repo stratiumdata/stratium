@@ -59,6 +59,9 @@ func (g *GRPCServer) CreateDelegation(ctx context.Context, req *CreateDelegation
 }
 
 func (g *GRPCServer) RevokeDelegation(ctx context.Context, req *RevokeDelegationRequest) (*RevokeDelegationResponse, error) {
+	if _, err := extractUserID(ctx); err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "missing user identity: %v", err)
+	}
 	resp, err := g.server.RevokeDelegation(ctx, req.GetDelegationId(), req.GetReason())
 	if err != nil {
 		return nil, mapBusinessError(err)
@@ -200,6 +203,9 @@ func (g *GRPCServer) ListAgents(ctx context.Context, req *ListAgentsRequest) (*L
 }
 
 func (g *GRPCServer) UpdateAgent(ctx context.Context, req *UpdateAgentRequest) (*UpdateAgentResponse, error) {
+	if _, err := extractUserID(ctx); err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "missing user identity: %v", err)
+	}
 	id, err := uuid.Parse(req.GetAgentId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid agent_id: %v", err)
@@ -242,6 +248,9 @@ func (g *GRPCServer) UpdateAgent(ctx context.Context, req *UpdateAgentRequest) (
 }
 
 func (g *GRPCServer) SuspendAgent(ctx context.Context, req *SuspendAgentRequest) (*SuspendAgentResponse, error) {
+	if _, err := extractUserID(ctx); err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "missing user identity: %v", err)
+	}
 	revokedCount, err := g.server.SuspendAgent(ctx, req.GetAgentId(), req.GetReason())
 	if err != nil {
 		return nil, mapBusinessError(err)

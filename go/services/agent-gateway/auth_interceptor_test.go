@@ -142,3 +142,19 @@ func TestExtractUserIDFromContext(t *testing.T) {
 	_, err = extractUserID(context.Background())
 	require.Error(t, err)
 }
+
+func TestDestructiveRPCsRequireIdentity(t *testing.T) {
+	// Nil server: the identity check must reject BEFORE any g.server access,
+	// so these must not panic and must return Unauthenticated on an identity-less context.
+	g := &GRPCServer{}
+	ctx := context.Background()
+
+	_, err := g.RevokeDelegation(ctx, &RevokeDelegationRequest{})
+	assert.Equal(t, codes.Unauthenticated, status.Code(err), "RevokeDelegation")
+
+	_, err = g.SuspendAgent(ctx, &SuspendAgentRequest{})
+	assert.Equal(t, codes.Unauthenticated, status.Code(err), "SuspendAgent")
+
+	_, err = g.UpdateAgent(ctx, &UpdateAgentRequest{})
+	assert.Equal(t, codes.Unauthenticated, status.Code(err), "UpdateAgent")
+}
