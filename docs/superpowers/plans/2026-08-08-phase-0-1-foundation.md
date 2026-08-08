@@ -1155,6 +1155,59 @@ func TestScopeNarrows_RejectsLongerExpiry(t *testing.T) {
 	}
 }
 
+// Omitting a cap is a widening, not an inheritance. At decision time CheckCap
+// treats absent caps as no restriction, so a child that drops the map holds
+// unrestricted classification access — the same outcome as widening an entry,
+// reached by a different route.
+func TestScopeNarrows_RejectsChildOmittingParentCap(t *testing.T) {
+	for name, caps := range map[string]map[string]string{
+		"nil":   nil,
+		"empty": {},
+		"other-hierarchy-only": {"commercial": "PUBLIC"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := validChild()
+			c.ClassificationCaps = caps
+			if ScopeNarrows(parentDelegation(), c) == "" {
+				t.Fatalf("child with %s caps under a capped parent must be rejected", name)
+			}
+		})
+	}
+}
+
+// Resource constraints may only be added. Dropping one, or changing its value,
+// widens what the child may reach.
+func TestScopeNarrows_RejectsDroppedResourceConstraint(t *testing.T) {
+	p := parentDelegation()
+	p.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
+	for name, res := range map[string]map[string]string{
+		"nil":            nil,
+		"empty":          {},
+		"partial":        {"project": "alpha"},
+		"altered":        {"project": "beta", "region": "us-east"},
+		"wildcard":       {"project": "*", "region": "us-east"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := validChild()
+			c.ResourceConstraints = res
+			if ScopeNarrows(p, c) == "" {
+				t.Fatalf("child with %s resource constraints must be rejected", name)
+			}
+		})
+	}
+}
+
+// Adding a constraint narrows and is permitted.
+func TestScopeNarrows_AcceptsAddedResourceConstraint(t *testing.T) {
+	p := parentDelegation()
+	p.ResourceConstraints = map[string]string{"project": "alpha"}
+	c := validChild()
+	c.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
+	if reason := ScopeNarrows(p, c); reason != "" {
+		t.Fatalf("adding a constraint is narrowing and must be accepted, got: %s", reason)
+	}
+}
+
 // An empty parent tool list means unrestricted, so any child list is a subset.
 func TestScopeNarrows_EmptyParentToolsIsUnrestricted(t *testing.T) {
 	p := parentDelegation()
@@ -1352,10 +1405,17 @@ func ScopeNarrows(parent, child *Delegation) string {
 		}
 	}
 
-	for hierarchy, childCap := range child.ClassificationCaps {
-		parentCap, ok := parent.ClassificationCaps[hierarchy]
+	// Iterate the PARENT's caps, not the child's. A hierarchy the parent
+	// restricts and the child omits is a widening, not an inheritance: at
+	// decision time CheckCap treats absent caps as "no restriction", so the
+	// child would hold unrestricted access to that hierarchy. This is the same
+	// asymmetry enforced above for tools — an empty child side under a
+	// restricted parent is a widening.
+	for hierarchy, parentCap := range parent.ClassificationCaps {
+		childCap, ok := child.ClassificationCaps[hierarchy]
 		if !ok {
-			return "child caps hierarchy " + hierarchy + " which parent does not cap"
+			return "child does not cap hierarchy " + hierarchy +
+				" which parent caps at " + parentCap
 		}
 		childIdx := classification.Index(hierarchy, childCap)
 		if childIdx < 0 {
@@ -1368,6 +1428,30 @@ func ScopeNarrows(parent, child *Delegation) string {
 		if childIdx > parentIdx {
 			return "child cap " + childCap + " exceeds parent cap " + parentCap +
 				" in hierarchy " + hierarchy
+		}
+	}
+
+	// The child may not introduce a cap on a hierarchy the parent does not cap.
+	for hierarchy := range child.ClassificationCaps {
+		if _, ok := parent.ClassificationCaps[hierarchy]; !ok {
+			return "child caps hierarchy " + hierarchy + " which parent does not cap"
+		}
+	}
+
+	// Resource constraints may only be added, never dropped or altered. Every
+	// constraint the parent sets must appear in the child with an identical
+	// value; extra child constraints are further narrowing and permitted.
+	// Values are opaque caller-defined strings, so the comparison is exact —
+	// it does not try to reason about wildcards or ranges, because every such
+	// interpretation is a place a widening could hide.
+	for key, parentVal := range parent.ResourceConstraints {
+		childVal, ok := child.ResourceConstraints[key]
+		if !ok {
+			return "child drops parent resource constraint " + key + "=" + parentVal
+		}
+		if childVal != parentVal {
+			return "child resource constraint " + key + "=" + childVal +
+				" differs from parent " + key + "=" + parentVal
 		}
 	}
 
@@ -3696,17 +3780,26 @@ func TestC6_DelegationClampedToPrincipalAuthority(t *testing.T) {
 func TestC7_ChildCannotWidenParent(t *testing.T) {
 	base := func() *models.Delegation {
 		return &models.Delegation{
-			MaxActionTier:      models.ActionTierInternalModify,
-			ApprovedTools:      []string{"Read"},
-			ClassificationCaps: map[string]string{"nato": "CONFIDENTIAL"},
-			ExpiresAt:          authzNow.Add(time.Hour),
+			MaxActionTier:       models.ActionTierInternalModify,
+			ApprovedTools:       []string{"Read"},
+			ClassificationCaps:  map[string]string{"nato": "CONFIDENTIAL"},
+			ResourceConstraints: map[string]string{"project": "alpha"},
+			ExpiresAt:           authzNow.Add(time.Hour),
 		}
 	}
+	// C7 names six dimensions: tools, actions, tier, caps, resources, expiry.
+	// Omission counts as widening wherever absence means "unrestricted" at
+	// decision time — that is how a child sheds a ceiling without ever
+	// appearing to widen one.
 	widenings := map[string]func(*models.Delegation){
-		"tier":           func(d *models.Delegation) { d.MaxActionTier = models.ActionTierDestructive },
-		"tools":          func(d *models.Delegation) { d.ApprovedTools = []string{"Read", "Bash"} },
-		"classification": func(d *models.Delegation) { d.ClassificationCaps = map[string]string{"nato": "TOP-SECRET"} },
-		"expiry":         func(d *models.Delegation) { d.ExpiresAt = authzNow.Add(2 * time.Hour) },
+		"tier":            func(d *models.Delegation) { d.MaxActionTier = models.ActionTierDestructive },
+		"tools":           func(d *models.Delegation) { d.ApprovedTools = []string{"Read", "Bash"} },
+		"tools-omitted":   func(d *models.Delegation) { d.ApprovedTools = nil },
+		"classification":  func(d *models.Delegation) { d.ClassificationCaps = map[string]string{"nato": "TOP-SECRET"} },
+		"caps-omitted":    func(d *models.Delegation) { d.ClassificationCaps = nil },
+		"resources":       func(d *models.Delegation) { d.ResourceConstraints = map[string]string{"project": "*"} },
+		"resources-omitted": func(d *models.Delegation) { d.ResourceConstraints = nil },
+		"expiry":          func(d *models.Delegation) { d.ExpiresAt = authzNow.Add(2 * time.Hour) },
 	}
 	for dim, widen := range widenings {
 		t.Run(dim, func(t *testing.T) {
