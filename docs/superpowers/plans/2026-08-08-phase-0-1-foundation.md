@@ -344,10 +344,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      # The gitleaks CLI, not gitleaks-action. The action calls GET /users/{owner}
+      # and exits 1 before scanning if the owner is a GitHub Organization and
+      # GITLEAKS_LICENSE is unset — the gate would fail on every run of an
+      # org-owned repo. The CLI itself is MIT-licensed with no such gate.
+      - name: gitleaks
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks git --no-banner --redact --verbose .
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.24.3"
 ```
+
+`gitleaks git` scans full history, which is why the checkout sets `fetch-depth: 0`. `--redact` keeps any finding out of the public log. The CLI exits non-zero on a finding, which fails the job — no `--exit-code` flag needed. Pin the version rather than tracking latest, so a new detection rule cannot turn an unrelated PR red.
 
 The race detector runs the full suite. The previous system had a logger data race and TOCTOU races in provider code with nothing gating against them.
 
