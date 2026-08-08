@@ -89,10 +89,17 @@ func ScopeNarrows(parent, child *Delegation) string {
 		}
 	}
 
-	for hierarchy, childCap := range child.ClassificationCaps {
-		parentCap, ok := parent.ClassificationCaps[hierarchy]
+	// Iterate the PARENT's caps, not the child's. A hierarchy the parent
+	// restricts and the child omits is a widening, not an inheritance: at
+	// decision time CheckCap treats absent caps as "no restriction", so the
+	// child would hold unrestricted access to that hierarchy. This is the same
+	// asymmetry enforced above for tools — an empty child side under a
+	// restricted parent is a widening.
+	for hierarchy, parentCap := range parent.ClassificationCaps {
+		childCap, ok := child.ClassificationCaps[hierarchy]
 		if !ok {
-			return "child caps hierarchy " + hierarchy + " which parent does not cap"
+			return "child does not cap hierarchy " + hierarchy +
+				" which parent caps at " + parentCap
 		}
 		childIdx := classification.Index(hierarchy, childCap)
 		if childIdx < 0 {
@@ -105,6 +112,30 @@ func ScopeNarrows(parent, child *Delegation) string {
 		if childIdx > parentIdx {
 			return "child cap " + childCap + " exceeds parent cap " + parentCap +
 				" in hierarchy " + hierarchy
+		}
+	}
+
+	// The child may not introduce a cap on a hierarchy the parent does not cap.
+	for hierarchy := range child.ClassificationCaps {
+		if _, ok := parent.ClassificationCaps[hierarchy]; !ok {
+			return "child caps hierarchy " + hierarchy + " which parent does not cap"
+		}
+	}
+
+	// Resource constraints may only be added, never dropped or altered. Every
+	// constraint the parent sets must appear in the child with an identical
+	// value; extra child constraints are further narrowing and permitted.
+	// Values are opaque caller-defined strings, so the comparison is exact —
+	// it does not try to reason about wildcards or ranges, because every such
+	// interpretation is a place a widening could hide.
+	for key, parentVal := range parent.ResourceConstraints {
+		childVal, ok := child.ResourceConstraints[key]
+		if !ok {
+			return "child drops parent resource constraint " + key + "=" + parentVal
+		}
+		if childVal != parentVal {
+			return "child resource constraint " + key + "=" + childVal +
+				" differs from parent " + key + "=" + parentVal
 		}
 	}
 

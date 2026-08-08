@@ -107,6 +107,59 @@ func TestScopeNarrows_RejectsLongerExpiry(t *testing.T) {
 	}
 }
 
+// Omitting a cap is a widening, not an inheritance. At decision time CheckCap
+// treats absent caps as no restriction, so a child that drops the map holds
+// unrestricted classification access — the same outcome as widening an entry,
+// reached by a different route.
+func TestScopeNarrows_RejectsChildOmittingParentCap(t *testing.T) {
+	for name, caps := range map[string]map[string]string{
+		"nil":                  nil,
+		"empty":                {},
+		"other-hierarchy-only": {"commercial": "PUBLIC"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := validChild()
+			c.ClassificationCaps = caps
+			if ScopeNarrows(parentDelegation(), c) == "" {
+				t.Fatalf("child with %s caps under a capped parent must be rejected", name)
+			}
+		})
+	}
+}
+
+// Resource constraints may only be added. Dropping one, or changing its value,
+// widens what the child may reach.
+func TestScopeNarrows_RejectsDroppedResourceConstraint(t *testing.T) {
+	p := parentDelegation()
+	p.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
+	for name, res := range map[string]map[string]string{
+		"nil":      nil,
+		"empty":    {},
+		"partial":  {"project": "alpha"},
+		"altered":  {"project": "beta", "region": "us-east"},
+		"wildcard": {"project": "*", "region": "us-east"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := validChild()
+			c.ResourceConstraints = res
+			if ScopeNarrows(p, c) == "" {
+				t.Fatalf("child with %s resource constraints must be rejected", name)
+			}
+		})
+	}
+}
+
+// Adding a constraint narrows and is permitted.
+func TestScopeNarrows_AcceptsAddedResourceConstraint(t *testing.T) {
+	p := parentDelegation()
+	p.ResourceConstraints = map[string]string{"project": "alpha"}
+	c := validChild()
+	c.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
+	if reason := ScopeNarrows(p, c); reason != "" {
+		t.Fatalf("adding a constraint is narrowing and must be accepted, got: %s", reason)
+	}
+}
+
 // An empty parent tool list means unrestricted, so any child list is a subset.
 func TestScopeNarrows_EmptyParentToolsIsUnrestricted(t *testing.T) {
 	p := parentDelegation()
