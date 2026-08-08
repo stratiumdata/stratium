@@ -808,7 +808,58 @@ func TestCheckCap_CapLookupIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("hierarchy lookup must be case-insensitive, got: %s", reason)
 	}
 }
+
+// Case-insensitivity must hold in BOTH directions. A caps map keyed in any
+// casing must be found against a resource declaring any casing. Testing only
+// the lowercase-caps direction hides a fail-open: a caps key the lookup cannot
+// see falls through to "no cap for this hierarchy", which allows.
+func TestCheckCap_CapKeyCasingCannotEvadeTheCap(t *testing.T) {
+	for _, capKey := range []string{"nato", "NATO", "Nato", "nAtO"} {
+		for _, resourceHierarchy := range []string{"nato", "NATO", "Nato"} {
+			t.Run(capKey+"/"+resourceHierarchy, func(t *testing.T) {
+				caps := map[string]string{capKey: "CONFIDENTIAL"}
+				resource := map[string]string{
+					"classification": "TOP-SECRET",
+					"hierarchy":      resourceHierarchy,
+				}
+				if ok, _ := CheckCap(caps, resource); ok {
+					t.Fatalf("TOP-SECRET passed a CONFIDENTIAL cap: caps key %q, resource hierarchy %q",
+						capKey, resourceHierarchy)
+				}
+			})
+		}
+	}
+}
+
+// Two keys differing only by case, carrying different caps, is ambiguous.
+// Resolving it by picking one would make the ceiling depend on map iteration
+// order, so it denies.
+func TestCheckCap_ConflictingCaseVariantKeysDeny(t *testing.T) {
+	caps := map[string]string{"nato": "TOP-SECRET", "NATO": "UNCLASSIFIED"}
+	resource := map[string]string{"classification": "SECRET", "hierarchy": "nato"}
+	ok, reason := CheckCap(caps, resource)
+	if ok {
+		t.Fatal("conflicting case-variant cap keys must deny as ambiguous")
+	}
+	if reason == "" {
+		t.Fatal("an ambiguity denial must explain itself")
+	}
+}
+
+// Case-variant keys carrying the SAME cap are redundant, not ambiguous, and
+// must enforce normally rather than denying.
+func TestCheckCap_DuplicateCaseVariantKeysWithSameCapEnforce(t *testing.T) {
+	caps := map[string]string{"nato": "SECRET", "NATO": "SECRET"}
+	if ok, reason := CheckCap(caps, map[string]string{"classification": "CONFIDENTIAL", "hierarchy": "nato"}); !ok {
+		t.Fatalf("identical case-variant caps must enforce, not deny: %s", reason)
+	}
+	if ok, _ := CheckCap(caps, map[string]string{"classification": "TOP-SECRET", "hierarchy": "nato"}); ok {
+		t.Fatal("identical case-variant caps must still enforce the cap")
+	}
+}
 ```
+
+> `TestCheckCap_UnknownCapLevelDenies` above pins the `capIdx < 0` guard. That guard is currently redundant — `resourceIdx >= 0` is already enforced, so `resourceIdx > -1` denies by arithmetic even without it — but the redundancy depends on guard ordering and on `Index` never returning a sentinel other than `-1`. The test enforces the rule directly so a future change to either cannot silently remove the protection.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -844,6 +895,32 @@ var Levels = map[string][]string{
 		"PUBLIC", "INTERNAL", "CONFIDENTIAL-COMMERCIAL",
 		"RESTRICTED-COMMERCIAL", "HIGHLY-CONFIDENTIAL",
 	},
+}
+
+// lookupCap finds a hierarchy's cap in a caller-supplied caps map, scanning
+// case-insensitively the way Index scans Levels.
+//
+// A plain map lookup is not enough here. Levels is ours and always lowercase,
+// but caps arrives from the caller in whatever casing it chose. Trying only
+// `strings.ToLower(h)` and then the verbatim key misses a caps map keyed
+// "NATO" against a resource declaring "nato" — the cap is silently invisible
+// and CheckCap falls through to "no cap for this hierarchy", which ALLOWS.
+// That is a fail-open on the platform's core authorization primitive.
+//
+// Two keys matching case-insensitively but carrying different levels is
+// ambiguous, and ambiguity denies — picking one would make the effective
+// ceiling depend on Go's map iteration order.
+func lookupCap(caps map[string]string, hierarchy string) (level string, found bool, ambiguous bool) {
+	for k, v := range caps {
+		if !strings.EqualFold(k, hierarchy) {
+			continue
+		}
+		if found && v != level {
+			return "", false, true
+		}
+		level, found = v, true
+	}
+	return level, found, false
 }
 
 // Index returns a level's rank within its hierarchy, case-insensitively, or -1
@@ -892,10 +969,11 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 		return false, "resource classification declared without a hierarchy attribute (ambiguous)"
 	}
 
-	capLevel, hasCap := caps[strings.ToLower(resourceHierarchy)]
-	if !hasCap {
-		// Caps are stored as the caller supplied them; try the original casing.
-		capLevel, hasCap = caps[resourceHierarchy]
+	capLevel, hasCap, ambiguous := lookupCap(caps, resourceHierarchy)
+	if ambiguous {
+		return false, fmt.Sprintf(
+			"conflicting caps for hierarchy %q (keys differing only by case carry different levels)",
+			resourceHierarchy)
 	}
 	if !hasCap {
 		return true, ""
