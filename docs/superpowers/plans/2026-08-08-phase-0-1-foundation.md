@@ -53,6 +53,8 @@ Everything below is created new. Nothing is modified in the old repository.
 
 **Greenfield simplifications versus the original plan:** tenancy is in the first migration rather than a follow-on `ALTER`; `ScopeNarrows` is written correct rather than fixed; there is no dead code to prune and no dangling imports to chase.
 
+**A Go toolchain quirk that shapes Tasks 1–3.** `go build ./...` treats "matched no packages" as a warning and exits 0; `go vet ./...` and `go test ./...` treat the same condition as a hard error and exit 1. `services/` holds no Go files until Task 4, so Tasks 1–3 verify configuration validity and job wiring rather than a passing gate. Do not add a placeholder `.go` file to make the gate go green — that is masking, and it leaves clutter for whoever writes the first real package. The gate is verified end to end at Task 16 Step 4, once every package exists.
+
 ---
 
 # PHASE 0 — Scaffold
@@ -71,8 +73,10 @@ Everything below is created new. Nothing is modified in the old repository.
 
 ```bash
 cd /path/to/stratium-data
-cat go.work services/go.mod && find . -type d -not -path "./.git*" | sort
+cat go.work services/go.mod && find . -type d -not -path "./.git/*" -not -path "./.superpowers/*" | sort
 ```
+
+(`-not -path "./.git*"` would also exclude `.github` — the glob matches both.)
 
 Expected: `go.work` uses `./services`; `services/go.mod` declares `module stratium` and `go 1.25`; directories `clients`, `deploy/docker`, `deploy/postgres`, `docs/superpowers/{specs,plans}`, `proto`, `services/{cmd,internal,pkg,migrations}`, `.github/workflows` all exist.
 
@@ -239,13 +243,17 @@ formatters:
 
 There is no exclusion list for pre-existing debt. This repository has none, and adding one now would only invite it.
 
-- [ ] **Step 2: Verify it runs clean**
+- [ ] **Step 2: Verify the configuration is valid**
+
+There are no Go files under `services/` until Task 4, so the linter has nothing to analyze yet. What is verifiable now is that the config parses and the linter accepts it:
 
 ```bash
-cd /path/to/stratium-data && make lint && echo "LINT CLEAN"
+cd /path/to/stratium-data/services && golangci-lint config verify
 ```
 
-Expected: `LINT CLEAN`. If golangci-lint is not installed, install it first — CI will run it regardless.
+Expected: the config validates. If golangci-lint is not installed, install it first — CI runs it regardless.
+
+`make lint` will report "no go files to analyze" until Task 4 adds the first package; that is expected, not a failure of this task. The linter is exercised against real code from Task 4 onward, and the full gate is verified end to end at Task 16 Step 4.
 
 - [ ] **Step 3: Commit**
 
@@ -352,14 +360,31 @@ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print
 
 Expected: `YAML OK`
 
-- [ ] **Step 3: Verify every job's command runs locally**
+- [ ] **Step 3: Verify the job wiring**
+
+The gate cannot pass yet — `services/` holds no Go files until Task 4, and `go vet`/`go test` exit 1 on "no packages" (unlike `go build`, which exits 0). What is verifiable now is that every job names a real target and a real working directory:
 
 ```bash
 cd /path/to/stratium-data
-make build && make vet && make test && make lint && echo "GATE PASSES"
+python3 - <<'PY'
+import yaml
+wf = yaml.safe_load(open('.github/workflows/ci.yml'))
+jobs = wf['jobs']
+assert set(jobs) == {'build','test','vet','lint','secrets'}, sorted(jobs)
+for name, job in jobs.items():
+    for step in job['steps']:
+        if 'working-directory' in step:
+            assert step['working-directory'] == 'services', (name, step)
+        if step.get('uses','').startswith('actions/setup-go'):
+            assert step['with']['cache-dependency-path'] == 'services/go.sum', name
+print("WIRING OK")
+PY
+make build
 ```
 
-Expected: `GATE PASSES`
+Expected: `WIRING OK`, then `make build` exits 0.
+
+The gate runs for real at Task 16 Step 4, once every package exists.
 
 - [ ] **Step 4: Commit**
 
