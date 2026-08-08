@@ -1,1 +1,25 @@
 .superpowers/
+
+# Build artifacts
+/services/bin/
+*.out
+!**/testdata/*.out
+
+# Terraform state — resource identifiers, sometimes secrets
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Node (clients/ui, later phases)
+node_modules/
+dist/
