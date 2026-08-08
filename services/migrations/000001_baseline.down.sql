@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS tenant_epoch;
+DROP TABLE IF EXISTS tier_overrides;
+DROP TABLE IF EXISTS entitlements;
+DROP TABLE IF EXISTS policies;
+DROP TABLE IF EXISTS delegations;
+DROP TABLE IF EXISTS agents;
