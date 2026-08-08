@@ -24,7 +24,13 @@ CREATE TABLE delegations (
     id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id            TEXT NOT NULL,
     user_id              TEXT NOT NULL,
-    agent_id             UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    -- RESTRICT, not CASCADE. The delegation row is the record of what authority
+    -- was granted to whom and when; cascade-deleting an agent silently destroys
+    -- that history, including already-revoked grants. pkg/audit records
+    -- decisions, not grants, so nothing else preserves it. Agents are retired by
+    -- setting enabled=false / suspended=true, which is what those columns exist
+    -- for; a hard delete now requires removing the delegations deliberately.
+    agent_id             UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
     approved_tools       JSONB NOT NULL DEFAULT '[]'::jsonb,
     max_action_tier      SMALLINT NOT NULL CHECK (max_action_tier BETWEEN 0 AND 4),
     classification_caps  JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -35,7 +41,12 @@ CREATE TABLE delegations (
     revoked              BOOLEAN NOT NULL DEFAULT false,
     revoked_at           TIMESTAMPTZ,
     parent_delegation_id UUID REFERENCES delegations(id) ON DELETE CASCADE,
-    root_delegation_id   UUID NOT NULL,
+    -- Self-referencing FK: a root delegation points at itself, a child at its
+    -- root. Without it a dangling root_delegation_id inserts cleanly, and since
+    -- cascade revocation is keyed on this column, such a row would silently
+    -- escape a root-keyed revocation sweep. Same backstop reasoning as
+    -- tier_overrides' raise-only CHECK.
+    root_delegation_id   UUID NOT NULL REFERENCES delegations(id),
     depth                SMALLINT NOT NULL DEFAULT 0 CHECK (depth >= 0),
     chain_agent_ids      JSONB NOT NULL DEFAULT '[]'::jsonb
 );
