@@ -148,3 +148,52 @@ func TestCheckCap_CapLookupIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("hierarchy lookup must be case-insensitive, got: %s", reason)
 	}
 }
+
+// Case-insensitivity must hold in BOTH directions. A caps map keyed in any
+// casing must be found against a resource declaring any casing. Testing only
+// the lowercase-caps direction hides a fail-open: a caps key the lookup cannot
+// see falls through to "no cap for this hierarchy", which allows.
+func TestCheckCap_CapKeyCasingCannotEvadeTheCap(t *testing.T) {
+	for _, capKey := range []string{"nato", "NATO", "Nato", "nAtO"} {
+		for _, resourceHierarchy := range []string{"nato", "NATO", "Nato"} {
+			t.Run(capKey+"/"+resourceHierarchy, func(t *testing.T) {
+				caps := map[string]string{capKey: "CONFIDENTIAL"}
+				resource := map[string]string{
+					"classification": "TOP-SECRET",
+					"hierarchy":      resourceHierarchy,
+				}
+				if ok, _ := CheckCap(caps, resource); ok {
+					t.Fatalf("TOP-SECRET passed a CONFIDENTIAL cap: caps key %q, resource hierarchy %q",
+						capKey, resourceHierarchy)
+				}
+			})
+		}
+	}
+}
+
+// Two keys differing only by case, carrying different caps, is ambiguous.
+// Resolving it by picking one would make the ceiling depend on map iteration
+// order, so it denies.
+func TestCheckCap_ConflictingCaseVariantKeysDeny(t *testing.T) {
+	caps := map[string]string{"nato": "TOP-SECRET", "NATO": "UNCLASSIFIED"}
+	resource := map[string]string{"classification": "SECRET", "hierarchy": "nato"}
+	ok, reason := CheckCap(caps, resource)
+	if ok {
+		t.Fatal("conflicting case-variant cap keys must deny as ambiguous")
+	}
+	if reason == "" {
+		t.Fatal("an ambiguity denial must explain itself")
+	}
+}
+
+// Case-variant keys carrying the SAME cap are redundant, not ambiguous, and
+// must enforce normally rather than denying.
+func TestCheckCap_DuplicateCaseVariantKeysWithSameCapEnforce(t *testing.T) {
+	caps := map[string]string{"nato": "SECRET", "NATO": "SECRET"}
+	if ok, reason := CheckCap(caps, map[string]string{"classification": "CONFIDENTIAL", "hierarchy": "nato"}); !ok {
+		t.Fatalf("identical case-variant caps must enforce, not deny: %s", reason)
+	}
+	if ok, _ := CheckCap(caps, map[string]string{"classification": "TOP-SECRET", "hierarchy": "nato"}); ok {
+		t.Fatal("identical case-variant caps must still enforce the cap")
+	}
+}

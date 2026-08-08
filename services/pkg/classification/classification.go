@@ -21,6 +21,32 @@ var Levels = map[string][]string{
 	},
 }
 
+// lookupCap finds a hierarchy's cap in a caller-supplied caps map, scanning
+// case-insensitively the way Index scans Levels.
+//
+// A plain map lookup is not enough here. Levels is ours and always lowercase,
+// but caps arrives from the caller in whatever casing it chose. Trying only
+// `strings.ToLower(h)` and then the verbatim key misses a caps map keyed
+// "NATO" against a resource declaring "nato" — the cap is silently invisible
+// and CheckCap falls through to "no cap for this hierarchy", which ALLOWS.
+// That is a fail-open on the platform's core authorization primitive.
+//
+// Two keys matching case-insensitively but carrying different levels is
+// ambiguous, and ambiguity denies — picking one would make the effective
+// ceiling depend on Go's map iteration order.
+func lookupCap(caps map[string]string, hierarchy string) (level string, found bool, ambiguous bool) {
+	for k, v := range caps {
+		if !strings.EqualFold(k, hierarchy) {
+			continue
+		}
+		if found && v != level {
+			return "", false, true
+		}
+		level, found = v, true
+	}
+	return level, found, false
+}
+
 // Index returns a level's rank within its hierarchy, case-insensitively, or -1
 // if either the hierarchy or the level is unknown. Callers must treat -1 as a
 // denial, never as a comparable value.
@@ -67,10 +93,11 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 		return false, "resource classification declared without a hierarchy attribute (ambiguous)"
 	}
 
-	capLevel, hasCap := caps[strings.ToLower(resourceHierarchy)]
-	if !hasCap {
-		// Caps are stored as the caller supplied them; try the original casing.
-		capLevel, hasCap = caps[resourceHierarchy]
+	capLevel, hasCap, ambiguous := lookupCap(caps, resourceHierarchy)
+	if ambiguous {
+		return false, fmt.Sprintf(
+			"conflicting caps for hierarchy %q (keys differing only by case carry different levels)",
+			resourceHierarchy)
 	}
 	if !hasCap {
 		return true, ""
