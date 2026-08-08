@@ -106,8 +106,19 @@ func (e Entry) Hash() [32]byte {
 	return out
 }
 
-// Verify walks a tenant's chain. Entries must be in sequence order and all
-// belong to one tenant.
+// Verify walks a tenant's chain.
+//
+// Preconditions, both enforced rather than assumed: entries belong to a single
+// tenant, and they are ordered by seq ascending. Ordering cannot be checked
+// here — Entry carries no ordinal — so a caller that queries audit_chain
+// without ORDER BY seq gets ErrChainBroken on intact data. That is a false
+// alarm, never a false acceptance.
+//
+// The tenant check is defence in depth. Hash is unkeyed SHA-256, so anyone can
+// compute a valid-looking PrevHash linking a forged entry onto another tenant's
+// real one. Row-level security stops an ordinary session from assembling such a
+// slice, but an admin, batch, or buggy paging caller could — and this package
+// is the auditor-facing proof, so it should not depend on a caller's diligence.
 func Verify(entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
@@ -115,7 +126,12 @@ func Verify(entries []Entry) error {
 	if entries[0].PrevHash != ZeroHash {
 		return fmt.Errorf("%w: first entry does not link to the zero hash", ErrChainBroken)
 	}
+	tenant := entries[0].TenantID
 	for i := 1; i < len(entries); i++ {
+		if entries[i].TenantID != tenant {
+			return fmt.Errorf("%w: entry %d belongs to tenant %q, chain is for %q",
+				ErrChainBroken, i, entries[i].TenantID, tenant)
+		}
 		if want := entries[i-1].Hash(); entries[i].PrevHash != want {
 			return fmt.Errorf("%w: entry %d does not link to entry %d", ErrChainBroken, i, i-1)
 		}

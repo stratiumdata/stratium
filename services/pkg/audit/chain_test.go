@@ -2,8 +2,11 @@ package audit
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var auditNow = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
@@ -70,21 +73,35 @@ func TestHash_Deterministic(t *testing.T) {
 // fails whenever a field is added to Entry without being added to Hash.
 func TestHash_CoversEveryField(t *testing.T) {
 	base := entry(ZeroHash, "base")
+	// Every field on Entry must appear here. A field present on the struct but
+	// absent from this table is a field nothing tests — deleting its write from
+	// Hash would pass the whole suite. PrevHash matters most: it is the literal
+	// chain link, and without it in the digest the structure stops being a chain.
+	someUUID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
 	mutations := map[string]func(*Entry){
-		"TenantID":      func(e *Entry) { e.TenantID = "other" },
-		"OccurredAt":    func(e *Entry) { e.OccurredAt = e.OccurredAt.Add(time.Second) },
-		"EventType":     func(e *Entry) { e.EventType = "other" },
-		"Actor":         func(e *Entry) { e.Actor = "mallory@example.com" },
-		"Decision":      func(e *Entry) { e.Decision = "DENY" },
-		"DeniedLeg":     func(e *Entry) { e.DeniedLeg = "agent" },
-		"DeniedAtDepth": func(e *Entry) { e.DeniedAtDepth = 3 },
-		"Reason":        func(e *Entry) { e.Reason = "other" },
-		"ToolName":      func(e *Entry) { e.ToolName = "Bash" },
-		"Action":        func(e *Entry) { e.Action = "delete" },
-		"DeclaredTier":  func(e *Entry) { e.DeclaredTier = 1 },
-		"DerivedTier":   func(e *Entry) { e.DerivedTier = 4 },
-		"ChainDepth":    func(e *Entry) { e.ChainDepth = 2 },
-		"InputDigest":   func(e *Entry) { e.InputDigest = [32]byte{9} },
+		"PrevHash":         func(e *Entry) { e.PrevHash = [32]byte{7} },
+		"TenantID":         func(e *Entry) { e.TenantID = "other" },
+		"OccurredAt":       func(e *Entry) { e.OccurredAt = e.OccurredAt.Add(time.Second) },
+		"EventType":        func(e *Entry) { e.EventType = "other" },
+		"Actor":            func(e *Entry) { e.Actor = "mallory@example.com" },
+		"AgentID":          func(e *Entry) { e.AgentID = &someUUID },
+		"DelegationID":     func(e *Entry) { e.DelegationID = &someUUID },
+		"RootDelegationID": func(e *Entry) { e.RootDelegationID = &someUUID },
+		"ChainDepth":       func(e *Entry) { e.ChainDepth = 2 },
+		"ToolName":         func(e *Entry) { e.ToolName = "Bash" },
+		"Action":           func(e *Entry) { e.Action = "delete" },
+		"DeclaredTier":     func(e *Entry) { e.DeclaredTier = 1 },
+		"DerivedTier":      func(e *Entry) { e.DerivedTier = 4 },
+		"Decision":         func(e *Entry) { e.Decision = "DENY" },
+		"DeniedLeg":        func(e *Entry) { e.DeniedLeg = "agent" },
+		"DeniedAtDepth":    func(e *Entry) { e.DeniedAtDepth = 3 },
+		"Reason":           func(e *Entry) { e.Reason = "other" },
+		"InputDigest":      func(e *Entry) { e.InputDigest = [32]byte{9} },
+	}
+
+	// Guard against the table silently falling behind the struct.
+	if got, want := len(mutations), reflect.TypeOf(Entry{}).NumField(); got != want {
+		t.Fatalf("mutation table covers %d fields but Entry has %d — add the missing ones", got, want)
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -97,15 +114,36 @@ func TestHash_CoversEveryField(t *testing.T) {
 	}
 }
 
-// Length prefixing prevents field-boundary ambiguity: without it,
-// {Actor:"ab", Reason:"c"} and {Actor:"a", Reason:"bc"} hash identically.
+// Length prefixing prevents field-boundary ambiguity: without it, content can
+// shift between fields undetected.
+//
+// The pair must be ADJACENT in Hash's write order. Actor and Reason are nine
+// fields apart, and the fixed-width writes between them act as accidental
+// delimiters — a test using that pair passes even with length-prefixing removed
+// entirely, which is coverage that isn't there. EventType and Actor are written
+// back to back with nothing in between, so they collide the moment prefixes go.
 func TestHash_FieldBoundariesUnambiguous(t *testing.T) {
-	a := entry(ZeroHash, "c")
-	a.Actor = "ab"
-	b := entry(ZeroHash, "bc")
-	b.Actor = "a"
+	a := entry(ZeroHash, "same")
+	a.EventType, a.Actor = "decisionX", "Y"
+	b := entry(ZeroHash, "same")
+	b.EventType, b.Actor = "decision", "XY"
 	if a.Hash() == b.Hash() {
-		t.Fatal("field boundaries are ambiguous — serialization is not length-prefixed")
+		t.Fatal("adjacent field boundaries are ambiguous — serialization is not length-prefixed")
+	}
+}
+
+// Hash is unkeyed, so a forged entry can be linked onto another tenant's real
+// entry by anyone who can read it. Verify must reject the mixed chain rather
+// than trusting the caller to have filtered by tenant.
+func TestVerify_RejectsCrossTenantForgery(t *testing.T) {
+	a1 := entry(ZeroHash, "tenant-a first")
+	a2 := entry(a1.Hash(), "tenant-a second")
+
+	forged := entry(a2.Hash(), "forged")
+	forged.TenantID = "tenant-b"
+
+	if err := Verify([]Entry{a1, a2, forged}); !errors.Is(err, ErrChainBroken) {
+		t.Fatalf("an entry from another tenant must break the chain, got: %v", err)
 	}
 }
 
