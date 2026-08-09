@@ -21,8 +21,16 @@ var (
 
 // TierTable is a tenant's resolved tier configuration, loaded by the caller.
 type TierTable struct {
-	// Overrides are tenant-authored and raise-only, validated by
-	// ValidateOverride at write time and by a database CHECK.
+	// Overrides are tenant-authored and meant to be raise-only. That
+	// invariant is enforced only at write time — by ValidateOverride, if the
+	// write path calls it, and by the tier_overrides_raise_only DB CHECK,
+	// which compares against a caller-supplied builtin_tier column rather
+	// than recomputing BuiltinTier(). Neither holds on the decision path
+	// below: DeriveTier consults Overrides first and returns whatever is
+	// stored, without re-deriving or re-validating against the builtin.
+	// TODO(phase-2): close the gap — either have DeriveTier reject an
+	// override below the live BuiltinTier(), or guarantee every write path
+	// is ValidateOverride-gated and builtin_tier cannot drift out of sync.
 	Overrides map[string]models.ActionTier
 
 	// Catalog holds tiers registered with a tool at registration time.

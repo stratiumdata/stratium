@@ -7,8 +7,16 @@ import (
 )
 
 // TrustTable maps an action tier to the minimum agent trust tier that may
-// perform it. The comparison is structural; the table is data, so a tenant can
-// require more trust than the default — never less (spec §4.3).
+// perform it. The comparison is structural; the table itself is plain data.
+//
+// Spec §4.3 describes this table as subject to the same raise-only override
+// mechanism as the action-tier table, but that is aspirational, not built:
+// there is no ValidateTrustTable or equivalent, so nothing today stops a
+// tenant-supplied table from requiring LESS trust than DefaultTrustTable.
+// Spec §8 lists "Trust-tier table overrides" as an open item ("confirm or
+// reverse") for exactly this reason.
+// TODO(phase-2): decide per spec §8, and if raise-only is confirmed, add
+// write-time validation analogous to ValidateOverride.
 type TrustTable struct {
 	Required map[models.ActionTier]models.AgentTrustTier
 }
