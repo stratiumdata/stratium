@@ -1,5 +1,6 @@
 .DEFAULT_GOAL := help
 GO_DIR := services
+PROTO_DIR := proto
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -21,6 +22,19 @@ lint: ## Lint (requires golangci-lint)
 		echo "golangci-lint not found: https://golangci-lint.run/welcome/install/"; exit 1; }
 	cd $(GO_DIR) && golangci-lint run ./...
 
+proto: ## Generate Go code from proto/ (requires protoc, protoc-gen-go, protoc-gen-go-grpc)
+	@command -v protoc >/dev/null 2>&1 || { \
+		echo "protoc not found: https://protobuf.dev/installation/"; exit 1; }
+	@command -v protoc-gen-go >/dev/null 2>&1 || { \
+		echo "protoc-gen-go not found: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest"; exit 1; }
+	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || { \
+		echo "protoc-gen-go-grpc not found: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"; exit 1; }
+	protoc \
+		--proto_path=$(PROTO_DIR) \
+		--go_out=$(GO_DIR) --go_opt=module=stratium \
+		--go-grpc_out=$(GO_DIR) --go-grpc_opt=module=stratium \
+		$(PROTO_DIR)/pdp/v1/pdp.proto
+
 CONFORMANCE_PROPERTIES := 25
 
 conformance: ## Run the authorization conformance suite (spec §7)
@@ -37,4 +51,4 @@ conformance: ## Run the authorization conformance suite (spec §7)
 	fi; \
 	echo "$$ran/$(CONFORMANCE_PROPERTIES) conformance properties executed."
 
-.PHONY: help build test vet fmt lint conformance
+.PHONY: help build test vet fmt lint proto conformance

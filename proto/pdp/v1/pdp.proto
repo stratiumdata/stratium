@@ -1,0 +1,110 @@
+// Package stratium.pdp.v1 is the PDP's external contract: one RPC, Decide,
+// that turns a request into a compound authorization decision.
+//
+// See services/internal/authz for the pure decision function this wraps, and
+// services/internal/pdpgrpc for the server that implements this service.
+syntax = "proto3";
+
+package stratium.pdp.v1;
+
+option go_package = "stratium/internal/pdpgrpc;pdpgrpc";
+
+// Effect mirrors internal/authz.Effect. EFFECT_DENY is deliberately the zero
+// value, not EFFECT_UNSPECIFIED as typical proto3 style would put there: an
+// Effect field that is never set, or that decodes from a truncated/corrupt
+// message, must come back DENY, not silently ALLOW. This is the same
+// invariant internal/authz.Effect documents for the Go type ("a leg that is
+// never evaluated must deny rather than silently permit") — the wire format
+// carries it through rather than reopening the gap at the boundary.
+enum Effect {
+  EFFECT_DENY = 0;
+  EFFECT_ALLOW = 1;
+  EFFECT_ESCALATE = 2;
+}
+
+// DecideRequest is everything the PDP needs from a caller to compute a
+// decision for one action.
+//
+// Two things are deliberately absent from this message, and must stay
+// absent:
+//
+//   - A tenant identifier. The tenant is startup configuration
+//     (internal/config.Config.TenantID), fixed for the PDP's lifetime and
+//     never taken from a request field. The predecessor system trusted a
+//     client-supplied identity header (x-user-id) to select the tenant, and
+//     that was a critical authentication bypass — any caller could name any
+//     tenant simply by setting the header. A tenant field here would
+//     reintroduce that exact defect over gRPC instead of HTTP.
+//   - A principal decision. Evaluating the principal leg is the server's
+//     job: it calls internal/policy.PrincipalPolicy itself, inside Decide,
+//     using the identity gRPC's transport authenticated (Phase 2 adds
+//     mTLS/OIDC for that; Phase 1c has no caller-verified identity at all,
+//     which is exactly why nothing here lets a caller assert one). A field
+//     carrying a caller-supplied verdict would let any caller hand the PDP
+//     its own answer and have the PDP rubber-stamp it — the same class of
+//     defect as the tenant header, aimed at authorization instead of
+//     authentication.
+message DecideRequest {
+  // delegation_id is the acting delegation: the last hop in the chain, the
+  // one actually presented for this action. A UUID string.
+  string delegation_id = 1;
+
+  // agent_id is the acting agent's registry ID. A UUID string.
+  string agent_id = 2;
+
+  // subject identifies the principal on whose behalf the agent acts.
+  string subject = 3;
+
+  string tool = 4;
+  string verb = 5;
+  string raw_input = 6;
+
+  // declared_tier is the caller's claimed action tier. It is optional so
+  // "the caller did not declare a tier" is distinguishable from "the caller
+  // declared REASONING": REASONING is tier zero, a real, meaningful tier
+  // (internal/authz never derives from this value — it is only cross-checked
+  // against the tier the server derives itself), and collapsing "absent"
+  // into that zero would silently turn a client that never set this field
+  // into one asserting the lowest-sensitivity tier there is.
+  optional int32 declared_tier = 7;
+
+  // resource carries attributes the classification and delegation-scope
+  // checks read (e.g. classification hierarchy levels). Caller-supplied and
+  // untrusted like every other field here — it narrows what a delegation
+  // permits, it does not widen it.
+  map<string, string> resource = 8;
+}
+
+// DecideResponse is the compound decision and each leg's individual
+// contribution to it, so a caller (and the audit trail) can see not just the
+// outcome but why.
+message DecideResponse {
+  Effect effect = 1;
+  int32 derived_tier = 2;
+
+  Effect principal_effect = 3;
+  string principal_reason = 4;
+
+  Effect agent_effect = 5;
+  string agent_reason = 6;
+
+  Effect delegation_effect = 7;
+  string delegation_reason = 8;
+
+  // denied_leg names which leg produced the denial: "principal", "agent", or
+  // "delegation". Empty when effect is not EFFECT_DENY.
+  string denied_leg = 9;
+
+  // denied_at_depth is the chain depth a delegation-leg denial occurred at,
+  // or -1 when the denial (if any) was not a delegation-leg denial.
+  int32 denied_at_depth = 10;
+
+  // reason is the overall, human-readable explanation for effect — the
+  // denying leg's reason when effect is EFFECT_DENY, or the escalating leg's
+  // reason when EFFECT_ESCALATE.
+  string reason = 11;
+}
+
+service PDPService {
+  rpc Decide(DecideRequest) returns (DecideResponse);
+}
