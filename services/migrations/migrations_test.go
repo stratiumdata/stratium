@@ -134,7 +134,11 @@ func TestEveryTableHasTenantID(t *testing.T) {
 		// paren rewrite closed, resurrected. No parsed body may contain a
 		// statement terminator or another statement keyword.
 		for _, tbl := range tables {
-			if strings.Contains(tbl.Body, ";") || strings.Contains(tbl.Body, "CREATE ") {
+			// A correct body ends at its own ")" and contains no earlier ");".
+			// Testing for a bare ";" instead would flag any prose comment that
+			// happens to use one, which trains people to reword comments rather
+			// than fix parses — a guard nobody trusts is a guard nobody keeps.
+			if inner := strings.TrimSuffix(tbl.Body, ")"); strings.Contains(inner, ");") {
 				t.Errorf("%s: parsed body for table %q ran past its own closing paren "+
 					"and swallowed following statements — the parser lost sync",
 					e.Name(), tbl.Name)
@@ -201,13 +205,33 @@ CREATE TABLE y (
 	}
 	swallowed := false
 	for _, tbl := range tables {
-		if strings.Contains(tbl.Body, ";") || strings.Contains(tbl.Body, "CREATE ") {
+		if inner := strings.TrimSuffix(tbl.Body, ")"); strings.Contains(inner, ");") {
 			swallowed = true
 		}
 	}
 	if !swallowed {
 		t.Fatal("a body that ran past its closing paren was not detected — " +
 			"a table with no tenant_id column would pass")
+	}
+}
+
+// The swallow check must not fire on ordinary SQL: prose comments using
+// semicolons, and nested parens in CHECK or DEFAULT expressions.
+func TestTenantIDGuardDoesNotFalsePositive(t *testing.T) {
+	sql := `CREATE TABLE ok (
+    tenant_id TEXT NOT NULL,
+    -- one thing; then another thing. Semicolons in prose are fine.
+    tier SMALLINT NOT NULL CHECK (tier BETWEEN 0 AND 4),
+    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (tenant_id, tier)
+);
+CREATE INDEX idx_ok_tenant ON ok(tenant_id);`
+	tables := parseCreateTables(sql)
+	if len(tables) != 1 {
+		t.Fatalf("expected 1 table, parsed %d", len(tables))
+	}
+	if inner := strings.TrimSuffix(tables[0].Body, ")"); strings.Contains(inner, ");") {
+		t.Fatalf("swallow check false-positived on ordinary SQL: %q", tables[0].Body)
 	}
 }
 
