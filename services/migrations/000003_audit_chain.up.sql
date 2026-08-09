@@ -36,7 +36,7 @@ CREATE TABLE audit_chain (
     CONSTRAINT audit_chain_hash_len CHECK (
         octet_length(prev_hash) = 32 AND octet_length(entry_hash) = 32),
     -- input_digest is also a SHA-256 and must be constrained like its siblings.
-    -- Nullable, because an entry need not carry one — but a present value of the
+    -- Nullable, because an entry need not carry one; but a present value of the
     -- wrong length is a truncated or corrupt digest, not a shorter one.
     CONSTRAINT audit_chain_input_digest_len CHECK (
         input_digest IS NULL OR octet_length(input_digest) = 32)
