@@ -92,11 +92,26 @@ func insertArgsFor(linked audit.Entry, entryHash [32]byte) []driver.Value {
 	}
 }
 
+// advisoryLockQuery mirrors the exact SQL text AppendAudit issues to acquire
+// the per-tenant serialization lock (see audit.go). Duplicated here rather
+// than imported from a shared constant because audit.go inlines it verbatim
+// rather than naming it — this string must match that literal exactly.
+const advisoryLockQuery = `SELECT pg_advisory_xact_lock(hashtext($1))`
+
+// expectAdvisoryLock registers the ordered expectation for AppendAudit's
+// per-tenant advisory lock. Mirrors expectSetTenant in store_test.go.
+func expectAdvisoryLock(mock sqlmock.Sqlmock) {
+	mock.ExpectExec(regexp.QuoteMeta(advisoryLockQuery)).
+		WithArgs(testTenant).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
 // --- AppendAudit ---
 //
 // Every case below registers sqlmock expectations in the exact order
-// AppendAudit must issue them — begin, set tenant, read the tail, insert,
-// commit — which is what proves the tail read and the insert happen inside
+// AppendAudit must issue them — begin, set tenant, acquire the advisory
+// lock, read the tail, insert, commit — which is what proves the lock is
+// acquired before the tail read and the tail read and insert happen inside
 // one transaction with the tenant set first: sqlmock matches expectations
 // in registration order by default, so a real implementation that reordered
 // or skipped a step would ask for a call it hasn't been told to expect and
@@ -115,6 +130,7 @@ func TestStore_AppendAudit_FirstEntryLinksToZeroHash(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
@@ -143,6 +159,7 @@ func TestStore_AppendAudit_SecondEntryLinksToPredecessorHash(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 		WillReturnRows(addAuditTailRow(sqlmock.NewRows(auditTailColumns()), predecessor))
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
@@ -179,6 +196,7 @@ func TestStore_AppendAudit_InsertCarriesZeroValuedColumns(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
@@ -210,6 +228,7 @@ func TestStore_AppendAudit_UniqueViolationIsDistinguishable(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
@@ -247,6 +266,7 @@ func TestStore_AppendAudit_InsertErrorIsNotMislabeledAsConcurrent(t *testing.T) 
 
 			mock.ExpectBegin()
 			expectSetTenant(mock)
+			expectAdvisoryLock(mock)
 			mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 				WillReturnError(sql.ErrNoRows)
 			mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
@@ -278,8 +298,71 @@ func TestStore_AppendAudit_TailQueryErrorPropagates(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 		WillReturnError(dbErr)
+	mock.ExpectRollback()
+
+	err := s.AppendAudit(context.Background(), e)
+	if err == nil {
+		t.Fatal("AppendAudit() error = nil, want error")
+	}
+	if errors.Is(err, ErrConcurrentAppend) {
+		t.Fatalf("AppendAudit() error = %v, must not be ErrConcurrentAppend", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// The advisory lock must be acquired inside the transaction, after the
+// tenant is set but before the chain tail is read — a lock taken after the
+// tail read would let two writers both read the tail before either one
+// serializes. sqlmock matches expectations in registration order by default
+// (see the comment above the "--- AppendAudit ---" section), so registering
+// the lock expectation between expectSetTenant and the tail ExpectQuery is
+// itself the proof: an implementation that read the tail first would ask
+// sqlmock for a query it hasn't been told to expect next and fail
+// immediately.
+func TestStore_AppendAudit_AcquiresAdvisoryLockBeforeTailRead(t *testing.T) {
+	s, mock := newMockStore(t)
+	e := fullAuditEntry(testTenant, 1)
+	wantLinked := audit.Link(nil, e)
+	wantHash := wantLinked.Hash()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(insertArgsFor(wantLinked, wantHash)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.AppendAudit(context.Background(), e); err != nil {
+		t.Fatalf("AppendAudit() error = %v", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A failure acquiring the lock — connection drop, statement timeout,
+// whatever — must abort the append immediately and must not fall through to
+// the tail read or the insert. Neither a tail ExpectQuery nor an insert
+// ExpectExec is registered below: if AppendAudit fell through to either
+// after a lock failure, sqlmock would fail this test for an unexpected
+// call, the same mechanism TestStore_AppendAudit_TailQueryErrorPropagates
+// relies on.
+func TestStore_AppendAudit_LockFailureAbortsWithoutWrite(t *testing.T) {
+	s, mock := newMockStore(t)
+	e := fullAuditEntry(testTenant, 1)
+	lockErr := errors.New("connection reset")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectExec(regexp.QuoteMeta(advisoryLockQuery)).
+		WithArgs(testTenant).
+		WillReturnError(lockErr)
 	mock.ExpectRollback()
 
 	err := s.AppendAudit(context.Background(), e)

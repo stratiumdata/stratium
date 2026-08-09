@@ -100,6 +100,23 @@ func (s *Store) AppendAudit(ctx context.Context, e audit.Entry) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Serialize appends per tenant. Two writers that read the same chain tail
+	// both link to it, and UNIQUE (tenant_id, prev_hash) then rejects one — which
+	// D3 turns into a denied action. Measured at 30-70% denials for a single
+	// tenant under ten concurrent decisions.
+	//
+	// pg_advisory_xact_lock is held for the transaction and released on commit or
+	// rollback, including if the process dies, so a crashed writer cannot wedge a
+	// tenant. hashtext gives a stable per-tenant key; collisions between distinct
+	// tenants only serialize them unnecessarily, never mix their chains.
+	//
+	// This bounds a tenant's decision throughput by audit-write latency. If that
+	// ceiling ever binds, the answer is batching appends behind the lock, not
+	// removing it.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, s.tenantID); err != nil {
+		return fmt.Errorf("acquire audit append lock: %w", err)
+	}
+
 	prev, err := scanAuditTail(tx.QueryRowContext(ctx, auditTailQuery))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("store: load audit chain tail: %w", err)

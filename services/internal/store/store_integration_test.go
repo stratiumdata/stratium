@@ -42,6 +42,7 @@ import (
 
 	"stratium/internal/authz"
 	"stratium/internal/pdpgrpc"
+	"stratium/internal/store"
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
 )
@@ -339,17 +340,27 @@ func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
 // would — so the exact string is reproduced here deliberately.
 const unconfiguredPrincipalReason = "principal: no policy engine configured (Phase 2)"
 
-// TestEndToEnd runs the six proofs, in the brief's own order, plus the two
-// measurements the task asked for explicitly. Subtests run sequentially
-// (never t.Parallel()) because later ones depend on earlier state: proof 3
-// needs proof 2's decision already written; the concurrency burst needs
-// proof 2's fixture already seeded; proof 6 deliberately revokes the
-// application role's INSERT privilege on audit_chain and must run last,
-// since nothing after it could append an audit row again.
+// TestEndToEnd runs the six proofs, in the brief's own order, plus the
+// Phase 2a Task 1 concurrency measurements: a single-call latency baseline,
+// the ten-way same-tenant burst (now expected 10/0 under the per-tenant
+// advisory lock — see audit.go), and a two-tenant check that the lock does
+// not serialize unrelated tenants against each other. Subtests run
+// sequentially (never t.Parallel()) because later ones depend on earlier
+// state: proof 3 needs proof 2's decision already written; the concurrency
+// measurements need proof 2's fixture already seeded; proof 6 deliberately
+// revokes the application role's INSERT privilege on audit_chain and must
+// run last, since nothing after it could append an audit row again.
 func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one")
 	_, acting := twoHopChain(t, configuredTenant, agentID)
+
+	// Set by single_decide_latency_baseline, read by
+	// measured_concurrent_decide_split_on_the_same_tail — both subtests run
+	// sequentially in the same TestEndToEnd, so this ordinary local variable
+	// is enough to carry the measurement across them without a package-level
+	// var.
+	var baselineLatency time.Duration
 
 	t.Run("proof1_migrations_applied_from_pdp_own_startup", func(t *testing.T) {
 		// This test never calls migrations.Up() itself — by the time
@@ -502,6 +513,30 @@ func TestEndToEnd(t *testing.T) {
 		t.Logf("ValidateChain(tenant-two's chain, expected tenant=%q) -> %v", configuredTenant, err)
 	})
 
+	t.Run("single_decide_latency_baseline", func(t *testing.T) {
+		// Uncontended latency for one Decide() call — no other writer
+		// racing this tenant's chain tail. This is what the burst
+		// subtest's per-call average is compared against below: the
+		// difference is the advisory lock's actual per-decision cost,
+		// not an assumption.
+		callStart := time.Now()
+		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: acting.ID.String(),
+			AgentId:      agentID.String(),
+			Subject:      "alice@example.com",
+			Tool:         "Bash",
+			Verb:         "read",
+		})
+		baselineLatency = time.Since(callStart)
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		if resp == nil {
+			t.Fatal("Decide() response = nil, want a decision")
+		}
+		t.Logf("single uncontended Decide() call: %s", baselineLatency)
+	})
+
 	t.Run("measured_concurrent_decide_split_on_the_same_tail", func(t *testing.T) {
 		const n = 10
 		var (
@@ -510,6 +545,7 @@ func TestEndToEnd(t *testing.T) {
 			start                         = make(chan struct{})
 		)
 		results := make([]string, n)
+		before := fetchAuditChain(t, configuredTenant)
 
 		for i := 0; i < n; i++ {
 			wg.Add(1)
@@ -536,28 +572,176 @@ func TestEndToEnd(t *testing.T) {
 				}
 			}(i)
 		}
+		burstStart := time.Now()
 		close(start) // release every goroutine at once, so they race the same tail
 		wg.Wait()
+		elapsed := time.Since(burstStart)
 
-		t.Logf("fired %d concurrent Decide() calls for tenant %q: %d ok, %d Aborted (ErrConcurrentAppend), %d other failures",
-			n, configuredTenant, succeeded, aborted, otherFail)
+		t.Logf("fired %d concurrent Decide() calls for tenant %q in %s (avg %s/call, vs %s single-call baseline): "+
+			"%d ok, %d Aborted (ErrConcurrentAppend), %d other failures",
+			n, configuredTenant, elapsed, elapsed/n, baselineLatency, succeeded, aborted, otherFail)
 		t.Logf("per-call outcomes: %v", results)
-		if succeeded == 0 {
-			t.Error("succeeded = 0, want at least 1 (the audit chain should never fully wedge)")
-		}
-		if succeeded+aborted != n {
-			t.Errorf("succeeded(%d) + aborted(%d) = %d, want %d — an outcome other than ok/Aborted appeared, see the log above",
-				succeeded, aborted, succeeded+aborted, n)
+
+		// Post-fix expectation: the per-tenant advisory lock in
+		// store.AppendAudit serializes these ten calls onto the same chain
+		// tail one at a time, so every one should now succeed and none
+		// should collide on UNIQUE(tenant_id, prev_hash). Before that lock
+		// existed, Phase 1c measured 3/7, 7/3, 4/6 splits here — a
+		// regression to any partial split means the lock has stopped
+		// covering this path.
+		if succeeded != n || aborted != 0 || otherFail != 0 {
+			t.Errorf("succeeded=%d aborted=%d other=%d, want %d/0/0 (advisory lock should serialize every call for one tenant)",
+				succeeded, aborted, otherFail, n)
 		}
 
-		// Bonus, not a required proof: confirm the chain a real race just
-		// wrote to is still internally consistent, not merely that
-		// individual writes succeeded or failed.
-		entries := fetchAuditChain(t, configuredTenant)
-		if err := audit.Verify(entries); err != nil {
+		after := fetchAuditChain(t, configuredTenant)
+		if err := audit.Verify(after); err != nil {
 			t.Fatalf("audit.Verify() after the concurrent burst error = %v, want nil (chain must stay linked under a race)", err)
 		}
-		t.Logf("chain still verifies after the burst: %d total entries", len(entries))
+		gotNewRows := int64(len(after) - len(before))
+		if gotNewRows != succeeded {
+			t.Errorf("audit_chain grew by %d rows, want %d (one per successful decision)", gotNewRows, succeeded)
+		}
+		t.Logf("chain still verifies after the burst: %d total entries (%d new, matching %d successful decisions)",
+			len(after), gotNewRows, succeeded)
+	})
+
+	t.Run("appendaudit_lock_is_per_tenant_not_global", func(t *testing.T) {
+		// The 10/0 result above is necessary but not sufficient: a single
+		// GLOBAL lock (not keyed by tenant) would also serialize every
+		// tenant's appends through one mutex and would still produce 10/0
+		// for each tenant measured individually — it would just also make
+		// unrelated tenants queue behind each other, invisibly to a
+		// count-only check. audit.go's lock key is hashtext(tenant_id), not
+		// a constant; the two checks below confirm that holds against a
+		// real database, not just that it reads that way in the source.
+		const n = 10
+		storeA := store.New(testDB, configuredTenant)
+		storeB := store.New(testDB, secondTenantID)
+
+		probe := func(tenant, label string, i int) audit.Entry {
+			return audit.Entry{
+				TenantID:   tenant,
+				OccurredAt: time.Now(),
+				EventType:  "decision",
+				Actor:      "integration-test:" + label,
+				ToolName:   "Bash",
+				Action:     "read",
+				Decision:   "DENY",
+				Reason:     fmt.Sprintf("%s probe %d", label, i),
+			}
+		}
+
+		// Check 1, informational: both tenants fire a 10-call burst
+		// released at the same instant, on independent goroutine sets
+		// sharing nothing but *sql.DB and the one Postgres instance
+		// underneath it. Both must still land 10/0 — a deadlock or a lock
+		// keyed wrongly enough to cross-link two tenants' chains would show
+		// up here even though it doesn't by itself distinguish a per-tenant
+		// lock from a global one (a global lock still produces 10/0 for
+		// each tenant measured separately; see above).
+		var wg sync.WaitGroup
+		var aOK, aAborted, aOther, bOK, bAborted, bOther int64
+		start := make(chan struct{})
+		fire := func(st *store.Store, tenant, label string, i int, ok, aborted, other *int64) {
+			defer wg.Done()
+			<-start
+			switch err := st.AppendAudit(t.Context(), probe(tenant, label, i)); {
+			case err == nil:
+				atomic.AddInt64(ok, 1)
+			case errors.Is(err, store.ErrConcurrentAppend):
+				atomic.AddInt64(aborted, 1)
+			default:
+				atomic.AddInt64(other, 1)
+				t.Logf("tenant %q AppendAudit unexpected error: %v", tenant, err)
+			}
+		}
+		for i := 0; i < n; i++ {
+			wg.Add(2)
+			go fire(storeA, configuredTenant, "interleaved-a", i, &aOK, &aAborted, &aOther)
+			go fire(storeB, secondTenantID, "interleaved-b", i, &bOK, &bAborted, &bOther)
+		}
+		burstStart := time.Now()
+		close(start)
+		wg.Wait()
+		burstElapsed := time.Since(burstStart)
+		t.Logf("interleaved burst, both tenants at once, %d calls each in %s: tenant %q %d ok/%d aborted/%d other, tenant %q %d ok/%d aborted/%d other",
+			n, burstElapsed, configuredTenant, aOK, aAborted, aOther, secondTenantID, bOK, bAborted, bOther)
+		if aOK != n || aAborted != 0 || aOther != 0 {
+			t.Errorf("tenant %q: %d ok, %d aborted, %d other, want %d/0/0", configuredTenant, aOK, aAborted, aOther, n)
+		}
+		if bOK != n || bAborted != 0 || bOther != 0 {
+			t.Errorf("tenant %q: %d ok, %d aborted, %d other, want %d/0/0", secondTenantID, bOK, bAborted, bOther, n)
+		}
+
+		// Check 2, decisive: hold tenant A's lock open on purpose and
+		// confirm a concurrent call for tenant A blocks behind it while a
+		// concurrent call for tenant B does not. This is deliberately not a
+		// throughput/timing-ratio comparison — an earlier version of this
+		// test compared aggregate wall-clock for two tenants' bursts run
+		// separately vs. interleaved, and it was too noisy in a small local
+		// Docker Compose stack to be a reliable signal: server-side
+		// contention (WAL fsync, CPU, connection setup) affects both the
+		// global-lock and per-tenant-lock cases and can mask the
+		// difference at n=10. Controlling one lock holder's duration
+		// directly removes that noise: unblocked is a few milliseconds,
+		// blocked is at least the hold duration, and there is no middle
+		// ground to misread.
+		const holdFor = 300 * time.Millisecond
+		holderTx, err := testDB.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("begin lock-holder tx: %v", err)
+		}
+		defer func() { _ = holderTx.Rollback() }() // safety net if a Fatal below skips the release timer
+		if _, err := holderTx.ExecContext(t.Context(), `SELECT set_config('app.tenant_id', $1, true)`, configuredTenant); err != nil {
+			t.Fatalf("lock-holder set_config: %v", err)
+		}
+		// Same literal statement and tenant string audit.go's AppendAudit
+		// uses, so this acquires the identical lock key a real AppendAudit
+		// call for configuredTenant would.
+		if _, err := holderTx.ExecContext(t.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, configuredTenant); err != nil {
+			t.Fatalf("lock-holder acquire lock: %v", err)
+		}
+		releaseTimer := time.AfterFunc(holdFor, func() { _ = holderTx.Rollback() })
+		defer releaseTimer.Stop()
+
+		call := func(st *store.Store, tenant string) (elapsed time.Duration, err error) {
+			callStart := time.Now()
+			err = st.AppendAudit(t.Context(), probe(tenant, "hold-probe", 0))
+			return time.Since(callStart), err
+		}
+		var aElapsed, bElapsed time.Duration
+		var aErr, bErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); aElapsed, aErr = call(storeA, configuredTenant) }()
+		go func() { defer wg.Done(); bElapsed, bErr = call(storeB, secondTenantID) }()
+		wg.Wait()
+
+		if aErr != nil {
+			t.Fatalf("tenant %q AppendAudit while its own lock is held error = %v, want nil (should block, then succeed once released)",
+				configuredTenant, aErr)
+		}
+		if bErr != nil {
+			t.Fatalf("tenant %q AppendAudit while tenant %q's lock is held error = %v, want nil", secondTenantID, configuredTenant, bErr)
+		}
+		t.Logf("while tenant %q held its own lock for %s: a same-tenant call took %s, a different-tenant call took %s",
+			configuredTenant, holdFor, aElapsed, bElapsed)
+
+		if aElapsed < holdFor {
+			t.Errorf("same-tenant call took %s, want >= %s — it should have blocked behind the held lock "+
+				"(if it did not, this test's control isn't verifying anything)", aElapsed, holdFor)
+		}
+		if bElapsed >= holdFor {
+			t.Errorf("different-tenant call took %s, want well under %s — it blocked behind another tenant's "+
+				"lock, which means the lock is not scoped per tenant", bElapsed, holdFor)
+		}
+
+		for _, tenant := range []string{configuredTenant, secondTenantID} {
+			entries := fetchAuditChain(t, tenant)
+			if err := audit.Verify(entries); err != nil {
+				t.Fatalf("audit.Verify() for tenant %q error = %v, want nil", tenant, err)
+			}
+		}
 	})
 
 	t.Run("proof6_failed_audit_append_blocks_the_decision", func(t *testing.T) {
