@@ -42,6 +42,14 @@ func Decide(req Request, cfg Config) Result {
 		return res
 	}
 
+	if err := ValidateChain(req.Chain, req.TenantID, req.Agent.ID); err != nil {
+		res.Effect = EffectDeny
+		res.DeniedLeg = "delegation"
+		res.Reason = err.Error()
+		res.Delegation = LegResult{Effect: EffectDeny, Reason: err.Error()}
+		return res
+	}
+
 	// The principal leg's zero value is EffectDeny, so a caller that forgets to
 	// evaluate it denies rather than silently permitting (C11, C13).
 	res.Principal = req.PrincipalDecision

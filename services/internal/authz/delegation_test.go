@@ -21,6 +21,26 @@ func delegation(depth int, maxTier models.ActionTier, tools []string) *models.De
 	}
 }
 
+// linkChain wires the depth-linkage fields ValidateChain checks — tenant,
+// root, parent pointers, and the acting agent — onto delegations built with
+// delegation(), which only sets the fields DelegationLeg itself reads. Callers
+// give each delegation its Depth via delegation()'s first argument; linkChain
+// makes the slice a genuine lineage instead of unrelated delegations that
+// merely sit next to each other, which is what ValidateChain now requires of
+// any chain passed to Decide.
+func linkChain(tenantID string, actingAgent uuid.UUID, ds ...*models.Delegation) []*models.Delegation {
+	for i, d := range ds {
+		d.TenantID = tenantID
+		d.RootDelegationID = ds[0].ID
+		if i > 0 {
+			parent := ds[i-1].ID
+			d.ParentDelegationID = &parent
+		}
+	}
+	ds[len(ds)-1].AgentID = actingAgent
+	return ds
+}
+
 func TestDelegationLeg_AllowsWithinScope(t *testing.T) {
 	chain := []*models.Delegation{delegation(0, models.ActionTierInternalModify, []string{"Read"})}
 	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, authzNow, 5)

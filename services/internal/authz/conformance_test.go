@@ -53,7 +53,7 @@ func TestC2_OverDeclaredTierPermitted(t *testing.T) {
 func TestC3_DerivedTierReachesEveryGate(t *testing.T) {
 	markRan(3)
 	req := request()
-	req.Chain = []*models.Delegation{delegation(0, models.ActionTierReadOnly, nil)}
+	req.Chain = linkChain(req.TenantID, req.Agent.ID, delegation(0, models.ActionTierReadOnly, nil))
 	req.Action = Action{Tool: "Bash", Verb: "delete", DeclaredTier: tierPtr(models.ActionTierDestructive)}
 	got := Decide(req, config())
 	if got.Effect != EffectDeny || got.DeniedLeg != "delegation" {
@@ -123,11 +123,11 @@ func TestC7_ChildCannotWidenParent(t *testing.T) {
 func TestC8_ChainDepthBounded(t *testing.T) {
 	markRan(8)
 	req := request()
-	req.Chain = []*models.Delegation{
+	req.Chain = linkChain(req.TenantID, req.Agent.ID,
 		delegation(0, models.ActionTierDestructive, nil),
 		delegation(1, models.ActionTierDestructive, nil),
 		delegation(2, models.ActionTierDestructive, nil),
-	}
+	)
 	cfg := config()
 	cfg.MaxDepth = 1
 	if got := Decide(req, cfg); got.Effect != EffectDeny {
@@ -140,7 +140,7 @@ func TestC9_RevokedRootDeniesDescendants(t *testing.T) {
 	req := request()
 	root := delegation(0, models.ActionTierDestructive, nil)
 	root.Revoked = true
-	req.Chain = []*models.Delegation{root, delegation(1, models.ActionTierReadOnly, nil)}
+	req.Chain = linkChain(req.TenantID, req.Agent.ID, root, delegation(1, models.ActionTierReadOnly, nil))
 	got := Decide(req, config())
 	if got.Effect != EffectDeny || got.DeniedAtDepth != 0 {
 		t.Fatalf("C9: a revoked root must deny at depth 0, got %v at %d", got.Effect, got.DeniedAtDepth)
@@ -192,7 +192,7 @@ func TestC14_PolicyCannotExceedCeiling(t *testing.T) {
 	markRan(14)
 	req := request()
 	req.PrincipalDecision = LegResult{Effect: EffectAllow, Reason: "policy grants everything"}
-	req.Chain = []*models.Delegation{delegation(0, models.ActionTierReadOnly, nil)}
+	req.Chain = linkChain(req.TenantID, req.Agent.ID, delegation(0, models.ActionTierReadOnly, nil))
 	req.Action = Action{Tool: "Bash", Verb: "delete"}
 	got := Decide(req, config())
 	if got.Effect != EffectDeny || got.DeniedLeg != "delegation" {

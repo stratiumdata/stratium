@@ -3,15 +3,20 @@ package authz
 import (
 	"testing"
 
+	"github.com/google/uuid"
+
 	"stratium/pkg/models"
 )
 
 func request() Request {
+	agent := agentInfo(models.TrustTierPlatformTrusted, nil)
+	root := delegation(0, models.ActionTierDestructive, nil)
+	linkChain("tenant-a", agent.ID, root)
 	return Request{
 		TenantID:          "tenant-a",
 		Principal:         Principal{Subject: "alice@example.com"},
-		Agent:             agentInfo(models.TrustTierPlatformTrusted, nil),
-		Chain:             []*models.Delegation{delegation(0, models.ActionTierDestructive, nil)},
+		Agent:             agent,
+		Chain:             []*models.Delegation{root},
 		Action:            Action{Tool: "Read", Verb: "read"},
 		Now:               authzNow,
 		PrincipalDecision: LegResult{Effect: EffectAllow},
@@ -81,11 +86,40 @@ func TestDecide_AnyDenyOverrides(t *testing.T) {
 func TestDecide_PolicyCannotExceedCeiling(t *testing.T) {
 	req := request()
 	req.PrincipalDecision = LegResult{Effect: EffectAllow, Reason: "policy grants everything"}
-	req.Chain = []*models.Delegation{delegation(0, models.ActionTierReadOnly, nil)}
+	req.Chain = linkChain(req.TenantID, req.Agent.ID, delegation(0, models.ActionTierReadOnly, nil))
 	req.Action = Action{Tool: "Bash", Verb: "delete"}
 	got := Decide(req, config())
 	if got.Effect != EffectDeny || got.DeniedLeg != "delegation" {
 		t.Fatalf("policy must not exceed the ceiling, got %v/%s", got.Effect, got.DeniedLeg)
+	}
+}
+
+// A fabricated chain must never reach ALLOW merely because Decide trusts
+// whatever slice it is handed: mixed tenants, a fabricated depth, an orphan
+// parent pointer, and an acting delegation issued to a different agent than
+// the requester. This is the exact shape of chain a review probe once got
+// ALLOW from — the reason ValidateChain exists.
+func TestDecide_RejectsFabricatedChain(t *testing.T) {
+	req := request() // req.TenantID == "tenant-a"
+
+	root := delegation(0, models.ActionTierDestructive, nil)
+	root.TenantID = "tenant-b"
+	root.RootDelegationID = root.ID
+
+	orphanParent := uuid.New()
+	fabricated := delegation(9, models.ActionTierDestructive, nil) // fabricated depth
+	fabricated.TenantID = "tenant-c"
+	fabricated.RootDelegationID = root.ID
+	fabricated.ParentDelegationID = &orphanParent // points nowhere
+	fabricated.AgentID = uuid.New()               // a different agent than the requester
+
+	req.Chain = []*models.Delegation{root, fabricated}
+	got := Decide(req, config())
+	if got.Effect != EffectDeny {
+		t.Fatalf("a fabricated chain must deny, got %v", got.Effect)
+	}
+	if got.DeniedLeg != "delegation" {
+		t.Fatalf("a fabricated chain must be attributed to the delegation leg, got %q", got.DeniedLeg)
 	}
 }
 
@@ -137,10 +171,10 @@ func TestDecide_DenyBeatsEscalate(t *testing.T) {
 // A chain denial reports the depth; a non-chain denial leaves it at -1.
 func TestDecide_DeniedAtDepth(t *testing.T) {
 	req := request()
-	req.Chain = []*models.Delegation{
+	req.Chain = linkChain(req.TenantID, req.Agent.ID,
 		delegation(0, models.ActionTierDestructive, nil),
 		delegation(1, models.ActionTierReadOnly, nil),
-	}
+	)
 	req.Action = Action{Tool: "Bash", Verb: "delete"}
 	got := Decide(req, config())
 	if got.DeniedAtDepth != 1 {
