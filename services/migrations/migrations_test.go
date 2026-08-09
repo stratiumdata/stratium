@@ -99,7 +99,7 @@ func TestEveryTableHasTenantID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading embedded FS: %v", err)
 	}
-	seen := 0
+	total := 0
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
@@ -108,15 +108,62 @@ func TestEveryTableHasTenantID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
-		for _, tbl := range parseCreateTables(string(b)) {
-			seen++
+		sql := string(b)
+		tables := parseCreateTables(sql)
+
+		// Reconcile per file. The depth counter is character-level, so an
+		// unbalanced paren inside a string literal or a comment desyncs it and
+		// the parser silently returns fewer tables — possibly none — for the
+		// rest of the file. A global "did we parse anything at all" check does
+		// not catch that, because another file keeps the total nonzero. Compare
+		// against a textual count instead: any disagreement means the parser
+		// lost track, and an unparsed table is an unchecked table.
+		if want, got := strings.Count(sql, "CREATE TABLE"), len(tables); want != got {
+			t.Errorf("%s: found %d occurrences of CREATE TABLE but parsed %d — "+
+				"the parser lost sync (unbalanced paren in a literal or comment, "+
+				"or an unsupported form such as CREATE TABLE ... AS SELECT)",
+				e.Name(), want, got)
+			continue
+		}
+
+		total += len(tables)
+		for _, tbl := range tables {
 			if !strings.Contains(tbl.Body, "tenant_id") {
 				t.Errorf("%s: table %q has no tenant_id column", e.Name(), tbl.Name)
 			}
 		}
 	}
-	if seen == 0 {
+	if total == 0 {
 		t.Fatal("parsed no CREATE TABLE statements — the guard is inert")
+	}
+}
+
+// The reconciliation check must fire when the parser loses sync, rather than
+// silently reporting fewer tables.
+func TestTenantIDGuardDetectsParserDesync(t *testing.T) {
+	desyncing := map[string]string{
+		"unbalanced paren in a string literal": `CREATE TABLE a (
+    tenant_id TEXT NOT NULL,
+    note TEXT DEFAULT 'oops ('
+);
+CREATE TABLE b (
+    id UUID PRIMARY KEY
+);`,
+		"unbalanced paren in a comment": `CREATE TABLE a (
+    tenant_id TEXT NOT NULL, -- see note (
+    note TEXT
+);
+CREATE TABLE b (
+    id UUID PRIMARY KEY
+);`,
+	}
+	for name, sql := range desyncing {
+		t.Run(name, func(t *testing.T) {
+			if want, got := strings.Count(sql, "CREATE TABLE"), len(parseCreateTables(sql)); want == got {
+				t.Fatalf("expected the parser to lose sync so the reconciliation "+
+					"check can catch it, but it parsed all %d tables", got)
+			}
+		})
 	}
 }
 
