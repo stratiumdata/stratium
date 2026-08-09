@@ -2012,6 +2012,21 @@ func TestEveryTableHasTenantID(t *testing.T) {
 			continue
 		}
 
+		// Equal counts are not sufficient. A stray paren inside one table's body
+		// can overrun its true close and swallow a trailing
+		// `CREATE INDEX ... ON t(tenant_id);` — no CREATE TABLE is consumed, so
+		// the count still matches, but the swallowed text supplies the substring
+		// and a table with no tenant_id column passes. That is the exact bug the
+		// paren rewrite closed, resurrected. No parsed body may contain a
+		// statement terminator or another statement keyword.
+		for _, tbl := range tables {
+			if strings.Contains(tbl.Body, ";") || strings.Contains(tbl.Body, "CREATE ") {
+				t.Errorf("%s: parsed body for table %q ran past its own closing paren "+
+					"and swallowed following statements — the parser lost sync",
+					e.Name(), tbl.Name)
+			}
+		}
+
 		total += len(tables)
 		for _, tbl := range tables {
 			if !strings.Contains(tbl.Body, "tenant_id") {
@@ -2050,6 +2065,35 @@ CREATE TABLE b (
 					"check can catch it, but it parsed all %d tables", got)
 			}
 		})
+	}
+}
+
+// The dangerous desync is the one that keeps the counts equal: a stray paren
+// lets a table body swallow a trailing CREATE INDEX naming tenant_id, so a
+// table with no such column looks compliant. The body must be rejected for
+// containing following statements, not merely counted.
+func TestTenantIDGuardCatchesSwallowedStatements(t *testing.T) {
+	sql := `CREATE TABLE x (
+    id UUID PRIMARY KEY,
+    name TEXT DEFAULT 'oops ('
+);
+CREATE INDEX idx_x_tenant ON x(tenant_id); -- balance )
+CREATE TABLE y (
+    tenant_id TEXT NOT NULL
+);`
+	tables := parseCreateTables(sql)
+	if strings.Count(sql, "CREATE TABLE") != len(tables) {
+		t.Skip("counts already disagree; the count check catches this case")
+	}
+	swallowed := false
+	for _, tbl := range tables {
+		if strings.Contains(tbl.Body, ";") || strings.Contains(tbl.Body, "CREATE ") {
+			swallowed = true
+		}
+	}
+	if !swallowed {
+		t.Fatal("a body that ran past its closing paren was not detected — " +
+			"a table with no tenant_id column would pass")
 	}
 }
 
@@ -2507,7 +2551,12 @@ CREATE TABLE audit_chain (
     input_digest BYTEA,
 
     CONSTRAINT audit_chain_hash_len CHECK (
-        octet_length(prev_hash) = 32 AND octet_length(entry_hash) = 32)
+        octet_length(prev_hash) = 32 AND octet_length(entry_hash) = 32),
+    -- input_digest is also a SHA-256 and must be constrained like its siblings.
+    -- Nullable, because an entry need not carry one; but a present value of the
+    -- wrong length is a truncated or corrupt digest, not a shorter one.
+    CONSTRAINT audit_chain_input_digest_len CHECK (
+        input_digest IS NULL OR octet_length(input_digest) = 32)
 );
 
 CREATE UNIQUE INDEX audit_chain_tenant_seq   ON audit_chain(tenant_id, seq);
@@ -2521,6 +2570,21 @@ CREATE INDEX audit_chain_root                ON audit_chain(root_delegation_id);
 CREATE RULE audit_chain_no_update AS ON UPDATE TO audit_chain DO INSTEAD NOTHING;
 CREATE RULE audit_chain_no_delete AS ON DELETE TO audit_chain DO INSTEAD NOTHING;
 
+-- Rules do NOT intercept TRUNCATE — only triggers do. Without this, TRUNCATE
+-- empties the entire audit trail silently, for any role holding the privilege,
+-- and the UPDATE/DELETE rules above give a false sense of immutability.
+-- Verified: TRUNCATE as the table owner took the table from 1 row to 0 with no
+-- error before this trigger existed.
+CREATE OR REPLACE FUNCTION audit_chain_deny_truncate() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_chain is append-only: TRUNCATE is not permitted';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER audit_chain_no_truncate
+    BEFORE TRUNCATE ON audit_chain
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_chain_deny_truncate();
+
 ALTER TABLE audit_chain ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_chain FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON audit_chain
@@ -2531,6 +2595,8 @@ CREATE POLICY tenant_isolation ON audit_chain
 Create `services/migrations/000003_audit_chain.down.sql`:
 
 ```sql
+DROP TRIGGER IF EXISTS audit_chain_no_truncate ON audit_chain;
+DROP FUNCTION IF EXISTS audit_chain_deny_truncate();
 DROP RULE IF EXISTS audit_chain_no_delete ON audit_chain;
 DROP RULE IF EXISTS audit_chain_no_update ON audit_chain;
 DROP TABLE IF EXISTS audit_chain;
