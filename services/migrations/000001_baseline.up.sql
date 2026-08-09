@@ -13,7 +13,11 @@ CREATE TABLE agents (
     trust_tier    SMALLINT NOT NULL DEFAULT 0 CHECK (trust_tier BETWEEN 0 AND 3),
     enabled       BOOLEAN NOT NULL DEFAULT true,
     suspended     BOOLEAN NOT NULL DEFAULT false,
-    allowed_tools JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- No default: an empty/absent list means UNRESTRICTED (Agent.HasTool),
+    -- so an INSERT omitting this column would silently grant every tool.
+    -- A writer must say "unrestricted" explicitly with '[]'::jsonb, not get
+    -- it for free by leaving the column out.
+    allowed_tools JSONB NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (tenant_id, name)
@@ -31,9 +35,15 @@ CREATE TABLE delegations (
     -- setting enabled=false / suspended=true, which is what those columns exist
     -- for; a hard delete now requires removing the delegations deliberately.
     agent_id             UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
-    approved_tools       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- approved_tools and classification_caps: no default, matching
+    -- max_action_tier below, which has never had one. Empty/absent means
+    -- UNRESTRICTED on both gates (Delegation.HasTool, and CheckCap treating
+    -- an absent hierarchy as no restriction) — an INSERT omitting either
+    -- would yield a delegation approved for every tool with no
+    -- classification ceiling. A writer must be explicit.
+    approved_tools       JSONB NOT NULL,
     max_action_tier      SMALLINT NOT NULL CHECK (max_action_tier BETWEEN 0 AND 4),
-    classification_caps  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    classification_caps  JSONB NOT NULL,
     resource_constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
     purpose              TEXT,
     expires_at           TIMESTAMPTZ NOT NULL,

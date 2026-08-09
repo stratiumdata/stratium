@@ -10,8 +10,17 @@ CREATE TABLE audit_chain (
     tenant_id  TEXT NOT NULL,
 
     prev_hash  BYTEA NOT NULL,   -- 32 zero bytes for a tenant's first row
-    entry_hash BYTEA NOT NULL,   -- SHA-256 over the canonical serialization
+    -- SHA-256 over the canonical serialization (pkg/audit.Entry.Hash). The
+    -- database does not recompute or verify this: it is application-supplied
+    -- and trusted at write time. Verification is re-walking the chain in Go
+    -- (pkg/audit.Verify), not any database-side check.
+    entry_hash BYTEA NOT NULL,
 
+    -- Default exists as a safety net, not a contract: Hash() covers
+    -- OccurredAt, so a writer must set this column to the same Go
+    -- time.Time that was hashed, or the stored value will not match what
+    -- was hashed. NOW() is evaluated by Postgres, not Go — the two are not
+    -- guaranteed to agree even to the second.
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     event_type  TEXT NOT NULL,
     actor       TEXT NOT NULL,
@@ -28,9 +37,18 @@ CREATE TABLE audit_chain (
 
     decision        TEXT NOT NULL CHECK (decision IN ('ALLOW','DENY','ESCALATE')),
     denied_leg      TEXT NOT NULL DEFAULT '' CHECK (denied_leg IN ('','principal','agent','delegation')),
-    denied_at_depth SMALLINT NOT NULL DEFAULT -1,
+    -- No default (was -1): Go's zero value for DeniedAtDepth is 0, not -1,
+    -- so a DEFAULT here let an INSERT that omitted the column store a value
+    -- Hash() never fed to the digest. NOT NULL with no default forces every
+    -- writer to supply the value that was actually hashed.
+    denied_at_depth SMALLINT NOT NULL,
     reason          TEXT NOT NULL DEFAULT '',
 
+    -- Nullable, but note the asymmetry this creates: Go's InputDigest is a
+    -- fixed [32]byte array, never absent — Hash() always feeds 32 bytes,
+    -- zero-valued when unset. SQL NULL is not that zero value, so a writer
+    -- that omits this column is not storing "no digest" in the sense Hash()
+    -- means; it is storing something Hash() never produced.
     input_digest BYTEA,
 
     CONSTRAINT audit_chain_hash_len CHECK (
@@ -39,7 +57,11 @@ CREATE TABLE audit_chain (
     -- Nullable, because an entry need not carry one; but a present value of the
     -- wrong length is a truncated or corrupt digest, not a shorter one.
     CONSTRAINT audit_chain_input_digest_len CHECK (
-        input_digest IS NULL OR octet_length(input_digest) = 32)
+        input_digest IS NULL OR octet_length(input_digest) = 32),
+    -- Without this, two concurrent writers can read the same chain tail and
+    -- both link a new entry onto it, forking the chain invisibly to
+    -- pkg/audit.Verify — walking either branch alone still verifies clean.
+    CONSTRAINT audit_chain_tenant_prev_hash_unique UNIQUE (tenant_id, prev_hash)
 );
 
 CREATE UNIQUE INDEX audit_chain_tenant_seq   ON audit_chain(tenant_id, seq);
