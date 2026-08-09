@@ -1,0 +1,44 @@
+# Local/CI stack for the Task 7 end-to-end proof: postgres:16 plus the PDP
+# built from ./Dockerfile. `make integration` (repo root) drives this file:
+# fresh volumes up, integration tests against the running stack, volumes
+# torn down again — see that target for the exact sequence.
+#
+# Ports are published without a fixed host port ("5432", not "5432:5432")
+# so this doesn't collide with a developer's own Postgres or a previous run;
+# `docker compose port <service> <port>` resolves the actual mapping.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_local_dev_only
+      POSTGRES_DB: postgres
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  pdp:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # stratium, not postgres: see init-db.sql for why the PDP must never
+      # authenticate as the bootstrap superuser.
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-one
+      STRATIUM_LISTEN_ADDR: :50051
+    ports:
+      - "50051"
+
+volumes:
+  pgdata:

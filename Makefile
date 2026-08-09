@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 GO_DIR := services
 PROTO_DIR := proto
+COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -51,4 +52,19 @@ conformance: ## Run the authorization conformance suite (spec §7)
 	fi; \
 	echo "$$ran/$(CONFORMANCE_PROPERTIES) conformance properties executed."
 
-.PHONY: help build test vet fmt lint proto conformance
+integration: ## Run the end-to-end proof: fresh compose volumes -> integration tests -> torn down, always
+	@command -v docker >/dev/null 2>&1 || { \
+		echo "docker not found: https://docs.docker.com/get-docker/"; exit 1; }
+	@$(COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
+	trap '$(COMPOSE) down -v --remove-orphans' EXIT; \
+	set -e; \
+	$(COMPOSE) up -d --build --wait --wait-timeout 120; \
+	pg_port=$$($(COMPOSE) port postgres 5432 | sed -E 's/.*://'); \
+	pdp_port=$$($(COMPOSE) port pdp 50051 | sed -E 's/.*://'); \
+	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port"; \
+	STRATIUM_IT_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
+	STRATIUM_IT_PDP_ADDR="localhost:$$pdp_port" \
+	STRATIUM_IT_TENANT_ID="tenant-one" \
+	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
+
+.PHONY: help build test vet fmt lint proto conformance integration
