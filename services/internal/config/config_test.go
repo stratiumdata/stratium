@@ -17,6 +17,7 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("STRATIUM_LISTEN_ADDR", "")
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "")
+	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "")
 }
 
 func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
@@ -25,20 +26,52 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_LISTEN_ADDR", ":9090")
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "8")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "30s")
+	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "postgres://migrate:pass@localhost:5432/stratium")
 
 	got, err := Load()
 	if err != nil {
 		t.Fatalf("Load() returned error: %v", err)
 	}
 	want := Config{
-		DatabaseURL: "postgres://user:pass@localhost:5432/stratium",
-		TenantID:    "tenant-abc",
-		ListenAddr:  ":9090",
-		MaxDepth:    8,
-		DBTimeout:   30 * time.Second,
+		DatabaseURL:          "postgres://user:pass@localhost:5432/stratium",
+		MigrationDatabaseURL: "postgres://migrate:pass@localhost:5432/stratium",
+		TenantID:             "tenant-abc",
+		ListenAddr:           ":9090",
+		MaxDepth:             8,
+		DBTimeout:            30 * time.Second,
 	}
 	if got != want {
 		t.Fatalf("Load() = %+v, want %+v", got, want)
+	}
+}
+
+// STRATIUM_MIGRATION_DATABASE_URL is optional: leaving it unset must not
+// error, and must leave the field empty so main.go's "skip migrations, log
+// the assumption" branch has something to test against.
+func TestLoad_MigrationDatabaseURLIsOptional(t *testing.T) {
+	setValidEnv(t)
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with no STRATIUM_MIGRATION_DATABASE_URL returned error: %v", err)
+	}
+	if got.MigrationDatabaseURL != "" {
+		t.Errorf("MigrationDatabaseURL = %q, want empty", got.MigrationDatabaseURL)
+	}
+}
+
+// Set, it must come through — main.go branches on this being non-empty to
+// decide whether to run migrations at all.
+func TestLoad_MigrationDatabaseURLSetWhenProvided(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "postgres://migrate:pass@localhost:5432/stratium")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	if got.MigrationDatabaseURL != "postgres://migrate:pass@localhost:5432/stratium" {
+		t.Errorf("MigrationDatabaseURL = %q, want the configured URL", got.MigrationDatabaseURL)
 	}
 }
 
@@ -97,6 +130,7 @@ func TestLoad_TenantIDHasNoDefault(t *testing.T) {
 	t.Setenv("STRATIUM_LISTEN_ADDR", "")
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "")
+	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "")
 
 	got, err := Load()
 	if err == nil {

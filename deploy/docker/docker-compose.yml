@@ -32,8 +32,18 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # stratium, not postgres: see init-db.sql for why the PDP must never
-      # authenticate as the bootstrap superuser.
+      # Two different roles, not one: see init-db.sql for why, and main.go's
+      # package doc for how it uses them. Neither is "postgres" — the PDP
+      # must never authenticate as the bootstrap superuser (that would make
+      # every row-level-security policy in migrations/000002 and 000003 a
+      # no-op for it).
+      #
+      # stratium_migrate: migrations only. main.go closes this connection
+      # before it starts serving.
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      # stratium: the serving connection. Not a member of
+      # stratium_audit_owner — main.go's startup check refuses to serve if
+      # it ever is.
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-one
       STRATIUM_LISTEN_ADDR: :50051

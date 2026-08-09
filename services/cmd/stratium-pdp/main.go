@@ -1,6 +1,17 @@
 // Command stratium-pdp is the Policy Decision Point: it loads configuration,
-// opens the database, applies migrations, and serves the Decide RPC over
-// gRPC until it receives a shutdown signal.
+// optionally applies migrations on a dedicated connection, then opens the
+// serving database connection and serves the Decide RPC over gRPC until it
+// receives a shutdown signal.
+//
+// Migrations and serving are deliberately different connections, opened
+// from different (optionally different) database URLs. Running both on one
+// connection would force the login role serving requests to also hold
+// whatever privileges migrations need — for migration 000004 specifically,
+// standing membership in stratium_audit_owner, which carries DDL rights
+// (DROP TRIGGER, DROP RULE) over audit_chain. checkNotAuditOwner is the
+// enforcement half of that split: it refuses to serve on an identity that
+// holds that membership, rather than trusting deployment configuration to
+// keep the two apart.
 package main
 
 import (
@@ -46,6 +57,15 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	if cfg.MigrationDatabaseURL != "" {
+		if err := runMigrations(logger, cfg); err != nil {
+			return err
+		}
+	} else {
+		logger.Info("STRATIUM_MIGRATION_DATABASE_URL not set: skipping migrations, " +
+			"assuming an already-migrated schema")
+	}
+
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -62,8 +82,15 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("connect to database within %s: %w", cfg.DBTimeout, err)
 	}
 
-	if err := migrations.Up(db); err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+	// Refuse to serve on an identity that can DROP TRIGGER (or DROP RULE) on
+	// audit_chain — migration 000004 exists specifically to keep that DDL
+	// power away from whatever role serves requests. This turns that
+	// ownership split from a convention (remember not to grant this) into
+	// something the PDP itself checks and enforces on every startup.
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), cfg.DBTimeout)
+	defer checkCancel()
+	if err := checkNotAuditOwner(checkCtx, db); err != nil {
+		return fmt.Errorf("serving identity startup check: %w", err)
 	}
 
 	srv := pdpgrpc.NewServer(store.New(db, cfg.TenantID), policy.Unconfigured(), cfg)
@@ -90,6 +117,36 @@ func run(logger *slog.Logger) error {
 		"until Phase 2 wires a policy engine — this is expected, not a bug")
 
 	return serve(logger, grpcServer, lis)
+}
+
+// runMigrations opens a connection to cfg.MigrationDatabaseURL, applies
+// pending migrations, and closes it before returning — deliberately scoped
+// to this function rather than deferred at run's level, so the migration
+// connection is always closed before run goes on to open the serving
+// connection and, eventually, start accepting RPCs. See the package doc for
+// why that separation matters.
+func runMigrations(logger *slog.Logger, cfg config.Config) error {
+	db, err := sql.Open("postgres", cfg.MigrationDatabaseURL)
+	if err != nil {
+		return fmt.Errorf("open migration database: %w", err)
+	}
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			logger.Error("closing migration database", "error", cerr)
+		}
+	}()
+
+	pingCtx, cancel := context.WithTimeout(context.Background(), cfg.DBTimeout)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		return fmt.Errorf("connect to migration database within %s: %w", cfg.DBTimeout, err)
+	}
+
+	if err := migrations.Up(db); err != nil {
+		return fmt.Errorf("apply migrations: %w", err)
+	}
+	logger.Info("migrations applied on STRATIUM_MIGRATION_DATABASE_URL, closing that connection")
+	return nil
 }
 
 // serve runs grpcServer until it errors or a SIGINT/SIGTERM arrives, then

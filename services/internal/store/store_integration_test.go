@@ -57,6 +57,15 @@ const secondTenantID = "tenant-two-integration"
 // Package-level: set once in TestMain, read by every subtest. TestMain also
 // owns the wait-for-readiness retries described in the task report, and
 // closes both connections after m.Run().
+//
+// testDB deliberately connects as stratium_migrate (STRATIUM_IT_DATABASE_URL
+// — see the Makefile's integration target), not as the stratium role the pdp
+// container actually serves from. This test needs to seed fixtures directly
+// (agents, delegations — there is no gRPC write path for either yet) and, in
+// proof6, REVOKE a grant on audit_chain; both need privileges the serving
+// identity must not have (see cmd/stratium-pdp's startup check). The system
+// under test is only ever exercised through pdpClient, whose backing
+// connection is whatever STRATIUM_DATABASE_URL the pdp container was given.
 var (
 	testDB           *sql.DB
 	pdpClient        pdpgrpc.PDPServiceClient

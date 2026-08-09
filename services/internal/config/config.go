@@ -12,11 +12,16 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string        // STRATIUM_DATABASE_URL (required)
-	TenantID    string        // STRATIUM_TENANT_ID (required)
-	ListenAddr  string        // STRATIUM_LISTEN_ADDR, default ":50051"
-	MaxDepth    int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
-	DBTimeout   time.Duration // STRATIUM_DB_TIMEOUT, default 5s
+	DatabaseURL string // STRATIUM_DATABASE_URL (required) — the serving connection.
+	// MigrationDatabaseURL (optional) is used only to apply migrations, on a
+	// connection closed before serving begins — see cmd/stratium-pdp/main.go.
+	// Left empty, the PDP skips migrations and assumes an already-migrated
+	// schema, logging that assumption plainly rather than guessing.
+	MigrationDatabaseURL string        // STRATIUM_MIGRATION_DATABASE_URL (optional)
+	TenantID             string        // STRATIUM_TENANT_ID (required)
+	ListenAddr           string        // STRATIUM_LISTEN_ADDR, default ":50051"
+	MaxDepth             int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
+	DBTimeout            time.Duration // STRATIUM_DB_TIMEOUT, default 5s
 }
 
 func Load() (Config, error) {
@@ -30,6 +35,9 @@ func Load() (Config, error) {
 	if c.DatabaseURL = os.Getenv("STRATIUM_DATABASE_URL"); c.DatabaseURL == "" {
 		return c, fmt.Errorf("STRATIUM_DATABASE_URL is required")
 	}
+	// No presence check: unset is a valid, deliberate choice (skip migrations),
+	// not a missing required value.
+	c.MigrationDatabaseURL = os.Getenv("STRATIUM_MIGRATION_DATABASE_URL")
 	// The tenant is configuration, never request input. See the plan's global
 	// constraints: the predecessor trusted a client-supplied header and that
 	// was a critical authentication bypass.

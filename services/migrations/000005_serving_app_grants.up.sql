@@ -1,0 +1,19 @@
+-- Privileges the serving identity needs on the baseline tables.
+--
+-- 000001-000003 created agents, delegations, policies, entitlements,
+-- tier_overrides, and tenant_epoch under whichever role ran the migrations.
+-- Until now that was also the role the application served requests from, so
+-- ownership alone was enough. main.go now runs migrations on a separate
+-- connection that is closed before serving begins (see its package doc),
+-- so the serving identity has no privileges on these tables unless a
+-- migration grants them explicitly — the same reasoning
+-- 000004_audit_ownership.up.sql already applied to audit_chain.
+--
+-- Only agents and delegations are granted here: internal/store's Decide
+-- path is the only runtime reader of these tables today (LoadAgent,
+-- LoadChain — both SELECT-only, never INSERT/UPDATE/DELETE; see
+-- internal/store/store.go). policies, entitlements, and tier_overrides have
+-- no reader or writer yet — that lands with Phase 2's policy engine. Grant
+-- what is used, not what might be; widen this migration's down/up pair (or
+-- add another) when a Phase 2 slice gives one of those tables a caller.
+GRANT SELECT ON agents, delegations TO stratium_app;
