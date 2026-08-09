@@ -68,6 +68,8 @@ func TestBuiltinTier_ResistsKnownEvasions(t *testing.T) {
 		`psql -c 'DROP TRIGGER audit_chain_no_truncate ON audit_chain'`: models.ActionTierDestructive,
 		`psql -c 'DROP ROLE stratium_audit_owner'`:                      models.ActionTierDestructive,
 		`psql -c 'REVOKE ALL ON audit_chain FROM stratium_app'`:         models.ActionTierDestructive,
+		`psql -c 'TRUNCATE audit_chain'`:                                models.ActionTierDestructive,
+		`mysql -e 'DROP DATABASE prod'`:                                 models.ActionTierDestructive,
 	}
 	for cmd, floor := range atLeast {
 		t.Run(cmd, func(t *testing.T) {
@@ -81,18 +83,41 @@ func TestBuiltinTier_ResistsKnownEvasions(t *testing.T) {
 
 // Matching must consider the RAW string as well as the normalized one.
 // Normalization strips quotes, which can merge two tokens and destroy a word
-// boundary the raw form had: in `echo abc"DROP TABLE users"` the raw string
-// matches \bDROP\b, but the normalized `echo abcDROP TABLE users` does not.
-// Dropping the raw arm of the match therefore loses detections rather than
-// gaining them, and nothing else in the suite catches that.
+// boundary the raw form had: in `psql -c abc"DROP TABLE users"` the raw
+// string matches \bDROP\b, but the normalized `psql -c abcDROP TABLE users`
+// does not. Dropping the raw arm of the match therefore loses detections
+// rather than gaining them, and nothing else in the suite catches that.
+//
+// The example needs a SQL-context tool (psql) in front of it now that DROP
+// is scoped to reDestructiveSQL: the same bare "DROP TABLE" text with no SQL
+// tool present is the prose collision this task removes, not a load-bearing
+// detection — see TestBuiltinTier_SQLKeywordsNeedSQLContext.
 func TestBuiltinTier_RawMatchIsLoadBearing(t *testing.T) {
-	const cmd = `echo abc"DROP TABLE users"`
+	const cmd = `psql -c abc"DROP TABLE users"`
 	got, ok := BuiltinTier(Action{Tool: "Bash", RawInput: cmd})
 	if !ok || got < models.ActionTierDestructive {
 		t.Fatalf("got %v (ok=%v); the raw-string match must still see DROP TABLE here", got, ok)
 	}
 	if normalizeCommand(cmd) == cmd {
 		t.Fatal("test premise broken: normalization no longer alters this input")
+	}
+}
+
+// SQL keywords outside a SQL context are ordinary English and must not
+// escalate an unrelated command. Rating a commit message DESTRUCTIVE pushes
+// operators to widen delegations, which weakens the system through friction.
+func TestBuiltinTier_SQLKeywordsNeedSQLContext(t *testing.T) {
+	prose := []string{
+		`git commit -m "revoke stale session tokens"`,
+		`git commit -m "we should alter table layout later"`,
+		`echo "drop table talk is just prose here"`,
+	}
+	for _, cmd := range prose {
+		t.Run(cmd, func(t *testing.T) {
+			if got, _ := BuiltinTier(Action{Tool: "Bash", RawInput: cmd}); got >= models.ActionTierDestructive {
+				t.Fatalf("prose containing a SQL keyword rated %v; no database is being touched", got)
+			}
+		})
 	}
 }
 

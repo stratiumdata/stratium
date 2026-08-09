@@ -50,10 +50,24 @@ var (
 		// DROP TRIGGER audit_chain_no_truncate is exactly the statement that
 		// defeats the audit table's append-only protection, and it was rated
 		// INTERNAL_MODIFY before this alternation was widened.
+		`\bdropdb\b|\bdropuser\b|\btruncate\s+-s\b|` +
+		`\bgit\s+push\s+--force|\bkubectl\s+delete\b|\bterraform\s+destroy\b`)
+
+	// SQL keywords only count when something is actually talking to a database.
+	// Applied unscoped, `\bREVOKE\b` and `\bALTER\s+(TABLE|ROLE|USER)\b` match
+	// ordinary English: `git commit -m "revoke stale session tokens"` rated
+	// DESTRUCTIVE. That is the safe direction, but it pressures operators into
+	// widening delegations to get work done, which trades a loud annoyance for a
+	// quiet weakening. Scoping keeps the detections that matter —
+	// `psql -c 'DROP TRIGGER audit_chain_no_truncate ...'` still rates
+	// DESTRUCTIVE — without the prose collisions.
+	reSQLContext = regexp.MustCompile(`(?i)\b(psql|mysql|mariadb|sqlite3?|sqlcmd|` +
+		`pgcli|mycli|sqlplus|clickhouse-client|cockroach\s+sql|` +
+		`pg_dump|pg_restore|flyway|liquibase|migrate)\b`)
+
+	reDestructiveSQL = regexp.MustCompile(`(?i)` +
 		`\bDROP\s+(TABLE|DATABASE|SCHEMA|TRIGGER|RULE|ROLE|USER|FUNCTION|INDEX|VIEW|OWNED|POLICY)\b|` +
-		`\bTRUNCATE\b|\bdropdb\b|\bdropuser\b|` +
-		`\bgit\s+push\s+--force|\bkubectl\s+delete\b|\bterraform\s+destroy\b|` +
-		`\bREVOKE\b|\bALTER\s+(TABLE|ROLE|USER)\b`)
+		`\bTRUNCATE\b|\bREVOKE\b|\bALTER\s+(TABLE|ROLE|USER)\b|\bDELETE\s+FROM\b`)
 
 	reExternal = regexp.MustCompile(`(?i)\b(curl|wget|ssh|scp|rsync|nc|telnet)\b|` +
 		`\bgit\s+push\b|\bdocker\s+push\b|\bnpm\s+publish\b|\b(aws|gcloud|az)\s`)
@@ -114,6 +128,8 @@ func BuiltinTier(a Action) (models.ActionTier, bool) {
 		}
 		switch {
 		case matches(reDestructive):
+			return models.ActionTierDestructive, true
+		case matches(reSQLContext) && matches(reDestructiveSQL):
 			return models.ActionTierDestructive, true
 		case matches(reExternal):
 			return models.ActionTierExternalComms, true
