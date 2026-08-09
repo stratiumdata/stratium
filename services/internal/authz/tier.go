@@ -36,10 +36,24 @@ type TierTable struct {
 }
 
 // Shell patterns, most severe first.
+//
+// RESIDUAL RISK, stated plainly: matching strings is a heuristic, not a
+// boundary. An adversary who controls the command text can eventually defeat
+// any static classifier — base64-piped-to-sh is the trivial existence proof.
+// The real controls are the delegation ceiling, the agent's tool allowlist,
+// and escalation; this function's job is to stop an action being *accidentally*
+// or *casually* under-rated, not to withstand a determined attacker.
+// See spec §4.4.
 var (
 	reDestructive = regexp.MustCompile(`(?i)\brm\s+-[a-z]*[rf]|\bmkfs\b|\bdd\s+if=|\bshred\b|` +
-		`\bDROP\s+(TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\b|\bdropdb\b|` +
-		`\bgit\s+push\s+--force|\bkubectl\s+delete\b|\bterraform\s+destroy\b`)
+		// DROP must cover every object type, not just the three that store rows.
+		// DROP TRIGGER audit_chain_no_truncate is exactly the statement that
+		// defeats the audit table's append-only protection, and it was rated
+		// INTERNAL_MODIFY before this alternation was widened.
+		`\bDROP\s+(TABLE|DATABASE|SCHEMA|TRIGGER|RULE|ROLE|USER|FUNCTION|INDEX|VIEW|OWNED|POLICY)\b|` +
+		`\bTRUNCATE\b|\bdropdb\b|\bdropuser\b|` +
+		`\bgit\s+push\s+--force|\bkubectl\s+delete\b|\bterraform\s+destroy\b|` +
+		`\bREVOKE\b|\bALTER\s+(TABLE|ROLE|USER)\b`)
 
 	reExternal = regexp.MustCompile(`(?i)\b(curl|wget|ssh|scp|rsync|nc|telnet)\b|` +
 		`\bgit\s+push\b|\bdocker\s+push\b|\bnpm\s+publish\b|\b(aws|gcloud|az)\s`)
@@ -47,7 +61,24 @@ var (
 	reReadOnly = regexp.MustCompile(`(?i)^\s*(cat|ls|pwd|head|tail|wc|grep|find|file|stat|` +
 		`echo|which|whoami|date|df|du|ps|env|` +
 		`git\s+(log|status|diff|show|branch)|docker\s+ps|kubectl\s+get)\b`)
+
+	// A string containing any of these is not a single command, so its leading
+	// token says nothing about what it does. `ls; "rm" -rf /` led with `ls` and
+	// was rated READ_ONLY — three tiers below the truth.
+	reCompound = regexp.MustCompile("[;&|\n\r`]|\\$\\(")
 )
+
+// normalizeCommand strips the punctuation an attacker uses to break token
+// adjacency, so `"rm" -rf /` and `rm${IFS}-rf /` match the same patterns as
+// `rm -rf /`. Quotes are removed rather than parsed — this is a matching aid,
+// not a shell lexer, and over-normalizing is safe here because the result is
+// only ever used to raise a tier, never to lower one.
+func normalizeCommand(s string) string {
+	s = strings.NewReplacer(`"`, "", `'`, "", "\\", "").Replace(s)
+	s = strings.ReplaceAll(s, "${IFS}", " ")
+	s = strings.ReplaceAll(s, "$IFS", " ")
+	return strings.Join(strings.Fields(s), " ")
+}
 
 var verbTiers = map[string]models.ActionTier{
 	"read": models.ActionTierReadOnly, "get": models.ActionTierReadOnly,
@@ -74,11 +105,22 @@ var verbTiers = map[string]models.ActionTier{
 // shell call says nothing about what the command does.
 func BuiltinTier(a Action) (models.ActionTier, bool) {
 	if a.RawInput != "" {
+		// Match against the normalized form so quoting and ${IFS} cannot break
+		// the adjacency the patterns rely on. Check the raw form too:
+		// normalization only ever adds matches, never removes them.
+		norm := normalizeCommand(a.RawInput)
+		matches := func(re *regexp.Regexp) bool {
+			return re.MatchString(a.RawInput) || re.MatchString(norm)
+		}
 		switch {
-		case reDestructive.MatchString(a.RawInput):
+		case matches(reDestructive):
 			return models.ActionTierDestructive, true
-		case reExternal.MatchString(a.RawInput):
+		case matches(reExternal):
 			return models.ActionTierExternalComms, true
+		case reCompound.MatchString(a.RawInput):
+			// Compound: the leading token is not the whole story, so READ_ONLY
+			// is not available. Destructive and external already had their say.
+			return models.ActionTierInternalModify, true
 		case reReadOnly.MatchString(a.RawInput):
 			return models.ActionTierReadOnly, true
 		default:

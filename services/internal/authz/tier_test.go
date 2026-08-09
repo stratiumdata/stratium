@@ -55,6 +55,56 @@ func TestBuiltinTier_ShellCommands(t *testing.T) {
 	}
 }
 
+// Known evasions must not land below their true tier. Each of these was
+// verified to under-classify before the normalization, widened DROP
+// alternation, and compound-command floor were added.
+func TestBuiltinTier_ResistsKnownEvasions(t *testing.T) {
+	atLeast := map[string]models.ActionTier{
+		`"rm" -rf /`:     models.ActionTierDestructive,
+		`'rm' -rf /`:     models.ActionTierDestructive,
+		"rm${IFS}-rf /":  models.ActionTierDestructive,
+		`ls; "rm" -rf /`: models.ActionTierDestructive,
+		"ls && rm -rf /": models.ActionTierDestructive,
+		`psql -c 'DROP TRIGGER audit_chain_no_truncate ON audit_chain'`: models.ActionTierDestructive,
+		`psql -c 'DROP ROLE stratium_audit_owner'`:                      models.ActionTierDestructive,
+		`psql -c 'REVOKE ALL ON audit_chain FROM stratium_app'`:         models.ActionTierDestructive,
+	}
+	for cmd, floor := range atLeast {
+		t.Run(cmd, func(t *testing.T) {
+			got, ok := BuiltinTier(Action{Tool: "Bash", RawInput: cmd})
+			if !ok || got < floor {
+				t.Fatalf("classified as %v (ok=%v); must be at least %v", got, ok, floor)
+			}
+		})
+	}
+}
+
+// A compound command's leading token proves nothing about the rest of it, so
+// READ_ONLY must be unreachable for one.
+func TestBuiltinTier_CompoundNeverReadOnly(t *testing.T) {
+	for _, cmd := range []string{
+		"ls; echo hi", "cat a | cat b", "ls && pwd", "echo $(whoami)", "ls\necho hi",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			if got, _ := BuiltinTier(Action{Tool: "Bash", RawInput: cmd}); got <= models.ActionTierReadOnly {
+				t.Fatalf("compound command classified as %v — the leading token is not the whole command", got)
+			}
+		})
+	}
+}
+
+// A plain read-only command must still classify as READ_ONLY; the compound
+// floor must not swallow ordinary usage.
+func TestBuiltinTier_SimpleReadOnlyUnaffected(t *testing.T) {
+	for _, cmd := range []string{"ls -la", "cat /etc/hosts", "git status", "grep -r foo ."} {
+		t.Run(cmd, func(t *testing.T) {
+			if got, _ := BuiltinTier(Action{Tool: "Bash", RawInput: cmd}); got != models.ActionTierReadOnly {
+				t.Fatalf("got %v, want READ_ONLY", got)
+			}
+		})
+	}
+}
+
 // An unrecognized command must not land below INTERNAL_MODIFY. Assuming
 // read-only is how an unknown internal CLI slips under a low tier cap.
 func TestBuiltinTier_UnknownCommandAssumedModifying(t *testing.T) {
