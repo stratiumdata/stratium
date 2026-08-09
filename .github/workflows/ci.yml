@@ -91,4 +91,11 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/go.sum
       - working-directory: services
-        run: go test ./internal/authz/ -run "TestC[0-9]" -v
+        # Pattern must include TestConformanceSuiteIsComplete, which fails if any
+        # property was deleted or renamed. Filtering to TestC[0-9] alone excludes it,
+        # and the job then passes green even with the whole suite removed.
+        # Delegates to the Makefile target, which asserts the property COUNT.
+        # Running go test directly is not enough: if conformance_test.go is deleted,
+        # -run matches nothing and go test exits 0 with "no tests to run".
+        working-directory: .
+        run: make conformance

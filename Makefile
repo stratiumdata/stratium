@@ -21,7 +21,20 @@ lint: ## Lint (requires golangci-lint)
 		echo "golangci-lint not found: https://golangci-lint.run/welcome/install/"; exit 1; }
 	cd $(GO_DIR) && golangci-lint run ./...
 
+CONFORMANCE_PROPERTIES := 25
+
 conformance: ## Run the authorization conformance suite (spec §7)
-	cd $(GO_DIR) && go test ./internal/authz/ -run "TestC[0-9]" -v
+	@# The count assertion lives HERE, not in Go. A completeness test inside
+	@# conformance_test.go cannot detect that file being deleted — it goes with it,
+	@# `go test -run` then matches nothing, and the job exits 0. Verified.
+	@out=$$(cd $(GO_DIR) && go test ./internal/authz/ -run "TestC[0-9]|TestConformanceSuiteIsComplete" -v 2>&1); \
+	echo "$$out"; \
+	ran=$$(echo "$$out" | grep -cE "^=== RUN   TestC[0-9]+_[^/]*$$" || true); \
+	if [ "$$ran" -ne $(CONFORMANCE_PROPERTIES) ]; then \
+		echo "CONFORMANCE GATE FAILED: expected $(CONFORMANCE_PROPERTIES) properties, $$ran ran."; \
+		echo "A property was deleted or renamed, or the suite file is missing."; \
+		exit 1; \
+	fi; \
+	echo "$$ran/$(CONFORMANCE_PROPERTIES) conformance properties executed."
 
 .PHONY: help build test vet fmt lint conformance
