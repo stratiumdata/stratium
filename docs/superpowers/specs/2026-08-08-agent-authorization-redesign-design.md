@@ -302,7 +302,27 @@ The client may **declare** a tier. The PDP always re-derives. Declared > actual 
 the enforcement path.
 
 Overrides are admin-role-gated, versioned, and audited on change. A tier override is never accepted
-from an agent-writable source. The existing `stratium.tool_tiers` block in `CLAUDE.md` may survive
+from an agent-writable source.
+
+#### Residual risk: shell-command classification is a heuristic, not a boundary
+
+Deriving a tier for a `Bash` action means classifying an arbitrary command string. That is
+best-effort and cannot be made complete: an adversary who controls the text can always reach a
+payload the matcher does not recognise — `echo <base64> | base64 -d | sh` is the trivial existence
+proof. Known evasions found in review and since closed (quoted verbs, `${IFS}` in place of a space,
+compound commands whose leading token looks benign, `DROP` on object types outside the original
+alternation) are pinned by tests, but closing named holes does not make the class of attack go away.
+
+**This is stated so an evaluator learns the limit from us rather than discovering it.** The
+controls that do carry weight are structural and not string-dependent: the delegation ceiling
+(`max_action_tier`), the agent's tool allowlist, the classification caps, and escalation. A tenant
+that considers shell access materially risky should withhold the `Bash` tool from the delegation
+rather than rely on per-command tiering — and the tier tables let them raise its floor if they
+grant it anyway.
+
+`CheckDeclaredTier` does not mitigate this. It defends against a dishonest *client*, not an
+incorrect *server* derivation, and escalation keys off the same derived tier — so it inherits the
+blind spot rather than catching it. The existing `stratium.tool_tiers` block in `CLAUDE.md` may survive
 as a *request* the server can honor; it is never a fact the client asserts.
 
 ### 4.5 Policy evaluation points

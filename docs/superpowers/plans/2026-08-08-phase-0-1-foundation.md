@@ -2756,6 +2756,57 @@ func TestBuiltinTier_ShellCommands(t *testing.T) {
 	}
 }
 
+// Known evasions must not land below their true tier. Each of these was
+// verified to under-classify before the normalization, widened DROP
+// alternation, and compound-command floor were added.
+func TestBuiltinTier_ResistsKnownEvasions(t *testing.T) {
+	atLeast := map[string]models.ActionTier{
+		`"rm" -rf /`:            models.ActionTierDestructive,
+		`'rm' -rf /`:            models.ActionTierDestructive,
+		"rm${IFS}-rf /":         models.ActionTierDestructive,
+		`ls; "rm" -rf /`:        models.ActionTierDestructive,
+		"ls && rm -rf /":        models.ActionTierDestructive,
+		`psql -c 'DROP TRIGGER audit_chain_no_truncate ON audit_chain'`: models.ActionTierDestructive,
+		`psql -c 'DROP ROLE stratium_audit_owner'`:                      models.ActionTierDestructive,
+		`psql -c 'REVOKE ALL ON audit_chain FROM stratium_app'`:         models.ActionTierDestructive,
+	}
+	for cmd, floor := range atLeast {
+		t.Run(cmd, func(t *testing.T) {
+			got, ok := BuiltinTier(Action{Tool: "Bash", RawInput: cmd})
+			if !ok || got < floor {
+				t.Fatalf("classified as %v (ok=%v); must be at least %v", got, ok, floor)
+			}
+		})
+	}
+}
+
+// A compound command's leading token proves nothing about the rest of it, so
+// READ_ONLY must be unreachable for one.
+func TestBuiltinTier_CompoundNeverReadOnly(t *testing.T) {
+	for _, cmd := range []string{
+		"ls; echo hi", "cat a | cat b", "ls && pwd", "echo $(whoami)", "ls
+echo hi",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			if got, _ := BuiltinTier(Action{Tool: "Bash", RawInput: cmd}); got <= models.ActionTierReadOnly {
+				t.Fatalf("compound command classified as %v — the leading token is not the whole command", got)
+			}
+		})
+	}
+}
+
+// A plain read-only command must still classify as READ_ONLY; the compound
+// floor must not swallow ordinary usage.
+func TestBuiltinTier_SimpleReadOnlyUnaffected(t *testing.T) {
+	for _, cmd := range []string{"ls -la", "cat /etc/hosts", "git status", "grep -r foo ."} {
+		t.Run(cmd, func(t *testing.T) {
+			if got, _ := BuiltinTier(Action{Tool: "Bash", RawInput: cmd}); got != models.ActionTierReadOnly {
+				t.Fatalf("got %v, want READ_ONLY", got)
+			}
+		})
+	}
+}
+
 // An unrecognized command must not land below INTERNAL_MODIFY. Assuming
 // read-only is how an unknown internal CLI slips under a low tier cap.
 func TestBuiltinTier_UnknownCommandAssumedModifying(t *testing.T) {
@@ -3012,10 +3063,24 @@ type TierTable struct {
 }
 
 // Shell patterns, most severe first.
+//
+// RESIDUAL RISK, stated plainly: matching strings is a heuristic, not a
+// boundary. An adversary who controls the command text can eventually defeat
+// any static classifier — base64-piped-to-sh is the trivial existence proof.
+// The real controls are the delegation ceiling, the agent's tool allowlist,
+// and escalation; this function's job is to stop an action being *accidentally*
+// or *casually* under-rated, not to withstand a determined attacker.
+// See spec §4.4.
 var (
 	reDestructive = regexp.MustCompile(`(?i)\brm\s+-[a-z]*[rf]|\bmkfs\b|\bdd\s+if=|\bshred\b|` +
-		`\bDROP\s+(TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\b|\bdropdb\b|` +
-		`\bgit\s+push\s+--force|\bkubectl\s+delete\b|\bterraform\s+destroy\b`)
+		// DROP must cover every object type, not just the three that store rows.
+		// DROP TRIGGER audit_chain_no_truncate is exactly the statement that
+		// defeats the audit table's append-only protection, and it was rated
+		// INTERNAL_MODIFY before this alternation was widened.
+		`\bDROP\s+(TABLE|DATABASE|SCHEMA|TRIGGER|RULE|ROLE|USER|FUNCTION|INDEX|VIEW|OWNED|POLICY)\b|` +
+		`\bTRUNCATE\b|\bdropdb\b|\bdropuser\b|` +
+		`\bgit\s+push\s+--force|\bkubectl\s+delete\b|\bterraform\s+destroy\b|` +
+		`\bREVOKE\b|\bALTER\s+(TABLE|ROLE|USER)\b`)
 
 	reExternal = regexp.MustCompile(`(?i)\b(curl|wget|ssh|scp|rsync|nc|telnet)\b|` +
 		`\bgit\s+push\b|\bdocker\s+push\b|\bnpm\s+publish\b|\b(aws|gcloud|az)\s`)
@@ -3023,7 +3088,24 @@ var (
 	reReadOnly = regexp.MustCompile(`(?i)^\s*(cat|ls|pwd|head|tail|wc|grep|find|file|stat|` +
 		`echo|which|whoami|date|df|du|ps|env|` +
 		`git\s+(log|status|diff|show|branch)|docker\s+ps|kubectl\s+get)\b`)
+
+	// A string containing any of these is not a single command, so its leading
+	// token says nothing about what it does. `ls; "rm" -rf /` led with `ls` and
+	// was rated READ_ONLY — three tiers below the truth.
+	reCompound = regexp.MustCompile("[;&|\n\r`]|\\$\\(")
 )
+
+// normalizeCommand strips the punctuation an attacker uses to break token
+// adjacency, so `"rm" -rf /` and `rm${IFS}-rf /` match the same patterns as
+// `rm -rf /`. Quotes are removed rather than parsed — this is a matching aid,
+// not a shell lexer, and over-normalizing is safe here because the result is
+// only ever used to raise a tier, never to lower one.
+func normalizeCommand(s string) string {
+	s = strings.NewReplacer(`"`, "", `'`, "", "\\", "").Replace(s)
+	s = strings.ReplaceAll(s, "${IFS}", " ")
+	s = strings.ReplaceAll(s, "$IFS", " ")
+	return strings.Join(strings.Fields(s), " ")
+}
 
 var verbTiers = map[string]models.ActionTier{
 	"read": models.ActionTierReadOnly, "get": models.ActionTierReadOnly,
@@ -3050,11 +3132,22 @@ var verbTiers = map[string]models.ActionTier{
 // shell call says nothing about what the command does.
 func BuiltinTier(a Action) (models.ActionTier, bool) {
 	if a.RawInput != "" {
+		// Match against the normalized form so quoting and ${IFS} cannot break
+		// the adjacency the patterns rely on. Check the raw form too:
+		// normalization only ever adds matches, never removes them.
+		norm := normalizeCommand(a.RawInput)
+		matches := func(re *regexp.Regexp) bool {
+			return re.MatchString(a.RawInput) || re.MatchString(norm)
+		}
 		switch {
-		case reDestructive.MatchString(a.RawInput):
+		case matches(reDestructive):
 			return models.ActionTierDestructive, true
-		case reExternal.MatchString(a.RawInput):
+		case matches(reExternal):
 			return models.ActionTierExternalComms, true
+		case reCompound.MatchString(a.RawInput):
+			// Compound: the leading token is not the whole story, so READ_ONLY
+			// is not available. Destructive and external already had their say.
+			return models.ActionTierInternalModify, true
 		case reReadOnly.MatchString(a.RawInput):
 			return models.ActionTierReadOnly, true
 		default:
