@@ -126,6 +126,21 @@ func TestEveryTableHasTenantID(t *testing.T) {
 			continue
 		}
 
+		// Equal counts are not sufficient. A stray paren inside one table's body
+		// can overrun its true close and swallow a trailing
+		// `CREATE INDEX ... ON t(tenant_id);` — no CREATE TABLE is consumed, so
+		// the count still matches, but the swallowed text supplies the substring
+		// and a table with no tenant_id column passes. That is the exact bug the
+		// paren rewrite closed, resurrected. No parsed body may contain a
+		// statement terminator or another statement keyword.
+		for _, tbl := range tables {
+			if strings.Contains(tbl.Body, ";") || strings.Contains(tbl.Body, "CREATE ") {
+				t.Errorf("%s: parsed body for table %q ran past its own closing paren "+
+					"and swallowed following statements — the parser lost sync",
+					e.Name(), tbl.Name)
+			}
+		}
+
 		total += len(tables)
 		for _, tbl := range tables {
 			if !strings.Contains(tbl.Body, "tenant_id") {
@@ -164,6 +179,35 @@ CREATE TABLE b (
 					"check can catch it, but it parsed all %d tables", got)
 			}
 		})
+	}
+}
+
+// The dangerous desync is the one that keeps the counts equal: a stray paren
+// lets a table body swallow a trailing CREATE INDEX naming tenant_id, so a
+// table with no such column looks compliant. The body must be rejected for
+// containing following statements, not merely counted.
+func TestTenantIDGuardCatchesSwallowedStatements(t *testing.T) {
+	sql := `CREATE TABLE x (
+    id UUID PRIMARY KEY,
+    name TEXT DEFAULT 'oops ('
+);
+CREATE INDEX idx_x_tenant ON x(tenant_id); -- balance )
+CREATE TABLE y (
+    tenant_id TEXT NOT NULL
+);`
+	tables := parseCreateTables(sql)
+	if strings.Count(sql, "CREATE TABLE") != len(tables) {
+		t.Skip("counts already disagree; the count check catches this case")
+	}
+	swallowed := false
+	for _, tbl := range tables {
+		if strings.Contains(tbl.Body, ";") || strings.Contains(tbl.Body, "CREATE ") {
+			swallowed = true
+		}
+	}
+	if !swallowed {
+		t.Fatal("a body that ran past its closing paren was not detected — " +
+			"a table with no tenant_id column would pass")
 	}
 }
 

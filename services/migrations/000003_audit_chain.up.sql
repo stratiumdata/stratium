@@ -34,7 +34,12 @@ CREATE TABLE audit_chain (
     input_digest BYTEA,
 
     CONSTRAINT audit_chain_hash_len CHECK (
-        octet_length(prev_hash) = 32 AND octet_length(entry_hash) = 32)
+        octet_length(prev_hash) = 32 AND octet_length(entry_hash) = 32),
+    -- input_digest is also a SHA-256 and must be constrained like its siblings.
+    -- Nullable, because an entry need not carry one — but a present value of the
+    -- wrong length is a truncated or corrupt digest, not a shorter one.
+    CONSTRAINT audit_chain_input_digest_len CHECK (
+        input_digest IS NULL OR octet_length(input_digest) = 32)
 );
 
 CREATE UNIQUE INDEX audit_chain_tenant_seq   ON audit_chain(tenant_id, seq);
@@ -47,6 +52,21 @@ CREATE INDEX audit_chain_root                ON audit_chain(root_delegation_id);
 -- own history even if compromised.
 CREATE RULE audit_chain_no_update AS ON UPDATE TO audit_chain DO INSTEAD NOTHING;
 CREATE RULE audit_chain_no_delete AS ON DELETE TO audit_chain DO INSTEAD NOTHING;
+
+-- Rules do NOT intercept TRUNCATE — only triggers do. Without this, TRUNCATE
+-- empties the entire audit trail silently, for any role holding the privilege,
+-- and the UPDATE/DELETE rules above give a false sense of immutability.
+-- Verified: TRUNCATE as the table owner took the table from 1 row to 0 with no
+-- error before this trigger existed.
+CREATE OR REPLACE FUNCTION audit_chain_deny_truncate() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_chain is append-only: TRUNCATE is not permitted';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER audit_chain_no_truncate
+    BEFORE TRUNCATE ON audit_chain
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_chain_deny_truncate();
 
 ALTER TABLE audit_chain ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_chain FORCE ROW LEVEL SECURITY;

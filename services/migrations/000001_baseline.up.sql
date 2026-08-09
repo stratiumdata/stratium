@@ -25,11 +25,11 @@ CREATE TABLE delegations (
     tenant_id            TEXT NOT NULL,
     user_id              TEXT NOT NULL,
     -- RESTRICT, not CASCADE. The delegation row is the record of what authority
-    -- was granted to whom and when; cascade-deleting an agent silently destroys
+    -- was granted to whom and when — cascade-deleting an agent silently destroys
     -- that history, including already-revoked grants. pkg/audit records
     -- decisions, not grants, so nothing else preserves it. Agents are retired by
     -- setting enabled=false / suspended=true, which is what those columns exist
-    -- for; a hard delete now requires removing the delegations deliberately.
+    -- for — a hard delete now requires removing the delegations deliberately.
     agent_id             UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
     approved_tools       JSONB NOT NULL DEFAULT '[]'::jsonb,
     max_action_tier      SMALLINT NOT NULL CHECK (max_action_tier BETWEEN 0 AND 4),
