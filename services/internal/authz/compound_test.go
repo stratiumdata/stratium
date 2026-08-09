@@ -19,7 +19,7 @@ func request() Request {
 		Chain:             []*models.Delegation{root},
 		Action:            Action{Tool: "Read", Verb: "read"},
 		Now:               authzNow,
-		PrincipalDecision: LegResult{Effect: EffectAllow},
+		PrincipalVerdicts: []PolicyVerdict{{Effect: EffectAllow}},
 	}
 }
 
@@ -49,7 +49,7 @@ func TestDecide_ReportsAllThreeLegs(t *testing.T) {
 // made the previous compound decision silently two-legged. (C11, C13)
 func TestDecide_UnevaluatedPrincipalDenies(t *testing.T) {
 	req := request()
-	req.PrincipalDecision = LegResult{}
+	req.PrincipalVerdicts = nil
 	got := Decide(req, config())
 	if got.Effect != EffectDeny {
 		t.Fatalf("an unevaluated principal leg must deny, got %v", got.Effect)
@@ -62,7 +62,7 @@ func TestDecide_UnevaluatedPrincipalDenies(t *testing.T) {
 // Any single deny overrides. (C12)
 func TestDecide_AnyDenyOverrides(t *testing.T) {
 	cases := map[string]func(*Request){
-		"principal":  func(r *Request) { r.PrincipalDecision = LegResult{Effect: EffectDeny, Reason: "no"} },
+		"principal":  func(r *Request) { r.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectDeny, Reason: "no"}} },
 		"agent":      func(r *Request) { r.Agent.Enabled = false },
 		"delegation": func(r *Request) { r.Chain[0].Revoked = true },
 	}
@@ -85,7 +85,7 @@ func TestDecide_AnyDenyOverrides(t *testing.T) {
 // independent AND terms. (C14)
 func TestDecide_PolicyCannotExceedCeiling(t *testing.T) {
 	req := request()
-	req.PrincipalDecision = LegResult{Effect: EffectAllow, Reason: "policy grants everything"}
+	req.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectAllow, Reason: "policy grants everything"}}
 	req.Chain = linkChain(req.TenantID, req.Agent.ID, delegation(0, models.ActionTierReadOnly, nil))
 	req.Action = Action{Tool: "Bash", Verb: "delete"}
 	got := Decide(req, config())
@@ -152,7 +152,13 @@ func TestDecide_UnknownActionDenies(t *testing.T) {
 
 func TestDecide_EscalatePropagatesWhenNothingDenies(t *testing.T) {
 	req := request()
-	req.PrincipalDecision = LegResult{Effect: EffectEscalate, Reason: "approval required"}
+	// Escalate is a modifier on an allow, not a standalone verdict (FoldVerdicts
+	// step 2: no allow present -> default-deny, checked before escalate in step
+	// 3). A companion allow verdict is what makes this an escalate case at all.
+	req.PrincipalVerdicts = []PolicyVerdict{
+		{Effect: EffectAllow},
+		{Effect: EffectEscalate, Reason: "approval required"},
+	}
 	if got := Decide(req, config()); got.Effect != EffectEscalate {
 		t.Fatalf("expected ESCALATE, got %v", got.Effect)
 	}
@@ -161,7 +167,10 @@ func TestDecide_EscalatePropagatesWhenNothingDenies(t *testing.T) {
 // Deny-overrides applies to every non-allow, including escalate.
 func TestDecide_DenyBeatsEscalate(t *testing.T) {
 	req := request()
-	req.PrincipalDecision = LegResult{Effect: EffectEscalate, Reason: "approval required"}
+	req.PrincipalVerdicts = []PolicyVerdict{
+		{Effect: EffectAllow},
+		{Effect: EffectEscalate, Reason: "approval required"},
+	}
 	req.Agent.Enabled = false
 	if got := Decide(req, config()); got.Effect != EffectDeny {
 		t.Fatalf("deny must beat escalate, got %v", got.Effect)
@@ -191,7 +200,7 @@ func TestDecide_DeniedAtDepth(t *testing.T) {
 // A denial always carries a reason — an empty one is useless in an audit record.
 func TestDecide_DenialAlwaysHasReason(t *testing.T) {
 	req := request()
-	req.PrincipalDecision = LegResult{Effect: EffectDeny} // no reason supplied
+	req.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectDeny}} // no reason supplied
 	if got := Decide(req, config()); got.Reason == "" {
 		t.Fatal("a denial must always carry a reason")
 	}

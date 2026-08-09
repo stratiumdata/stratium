@@ -44,6 +44,26 @@ type LegResult struct {
 	Reason string
 }
 
+// PolicyVerdict is one policy's answer about the principal. It is plain data:
+// the engines produce it, authz consumes it, and no engine dependency enters
+// this package.
+type PolicyVerdict struct {
+	Effect Effect
+	Reason string
+
+	// Source names the engine or grant model — "cedar", "rego", "xacml",
+	// "json", "entitlement". Recorded for provenance.
+	Source string
+
+	// PolicyID identifies the specific policy or entitlement row.
+	PolicyID string
+
+	// Priority is recorded for audit and debugging and is NOT consulted by the
+	// fold. Deny-overrides makes priority security-irrelevant (spec §3.3 Y7);
+	// ordering by it here would reinstate the bug class Y7 removed.
+	Priority int
+}
+
 // Action describes what the agent is attempting.
 type Action struct {
 	Tool     string // "Bash", "Read", "mcp__stripe__create_refund"
@@ -84,10 +104,11 @@ type Request struct {
 	// Now is injected so decisions are deterministic and testable.
 	Now time.Time
 
-	// PrincipalDecision is the policy engines' verdict, evaluated before this
-	// call. Its zero value is EffectDeny, so a caller that forgets to evaluate
-	// it denies rather than permitting.
-	PrincipalDecision LegResult
+	// PrincipalVerdicts are the policy engines' per-policy verdicts, evaluated
+	// before this call and combined by FoldVerdicts. A nil or empty slice
+	// folds to deny (default-deny), so a caller that forgets to evaluate it
+	// denies rather than permitting.
+	PrincipalVerdicts []PolicyVerdict
 }
 
 // Result is the compound decision.

@@ -50,9 +50,10 @@ func Decide(req Request, cfg Config) Result {
 		return res
 	}
 
-	// The principal leg's zero value is EffectDeny, so a caller that forgets to
-	// evaluate it denies rather than silently permitting (C11, C13).
-	res.Principal = req.PrincipalDecision
+	// A nil or empty PrincipalVerdicts folds to deny (FoldVerdicts's
+	// default-deny step), so a caller that forgets to evaluate the principal
+	// leg denies rather than silently permitting (C11, C13).
+	res.Principal, _ = FoldVerdicts(req.PrincipalVerdicts)
 	res.Agent = AgentLeg(req.Agent, req.Action, derived, cfg.Trust)
 	delegationLeg, deniedDepth := DelegationLeg(
 		req.Chain, req.Action, derived, req.Resource, req.Now, cfg.MaxDepth)

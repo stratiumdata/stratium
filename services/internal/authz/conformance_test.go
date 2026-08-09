@@ -164,7 +164,7 @@ func TestC11_AllThreeLegsEvaluated(t *testing.T) {
 			got.Principal.Effect, got.Agent.Effect, got.Delegation.Effect)
 	}
 	req := request()
-	req.PrincipalDecision = LegResult{}
+	req.PrincipalVerdicts = nil
 	if got := Decide(req, config()); got.Effect != EffectDeny {
 		t.Fatal("C11: an unevaluated leg must deny")
 	}
@@ -182,7 +182,7 @@ func TestC12_DenyOverridesEverything(t *testing.T) {
 func TestC13_DefaultDeny(t *testing.T) {
 	markRan(13)
 	req := request()
-	req.PrincipalDecision = LegResult{}
+	req.PrincipalVerdicts = nil
 	if got := Decide(req, config()); got.Effect != EffectDeny {
 		t.Fatalf("C13: an absent grant must deny, got %v", got.Effect)
 	}
@@ -191,7 +191,7 @@ func TestC13_DefaultDeny(t *testing.T) {
 func TestC14_PolicyCannotExceedCeiling(t *testing.T) {
 	markRan(14)
 	req := request()
-	req.PrincipalDecision = LegResult{Effect: EffectAllow, Reason: "policy grants everything"}
+	req.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectAllow, Reason: "policy grants everything"}}
 	req.Chain = linkChain(req.TenantID, req.Agent.ID, delegation(0, models.ActionTierReadOnly, nil))
 	req.Action = Action{Tool: "Bash", Verb: "delete"}
 	got := Decide(req, config())

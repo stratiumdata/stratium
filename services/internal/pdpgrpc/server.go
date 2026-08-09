@@ -130,15 +130,23 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		DeclaredTier: declaredTier,
 	}
 
+	// Wrapped as a single-element slice: this package has one policy source
+	// today (policy.PrincipalPolicy), so there is exactly one verdict to fold.
+	// Task 3 replaces this with the real multi-engine verdict list.
+	principalDecision := s.policy.Evaluate(ctx, principal, action, resource)
 	result := authz.Decide(authz.Request{
-		TenantID:          s.cfg.TenantID, // config only. Never req — see package doc.
-		Principal:         principal,
-		Agent:             agent,
-		Chain:             chain,
-		Action:            action,
-		Resource:          resource,
-		Now:               now,
-		PrincipalDecision: s.policy.Evaluate(ctx, principal, action, resource),
+		TenantID:  s.cfg.TenantID, // config only. Never req — see package doc.
+		Principal: principal,
+		Agent:     agent,
+		Chain:     chain,
+		Action:    action,
+		Resource:  resource,
+		Now:       now,
+		PrincipalVerdicts: []authz.PolicyVerdict{{
+			Effect: principalDecision.Effect,
+			Reason: principalDecision.Reason,
+			Source: "policy",
+		}},
 	}, authz.Config{
 		Tiers:    authz.TierTable{}, // tenant tier overrides load from the DB starting Phase 2; none exist yet.
 		Trust:    authz.DefaultTrustTable(),
