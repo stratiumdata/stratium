@@ -184,6 +184,90 @@ Decided after §3.1–§3.6, during execution planning. Supersedes P2 and X1.
 
 ---
 
+## 3.8 Phase 2 design decisions (2026-08-09)
+
+Two questions deferred from §3.1–§3.7 and resolved after Phase 1 shipped. Both
+were deferred because they depend on shapes the policy-engine work defines, and
+both are now settled because Phase 2 cannot start without them.
+
+### G6 — Principal authority is probed, not materialized
+
+The delegation-creation gate (C6) clamps a requested scope to what the
+principal actually holds. There is no `Authority` type and no stored
+representation of a principal's authority.
+
+**Why not materialize it.** Entitlements are rows and can be enumerated:
+"which entitlements match alice?" returns a set. Policies cannot. Cedar, Rego,
+XACML, and JSON policies are *functions* — they answer "may alice do X?" and
+have no general way to answer "what may alice do?" That is the ABAC
+enumeration problem, and it has no solution that holds across all four
+engines. A materialized authority built from entitlements alone would be
+silently incomplete for any principal whose authority comes from a policy,
+which for a product that replaces a customer's PDP is a real hole rather than
+a corner case.
+
+**The mechanism.** For each dimension of the *requested* scope — each tool,
+the max action tier, each classification cap, each resource constraint — the
+gate asks the policy set whether the principal may hold it. Whatever is denied
+is dropped. The artifact is issued with the surviving intersection, and the
+granted scope is returned to the caller (§3.3 Y4).
+
+Cost scales with the size of the request, not the policy space, and delegation
+creation is orders of magnitude rarer than per-action evaluation.
+
+**The asymmetry, stated deliberately.** The creation gate asks a coarser
+question than the runtime gate. At creation there is no concrete resource, so
+the question is "may alice use `Bash` at all?" rather than "may alice run this
+command against this resource?" The two are different queries over the same
+policy set, and a principal can pass the coarse question and fail the fine one
+at action time. That is correct — the artifact is a ceiling, not a promise —
+but it means a clamp that succeeds does not imply any particular action will.
+
+**Fail-closed rule.** A probe that errors or is inconclusive drops the
+dimension. An unanswerable question is not a grant.
+
+### G7 — The engines' verdicts are combined inside `Decide`
+
+`Request.PrincipalDecision LegResult` is replaced by
+`Request.PrincipalVerdicts []PolicyVerdict`, and `Decide` performs the
+deny-overrides fold itself.
+
+**Why.** Today the PDP folds four engines into a single `LegResult` before
+calling `Decide`, which puts C12 — "any deny, in any policy language, at any
+priority, overrides every allow" — half outside the audited core. The
+combining algorithm is a security property, and every other security property
+in this system lives in `internal/authz` where it is mutation-tested. A
+property enforced in a package nothing mutates is a property nobody has
+checked.
+
+`authz` stays pure: a `PolicyVerdict` is plain data (engine, policy identifier,
+priority, effect, reason), carrying no engine dependency.
+
+**The fold, preserving both C12 and C13:**
+
+1. any verdict denying → DENY
+2. otherwise no verdict allowing → DENY (default-deny)
+3. otherwise any verdict escalating → ESCALATE
+4. otherwise → ALLOW
+
+Step 2 is what keeps the zero value safe. `PrincipalDecision`'s zero value was
+`EffectDeny`; a nil `[]PolicyVerdict` has no allow and therefore denies by the
+same reasoning. The invariant that an unevaluated principal leg denies survives
+the type change — and must be re-pinned by a test, because the mechanism
+producing it is now different.
+
+**Provenance follows.** Because the core sees each verdict, `Result` can record
+which engine, policy, and priority decided, and the audit entry can carry it.
+
+**Consequence for the audit chain.** `audit.Entry` gains at least one field for
+provenance. `Hash()` covers every field and `TestHash_CoversEveryField` asserts
+the mutation table's length against `reflect.TypeOf(Entry{}).NumField()` — so
+adding a field will fail that test until the table and the serialization are
+both updated. That is the guard working as designed; do not weaken the
+assertion to accommodate the change.
+
+---
+
 ## 4. Architecture
 
 ### 4.1 Artifacts
