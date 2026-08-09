@@ -145,3 +145,34 @@ func TestEffect_DenyIsZeroValue(t *testing.T) {
 		t.Fatal("a zero-value LegResult must deny")
 	}
 }
+
+// Under-declaration is a spoofing attempt. (C1)
+func TestCheckDeclaredTier_UnderDeclarationDenies(t *testing.T) {
+	got := CheckDeclaredTier(models.ActionTierDestructive, tierPtr(models.ActionTierReadOnly))
+	if got.Effect != EffectDeny {
+		t.Fatalf("declared below actual must deny, got %v", got.Effect)
+	}
+	if got.Reason == "" {
+		t.Fatal("a denial must carry a reason")
+	}
+}
+
+// Over-declaration is conservative and permitted. (C2)
+func TestCheckDeclaredTier_OverDeclarationAllowed(t *testing.T) {
+	got := CheckDeclaredTier(models.ActionTierReadOnly, tierPtr(models.ActionTierDestructive))
+	if got.Effect != EffectAllow {
+		t.Fatalf("declared above actual must be allowed, got %v: %s", got.Effect, got.Reason)
+	}
+}
+
+func TestCheckDeclaredTier_ExactMatchAllowed(t *testing.T) {
+	if got := CheckDeclaredTier(models.ActionTierExternalComms, tierPtr(models.ActionTierExternalComms)); got.Effect != EffectAllow {
+		t.Fatalf("exact match must be allowed, got %v", got.Effect)
+	}
+}
+
+func TestCheckDeclaredTier_NoDeclarationAllowed(t *testing.T) {
+	if got := CheckDeclaredTier(models.ActionTierDestructive, nil); got.Effect != EffectAllow {
+		t.Fatalf("absent declaration must be allowed, got %v", got.Effect)
+	}
+}

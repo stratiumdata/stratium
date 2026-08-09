@@ -145,3 +145,23 @@ func ValidateOverride(builtin, override models.ActionTier) error {
 	}
 	return nil
 }
+
+// CheckDeclaredTier compares the caller's declared tier against the derived one.
+//
+// Over-declaration is permitted — a conservative client that rounds up is not
+// attacking anything. Under-declaration is denied: it is an attempt to slip a
+// sensitive action beneath a delegation cap, and it is the hole that made
+// every enforcement path in the previous system bypassable (spec §1.1 D1).
+func CheckDeclaredTier(derived models.ActionTier, declared *models.ActionTier) LegResult {
+	if declared == nil {
+		return LegResult{Effect: EffectAllow}
+	}
+	if *declared < derived {
+		return LegResult{
+			Effect: EffectDeny,
+			Reason: fmt.Sprintf("declared action tier %s is below the derived tier %s (under-declaration)",
+				*declared, derived),
+		}
+	}
+	return LegResult{Effect: EffectAllow}
+}
