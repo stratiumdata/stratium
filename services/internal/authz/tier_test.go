@@ -79,6 +79,23 @@ func TestBuiltinTier_ResistsKnownEvasions(t *testing.T) {
 	}
 }
 
+// Matching must consider the RAW string as well as the normalized one.
+// Normalization strips quotes, which can merge two tokens and destroy a word
+// boundary the raw form had: in `echo abc"DROP TABLE users"` the raw string
+// matches \bDROP\b, but the normalized `echo abcDROP TABLE users` does not.
+// Dropping the raw arm of the match therefore loses detections rather than
+// gaining them, and nothing else in the suite catches that.
+func TestBuiltinTier_RawMatchIsLoadBearing(t *testing.T) {
+	const cmd = `echo abc"DROP TABLE users"`
+	got, ok := BuiltinTier(Action{Tool: "Bash", RawInput: cmd})
+	if !ok || got < models.ActionTierDestructive {
+		t.Fatalf("got %v (ok=%v); the raw-string match must still see DROP TABLE here", got, ok)
+	}
+	if normalizeCommand(cmd) == cmd {
+		t.Fatal("test premise broken: normalization no longer alters this input")
+	}
+}
+
 // A compound command's leading token proves nothing about the rest of it, so
 // READ_ONLY must be unreachable for one.
 func TestBuiltinTier_CompoundNeverReadOnly(t *testing.T) {

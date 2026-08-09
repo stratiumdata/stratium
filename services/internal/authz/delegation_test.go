@@ -32,6 +32,20 @@ func TestDelegationLeg_AllowsWithinScope(t *testing.T) {
 	}
 }
 
+// MaxActionTier is an INCLUSIVE ceiling: an action exactly at it is allowed.
+// Without this, flipping `>` to `>=` passes the whole suite and silently starts
+// denying every action at its delegation's authorized limit.
+func TestDelegationLeg_AllowsTierExactlyAtCeiling(t *testing.T) {
+	chain := []*models.Delegation{delegation(0, models.ActionTierExternalComms, nil)}
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierExternalComms, nil, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("tier exactly at the ceiling must be allowed, got %v: %s", got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
 func TestDelegationLeg_DeniesTierAboveCeiling(t *testing.T) {
 	chain := []*models.Delegation{delegation(0, models.ActionTierReadOnly, []string{"Bash"})}
 	got, _ := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierDestructive, nil, authzNow, 5)
