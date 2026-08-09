@@ -46,6 +46,10 @@ CREATE TABLE delegations (
     -- cascade revocation is keyed on this column, such a row would silently
     -- escape a root-keyed revocation sweep. Same backstop reasoning as
     -- tier_overrides' raise-only CHECK.
+    -- No ON DELETE clause: defaults to NO ACTION, so deleting a root
+    -- delegation now hard-fails while any row (including itself, or any
+    -- descendant) still names it via root_delegation_id. Deleting a chain
+    -- must proceed leaf-first.
     root_delegation_id   UUID NOT NULL REFERENCES delegations(id),
     depth                SMALLINT NOT NULL DEFAULT 0 CHECK (depth >= 0),
     chain_agent_ids      JSONB NOT NULL DEFAULT '[]'::jsonb

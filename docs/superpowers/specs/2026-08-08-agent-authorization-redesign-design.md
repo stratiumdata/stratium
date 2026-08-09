@@ -313,6 +313,17 @@ proof. Known evasions found in review and since closed (quoted verbs, `${IFS}` i
 compound commands whose leading token looks benign, `DROP` on object types outside the original
 alternation) are pinned by tests, but closing named holes does not make the class of attack go away.
 
+Scoping the SQL keyword patterns to a SQL context traded one gap for another. Matching
+`DROP`/`REVOKE`/`ALTER`/etc. unconditionally rated ordinary English as DESTRUCTIVE
+(`git commit -m "revoke stale session tokens"`); requiring one of a fixed list of database CLIs
+(`psql`, `mysql`, `sqlite3`, …) alongside the keyword closes that false positive but opens a
+measured false-negative class: any tool that reaches a database without shelling out to one of the
+recognised CLIs is invisible to this check. `python -c "db.execute('DROP TABLE users')"`,
+`rails db:drop`, and any application-specific or custom CLI wrapping a driver all rate no higher
+than INTERNAL_MODIFY. This is a larger surface than the base64-pipe-to-sh example above —
+base64 obfuscation requires deliberate evasion, while an ORM call or a framework task is how
+destructive SQL is *ordinarily* issued outside a terminal.
+
 **This is stated so an evaluator learns the limit from us rather than discovering it.** The
 controls that do carry weight are structural and not string-dependent: the delegation ceiling
 (`max_action_tier`), the agent's tool allowlist, the classification caps, and escalation. A tenant
