@@ -257,13 +257,9 @@ func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	markRan(24)
-	req := request()
-	expired := delegation(0, models.ActionTierDestructive, nil)
-	expired.ExpiresAt = authzNow.Add(-time.Second)
-	req.Chain = []*models.Delegation{expired}
-	if got := Decide(req, config()); got.Effect != EffectDeny {
-		t.Fatalf("C24: an expired delegation must deny, got %v", got.Effect)
-	}
+	t.Skip("Phase 3: the property is about an expired TOKEN with a live cache " +
+		"entry; neither exists yet. Delegation expiry alone is covered by " +
+		"TestDelegationLeg_DeniesExpiredHop.")
 }
 
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
