@@ -75,7 +75,16 @@ into a wildcard match.
 
 ## Task 2 — The clamp
 
-**Files:** `services/internal/authz/clamp.go` and its test.
+**Prerequisite found in Task 1.** `EvaluationInput.DerivedTier` is populated
+from `GrantProbe.Tier`, but Cedar's `buildRequest` does not yet map it into the
+request context — so a policy conditioning on tier cannot answer a tier-ceiling
+probe. Extend the Cedar context mapping to carry `DerivedTier` before the clamp
+can work, and add a Cedar test proving a policy that forbids above a tier
+actually denies a probe at that tier. Without it the tier walk-down below has
+nothing to walk against.
+
+**Files:** `services/internal/policy/cedar/` (the context mapping),
+`services/internal/authz/clamp.go` and its test.
 
 ```go
 // RequestedScope is what the caller asked for.
