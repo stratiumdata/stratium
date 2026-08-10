@@ -41,6 +41,8 @@ func fullAuditEntry(tenantID string, seed byte) audit.Entry {
 		DeniedLeg:        "",
 		DeniedAtDepth:    0,
 		Reason:           "ok",
+		PolicySource:     "cedar",
+		PolicyID:         "policy-42",
 		InputDigest:      [32]byte{seed, seed + 1, seed + 2},
 	}
 }
@@ -50,7 +52,8 @@ func auditTailColumns() []string {
 		"prev_hash", "tenant_id", "occurred_at", "event_type", "actor",
 		"agent_id", "delegation_id", "root_delegation_id", "chain_depth",
 		"tool_name", "action", "declared_tier", "derived_tier",
-		"decision", "denied_leg", "denied_at_depth", "reason", "input_digest",
+		"decision", "denied_leg", "denied_at_depth", "reason",
+		"policy_source", "policy_id", "input_digest",
 	}
 }
 
@@ -71,7 +74,8 @@ func addAuditTailRow(rows *sqlmock.Rows, e audit.Entry) *sqlmock.Rows {
 		e.PrevHash[:], e.TenantID, e.OccurredAt, e.EventType, e.Actor,
 		uuidArg(e.AgentID), uuidArg(e.DelegationID), uuidArg(e.RootDelegationID), int64(e.ChainDepth),
 		e.ToolName, e.Action, int64(e.DeclaredTier), int64(e.DerivedTier),
-		e.Decision, e.DeniedLeg, int64(e.DeniedAtDepth), e.Reason, e.InputDigest[:],
+		e.Decision, e.DeniedLeg, int64(e.DeniedAtDepth), e.Reason,
+		e.PolicySource, e.PolicyID, e.InputDigest[:],
 	)
 }
 
@@ -88,7 +92,8 @@ func insertArgsFor(linked audit.Entry, entryHash [32]byte) []driver.Value {
 		linked.TenantID, linked.PrevHash[:], entryHash[:], linked.OccurredAt, linked.EventType, linked.Actor,
 		linked.AgentID, linked.DelegationID, linked.RootDelegationID, linked.ChainDepth,
 		linked.ToolName, linked.Action, linked.DeclaredTier, linked.DerivedTier,
-		linked.Decision, linked.DeniedLeg, linked.DeniedAtDepth, linked.Reason, linked.InputDigest[:],
+		linked.Decision, linked.DeniedLeg, linked.DeniedAtDepth, linked.Reason,
+		linked.PolicySource, linked.PolicyID, linked.InputDigest[:],
 	}
 }
 
@@ -162,6 +167,55 @@ func TestStore_AppendAudit_SecondEntryLinksToPredecessorHash(t *testing.T) {
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).
 		WillReturnRows(addAuditTailRow(sqlmock.NewRows(auditTailColumns()), predecessor))
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(insertArgsFor(wantLinked, wantHash)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.AppendAudit(context.Background(), e); err != nil {
+		t.Fatalf("AppendAudit() error = %v", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// policy_source and policy_id are nullable with no default (migrations/
+// 000006_audit_policy_provenance), so a predecessor row written before that
+// migration — or by any writer that never set them — comes back from the
+// tail query as SQL NULL, not "". scanAuditTail must decode that NULL to
+// Go's zero string, the same value a fresh Entry{} already has, or the
+// recomputed PrevHash for the new entry will not match what a chain reader
+// gets by reconstructing the same predecessor from its own zero-valued
+// fields — silently forking what "the predecessor's hash" means depending
+// on which code path computed it.
+func TestStore_AppendAudit_TailReadDecodesNullPolicyColumnsAsEmptyString(t *testing.T) {
+	s, mock := newMockStore(t)
+	predecessor := fullAuditEntry(testTenant, 9)
+	predecessor.PolicySource = "" // what AppendAudit itself writes for "no Deciding verdict"
+	predecessor.PolicyID = ""
+	e := fullAuditEntry(testTenant, 1)
+
+	wantLinked := audit.Link(&predecessor, e)
+	wantHash := wantLinked.Hash()
+	if wantLinked.PrevHash != predecessor.Hash() {
+		t.Fatal("test setup bug: audit.Link(&predecessor, e).PrevHash must equal predecessor.Hash()")
+	}
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
+	// nil, not "", in these two positions: this is what a real driver hands
+	// back for SQL NULL, which is what addAuditTailRow(predecessor) would NOT
+	// exercise (it would send the Go "" string as a driver value, not NULL).
+	row := sqlmock.NewRows(auditTailColumns()).AddRow(
+		predecessor.PrevHash[:], predecessor.TenantID, predecessor.OccurredAt, predecessor.EventType, predecessor.Actor,
+		uuidArg(predecessor.AgentID), uuidArg(predecessor.DelegationID), uuidArg(predecessor.RootDelegationID),
+		int64(predecessor.ChainDepth), predecessor.ToolName, predecessor.Action,
+		int64(predecessor.DeclaredTier), int64(predecessor.DerivedTier),
+		predecessor.Decision, predecessor.DeniedLeg, int64(predecessor.DeniedAtDepth), predecessor.Reason,
+		nil, nil, predecessor.InputDigest[:],
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnRows(row)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
 		WithArgs(insertArgsFor(wantLinked, wantHash)...).
 		WillReturnResult(sqlmock.NewResult(0, 1))

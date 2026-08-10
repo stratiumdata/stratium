@@ -96,6 +96,8 @@ func TestHash_CoversEveryField(t *testing.T) {
 		"DeniedLeg":        func(e *Entry) { e.DeniedLeg = "agent" },
 		"DeniedAtDepth":    func(e *Entry) { e.DeniedAtDepth = 3 },
 		"Reason":           func(e *Entry) { e.Reason = "other" },
+		"PolicySource":     func(e *Entry) { e.PolicySource = "cedar" },
+		"PolicyID":         func(e *Entry) { e.PolicyID = "policy-123" },
 		"InputDigest":      func(e *Entry) { e.InputDigest = [32]byte{9} },
 	}
 

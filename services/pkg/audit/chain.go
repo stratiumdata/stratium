@@ -54,6 +54,15 @@ type Entry struct {
 	DeniedAtDepth int16
 	Reason        string
 
+	// PolicySource and PolicyID identify the policy verdict the decision was
+	// attributed to (authz.Result.Deciding) — the engine ("cedar", "rego",
+	// "entitlement", ...) and the specific policy or entitlement row. Both
+	// are empty when the decision was default-deny with no verdict at all:
+	// "no policy spoke" and "a policy denied" are different facts, and this
+	// pair is what lets an auditor trace a denial to the rule that made it.
+	PolicySource string
+	PolicyID     string
+
 	InputDigest [32]byte
 }
 
@@ -99,6 +108,8 @@ func (e Entry) Hash() [32]byte {
 	writeStr(e.DeniedLeg)
 	writeInt(int64(e.DeniedAtDepth))
 	writeStr(e.Reason)
+	writeStr(e.PolicySource)
+	writeStr(e.PolicyID)
 	writeBytes(e.InputDigest[:])
 
 	var out [32]byte

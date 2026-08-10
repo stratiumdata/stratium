@@ -1,0 +1,25 @@
+-- Provenance for the policy verdict a decision was attributed to (spec §3.8
+-- G7 / Phase 2b Task 2). Mirrors pkg/audit.Entry's PolicySource and
+-- PolicyID, added to Hash()'s serialization in the same change — see
+-- TestHash_CoversEveryField in pkg/audit/chain_test.go.
+--
+-- Numbered 000006, not 000005 as the task brief and plan doc name it:
+-- 000005_serving_app_grants already occupies that version (commit 370cd05,
+-- which predates the Phase 2b plan doc), and golang-migrate requires unique
+-- version numbers.
+--
+-- Nullable, unlike audit_chain's other string columns (tool_name, action,
+-- reason, ...), which are NOT NULL DEFAULT ''. AppendAudit still always
+-- writes a concrete value, empty string when Result.Deciding is nil — the
+-- same "write the zero value explicitly" discipline input_digest's doc
+-- comment already describes. Nullability here exists so a row written
+-- before this migration (or by any future writer that genuinely omits the
+-- column) reads back as NULL rather than colliding with a policy whose
+-- source or ID is legitimately an empty string. scanAuditTail decodes
+-- either NULL or '' to Go's zero value "", so both mean the same thing to
+-- Hash() and the chain still verifies across the migration boundary.
+--
+-- This migration only alters an existing table, so the tenant_id guard in
+-- migrations_test.go has no new table to check here.
+ALTER TABLE audit_chain ADD COLUMN policy_source TEXT;
+ALTER TABLE audit_chain ADD COLUMN policy_id TEXT;

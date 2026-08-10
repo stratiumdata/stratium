@@ -120,6 +120,15 @@ type Result struct {
 	Agent      LegResult
 	Delegation LegResult
 
+	// PrincipalVerdicts is every verdict consulted, in the order supplied.
+	PrincipalVerdicts []PolicyVerdict
+	// Deciding names the verdict Principal.Reason was attributed to, or nil
+	// when the decision was default-deny with no verdict at all. That case
+	// is real (an empty PrincipalVerdicts slice folds to deny) and must not
+	// be papered over with a zero-value verdict: "no policy spoke" and "a
+	// policy denied" are different facts an auditor needs told apart.
+	Deciding *PolicyVerdict
+
 	// DeniedAtDepth is the chain depth at which a denial occurred, or -1.
 	DeniedAtDepth int
 	DeniedLeg     string

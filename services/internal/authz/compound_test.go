@@ -57,6 +57,31 @@ func TestDecide_UnevaluatedPrincipalDenies(t *testing.T) {
 	if got.DeniedLeg != "principal" {
 		t.Fatalf("denial should be attributed to principal, got %q", got.DeniedLeg)
 	}
+	// Nil, not a zero-value &PolicyVerdict{}: "no policy spoke" and "a policy
+	// denied" are different facts, and papering over the difference would
+	// forge attribution to a policy that was never evaluated.
+	if got.Deciding != nil {
+		t.Fatalf("default-deny with no verdict at all must leave Deciding nil, got %+v", got.Deciding)
+	}
+}
+
+// Result surfaces every verdict consulted, in order, and names the one the
+// reason was attributed to — not just the folded LegResult — so an auditor
+// can trace a decision to a specific policy. (Phase 2b Task 2)
+func TestDecide_ReportsPrincipalVerdictsAndDeciding(t *testing.T) {
+	req := request()
+	allow := PolicyVerdict{Effect: EffectAllow, Reason: "granted", Source: "rego", PolicyID: "p-2"}
+	deny := PolicyVerdict{Effect: EffectDeny, Reason: "blocked", Source: "cedar", PolicyID: "p-1"}
+	req.PrincipalVerdicts = []PolicyVerdict{allow, deny}
+
+	got := Decide(req, config())
+
+	if len(got.PrincipalVerdicts) != 2 || got.PrincipalVerdicts[0] != allow || got.PrincipalVerdicts[1] != deny {
+		t.Fatalf("PrincipalVerdicts must be every verdict consulted, in the order supplied, got %+v", got.PrincipalVerdicts)
+	}
+	if got.Deciding == nil || *got.Deciding != deny {
+		t.Fatalf("Deciding must name the verdict the reason was attributed to, got %+v", got.Deciding)
+	}
 }
 
 // Any single deny overrides. (C12)
