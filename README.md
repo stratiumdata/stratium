@@ -20,3 +20,11 @@ specific point in a delegation chain — may perform a specific action.
     make conformance  # authorization conformance properties
 
 Design of record: `docs/superpowers/specs/2026-08-08-agent-authorization-redesign-design.md`
+
+## Installing the enforcement hook
+
+`services/cmd/stratium-pep` is the client-side binary that gates a real
+agent's tool calls against the PDP. See [`docs/pep.md`](docs/pep.md) for the
+`.claude/settings.json` hook entry, required environment variables, and how
+to start a session — **every tool call is denied until a session is started
+and a policy permits it.**
