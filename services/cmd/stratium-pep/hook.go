@@ -7,14 +7,25 @@
 // hookSpecificOutput.permissionDecisionReason.
 //
 // The boundary that matters: runHook reads tool_name and forwards
-// tool_input verbatim, as bytes, into DecideRequest.raw_input. Nothing here
-// parses tool_input's structure or its content — no "the command field
-// looks like rm -rf", no per-tool special-casing of what a dangerous call
-// looks like. That parsing is the PDP's job, server-side, from raw_input;
-// doing any of it here would be exactly the predecessor's local-classifier
-// defect (spec D1) in a new coat of paint. verbForTool below derives a verb
-// from the tool *name* only, which is not the same thing — see its doc
-// comment.
+// tool_input verbatim, as bytes, into DecideRequest.raw_input — always,
+// unconditionally. It also extracts DecideRequest.normalized_input
+// (normalize.go), but only by a field-name lookup keyed on tool_name: "the
+// shell tool's argument lives under .command," never "this text looks like
+// rm -rf." Nothing here — in this file or in normalize.go — parses what
+// tool_input's content *means*: no per-tool special-casing of what a
+// dangerous call looks like. That classification is the PDP's job,
+// server-side, from raw_input and normalized_input together
+// (internal/authz.BuiltinTier); doing any of it here would be exactly the
+// predecessor's local-classifier defect (spec D1) in a new coat of paint.
+// toolVerbs below derives a verb from the tool *name* only, which is not
+// the same thing — see its doc comment.
+//
+// normalized_input can only help classification, never hurt it:
+// BuiltinTier's combining rule lets a positive destructive-or-external match
+// on raw_input win outright, before normalized_input is even consulted — so
+// a tool this hook does not recognize, or a field extraction that misses or
+// under-reports, degrades to raw-only classification, never below it. See
+// normalize.go's doc comment for the extraction table itself.
 //
 // declared_tier is never set on the outgoing request, deliberately: the
 // field exists in the proto for callers that have a real tier to declare,
@@ -182,12 +193,13 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 	}
 
 	req := &pdpgrpc.DecideRequest{
-		DelegationId: session.GetDelegationId(),
-		AgentId:      cfg.AgentID,
-		Subject:      cfg.Subject,
-		Tool:         in.ToolName,
-		Verb:         toolVerbs[in.ToolName],
-		RawInput:     string(in.ToolInput),
+		DelegationId:    session.GetDelegationId(),
+		AgentId:         cfg.AgentID,
+		Subject:         cfg.Subject,
+		Tool:            in.ToolName,
+		Verb:            toolVerbs[in.ToolName],
+		RawInput:        string(in.ToolInput),
+		NormalizedInput: extractNormalizedInput(in.ToolName, in.ToolInput),
 		// DeclaredTier: deliberately never set. See the package doc.
 	}
 

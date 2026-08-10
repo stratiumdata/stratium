@@ -409,6 +409,47 @@ func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	}
 }
 
+// End-to-end proof that runHook wires extractNormalizedInput's result onto
+// the outgoing request, alongside the unconditional raw_input -- the unit
+// tests in normalize_test.go cover extraction itself, this covers that
+// runHook actually calls it and sends what it returns.
+func TestRunHook_RequestCarriesNormalizedInput(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		input    string
+		wantNorm string
+	}{
+		{"Bash command extracted", "Bash", `{"command":"ls -la"}`, "ls -la"},
+		{"Read file_path extracted", "Read", `{"file_path":"/tmp/notes.txt"}`, "/tmp/notes.txt"},
+		{"unrecognized tool yields empty normalized input", "WebFetch", `{"url":"https://example.com"}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			client := startFakePDP(t, fake)
+
+			var stdout bytes.Buffer
+			code := runHook(stdinBody(tt.tool, tt.input), &stdout, client, testCfg(t))
+			if code != 0 {
+				t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
+			}
+
+			req := fake.lastRequest()
+			if req == nil {
+				t.Fatal("PDP never received a request")
+			}
+			if req.GetNormalizedInput() != tt.wantNorm {
+				t.Errorf("normalized_input = %q, want %q", req.GetNormalizedInput(), tt.wantNorm)
+			}
+			if req.GetRawInput() != tt.input {
+				t.Errorf("raw_input = %q, want the exact tool_input bytes %q -- normalized_input must never replace it",
+					req.GetRawInput(), tt.input)
+			}
+		})
+	}
+}
+
 // Proves "verb derived from the tool name only, not the input" directly: the
 // same tool name with two very different inputs must produce the same verb.
 // If it did not, the verb would itself be a second, informal classification
