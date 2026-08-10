@@ -15,17 +15,24 @@ import (
 func TestUnconfigured_Denies(t *testing.T) {
 	got := Unconfigured().Evaluate(context.Background(), authz.Principal{}, authz.Action{}, nil)
 
-	if got.Effect != authz.EffectDeny {
-		t.Fatalf("Unconfigured must deny, got %v", got.Effect)
+	if len(got) != 1 {
+		t.Fatalf("Unconfigured must return exactly one verdict, got %d", len(got))
 	}
-	if got.Reason == "" {
+	v := got[0]
+	if v.Effect != authz.EffectDeny {
+		t.Fatalf("Unconfigured must deny, got %v", v.Effect)
+	}
+	if v.Source != "none" {
+		t.Errorf("Source = %q, want %q", v.Source, "none")
+	}
+	if v.Reason == "" {
 		t.Fatal("Unconfigured must give a non-empty reason")
 	}
-	if !strings.Contains(got.Reason, "policy engine") {
-		t.Errorf("reason must name the policy engine as the cause, got %q", got.Reason)
+	if !strings.Contains(v.Reason, "policy engine") {
+		t.Errorf("reason must name the policy engine as the cause, got %q", v.Reason)
 	}
-	if !strings.Contains(got.Reason, "Phase 2") {
-		t.Errorf("reason must mention Phase 2, got %q", got.Reason)
+	if !strings.Contains(v.Reason, "Phase 2") {
+		t.Errorf("reason must mention Phase 2, got %q", v.Reason)
 	}
 }
 
@@ -43,9 +50,11 @@ var constructors = map[string]func() PrincipalPolicy{
 // later. It does not trust the constructors map above as ground truth — it
 // parses this package's own source with go/ast to find every exported,
 // top-level function that returns PrincipalPolicy, then requires each one to
-// be wired into the map and to never produce EffectAllow. A new constructor
-// (an "AllowAll", say) that isn't wired into the map fails the test by name
-// rather than passing silently.
+// be wired into the map and to never produce a verdict slice containing
+// EffectAllow. A new constructor (an "AllowAll", say) that isn't wired into
+// the map fails the test by name rather than passing silently — and every
+// verdict in the slice is checked, not just the first, so a constructor that
+// buries an allow behind a leading deny is caught too.
 func TestNoExportedConstructorAllows(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -83,9 +92,11 @@ func TestNoExportedConstructorAllows(t *testing.T) {
 			t.Errorf("exported constructor %s returns PrincipalPolicy but is not wired into the constructors map in policy_test.go — add it so this guard actually checks it", name)
 			continue
 		}
-		got := ctor().Evaluate(context.Background(), authz.Principal{}, authz.Action{}, nil)
-		if got.Effect == authz.EffectAllow {
-			t.Errorf("%s() must not produce EffectAllow — Phase 1c has no policy engine to authorize this (see package doc)", name)
+		verdicts := ctor().Evaluate(context.Background(), authz.Principal{}, authz.Action{}, nil)
+		for _, v := range verdicts {
+			if v.Effect == authz.EffectAllow {
+				t.Errorf("%s() must not produce a verdict slice containing EffectAllow (found one from source %q, policy_id %q) — Phase 1c has no policy engine to authorize this (see package doc)", name, v.Source, v.PolicyID)
+			}
 		}
 	}
 }

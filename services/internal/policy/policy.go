@@ -14,9 +14,11 @@ import (
 )
 
 // PrincipalPolicy answers whether the principal may perform this action on this
-// resource, independent of which agent is acting.
+// resource, independent of which agent is acting. It returns every verdict it
+// consulted — authz.FoldVerdicts is what combines them with deny-overrides —
+// so provenance for each one survives into the response and the audit row.
 type PrincipalPolicy interface {
-	Evaluate(ctx context.Context, p authz.Principal, action authz.Action, resource map[string]string) authz.LegResult
+	Evaluate(ctx context.Context, p authz.Principal, action authz.Action, resource map[string]string) []authz.PolicyVerdict
 }
 
 type unconfigured struct{}
@@ -25,9 +27,14 @@ type unconfigured struct{}
 // implementation in Phase 1c.
 func Unconfigured() PrincipalPolicy { return unconfigured{} }
 
-func (unconfigured) Evaluate(context.Context, authz.Principal, authz.Action, map[string]string) authz.LegResult {
-	return authz.LegResult{
+func (unconfigured) Evaluate(context.Context, authz.Principal, authz.Action, map[string]string) []authz.PolicyVerdict {
+	// Exactly one verdict, not zero. FoldVerdicts folds a nil/empty slice to
+	// deny too, but with its own generic "default deny: no policy verdict
+	// allowed" text — only a real verdict carries this specific reason
+	// through to the response and the audit row.
+	return []authz.PolicyVerdict{{
 		Effect: authz.EffectDeny,
+		Source: "none",
 		Reason: "principal: no policy engine configured (Phase 2)",
-	}
+	}}
 }

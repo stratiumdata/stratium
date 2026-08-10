@@ -105,6 +105,17 @@ func wellFormedFixture() (*fakeStore, *DecideRequest) {
 	return fs, req
 }
 
+// emptyPolicy consults no policy at all: Evaluate returns nil. It exercises
+// the default-deny-with-no-verdict path (authz.Result.Deciding is nil), which
+// is distinct from policy.Unconfigured()'s case (Deciding is non-nil and its
+// Source/PolicyID happen to be "none"/""). The response's provenance fields
+// must tell these apart rather than collapsing both to empty strings.
+type emptyPolicy struct{}
+
+func (emptyPolicy) Evaluate(context.Context, authz.Principal, authz.Action, map[string]string) []authz.PolicyVerdict {
+	return nil
+}
+
 func wantCode(t *testing.T, err error, want codes.Code) {
 	t.Helper()
 	if err == nil {
@@ -180,6 +191,95 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	}
 	if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
 		t.Errorf("DerivedTier = %d, want %d (READ_ONLY)", resp.GetDerivedTier(), models.ActionTierReadOnly)
+	}
+}
+
+// The response's provenance fields must carry policy.Unconfigured()'s
+// specific reason and source through, not FoldVerdicts's generic
+// "default deny: no policy verdict allowed" text — that is the entire point
+// of Unconfigured() returning one verdict instead of zero (see the package
+// doc on policy.Unconfigured).
+func TestDecide_ProvenanceReflectsUnconfiguredVerdict(t *testing.T) {
+	const wantReason = "principal: no policy engine configured (Phase 2)"
+	fs, req := wellFormedFixture()
+	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetReason() != wantReason {
+		t.Errorf("Reason = %q, want %q", resp.GetReason(), wantReason)
+	}
+	if resp.GetPrincipalReason() != wantReason {
+		t.Errorf("PrincipalReason = %q, want %q", resp.GetPrincipalReason(), wantReason)
+	}
+	if resp.DecidedSource == nil {
+		t.Fatal("DecidedSource is unset, want present (\"none\")")
+	}
+	if got := resp.GetDecidedSource(); got != "none" {
+		t.Errorf("DecidedSource = %q, want %q", got, "none")
+	}
+	// PolicyID is legitimately empty for Unconfigured() — the field must
+	// still be present (non-nil) to prove it was populated from a real
+	// Deciding verdict, not left unset.
+	if resp.DecidedPolicyId == nil {
+		t.Fatal("DecidedPolicyId is unset, want present (empty string)")
+	}
+	if got := resp.GetDecidedPolicyId(); got != "" {
+		t.Errorf("DecidedPolicyId = %q, want empty string", got)
+	}
+
+	// The audit row must carry the same provenance as the response — that is
+	// the entire reason audit.Entry gained these columns (Task 2).
+	if len(fs.appended) != 1 {
+		t.Fatalf("AppendAudit called %d times, want 1", len(fs.appended))
+	}
+	if got := fs.appended[0].PolicySource; got != "none" {
+		t.Errorf("audit entry PolicySource = %q, want %q", got, "none")
+	}
+	if got := fs.appended[0].PolicyID; got != "" {
+		t.Errorf("audit entry PolicyID = %q, want empty string", got)
+	}
+}
+
+// When the policy provider consults nothing at all (a nil verdict slice),
+// authz.Result.Deciding is nil — no verdict decided the outcome, as opposed
+// to a verdict deciding it whose Source/PolicyID happen to be empty. The
+// response must leave DecidedSource/DecidedPolicyId unset (nil pointers) in
+// that case, not populate them with zero-valued strings that would be
+// indistinguishable from TestDecide_ProvenanceReflectsUnconfiguredVerdict's
+// PolicyID case above.
+func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
+	fs, req := wellFormedFixture()
+	srv := NewServer(fs, emptyPolicy{}, testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("Effect = %v, want EFFECT_DENY (default-deny with no verdict)", resp.GetEffect())
+	}
+	if resp.DecidedSource != nil {
+		t.Errorf("DecidedSource = %q, want unset (nil): no verdict decided this", resp.GetDecidedSource())
+	}
+	if resp.DecidedPolicyId != nil {
+		t.Errorf("DecidedPolicyId = %q, want unset (nil): no verdict decided this", resp.GetDecidedPolicyId())
+	}
+
+	// audit.Entry has no presence tracking (plain strings, not proto3
+	// optional) — "" is documented as meaning "no verdict decided this" at
+	// that layer (see audit.Entry's doc comment), so both columns should be
+	// the Go zero value here, consistent with that documented meaning.
+	if len(fs.appended) != 1 {
+		t.Fatalf("AppendAudit called %d times, want 1", len(fs.appended))
+	}
+	if got := fs.appended[0].PolicySource; got != "" {
+		t.Errorf("audit entry PolicySource = %q, want empty string: no verdict decided this", got)
+	}
+	if got := fs.appended[0].PolicyID; got != "" {
+		t.Errorf("audit entry PolicyID = %q, want empty string: no verdict decided this", got)
 	}
 }
 

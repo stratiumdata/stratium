@@ -130,23 +130,19 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		DeclaredTier: declaredTier,
 	}
 
-	// Wrapped as a single-element slice: this package has one policy source
-	// today (policy.PrincipalPolicy), so there is exactly one verdict to fold.
-	// Task 3 replaces this with the real multi-engine verdict list.
-	principalDecision := s.policy.Evaluate(ctx, principal, action, resource)
+	// The policy provider returns every verdict it consulted for the
+	// principal leg; authz.Decide folds them with deny-overrides via
+	// authz.FoldVerdicts.
+	principalVerdicts := s.policy.Evaluate(ctx, principal, action, resource)
 	result := authz.Decide(authz.Request{
-		TenantID:  s.cfg.TenantID, // config only. Never req — see package doc.
-		Principal: principal,
-		Agent:     agent,
-		Chain:     chain,
-		Action:    action,
-		Resource:  resource,
-		Now:       now,
-		PrincipalVerdicts: []authz.PolicyVerdict{{
-			Effect: principalDecision.Effect,
-			Reason: principalDecision.Reason,
-			Source: "policy",
-		}},
+		TenantID:          s.cfg.TenantID, // config only. Never req — see package doc.
+		Principal:         principal,
+		Agent:             agent,
+		Chain:             chain,
+		Action:            action,
+		Resource:          resource,
+		Now:               now,
+		PrincipalVerdicts: principalVerdicts,
 	}, authz.Config{
 		Tiers:    authz.TierTable{}, // tenant tier overrides load from the DB starting Phase 2; none exist yet.
 		Trust:    authz.DefaultTrustTable(),
@@ -162,6 +158,11 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 
 // appendAudit builds the audit entry for one decision and appends it.
 // chain must be non-empty (LoadChain guarantees this on a nil error).
+//
+// PolicySource/PolicyID are populated from result.Deciding, guarded against
+// nil exactly as toResponse guards it: left at their zero value ("") for the
+// default-deny-with-no-verdict case, which audit.Entry's own doc comment
+// already documents as the meaning of "empty" there.
 func (s *Server) appendAudit(
 	ctx context.Context,
 	agentID, delegationID uuid.UUID,
@@ -202,6 +203,10 @@ func (s *Server) appendAudit(
 		Reason:           result.Reason,
 		InputDigest:      digest,
 	}
+	if d := result.Deciding; d != nil {
+		entry.PolicySource = d.Source
+		entry.PolicyID = d.PolicyID
+	}
 
 	if err := s.store.AppendAudit(ctx, entry); err != nil {
 		if errors.Is(err, store.ErrConcurrentAppend) {
@@ -229,8 +234,16 @@ func parseNonNilUUID(s string) (uuid.UUID, error) {
 // them at its zero value would silently read back as EFFECT_DENY with no
 // reason, indistinguishable from a leg that was actually evaluated and
 // denied for no stated reason.
+//
+// DecidedSource/DecidedPolicyId are the exception: they are left unset
+// (nil), not zeroed, when result.Deciding is nil. That case is real — a
+// default-deny with no verdict at all, from a nil/empty PrincipalVerdicts —
+// and collapsing it into empty strings would make it indistinguishable from
+// a verdict that did decide the outcome and whose Source/PolicyID happen to
+// be empty. Both fields are proto3 optional for exactly that reason, the
+// same presence-vs-zero-value pattern DecideRequest.declared_tier uses.
 func toResponse(result authz.Result) *DecideResponse {
-	return &DecideResponse{
+	resp := &DecideResponse{
 		Effect:           toProtoEffect(result.Effect),
 		DerivedTier:      int32(result.DerivedTier), //nolint:gosec // G115: models.ActionTier is a 0-4 enum
 		PrincipalEffect:  toProtoEffect(result.Principal.Effect),
@@ -243,6 +256,14 @@ func toResponse(result authz.Result) *DecideResponse {
 		DeniedAtDepth:    int32(result.DeniedAtDepth), //nolint:gosec // G115: -1 sentinel or a chain depth bounded well under int32's range
 		Reason:           result.Reason,
 	}
+
+	if d := result.Deciding; d != nil {
+		source, policyID := d.Source, d.PolicyID
+		resp.DecidedSource = &source
+		resp.DecidedPolicyId = &policyID
+	}
+
+	return resp
 }
 
 // toProtoEffect maps authz.Effect onto the wire enum explicitly rather than

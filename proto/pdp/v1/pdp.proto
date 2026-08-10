@@ -103,6 +103,19 @@ message DecideResponse {
   // denying leg's reason when effect is EFFECT_DENY, or the escalating leg's
   // reason when EFFECT_ESCALATE.
   string reason = 11;
+
+  // decided_source and decided_policy_id name the policy verdict the
+  // decision was attributed to: which engine or grant model produced it
+  // ("cedar", "rego", "none", ...) and which policy or entitlement row.
+  //
+  // Both are optional, for the same reason declared_tier above is: a
+  // decision can be default-deny with no verdict at all (an empty or nil
+  // principal verdict list), and that case must stay distinguishable from a
+  // verdict that did decide the outcome whose source/policy ID happen to be
+  // empty strings. Unset means the former; present-but-empty means the
+  // latter.
+  optional string decided_source = 12;
+  optional string decided_policy_id = 13;
 }
 
 service PDPService {
