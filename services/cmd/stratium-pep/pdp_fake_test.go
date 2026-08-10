@@ -13,20 +13,31 @@ import (
 )
 
 // fakePDP is a real PDPServiceServer, not a mocked client interface: tests
-// in hook_test.go dial it over an actual TCP loopback connection through the
-// generated gRPC client, the same code path runHookCmd uses in production.
-// That matters specifically for the declared_tier assertion — a mock could
-// only prove a Go struct field was left nil, where a real round trip proves
-// the wire message never carried it.
+// in hook_test.go and session_start_test.go dial it over an actual TCP
+// loopback connection through the generated gRPC client, the same code path
+// runHookCmd/runSessionStartCmd use in production. That matters specifically
+// for the declared_tier assertion in hook_test.go — a mock could only prove
+// a Go struct field was left nil, where a real round trip proves the wire
+// message never carried it.
+//
+// Decide and CreateDelegation each get their own response/error/call-count
+// fields below rather than sharing one, because a single session_start_test
+// scenario can need Decide left at its zero-value UnimplementedPDPServiceServer
+// behavior while CreateDelegation is stubbed, and vice versa for hook_test.
 type fakePDP struct {
 	pdpgrpc.UnimplementedPDPServiceServer
 
 	resp *pdpgrpc.DecideResponse
 	err  error
 
-	mu      sync.Mutex
-	lastReq *pdpgrpc.DecideRequest
-	calls   int
+	createResp *pdpgrpc.CreateDelegationResponse
+	createErr  error
+
+	mu            sync.Mutex
+	lastReq       *pdpgrpc.DecideRequest
+	calls         int
+	lastCreateReq *pdpgrpc.CreateDelegationRequest
+	createCalls   int
 }
 
 func (f *fakePDP) Decide(_ context.Context, req *pdpgrpc.DecideRequest) (*pdpgrpc.DecideResponse, error) {
@@ -50,6 +61,29 @@ func (f *fakePDP) lastRequest() *pdpgrpc.DecideRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastReq
+}
+
+func (f *fakePDP) CreateDelegation(_ context.Context, req *pdpgrpc.CreateDelegationRequest) (*pdpgrpc.CreateDelegationResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createCalls++
+	f.lastCreateReq = req
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	return f.createResp, nil
+}
+
+func (f *fakePDP) createRequestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createCalls
+}
+
+func (f *fakePDP) lastCreateRequest() *pdpgrpc.CreateDelegationRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastCreateReq
 }
 
 // startFakePDP serves srv on an OS-assigned loopback port and returns a real

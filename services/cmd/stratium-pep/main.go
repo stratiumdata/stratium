@@ -8,17 +8,23 @@
 // PreToolUse hook; "mcp", "proxy", and "extauthz" are later surfaces over
 // the same PDP call. Structuring the dispatch this way now means adding one
 // of those later is a new case in dispatch, not a restructuring of this
-// binary.
+// binary. "session-start" (session_start.go) is not itself an enforcement
+// surface — it provisions the delegation an enforcement surface later
+// enforces, by calling CreateDelegation once at session setup and caching
+// what it returns for hook (and later mcp/proxy/extauthz) to read.
 //
-// The property every subcommand here shares, and the only one that makes
-// this binary worth having: it classifies nothing itself. A PreToolUse
-// payload's tool_input crosses this process only as opaque bytes, forwarded
-// to the PDP as DecideRequest.raw_input and never inspected. The system
-// this replaces ran a local regex classifier and sent the server its own
-// verdict — the component being policed declared its own sensitivity, and
-// the enforcement path took it at face value. That is spec defect D1, and
-// it made every enforcement surface in that system bypassable. See hook.go
-// for where that boundary is drawn in code.
+// The property every enforcement subcommand here shares, and the only one
+// that makes this binary worth having: it classifies nothing itself. A
+// PreToolUse payload's tool_input crosses this process only as opaque
+// bytes, forwarded to the PDP as DecideRequest.raw_input and never
+// inspected. The system this replaces ran a local regex classifier and sent
+// the server its own verdict — the component being policed declared its own
+// sensitivity, and the enforcement path took it at face value. That is spec
+// defect D1, and it made every enforcement surface in that system
+// bypassable. See hook.go for where that boundary is drawn in code.
+// session-start holds the analogous line for its own RPC: it caches
+// whatever CreateDelegation actually granted, never what was requested —
+// see session_start.go.
 package main
 
 import (
@@ -36,13 +42,15 @@ func main() {
 // stdin/stdout/stderr swapped for buffers.
 func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook> ...")
+		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start> ...")
 		return 1
 	}
 
 	switch args[0] {
 	case "hook":
 		return runHookCmd(stdin, stdout)
+	case "session-start":
+		return runSessionStartCmd(stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: unknown subcommand %q\n", args[0])
 		return 1
