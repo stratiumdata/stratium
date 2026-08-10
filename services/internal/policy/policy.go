@@ -1,10 +1,14 @@
-// Package policy is the seam the policy engines plug into in Phase 2.
+// Package policy is the seam the policy engines plug into.
 //
-// It has one implementation today and that implementation denies. There is
-// deliberately no allow-all variant, not even behind a flag: the predecessor
+// Two implementations live here. Unconfigured always denies — the only one
+// that existed before a real engine did, still correct for a deployment with
+// no policy engine wired at all. Configured (configured.go) delegates to a
+// real PolicyEngine and can legitimately allow. There is deliberately no
+// unconditional allow-all variant, not even behind a flag: the predecessor
 // carried a development-only auth fallback into production, where any OIDC
 // blip silently accepted forged tokens. A bypass outlives the reason it was
-// added.
+// added. TestNoExportedConstructorAllows (policy_test.go) is the guard
+// against one being added here later.
 package policy
 
 import (

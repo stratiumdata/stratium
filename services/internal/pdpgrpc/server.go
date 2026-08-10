@@ -135,9 +135,22 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
 	// from these same inputs — that second derivation stays authoritative for
 	// the actual decision, so this one cannot itself widen anything.
+	//
+	// On error, this does NOT return codes.Internal directly: Decide's own
+	// re-derivation (same tiers, same action) would hit this identical error
+	// and deny-and-audit via authz.DeriveTierDenial — bailing out here first,
+	// before principal verdicts are even evaluated, would bypass the audit
+	// trail on exactly the same error Decide always audits. Building that
+	// same Result here, through the same shared function, keeps both call
+	// sites deny-and-audit rather than two paths that could report the
+	// identical failure differently.
 	derivedTier, err := authz.DeriveTier(tiers, action)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "derive tier: %s", err)
+		result := authz.DeriveTierDenial(err)
+		if auditErr := s.appendAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), result, now); auditErr != nil {
+			return nil, auditErr
+		}
+		return toResponse(result), nil
 	}
 
 	// acting is the delegation the agent is presenting — the last hop.

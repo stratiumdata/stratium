@@ -24,11 +24,7 @@ func Decide(req Request, cfg Config) Result {
 	// (spec §4.4, C3).
 	derived, err := DeriveTier(cfg.Tiers, req.Action)
 	if err != nil {
-		res.Effect = EffectDeny
-		res.DeniedLeg = "delegation"
-		res.Reason = err.Error()
-		res.Delegation = LegResult{Effect: EffectDeny, Reason: err.Error()}
-		return res
+		return DeriveTierDenial(err)
 	}
 	res.DerivedTier = derived
 
@@ -94,4 +90,27 @@ func Decide(req Request, cfg Config) Result {
 
 	res.Effect = EffectAllow
 	return res
+}
+
+// DeriveTierDenial builds the Result Decide itself returns when DeriveTier
+// fails: deny, attributed to the delegation leg (the tier ceiling is
+// structural, never policy-configurable — see DelegationLeg's own doc
+// comment), carrying err's text as the reason.
+//
+// Exported so a caller that must derive the tier before calling Decide — the
+// PDP server derives it once more, early, so the policy engine can see it in
+// EvaluationInput before principal verdicts are evaluated, which themselves
+// must be computed before Decide can be called — produces the identical
+// audited denial Decide would, rather than inventing a second, divergent
+// error path. Two call sites computing the same Result this way can never
+// drift apart on how a DeriveTier failure is reported, because they call the
+// same code.
+func DeriveTierDenial(err error) Result {
+	return Result{
+		DeniedAtDepth: -1,
+		Effect:        EffectDeny,
+		DeniedLeg:     "delegation",
+		Reason:        err.Error(),
+		Delegation:    LegResult{Effect: EffectDeny, Reason: err.Error()},
+	}
 }

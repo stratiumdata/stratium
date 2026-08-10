@@ -47,25 +47,63 @@ func TestUnconfigured_Denies(t *testing.T) {
 	}
 }
 
-// constructors is the documented convention the guard test below enforces:
-// every exported, top-level function in this package that returns
-// PrincipalPolicy must have an entry here that calls it with zero-value
-// arguments. TestNoExportedConstructorAllows cross-checks this map against
-// the package's actual source, so a constructor added here without ever
-// updating this map fails loudly instead of shipping unchecked.
+// constructors is the documented convention the guard test below enforces
+// for every exported, zero-argument, top-level function in this package that
+// returns PrincipalPolicy: each one must have an entry here that calls it
+// with no arguments. TestNoExportedConstructorAllows cross-checks this map
+// against the package's actual source, so a constructor added here without
+// ever updating this map fails loudly instead of shipping unchecked.
 var constructors = map[string]func() PrincipalPolicy{
 	"Unconfigured": Unconfigured,
 }
 
+// engineBackedConstructors is the guard's one deliberate, narrow exemption,
+// for exported constructors the AST scan finds that take a PolicySource
+// argument. Configured is the first: it cannot be called with zero
+// arguments — Go's own type checker enforces that a source and an engine are
+// supplied — so it cannot be a hardcoded, zero-configuration bypass the way
+// an "AllowAll()" could be. That is a structural fact TestNoExportedConstructorAllows
+// re-derives from the source itself (requiresPolicySource), not something
+// this map is trusted to claim on its own: a constructor that takes
+// arguments but none of them is a PolicySource does NOT get exempted (see
+// the test's default case) — only the specific, narrow shape "requires a
+// PolicySource" does.
+//
+// Each entry here still gets the same behavioral check every zero-argument
+// constructor gets (assertNoAllow), just built from a minimal, explicitly
+// empty PolicySource rather than a genuinely zero-argument call — proving
+// that even in the most permissive-looking wiring this guard can construct,
+// the result still cannot allow without policies actually flowing through
+// it. (What a *non-empty* PolicySource can produce is the whole point of
+// Configured, exercised by configured_test.go and the Task 5 integration
+// suite instead — this guard is not the place that proves an engine's real
+// evaluation logic, only that nothing here can allow for free.)
+var engineBackedConstructors = map[string]func() PrincipalPolicy{
+	"Configured": func() PrincipalPolicy {
+		return Configured(stubSource{}, stubEngine{language: "guard-empty-policy-check"})
+	},
+}
+
 // TestNoExportedConstructorAllows is the guard against a bypass being added
-// later. It does not trust the constructors map above as ground truth — it
-// parses this package's own source with go/ast to find every exported,
-// top-level function that returns PrincipalPolicy, then requires each one to
-// be wired into the map and to never produce a verdict slice containing
-// EffectAllow. A new constructor (an "AllowAll", say) that isn't wired into
-// the map fails the test by name rather than passing silently — and every
-// verdict in the slice is checked, not just the first, so a constructor that
-// buries an allow behind a leading deny is caught too.
+// later. It does not trust the constructors/engineBackedConstructors maps
+// above as ground truth — it parses this package's own source with go/ast to
+// find every exported, top-level function that returns PrincipalPolicy, then
+// classifies each by its own declared signature:
+//
+//   - zero parameters: must be wired into constructors, called with no
+//     arguments, and its result checked for EffectAllow. This is the strict
+//     path — the shape a hardcoded bypass would use.
+//   - takes a PolicySource parameter: must be wired into
+//     engineBackedConstructors instead. This is the guard's only exemption,
+//     and it is narrow by construction: arity alone would let a decoy
+//     parameter ("Bypass(x int)") dodge the strict path, so the exemption
+//     requires the specific type, not merely that some argument exists.
+//   - anything else (takes arguments, but none is a PolicySource): fails
+//     loudly. The guard refuses to guess at a new shape rather than silently
+//     passing it through.
+//
+// Every verdict in a checked result is inspected, not just the first, so a
+// constructor that buries an allow behind a leading deny is caught too.
 func TestNoExportedConstructorAllows(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -73,7 +111,7 @@ func TestNoExportedConstructorAllows(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	var found []string
+	found := make(map[string]*ast.FuncDecl)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -88,7 +126,7 @@ func TestNoExportedConstructorAllows(t *testing.T) {
 				continue
 			}
 			if returnsPrincipalPolicy(fn) {
-				found = append(found, fn.Name.Name)
+				found[fn.Name.Name] = fn
 			}
 		}
 	}
@@ -97,17 +135,46 @@ func TestNoExportedConstructorAllows(t *testing.T) {
 		t.Fatal("found no exported PrincipalPolicy constructor in source — the guard isn't exercising anything, fix the scan")
 	}
 
-	for _, name := range found {
-		ctor, ok := constructors[name]
-		if !ok {
-			t.Errorf("exported constructor %s returns PrincipalPolicy but is not wired into the constructors map in policy_test.go — add it so this guard actually checks it", name)
-			continue
-		}
-		verdicts := ctor().Evaluate(context.Background(), EvaluationInput{})
-		for _, v := range verdicts {
-			if v.Effect == authz.EffectAllow {
-				t.Errorf("%s() must not produce a verdict slice containing EffectAllow (found one from source %q, policy_id %q) — Phase 1c has no policy engine to authorize this (see package doc)", name, v.Source, v.PolicyID)
+	for name, fn := range found {
+		switch {
+		case paramCount(fn) == 0:
+			ctor, ok := constructors[name]
+			if !ok {
+				t.Errorf("exported constructor %s takes no arguments but is not wired into the constructors map in policy_test.go — add it so this guard actually checks it", name)
+				continue
 			}
+			assertNoAllow(t, name, ctor().Evaluate(context.Background(), EvaluationInput{}))
+
+		case requiresPolicySource(fn):
+			build, ok := engineBackedConstructors[name]
+			if !ok {
+				t.Errorf("exported constructor %s takes a PolicySource argument but is not acknowledged in "+
+					"engineBackedConstructors in policy_test.go — it is exempt from the zero-argument check because "+
+					"it cannot allow without real policy data flowing through a caller-supplied PolicySource (see "+
+					"Configured's doc comment), but this guard must see it wired in deliberately, not by omission", name)
+				continue
+			}
+			assertNoAllow(t, name, build().Evaluate(context.Background(), EvaluationInput{}))
+
+		default:
+			t.Errorf("exported constructor %s returns PrincipalPolicy and takes arguments, but none of them is a "+
+				"PolicySource — this guard does not recognize the shape and refuses to guess: either make it "+
+				"zero-argument and wire it into constructors, or take a PolicySource argument and wire it into "+
+				"engineBackedConstructors", name)
+		}
+	}
+}
+
+// assertNoAllow fails t if verdicts contains any EffectAllow, checking every
+// element, not just the first, so a constructor that buries an allow behind
+// a leading deny is still caught.
+func assertNoAllow(t *testing.T, name string, verdicts []authz.PolicyVerdict) {
+	t.Helper()
+	for _, v := range verdicts {
+		if v.Effect == authz.EffectAllow {
+			t.Errorf("%s() must not produce a verdict slice containing EffectAllow (found one from source %q, "+
+				"policy_id %q) — a zero-configuration call must never authorize anything (see package doc)",
+				name, v.Source, v.PolicyID)
 		}
 	}
 }
@@ -122,4 +189,41 @@ func returnsPrincipalPolicy(fn *ast.FuncDecl) bool {
 	}
 	ident, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
 	return ok && ident.Name == "PrincipalPolicy"
+}
+
+// paramCount returns fn's declared parameter count, counting each name in a
+// grouped field (e.g. "a, b int") separately and an unnamed field as one.
+func paramCount(fn *ast.FuncDecl) int {
+	if fn.Type.Params == nil {
+		return 0
+	}
+	n := 0
+	for _, field := range fn.Type.Params.List {
+		if len(field.Names) == 0 {
+			n++
+			continue
+		}
+		n += len(field.Names)
+	}
+	return n
+}
+
+// requiresPolicySource reports whether fn declares a parameter of type
+// PolicySource. This is the guard's one exemption criterion (see
+// engineBackedConstructors above): a constructor that cannot compile without
+// a caller supplying something that loads real policy data cannot itself be
+// a hardcoded bypass — Go's own type checker enforces that the argument is
+// present, which this test does not need to re-verify, only rely on. A
+// parameter of any other type does not count, deliberately: an arity-only
+// check would let a decoy parameter exempt a real bypass.
+func requiresPolicySource(fn *ast.FuncDecl) bool {
+	if fn.Type.Params == nil {
+		return false
+	}
+	for _, field := range fn.Type.Params.List {
+		if ident, ok := field.Type.(*ast.Ident); ok && ident.Name == "PolicySource" {
+			return true
+		}
+	}
+	return false
 }

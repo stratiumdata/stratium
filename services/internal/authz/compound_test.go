@@ -1,6 +1,7 @@
 package authz
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -222,5 +223,37 @@ func TestDecide_DenialAlwaysHasReason(t *testing.T) {
 	req.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectDeny}} // no reason supplied
 	if got := Decide(req, config()); got.Reason == "" {
 		t.Fatal("a denial must always carry a reason")
+	}
+}
+
+// TestDeriveTierDenial pins the exact shape Decide's own DeriveTier-error
+// branch relies on (see TestDecide_UnknownActionDenies below, which proves
+// Decide actually produces this through the real code path) — and the shape
+// pdpgrpc/server.go's own pre-derivation now calls this same function to
+// build, rather than inventing a second, divergent DENY-and-audit path. See
+// that file's Decide method doc comment for why a second call site exists at
+// all: the policy engine needs the tier before Decide can be called, since
+// Decide takes the already-evaluated principal verdicts as an input.
+func TestDeriveTierDenial(t *testing.T) {
+	err := errors.New("boom: could not classify this action")
+	got := DeriveTierDenial(err)
+
+	if got.Effect != EffectDeny {
+		t.Errorf("Effect = %v, want EffectDeny", got.Effect)
+	}
+	if got.DeniedLeg != "delegation" {
+		t.Errorf("DeniedLeg = %q, want %q (the tier ceiling is structural, never policy-configurable)", got.DeniedLeg, "delegation")
+	}
+	if got.Reason != err.Error() {
+		t.Errorf("Reason = %q, want %q", got.Reason, err.Error())
+	}
+	if got.Delegation.Effect != EffectDeny || got.Delegation.Reason != err.Error() {
+		t.Errorf("Delegation = %+v, want {Effect: EffectDeny, Reason: %q}", got.Delegation, err.Error())
+	}
+	if got.DeniedAtDepth != -1 {
+		t.Errorf("DeniedAtDepth = %d, want -1 (not a chain-position denial)", got.DeniedAtDepth)
+	}
+	if got.Deciding != nil {
+		t.Errorf("Deciding = %+v, want nil: no policy verdict was ever consulted on this path", got.Deciding)
 	}
 }

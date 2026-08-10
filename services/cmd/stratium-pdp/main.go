@@ -33,6 +33,7 @@ import (
 	"stratium/internal/config"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
+	"stratium/internal/policy/cedar"
 	"stratium/internal/store"
 	"stratium/migrations"
 )
@@ -93,7 +94,18 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("serving identity startup check: %w", err)
 	}
 
-	srv := pdpgrpc.NewServer(store.New(db, cfg.TenantID), policy.Unconfigured(), cfg)
+	repo := store.New(db, cfg.TenantID)
+
+	// policy.Configured, not Unconfigured: Phase 2c wires a real engine.
+	// Cedar loads and prepares this tenant's policies fresh on every Decide
+	// call (no cache — see the Phase 2c plan's "caching is deliberately out
+	// of scope" and Task 5's measurement of why). A tenant with no cedar
+	// policies stored still denies at the principal leg, just as Unconfigured
+	// always did; Unconfigured itself remains for a deployment that wants no
+	// policy engine at all. repo satisfies both Store (pdpgrpc's own
+	// dependency interface) and policy.PolicySource structurally — one
+	// instance, two roles, no adapter needed.
+	srv := pdpgrpc.NewServer(repo, policy.Configured(repo, cedar.New()), cfg)
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -113,8 +125,8 @@ func run(logger *slog.Logger) error {
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
 
 	logger.Info("stratium-pdp starting", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr)
-	logger.Warn("principal policy is unconfigured: every decision will deny at the principal leg " +
-		"until Phase 2 wires a policy engine — this is expected, not a bug")
+	logger.Info("principal policy: cedar engine, policies loaded fresh from the store on every decision " +
+		"(no cache); a tenant with none stored still denies at the principal leg")
 
 	return serve(logger, grpcServer, lis)
 }
