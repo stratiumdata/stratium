@@ -255,6 +255,37 @@ func TestRunSessionStart_RequestCarriesConfiguredScope(t *testing.T) {
 	}
 }
 
+// runSessionStart calls removeStaleSessionFile from two independent places:
+// after CreateDelegation itself fails, and after it succeeds but the local
+// write does not. The tests above only exercise the first. This exercises
+// the second -- CreateDelegation succeeds, but the write fails because the
+// session file path is already occupied by an empty directory, which
+// os.Rename cannot replace with a file -- so a mutation deleting only the
+// write-failure branch's removal call cannot hide behind the other tests.
+func TestRunSessionStart_WriteFails_RemovesAnyExistingFile(t *testing.T) {
+	fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
+		DelegationId: "deleg-write-fails",
+		GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"}},
+	}}
+	client := startFakePDP(t, fake)
+
+	cfg := testSessionStartCfg(t)
+	if err := os.Mkdir(cfg.SessionFilePath, 0o700); err != nil {
+		t.Fatalf("seed a directory at the session file path: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := runSessionStart(client, cfg, &stderr)
+
+	if code != 1 {
+		t.Fatalf("runSessionStart() = %d, want 1", code)
+	}
+	assertNoSessionFile(t, cfg.SessionFilePath)
+	if stderr.Len() == 0 {
+		t.Error("stderr is empty, want a reason saying the session file could not be written")
+	}
+}
+
 func TestRunSessionStart_CreationFails_WritesNoFileAndRemovesStale(t *testing.T) {
 	fake := &fakePDP{createErr: status.Error(codes.PermissionDenied, "none of the requested tools are held by this principal")}
 	client := startFakePDP(t, fake)
