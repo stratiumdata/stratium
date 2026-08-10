@@ -1,9 +1,10 @@
 // session_start.go implements the "session-start" subcommand: creates a
 // delegation for an agent session via the PDP's CreateDelegation RPC and
 // caches the result -- delegation ID and *granted* scope -- to a session
-// file. "hook" (hook.go) reads that file on every tool call once Task 3
-// wires that read path (and hardens it: a missing or malformed session
-// file, a connect timeout). This file only writes it.
+// file (session_file.go's writeSessionFile). "hook" (hook.go) reads that
+// file fresh on every tool call via session_file.go's loadSessionFile, so a
+// session-start or a revocation between tool calls takes effect on the very
+// next one rather than waiting on a cache to expire.
 //
 // Two rules from the task brief, both enforced by construction below rather
 // than by convention:
@@ -31,11 +32,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -46,35 +45,23 @@ import (
 	"stratium/internal/pdpgrpc"
 )
 
-// createDelegationTimeout bounds the CreateDelegation RPC the same way
-// decideTimeout (hook.go) bounds Decide: an unreachable or hung PDP fails
-// closed in finite time instead of wedging session start forever. Task 3
-// makes this configurable; this is a conservative fixed default until then.
-const createDelegationTimeout = 5 * time.Second
-
-// sessionFileMode is the session file's permission bits from the instant it
-// is created, not chmod'ed on afterward -- see writeSessionFile. It matches
-// os.CreateTemp's own documented default (0600 before umask); the constant
-// exists so that fact is asserted by name in this file rather than left
-// implicit in a stdlib doc comment elsewhere.
-const sessionFileMode = 0o600
-
 // sessionStartConfig is what runSessionStart needs beyond the PDP client:
 // the delegation to request, and where to cache what comes back.
 //
-// Task 3 owns loading the pieces this shares with hook's own config (PDP
-// address, agent ID, subject, session-file path, a connect timeout) for
-// real -- see hookConfig's doc comment (hook.go) for the same rule applied
-// there. loadSessionStartConfigFromEnv below is this subcommand's own
-// honestly-scoped stand-in in the meantime: every value is required, with
-// no default, the same rule internal/config.Load and hookConfig both use --
-// a session started with a guessed identity or a guessed scope is worse
-// than one that refuses to start.
+// PDPAddr, AgentID, Subject, SessionFilePath, and ConnectTimeout are the
+// same five values hookConfig (hook.go) loads, by the same rule
+// internal/config.Load uses for the PDP itself: every one is required, with
+// no default -- a session started with a guessed identity, a guessed scope,
+// or no bound on how long to wait for the PDP is worse than one that
+// refuses to start. loadSessionStartConfigFromEnv below and
+// loadHookConfigFromEnv (hook.go) share the small helpers in config.go
+// rather than duplicating the presence-checking and parsing twice.
 type sessionStartConfig struct {
 	PDPAddr         string
 	AgentID         string
 	Subject         string
 	SessionFilePath string
+	ConnectTimeout  time.Duration
 	RequestedTier   int32
 	RequestedTools  []string
 	Purpose         string
@@ -93,46 +80,34 @@ type sessionStartConfig struct {
 // Duplicating the range check client-side would only be a second place for
 // the two to drift apart.
 func loadSessionStartConfigFromEnv() (sessionStartConfig, error) {
+	var missing []string
 	cfg := sessionStartConfig{
-		PDPAddr:         os.Getenv("STRATIUM_PEP_PDP_ADDR"),
-		AgentID:         os.Getenv("STRATIUM_PEP_AGENT_ID"),
-		Subject:         os.Getenv("STRATIUM_PEP_SUBJECT"),
-		SessionFilePath: os.Getenv("STRATIUM_PEP_SESSION_FILE"),
+		PDPAddr:         requiredEnv("STRATIUM_PEP_PDP_ADDR", &missing),
+		AgentID:         requiredEnv("STRATIUM_PEP_AGENT_ID", &missing),
+		Subject:         requiredEnv("STRATIUM_PEP_SUBJECT", &missing),
+		SessionFilePath: requiredEnv("STRATIUM_PEP_SESSION_FILE", &missing),
 		Purpose:         os.Getenv("STRATIUM_PEP_PURPOSE"), // optional: CreateDelegation does not require one
 	}
 
-	var missing []string
-	if cfg.PDPAddr == "" {
-		missing = append(missing, "STRATIUM_PEP_PDP_ADDR")
-	}
-	if cfg.AgentID == "" {
-		missing = append(missing, "STRATIUM_PEP_AGENT_ID")
-	}
-	if cfg.Subject == "" {
-		missing = append(missing, "STRATIUM_PEP_SUBJECT")
-	}
-	if cfg.SessionFilePath == "" {
-		missing = append(missing, "STRATIUM_PEP_SESSION_FILE")
-	}
-
-	tierRaw := os.Getenv("STRATIUM_PEP_REQUESTED_TIER")
-	if tierRaw == "" {
-		missing = append(missing, "STRATIUM_PEP_REQUESTED_TIER")
-	}
+	timeoutRaw := requiredEnv("STRATIUM_PEP_CONNECT_TIMEOUT", &missing)
+	tierRaw := requiredEnv("STRATIUM_PEP_REQUESTED_TIER", &missing)
 
 	cfg.RequestedTools = splitAndTrim(os.Getenv("STRATIUM_PEP_REQUESTED_TOOLS"))
 	if len(cfg.RequestedTools) == 0 {
 		missing = append(missing, "STRATIUM_PEP_REQUESTED_TOOLS")
 	}
 
-	ttlRaw := os.Getenv("STRATIUM_PEP_TTL_SECONDS")
-	if ttlRaw == "" {
-		missing = append(missing, "STRATIUM_PEP_TTL_SECONDS")
-	}
+	ttlRaw := requiredEnv("STRATIUM_PEP_TTL_SECONDS", &missing)
 
 	if len(missing) > 0 {
-		return sessionStartConfig{}, fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
+		return sessionStartConfig{}, missingConfigError(missing)
 	}
+
+	timeout, err := requiredDuration("STRATIUM_PEP_CONNECT_TIMEOUT", timeoutRaw)
+	if err != nil {
+		return sessionStartConfig{}, err
+	}
+	cfg.ConnectTimeout = timeout
 
 	tier, err := strconv.ParseInt(tierRaw, 10, 32)
 	if err != nil {
@@ -205,7 +180,7 @@ func runSessionStart(client pdpgrpc.PDPServiceClient, cfg sessionStartConfig, st
 		TtlSeconds: cfg.TTLSeconds,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), createDelegationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
 	defer cancel()
 
 	resp, err := client.CreateDelegation(ctx, req)
@@ -234,51 +209,6 @@ func runSessionStart(client pdpgrpc.PDPServiceClient, cfg sessionStartConfig, st
 	}
 
 	return 0
-}
-
-// writeSessionFile atomically replaces path with resp's JSON encoding --
-// delegation_id and granted_scope exactly as CreateDelegation returned them,
-// including granted_scope.removed, so a later denial is legible against what
-// this session actually holds rather than what it originally asked for.
-//
-// "Atomically" is the mechanism behind two requirements at once: path is
-// never observed half-written (the encoding is built up in a temp file in
-// the same directory first, and only replaces path via a single rename once
-// that write is known-good, so a write failure midway never leaves a
-// truncated or partial file at path), and path is mode sessionFileMode from
-// the instant it exists rather than chmod'ed after (os.CreateTemp already
-// creates with exactly that mode, before umask). Any failure here removes
-// the temp file and leaves path untouched; the caller (runSessionStart)
-// removes path itself on this or any other failure, per the package doc's
-// fail-closed rule.
-func writeSessionFile(path string, resp *pdpgrpc.CreateDelegationResponse) error {
-	data, err := json.MarshalIndent(resp, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode session file: %w", err)
-	}
-	data = append(data, '\n')
-
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".stratium-pep-session-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp session file: %w", err)
-	}
-	// A successful rename below moves tmp's name to path, so this Remove is
-	// a harmless no-op (ENOENT) on the success path -- it only ever does real
-	// work on an error return, where it discards the half-written temp file
-	// rather than leaving it behind as debris in the session directory.
-	defer func() { _ = os.Remove(tmp.Name()) }()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp session file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp session file: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return fmt.Errorf("rename temp session file into place: %w", err)
-	}
-	return nil
 }
 
 // removeStaleSessionFile removes any session file left at path, reporting

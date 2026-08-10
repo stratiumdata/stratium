@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -28,6 +29,7 @@ func testSessionStartCfg(t *testing.T) sessionStartConfig {
 		AgentID:         uuid.NewString(),
 		Subject:         "alice@example.com",
 		SessionFilePath: filepath.Join(t.TempDir(), "session.json"),
+		ConnectTimeout:  5 * time.Second,
 		RequestedTier:   int32(models.ActionTierReadOnly),
 		RequestedTools:  []string{"Read"},
 		Purpose:         "test session",
@@ -387,7 +389,7 @@ func clearSessionStartEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
-		"STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_REQUESTED_TIER",
+		"STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT", "STRATIUM_PEP_REQUESTED_TIER",
 		"STRATIUM_PEP_REQUESTED_TOOLS", "STRATIUM_PEP_TTL_SECONDS", "STRATIUM_PEP_PURPOSE",
 	} {
 		t.Setenv(k, "")
@@ -401,6 +403,7 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
 		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
 		t.Setenv("STRATIUM_PEP_SESSION_FILE", "/tmp/stratium-pep-session.json")
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "2")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read, Grep,Bash")
 		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "3600")
@@ -415,6 +418,7 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 			AgentID:         "agent-1",
 			Subject:         "alice@example.com",
 			SessionFilePath: "/tmp/stratium-pep-session.json",
+			ConnectTimeout:  5 * time.Second,
 			RequestedTier:   2,
 			RequestedTools:  []string{"Read", "Grep", "Bash"}, // comma-separated, trimmed
 			Purpose:         "an agent session",
@@ -431,6 +435,7 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
 		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
 		t.Setenv("STRATIUM_PEP_SESSION_FILE", "/tmp/stratium-pep-session.json")
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "0")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read")
 		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "60")
@@ -449,6 +454,7 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 		t.Setenv("STRATIUM_PEP_PDP_ADDR", "localhost:50051")
 		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
 		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "1")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read")
 		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "60")
@@ -469,6 +475,7 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
 		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
 		t.Setenv("STRATIUM_PEP_SESSION_FILE", "/tmp/stratium-pep-session.json")
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "not-a-number")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read")
 		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "60")
@@ -488,6 +495,7 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
 		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
 		t.Setenv("STRATIUM_PEP_SESSION_FILE", "/tmp/stratium-pep-session.json")
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "1")
 		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read")
 		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "0")
@@ -498,6 +506,38 @@ func TestLoadSessionStartConfigFromEnv(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "STRATIUM_PEP_TTL_SECONDS") {
 			t.Errorf("error = %q, want it to name STRATIUM_PEP_TTL_SECONDS", err.Error())
+		}
+	})
+
+	t.Run("invalid connect timeout", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			value string
+		}{
+			{"not a duration", "not-a-duration"},
+			{"zero", "0s"},
+			{"negative", "-5s"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				clearSessionStartEnv(t)
+				t.Setenv("STRATIUM_PEP_PDP_ADDR", "localhost:50051")
+				t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
+				t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
+				t.Setenv("STRATIUM_PEP_SESSION_FILE", "/tmp/stratium-pep-session.json")
+				t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", tt.value)
+				t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "1")
+				t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read")
+				t.Setenv("STRATIUM_PEP_TTL_SECONDS", "60")
+
+				_, err := loadSessionStartConfigFromEnv()
+				if err == nil {
+					t.Fatal("loadSessionStartConfigFromEnv() error = nil, want an error naming STRATIUM_PEP_CONNECT_TIMEOUT")
+				}
+				if !strings.Contains(err.Error(), "STRATIUM_PEP_CONNECT_TIMEOUT") {
+					t.Errorf("error = %q, want it to name STRATIUM_PEP_CONNECT_TIMEOUT", err.Error())
+				}
+			})
 		}
 	})
 }

@@ -22,6 +22,12 @@
 // create a chance to be wrong, and a wrong-but-plausible-looking tier is
 // more dangerous than no tier at all. TestRunHook_RequestCarriesRawInputAndNoDeclaredTier
 // asserts this on the wire.
+//
+// delegation_id is never read from configuration either: it comes from
+// SessionFilePath (loadSessionFile, session_file.go), read fresh on every
+// invocation, because this process is exec'd new for every tool call and
+// caching it in an env var would mean a revoked or never-started session
+// looks identical to a healthy one until something re-reads the file.
 package main
 
 import (
@@ -29,20 +35,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"stratium/internal/pdpgrpc"
 )
-
-// decideTimeout bounds the Decide RPC so an unreachable or hung PDP fails
-// closed in finite time instead of wedging the tool call forever. Task 3
-// makes this configurable; this is a conservative fixed default until then.
-const decideTimeout = 5 * time.Second
 
 // hookStdin is the subset of Claude Code's PreToolUse payload this hook
 // reads. ToolInput is captured as raw JSON — the exact bytes Claude Code
@@ -81,49 +82,47 @@ var toolVerbs = map[string]string{
 }
 
 // hookConfig is what runHook needs beyond stdin: the identity presented to
-// the PDP and where to reach it.
+// the PDP, where to reach it, where the session file session-start
+// (session_start.go) wrote lives, and how long to wait for a reply before
+// giving up.
 //
-// Task 3 owns loading this for real — a session file for DelegationID, a
-// configurable connect timeout, and a full fail-closed test matrix around
-// all of it. loadHookConfigFromEnv below is a minimal, honestly-scoped
-// stand-in so this subcommand is a runnable, real binary in the meantime:
-// every value is required, with no default, the same rule
-// internal/config.Load uses for the PDP itself — a hook that starts with a
-// guessed identity is worse than one that refuses to start.
+// Every value here is required, with no default — the same rule
+// internal/config.Load uses for the PDP itself, for the same reason: a hook
+// that starts against a guessed PDP address, or that waits forever (or not
+// at all) for a reply, fails at the first tool call in a way that looks
+// like a policy denial rather than a misconfiguration. DelegationID is
+// deliberately not a field here — see the package doc.
 type hookConfig struct {
-	PDPAddr      string
-	AgentID      string
-	Subject      string
-	DelegationID string
+	PDPAddr         string
+	AgentID         string
+	Subject         string
+	SessionFilePath string
+	ConnectTimeout  time.Duration
 }
 
 // loadHookConfigFromEnv reads hookConfig from the environment, or returns an
 // error naming every missing variable at once rather than stopping at the
-// first.
+// first. Shares requiredEnv/requiredDuration/missingConfigError (config.go)
+// with loadSessionStartConfigFromEnv (session_start.go), which loads the
+// same five values the same way.
 func loadHookConfigFromEnv() (hookConfig, error) {
+	var missing []string
 	cfg := hookConfig{
-		PDPAddr:      os.Getenv("STRATIUM_PEP_PDP_ADDR"),
-		AgentID:      os.Getenv("STRATIUM_PEP_AGENT_ID"),
-		Subject:      os.Getenv("STRATIUM_PEP_SUBJECT"),
-		DelegationID: os.Getenv("STRATIUM_PEP_DELEGATION_ID"),
+		PDPAddr:         requiredEnv("STRATIUM_PEP_PDP_ADDR", &missing),
+		AgentID:         requiredEnv("STRATIUM_PEP_AGENT_ID", &missing),
+		Subject:         requiredEnv("STRATIUM_PEP_SUBJECT", &missing),
+		SessionFilePath: requiredEnv("STRATIUM_PEP_SESSION_FILE", &missing),
+	}
+	timeoutRaw := requiredEnv("STRATIUM_PEP_CONNECT_TIMEOUT", &missing)
+	if len(missing) > 0 {
+		return hookConfig{}, missingConfigError(missing)
 	}
 
-	var missing []string
-	if cfg.PDPAddr == "" {
-		missing = append(missing, "STRATIUM_PEP_PDP_ADDR")
+	timeout, err := requiredDuration("STRATIUM_PEP_CONNECT_TIMEOUT", timeoutRaw)
+	if err != nil {
+		return hookConfig{}, err
 	}
-	if cfg.AgentID == "" {
-		missing = append(missing, "STRATIUM_PEP_AGENT_ID")
-	}
-	if cfg.Subject == "" {
-		missing = append(missing, "STRATIUM_PEP_SUBJECT")
-	}
-	if cfg.DelegationID == "" {
-		missing = append(missing, "STRATIUM_PEP_DELEGATION_ID")
-	}
-	if len(missing) > 0 {
-		return hookConfig{}, fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
-	}
+	cfg.ConnectTimeout = timeout
 	return cfg, nil
 }
 
@@ -172,8 +171,18 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		return writeDeny(stdout, "stratium-pep: malformed stdin: tool_name is required")
 	}
 
+	// Read fresh every call, deliberately — see the package doc. Any of
+	// "session-start never ran", "someone hand-edited the file", or "an old
+	// build wrote a different shape" denies here, before any network call:
+	// see loadSessionFile's own doc comment (session_file.go) for why each
+	// gets its own distinct reason.
+	session, err := loadSessionFile(cfg.SessionFilePath)
+	if err != nil {
+		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", err))
+	}
+
 	req := &pdpgrpc.DecideRequest{
-		DelegationId: cfg.DelegationID,
+		DelegationId: session.GetDelegationId(),
 		AgentId:      cfg.AgentID,
 		Subject:      cfg.Subject,
 		Tool:         in.ToolName,
@@ -182,12 +191,12 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		// DeclaredTier: deliberately never set. See the package doc.
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), decideTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
 	defer cancel()
 
 	resp, err := client.Decide(ctx, req)
 	if err != nil {
-		return writeDeny(stdout, fmt.Sprintf("stratium-pep: could not reach PDP: %s", err))
+		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", describeDecideError(err)))
 	}
 
 	switch resp.GetEffect() {
@@ -205,6 +214,30 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		// proto documents EFFECT_DENY as the zero value for exactly this
 		// case — an unset or unrecognized field must read back as deny).
 		return writeDeny(stdout, resp.GetReason())
+	}
+}
+
+// describeDecideError turns a failed Decide call into a reason that
+// distinguishes "we could not ask" from "we asked and were told something
+// specific" — the difference between a useful denial and a mysterious one.
+// Before this, every one of these cases produced the same flat "could not
+// reach PDP" text, which was simply wrong for three of the four: a
+// NotFound (a session file naming a delegation, or an agent, the PDP has
+// never heard of) or a DeadlineExceeded or any other application-level
+// error all mean the PDP *was* reached and *did* answer — conflating them
+// with an unreachable PDP would send a developer chasing a network problem
+// that does not exist. Every branch here still denies identically; only the
+// text differs.
+func describeDecideError(err error) string {
+	switch status.Code(err) {
+	case codes.Unavailable:
+		return fmt.Sprintf("could not reach PDP: %s", err)
+	case codes.DeadlineExceeded:
+		return fmt.Sprintf("PDP did not respond in time: %s", err)
+	case codes.NotFound:
+		return fmt.Sprintf("PDP says the delegation or agent this request names is unknown to it: %s", err)
+	default:
+		return fmt.Sprintf("PDP returned an error: %s", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -29,6 +30,14 @@ type fakePDP struct {
 
 	resp *pdpgrpc.DecideResponse
 	err  error
+	// decideDelay, when positive, makes Decide block this long (or until ctx
+	// is done, whichever comes first) before responding -- how a test
+	// simulates a PDP that does not answer inside the client's
+	// ConnectTimeout. The client gives up and returns codes.DeadlineExceeded
+	// on its own once ctx expires regardless of what this handler does;
+	// honoring ctx.Done() here just keeps the fake server's own goroutine
+	// from outliving a test that already moved on.
+	decideDelay time.Duration
 
 	createResp *pdpgrpc.CreateDelegationResponse
 	createErr  error
@@ -40,15 +49,24 @@ type fakePDP struct {
 	createCalls   int
 }
 
-func (f *fakePDP) Decide(_ context.Context, req *pdpgrpc.DecideRequest) (*pdpgrpc.DecideResponse, error) {
+func (f *fakePDP) Decide(ctx context.Context, req *pdpgrpc.DecideRequest) (*pdpgrpc.DecideResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls++
 	f.lastReq = req
-	if f.err != nil {
-		return nil, f.err
+	delay, err, resp := f.decideDelay, f.err, f.resp
+	f.mu.Unlock()
+
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	return f.resp, nil
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (f *fakePDP) requestCount() int {
