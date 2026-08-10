@@ -2,6 +2,7 @@ package cedar
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"stratium/internal/authz"
@@ -158,6 +159,73 @@ func TestEvaluate_ClassificationCapReadableFromContextDrivesForbid(t *testing.T)
 		}
 		if len(verdicts) != 0 {
 			t.Fatalf("got %d verdicts, want 0: %+v", len(verdicts), verdicts)
+		}
+	})
+}
+
+// TestEvaluate_DerivedTierReadableFromContextDrivesForbid is the
+// prerequisite Part 2's tier walk-down depends on: a tier-ceiling policy —
+// forbid at or above a tier, permit otherwise — must actually read
+// context.derived_tier, not just have it silently present and unread.
+//
+// Without the mapping, referencing context.derived_tier is a reference to
+// an absent record attribute, which Cedar treats as an evaluation error —
+// and Evaluate treats an evaluation error the same as a non-match (see this
+// package's doc comment), so "cap" simply never appears in verdicts. The
+// first subtest below checks presence with the two-value map form
+// (effect, ok := byID["cap"]) rather than comparing byID["cap"] to
+// authz.EffectDeny directly: authz.Effect's zero value IS EffectDeny (by
+// design, for the runtime decision path — see that type's doc comment), so
+// a bare equality check cannot tell "cap fired and denied" apart from "cap
+// never fired at all" — exactly the silent-pass this test exists to rule
+// out. Caught in review by running this test against a deliberately
+// unmapped buildRequest before trusting it.
+func TestEvaluate_DerivedTierReadableFromContextDrivesForbid(t *testing.T) {
+	set := prepare(t, []policy.StoredPolicy{
+		{
+			ID:   "cap",
+			Name: "forbid-at-or-above-destructive",
+			Text: fmt.Sprintf(`forbid(principal, action, resource) when { context.derived_tier >= %d };`,
+				int(models.ActionTierDestructive)),
+		},
+		{ID: "base", Name: "allow-all", Text: "permit(principal, action, resource);"},
+	})
+
+	effectsByID := func(verdicts []authz.PolicyVerdict) map[string]authz.Effect {
+		m := make(map[string]authz.Effect, len(verdicts))
+		for _, v := range verdicts {
+			m[v.PolicyID] = v.Effect
+		}
+		return m
+	}
+
+	t.Run("probe at the capped tier is denied", func(t *testing.T) {
+		verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
+			DerivedTier: models.ActionTierDestructive,
+		})
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		effect, capFired := effectsByID(verdicts)["cap"]
+		if !capFired || effect != authz.EffectDeny {
+			t.Fatalf("got %+v, want the cap policy to fire and deny a probe at the capped tier", verdicts)
+		}
+	})
+
+	t.Run("probe below the capped tier is allowed", func(t *testing.T) {
+		verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
+			DerivedTier: models.ActionTierInternalModify,
+		})
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		byID := effectsByID(verdicts)
+		if _, capFired := byID["cap"]; capFired {
+			t.Fatalf("got %+v, want the cap policy not to match below the capped tier "+
+				"(it must actually read the tier, not always fire)", verdicts)
+		}
+		if byID["base"] != authz.EffectAllow {
+			t.Fatalf("got %+v, want the base policy to allow a probe below the capped tier", verdicts)
 		}
 	})
 }

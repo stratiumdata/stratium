@@ -44,8 +44,9 @@ func buildRequest(in policy.EvaluationInput) (cedarlib.Request, cedarlib.EntityM
 		Action:    actionUID,
 		Resource:  resourceUID,
 		Context: cedarlib.NewRecord(cedarlib.RecordMap{
-			"agent":      agentRecord(in.Agent),
-			"delegation": delegationRecord(in.Delegation),
+			"agent":        agentRecord(in.Agent),
+			"delegation":   delegationRecord(in.Delegation),
+			"derived_tier": cedarlib.Long(in.DerivedTier),
 		}),
 	}
 	return req, entities

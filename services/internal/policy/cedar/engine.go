@@ -34,12 +34,20 @@
 //     deliberately — not by drift. If a rule ever needs agents-as-groups
 //     ("any agent in AgentGroup::trusted-crawlers"), that is the point to
 //     revisit it.
+//   - DerivedTier becomes a context attribute, context.derived_tier —
+//     mapped as a Cedar Long, not a String like delegation.max_action_tier,
+//     because a tier-ceiling policy needs a real >= comparison. ActionTier's
+//     ordinal order is load-bearing (see that type's doc comment); Cedar
+//     string comparison is lexicographic and disagrees with it
+//     ("EXTERNAL_COMMS" < "INTERNAL_MODIFY" as strings — backwards from the
+//     real ranking, where EXTERNAL_COMMS outranks INTERNAL_MODIFY). Added
+//     for the delegation-creation clamp (Phase 2d Task 2): the clamp's tier
+//     walk-down probes one tier at a time and has nothing to walk against
+//     if a policy cannot tell which tier is being asked about.
 //
-// EvaluationInput.Environment and EvaluationInput.DerivedTier are not yet
-// mapped into the request: no rule in scope needs them and Task 4's mapping
-// brief covers only principal, resource, action, agent, and delegation.
-// Extend buildRequest (request.go) when a rule actually needs them, rather
-// than guessing their shape now.
+// EvaluationInput.Environment is not yet mapped into the request: no rule in
+// scope needs it. Extend buildRequest (request.go) when a rule actually
+// needs it, rather than guessing its shape now.
 //
 // # The narrowing invariant
 //
