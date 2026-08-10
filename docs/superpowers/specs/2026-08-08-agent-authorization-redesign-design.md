@@ -416,6 +416,29 @@ the enforcement path.
 Overrides are admin-role-gated, versioned, and audited on change. A tier override is never accepted
 from an agent-writable source.
 
+#### Normalized input: the PEP extracts, the PDP classifies both (2026-08-10)
+
+Added after the first real-agent run found the classifier inert at the only
+surface that matters. Claude Code sends `tool_input` as JSON, and the read-only
+pattern is anchored, so every read-only operation fell through to
+`INTERNAL_MODIFY`. Destructive detection was unaffected — those patterns are
+unanchored — so it failed safe, but the read/write distinction did not work.
+
+**The PEP sends both the raw `tool_input` and a normalized extraction. The PDP
+classifies each and takes the more severe result.**
+
+The PEP knows its agent framework's schema and the PDP deliberately does not,
+so extraction belongs at the edge. Extraction is nonetheless interpretation,
+and D1 exists to keep interpretation out of the component being policed — so
+the raw input travels alongside it. A PEP that extracts wrongly, or lies, can
+only under-report the extracted field; the raw JSON is still scanned, so a
+destructive command cannot be hidden by a bad extraction.
+
+Extracting a named field from a JSON object is a structural lookup, not a
+judgement about sensitivity — the same category as deriving `verb` from a tool
+name. Tier logic, allowlists, and severity reasoning remain forbidden in the
+PEP.
+
 #### Residual risk: shell-command classification is a heuristic, not a boundary
 
 Deriving a tier for a `Bash` action means classifying an arbitrary command string. That is
