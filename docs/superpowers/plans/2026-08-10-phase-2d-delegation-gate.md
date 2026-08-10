@@ -161,8 +161,30 @@ requested scope, an optional parent delegation id, a purpose, and a TTL.
 including what was removed and why. A caller that asked for more must be able
 to see what it actually received.
 
-Order: validate → load the agent → load the parent chain if any → probe and
-clamp → build the delegation → `ScopeNarrows` if child → persist → **audit** →
+**Two rejections the RPC must make, found in Task 2.** Everywhere else in this
+system an empty tool list means **unrestricted** — `Agent.HasTool` and
+`Delegation.HasTool` both treat it that way deliberately. That collides with a
+clamp that can produce an empty list, in two directions:
+
+- **An empty requested tool list is rejected** (`InvalidArgument`). Requesting
+  no tools means requesting unrestricted, which is precisely what this gate
+  exists to prevent, and it is structurally unprobeable — there is nothing to
+  ask policy about.
+- **A request whose tools are *all* denied is rejected** (`PermissionDenied`),
+  not granted with an empty list. "You asked for three tools and hold none of
+  them" is a refusal, not a grant of nothing. Returning an empty `Tools` would
+  produce a delegation meaning the opposite of what the clamp intended, and a
+  caller copying `Tools` alone into an `ApprovedTools`-shaped field without
+  reading `Removed` would silently grant everything.
+
+This is the same empty-means-unrestricted asymmetry that produced the
+`ScopeNarrows` omission hole in Phase 0+1, where a child shed its parent's
+classification ceiling by omitting the map rather than widening it. Fixing it
+at the RPC boundary keeps the convention intact everywhere else.
+
+Order: validate (including both rejections above) → load the agent → load the
+parent chain if any → probe and clamp → **reject if every tool was removed** →
+build the delegation → `ScopeNarrows` if child → persist → **audit** →
 respond. As with `Decide`, a failed audit write fails the call; a delegation
 that was created without a record did not happen.
 
