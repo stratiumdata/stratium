@@ -79,11 +79,15 @@ message DecideRequest {
   // classification ever runs, so an agent framework that wraps tool input in
   // JSON does not defeat the read-only pattern's anchoring. It never
   // replaces raw_input: both travel on the wire, and
-  // internal/authz.BuiltinTier classifies each and takes the more severe
-  // result. An extraction that under-reports (or a caller that omits this
-  // field) can only fail to raise the tier, never lower it below what
-  // raw_input alone would produce — raw_input's own classification runs
-  // regardless of what this field says. Plain (non-optional) proto3 string:
+  // internal/authz.BuiltinTier combines them so that a positive destructive
+  // or external match on raw_input wins outright and is never lowered;
+  // otherwise a normalized_input that classifies is used; otherwise
+  // raw_input's result, including its default. A positive pattern match is
+  // evidence, a default is not — taking simply the more severe would let
+  // raw's "unrecognised, assume it modifies" default override a correct
+  // read-only extraction, which is the defect this field exists to fix. An
+  // extraction that under-reports (or a caller that omits this field) can
+  // never lower the tier below what a positive raw_input match produces. Plain (non-optional) proto3 string:
   // unlike declared_tier above, there is no absent-vs-empty distinction to
   // preserve here, because an empty extraction changes nothing.
   string normalized_input = 9;
