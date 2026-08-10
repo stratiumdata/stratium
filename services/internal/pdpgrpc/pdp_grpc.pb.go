@@ -25,7 +25,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PDPService_Decide_FullMethodName = "/stratium.pdp.v1.PDPService/Decide"
+	PDPService_Decide_FullMethodName           = "/stratium.pdp.v1.PDPService/Decide"
+	PDPService_CreateDelegation_FullMethodName = "/stratium.pdp.v1.PDPService/CreateDelegation"
 )
 
 // PDPServiceClient is the client API for PDPService service.
@@ -33,6 +34,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type PDPServiceClient interface {
 	Decide(ctx context.Context, in *DecideRequest, opts ...grpc.CallOption) (*DecideResponse, error)
+	CreateDelegation(ctx context.Context, in *CreateDelegationRequest, opts ...grpc.CallOption) (*CreateDelegationResponse, error)
 }
 
 type pDPServiceClient struct {
@@ -53,11 +55,22 @@ func (c *pDPServiceClient) Decide(ctx context.Context, in *DecideRequest, opts .
 	return out, nil
 }
 
+func (c *pDPServiceClient) CreateDelegation(ctx context.Context, in *CreateDelegationRequest, opts ...grpc.CallOption) (*CreateDelegationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateDelegationResponse)
+	err := c.cc.Invoke(ctx, PDPService_CreateDelegation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PDPServiceServer is the server API for PDPService service.
 // All implementations must embed UnimplementedPDPServiceServer
 // for forward compatibility.
 type PDPServiceServer interface {
 	Decide(context.Context, *DecideRequest) (*DecideResponse, error)
+	CreateDelegation(context.Context, *CreateDelegationRequest) (*CreateDelegationResponse, error)
 	mustEmbedUnimplementedPDPServiceServer()
 }
 
@@ -70,6 +83,9 @@ type UnimplementedPDPServiceServer struct{}
 
 func (UnimplementedPDPServiceServer) Decide(context.Context, *DecideRequest) (*DecideResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Decide not implemented")
+}
+func (UnimplementedPDPServiceServer) CreateDelegation(context.Context, *CreateDelegationRequest) (*CreateDelegationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateDelegation not implemented")
 }
 func (UnimplementedPDPServiceServer) mustEmbedUnimplementedPDPServiceServer() {}
 func (UnimplementedPDPServiceServer) testEmbeddedByValue()                    {}
@@ -110,6 +126,24 @@ func _PDPService_Decide_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PDPService_CreateDelegation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateDelegationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDPServiceServer).CreateDelegation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PDPService_CreateDelegation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDPServiceServer).CreateDelegation(ctx, req.(*CreateDelegationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PDPService_ServiceDesc is the grpc.ServiceDesc for PDPService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -120,6 +154,10 @@ var PDPService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Decide",
 			Handler:    _PDPService_Decide_Handler,
+		},
+		{
+			MethodName: "CreateDelegation",
+			Handler:    _PDPService_CreateDelegation_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

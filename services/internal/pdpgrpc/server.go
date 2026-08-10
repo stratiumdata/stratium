@@ -36,6 +36,12 @@ type Store interface {
 	LoadAgent(ctx context.Context, id uuid.UUID) (authz.AgentInfo, error)
 	LoadChain(ctx context.Context, actingDelegationID uuid.UUID) ([]*models.Delegation, error)
 	AppendAudit(ctx context.Context, e audit.Entry) error
+
+	// CreateDelegation persists a new delegation, used by CreateDelegation
+	// (delegation.go). *store.Store's own doc comment covers ScopeNarrows
+	// enforcement and why root_delegation_id/depth are computed server-side
+	// rather than trusted from the caller's struct.
+	CreateDelegation(ctx context.Context, d *models.Delegation) error
 }
 
 // eventTypeDecision is the audit_chain event_type recorded for every Decide
@@ -62,15 +68,44 @@ var errZeroUUID = errors.New("must not be the zero UUID")
 type Server struct {
 	UnimplementedPDPServiceServer
 
-	store  Store
-	policy policy.PrincipalPolicy
-	cfg    config.Config
+	store Store
+
+	// policy decides the principal leg for Decide (one action, one
+	// evaluation). policySource/policyEngine are the raw ingredients
+	// CreateDelegation (delegation.go) prepares into a policy.CompiledPolicySet
+	// itself, once per call, rather than going through policy:
+	// PrincipalPolicy.Evaluate decides a single action and has no way to hand
+	// back a compiled set for Clamp to probe several times over.
+	policy       policy.PrincipalPolicy
+	policySource policy.PolicySource
+	policyEngine policy.PolicyEngine
+
+	cfg config.Config
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum
 // delegation depth; both are startup configuration, never per-request.
-func NewServer(store Store, policy policy.PrincipalPolicy, cfg config.Config) *Server {
-	return &Server{store: store, policy: policy, cfg: cfg}
+//
+// policySource/policyEngine back CreateDelegation's grant probes. In
+// production both are satisfied by the same values principalPolicy is
+// itself built from (see cmd/stratium-pdp/main.go) — policy.Configured does
+// not expose them back out through the PrincipalPolicy interface it
+// returns, so the caller supplies them again here rather than pdpgrpc
+// reaching into policy's unexported configured type.
+func NewServer(
+	store Store,
+	principalPolicy policy.PrincipalPolicy,
+	policySource policy.PolicySource,
+	policyEngine policy.PolicyEngine,
+	cfg config.Config,
+) *Server {
+	return &Server{
+		store:        store,
+		policy:       principalPolicy,
+		policySource: policySource,
+		policyEngine: policyEngine,
+		cfg:          cfg,
+	}
 }
 
 // Decide turns req into a decision.

@@ -34,6 +34,14 @@ type fakeStore struct {
 	appendErr error
 	appended  []audit.Entry
 
+	// createErr/created back CreateDelegation (delegation_test.go). created
+	// only grows on a nil createErr, mirroring *store.Store's own
+	// transactional all-or-nothing behavior: a failed CreateDelegation
+	// commits no row, so a test asserting "no delegation row is written" can
+	// check len(created) == 0 rather than trusting the response alone.
+	createErr error
+	created   []*models.Delegation
+
 	calls int
 }
 
@@ -59,6 +67,15 @@ func (f *fakeStore) AppendAudit(_ context.Context, e audit.Entry) error {
 		return f.appendErr
 	}
 	f.appended = append(f.appended, e)
+	return nil
+}
+
+func (f *fakeStore) CreateDelegation(_ context.Context, d *models.Delegation) error {
+	f.calls++
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.created = append(f.created, d)
 	return nil
 }
 
@@ -130,6 +147,12 @@ func wantCode(t *testing.T, err error, want codes.Code) {
 	}
 }
 
+// Every NewServer(...) call in this file passes nil, nil for
+// policySource/policyEngine: those two only back CreateDelegation's grant
+// probes (delegation_test.go), and Decide never reads them, so a nil
+// interface value is a safe, honest "unused by this test" rather than a
+// fake that would never be exercised.
+
 // A well-formed request reaches a decision: DENY, attributed to principal,
 // since policy.Unconfigured() is unconditional. This also exercises the
 // tenant plumbing end to end — if the server sourced the tenant from
@@ -137,7 +160,7 @@ func wantCode(t *testing.T, err error, want codes.Code) {
 // would deny at "delegation" instead, failing the DeniedLeg assertion below.
 func TestDecide_WellFormedRequestReachesADecision(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -171,7 +194,7 @@ func TestDecide_WellFormedRequestReachesADecision(t *testing.T) {
 // EFFECT_ALLOW back means the field was never wired.
 func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -202,7 +225,7 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 func TestDecide_ProvenanceReflectsUnconfiguredVerdict(t *testing.T) {
 	const wantReason = "principal: no policy engine configured (Phase 2)"
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -252,7 +275,7 @@ func TestDecide_ProvenanceReflectsUnconfiguredVerdict(t *testing.T) {
 // PolicyID case above.
 func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, emptyPolicy{}, testConfig())
+	srv := NewServer(fs, emptyPolicy{}, nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -286,7 +309,7 @@ func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
 func TestDecide_UnknownAgent_NotFound(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.agentErr = fmt.Errorf("%w: agent %s", store.ErrNotFound, req.GetAgentId())
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
@@ -298,7 +321,7 @@ func TestDecide_UnknownAgent_NotFound(t *testing.T) {
 func TestDecide_UnknownDelegation_NotFound(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.chainErr = fmt.Errorf("%w: delegation %s", store.ErrNotFound, req.GetDelegationId())
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
@@ -328,7 +351,7 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fs, req := wellFormedFixture()
 			mutate(req)
-			srv := NewServer(fs, policy.Unconfigured(), testConfig())
+			srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 			resp, err := srv.Decide(context.Background(), req)
 			if resp != nil {
@@ -353,7 +376,7 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 func TestDecide_AuditWriteFailure_ReturnsErrorNotDecision(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.appendErr = errors.New("disk full")
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err == nil {
@@ -387,7 +410,7 @@ func TestToProtoEffect(t *testing.T) {
 func TestDecide_ConcurrentAuditAppend_Aborted(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.appendErr = fmt.Errorf("wrapped: %w", store.ErrConcurrentAppend)
-	srv := NewServer(fs, policy.Unconfigured(), testConfig())
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {

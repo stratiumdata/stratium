@@ -118,6 +118,103 @@ message DecideResponse {
   optional string decided_policy_id = 13;
 }
 
+// RequestedScope is what a caller asks a new delegation to hold: an action-
+// tier ceiling and a tool set. Both are resource-independent — the same two
+// dimensions internal/authz.Clamp narrows (spec §3.8 G6, amended
+// 2026-08-10) — because resource scope and classification are not
+// probeable ahead of a concrete resource; see internal/policy.GrantProbe's
+// doc comment for why.
+message RequestedScope {
+  int32 max_action_tier = 1;
+
+  // tools must not be empty. Everywhere else in this system an empty tool
+  // list means UNRESTRICTED (models.Agent.HasTool, models.Delegation.HasTool,
+  // deliberately) — requesting one here would mean requesting unrestricted
+  // access, exactly what this gate exists to prevent, and it is structurally
+  // unprobeable: there is no policy question "may this principal hold every
+  // tool that exists." CreateDelegation rejects an empty list with
+  // INVALID_ARGUMENT before any policy is consulted.
+  repeated string tools = 2;
+}
+
+// ScopeRemoval names one thing CreateDelegation took away from a
+// RequestedScope, and why. Fields mirror internal/authz.ClampRemoval one for
+// one — Dimension/Value/Reason/Detail are plain strings there for the same
+// reason they are here: this is written straight into the response, and a
+// closed enum buys nothing a string doesn't already give a caller or an
+// auditor.
+message ScopeRemoval {
+  string dimension = 1; // "tier" or "tool"
+  string value = 2;     // the requested tier's name, or the tool name
+
+  string reason = 3; // "denied" or "probe error"
+
+  // detail carries the probe error's text when reason is "probe error".
+  // Empty when reason is "denied" — there is no engine error to report,
+  // only a verdict.
+  string detail = 4;
+}
+
+// GrantedScope is what survived internal/authz.Clamp: the narrowed ceiling
+// and tool set, plus what was removed and why.
+message GrantedScope {
+  int32 max_action_tier = 1;
+
+  // tools is the intersection of what was requested and what the principal's
+  // own policy grants. It is never empty on a response that reaches the
+  // caller: a request whose tools were every one clamped away is rejected
+  // with PERMISSION_DENIED instead of being returned here as an empty list.
+  // An empty list here would be indistinguishable from "this delegation
+  // holds every tool" under the same empty-means-unrestricted convention
+  // RequestedScope.tools documents above — the exact inversion this gate
+  // exists to prevent.
+  repeated string tools = 2;
+
+  repeated ScopeRemoval removed = 3;
+}
+
+// CreateDelegationRequest asks the PDP to mint a new delegation — a root
+// grant from a principal, or (with parent_delegation_id set) a child
+// narrowing an existing one.
+//
+// No tenant field, for the same reason DecideRequest has none: the tenant is
+// startup configuration (internal/config.Config.TenantID), never taken from
+// a request field. See DecideRequest's doc comment above for the
+// predecessor defect this avoids.
+message CreateDelegationRequest {
+  // subject identifies the principal the new delegation acts on behalf of.
+  string subject = 1;
+
+  // agent_id is the agent the new delegation is issued to. A UUID string.
+  string agent_id = 2;
+
+  RequestedScope requested_scope = 3;
+
+  // parent_delegation_id, when set, makes this a child delegation: it must
+  // narrow the parent (models.ScopeNarrows, enforced inside
+  // store.CreateDelegation) or the call fails with PERMISSION_DENIED. Empty
+  // means a root delegation, granted directly from the principal — a UUID
+  // string is never legitimately empty, so no separate presence field is
+  // needed the way declared_tier above needs one.
+  string parent_delegation_id = 4;
+
+  string purpose = 5;
+
+  // ttl_seconds is how long the new delegation is valid for, measured from
+  // the instant the server creates it. Must be positive.
+  int64 ttl_seconds = 6;
+}
+
+// CreateDelegationResponse is the new delegation's id and what it was
+// actually granted — which may be narrower than what was requested. A
+// caller that asked for three tools and received one must be able to see
+// which one and why (granted_scope.removed), not just that the set shrank.
+message CreateDelegationResponse {
+  string delegation_id = 1;
+  GrantedScope granted_scope = 2;
+}
+
 service PDPService {
   rpc Decide(DecideRequest) returns (DecideResponse);
+  rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
 }

@@ -103,9 +103,13 @@ func run(logger *slog.Logger) error {
 	// policies stored still denies at the principal leg, just as Unconfigured
 	// always did; Unconfigured itself remains for a deployment that wants no
 	// policy engine at all. repo satisfies both Store (pdpgrpc's own
-	// dependency interface) and policy.PolicySource structurally — one
-	// instance, two roles, no adapter needed.
-	srv := pdpgrpc.NewServer(repo, policy.Configured(repo, cedar.New()), cfg)
+	// dependency interface) and policy.PolicySource structurally — repo and
+	// engine are each passed twice below: once wrapped in policy.Configured
+	// for Decide's PrincipalPolicy, once raw for CreateDelegation's own
+	// per-call policy-set preparation (see pdpgrpc.NewServer's doc comment
+	// for why it needs both) — no adapter needed either way.
+	engine := cedar.New()
+	srv := pdpgrpc.NewServer(repo, policy.Configured(repo, engine), repo, engine, cfg)
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
