@@ -226,6 +226,34 @@ but it means a clamp that succeeds does not imply any particular action will.
 **Fail-closed rule.** A probe that errors or is inconclusive drops the
 dimension. An unanswerable question is not a grant.
 
+**Amended 2026-08-10 — the clamp covers resource-independent dimensions only.**
+Implementing G6 surfaced that probing existing action policies with no resource
+under-grants severely: `permit(principal == alice, action == read, resource in
+Folder::"hr")` does not match a probe carrying no resource, so `read` would be
+clamped away even though alice plainly holds it. Most real authority is
+resource-conditional, so a naive probe clamps nearly everything.
+
+The gate therefore probes only what is answerable without a resource — the
+**action-tier ceiling** and the **tool set** — and leaves resource scope and
+classification to the runtime principal leg, which has the concrete resource
+and evaluates on every action regardless.
+
+**What the clamp is for, stated precisely.** It is defence in depth, not the
+only barrier. An over-broad artifact does not by itself let an agent act beyond
+its principal: the principal leg still evaluates at runtime and denies. What
+the clamp buys is an artifact that is honest about what it permits (so offline
+verification and audit mean something), a cheaper and earlier denial, and a
+backstop if the principal leg is ever misconfigured. D3's concrete case — any
+authenticated user minting `max_action_tier: DESTRUCTIVE` with every tool — is
+closed by exactly this.
+
+A dedicated grant-action namespace (`action == Action::"grant_tool"`) was
+considered and deferred. It removes the under-granting problem entirely and
+recognises that "what alice may delegate" is genuinely a different question
+from "what alice may do" — but it requires every tenant to author grant
+policies before anything can be delegated at all. Revisit if a real authority
+model needs it.
+
 ### G7 — The engines' verdicts are combined inside `Decide`
 
 `Request.PrincipalDecision LegResult` is replaced by
