@@ -1,0 +1,15 @@
+-- Grants the serving identity INSERT on delegations.
+--
+-- 000005_serving_app_grants.up.sql granted SELECT only on agents and
+-- delegations: at the time the only runtime access to delegations was
+-- internal/store.LoadChain/LoadAgent, both read-only. Phase 2d gives
+-- delegations its first writer, internal/store.CreateDelegation (the
+-- delegation-creation gate, spec defect D3) — SELECT alone cannot satisfy
+-- its INSERT.
+--
+-- Same gap, same cause, as 000007_policies_serving_grant.up.sql: the missing
+-- grant is invisible to CreateDelegation's own unit tests (sqlmock has no
+-- real grants to violate) and surfaces only against a real Postgres — this
+-- migration exists because Phase 2d Task 5's integration run is that first
+-- real Postgres.
+GRANT INSERT ON delegations TO stratium_app;

@@ -58,6 +58,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -455,6 +456,46 @@ func auditRowProvenance(t *testing.T, tenant string) (source, policyID sql.NullS
 	return source, policyID
 }
 
+const loadDelegationForAssertionQuery = `SELECT max_action_tier, approved_tools, depth, root_delegation_id ` +
+	`FROM delegations WHERE id = $1`
+
+// fetchDelegationRow reads back exactly the four columns Task 5's brief
+// singles out for the persisted-matches-response comparison: max_action_tier,
+// approved_tools, depth, root_delegation_id. Scoped by RLS via app.tenant_id
+// (withTenantTx), not a WHERE tenant_id clause, matching every other read in
+// this file — proof11 below is what turns a successful read here into
+// evidence RLS's WITH CHECK accepted CreateDelegation's own write as
+// correctly tenant-scoped, the same reasoning seedDelegation's doc comment
+// gives for not re-reading its own inserts.
+func fetchDelegationRow(t *testing.T, tenant string, id uuid.UUID) (maxActionTier int64, approvedTools []string, depth int64, rootDelegationID uuid.UUID) {
+	t.Helper()
+	withTenantTx(t, tenant, func(tx *sql.Tx) {
+		var toolsRaw []byte
+		if err := tx.QueryRowContext(t.Context(), loadDelegationForAssertionQuery, id.String()).
+			Scan(&maxActionTier, &toolsRaw, &depth, &rootDelegationID); err != nil {
+			t.Fatalf("query delegation %s: %v", id, err)
+		}
+		if err := json.Unmarshal(toolsRaw, &approvedTools); err != nil {
+			t.Fatalf("decode delegation %s approved_tools: %v", id, err)
+		}
+	})
+	return
+}
+
+// findRemoval returns the ScopeRemoval in removed matching dimension/value,
+// or nil. Reproduced here rather than imported: internal/pdpgrpc's own
+// findRemoval (delegation_test.go) is unexported and operates on the same
+// package's unqualified *ScopeRemoval — this file is an external test
+// package (store_test) and sees the qualified *pdpgrpc.ScopeRemoval instead.
+func findRemoval(removed []*pdpgrpc.ScopeRemoval, dimension, value string) *pdpgrpc.ScopeRemoval {
+	for _, r := range removed {
+		if r.GetDimension() == dimension && r.GetValue() == value {
+			return r
+		}
+	}
+	return nil
+}
+
 func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
 	t.Helper()
 	if err == nil {
@@ -568,6 +609,30 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 // "zero cedar policies" assertion and every measurement after it depend on,
 // so nothing about her decisions may change once these subtests seed
 // policies for the tenant.
+//
+// Phase 2d Task 5 (docs/superpowers/sdd/2026-08-10-phase-2d-delegation-gate)
+// closes spec defect D3 and adds proof10-proof14, exercising
+// PDPService.CreateDelegation — the delegation-creation policy gate — end to
+// end for the first time: a clamped grant with removals (proof10), the
+// persisted row matching the response field by field (proof11), a Decide
+// call against the freshly-created delegation confirming the clamp and the
+// runtime ceiling agree (proof12), the audit chain carrying both a creation
+// and a decision entry through one verified hash chain (proof13), and
+// cross-tenant creation rejected by RLS (proof14). Placed after
+// appendaudit_lock_is_per_tenant_not_global and before
+// chain_verifies_across_the_migration_boundary: every "ordinary" proof has
+// by then already run against the real schema (same reasoning Phase 2b Task
+// 4 used for its own placement), and CreateDelegation's own audit step needs
+// INSERT on audit_chain, which proof6 permanently revokes — so these must
+// run before proof6, not just conventionally but structurally.
+//
+// CreateDelegation's own INSERT into delegations surfaced a grant gap
+// identical in kind to the one 000007_policies_serving_grant.up.sql fixed
+// for policies (see that migration's own doc comment): 000005_serving_app_
+// grants granted the serving role SELECT only, never INSERT, because
+// delegations had no writer until now. migrations/000008_delegations_
+// serving_grant.up.sql is the fix — found by this task's own run against a
+// real Postgres, exactly as 000007's gap was.
 func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one", models.TrustTierUnverified)
@@ -594,6 +659,14 @@ func TestEndToEnd(t *testing.T) {
 	// not stored-vs-seeded-twice.
 	var proof7Resp *pdpgrpc.DecideResponse
 	var proof7PolicyID string
+
+	// Set by proof10_create_delegation_clamps_request_to_principal_authority,
+	// read by proof11-13 — same reasoning as proof2Resp above.
+	// delegationGateAgentID is the agent the delegation was issued to (needed
+	// again by proof12's Decide call, which is a separate RPC); delegationGateResp
+	// is what CreateDelegation actually returned.
+	var delegationGateAgentID uuid.UUID
+	var delegationGateResp *pdpgrpc.CreateDelegationResponse
 
 	t.Run("proof1_migrations_applied_from_pdp_own_startup", func(t *testing.T) {
 		// This test never calls migrations.Up() itself — by the time
@@ -1288,6 +1361,322 @@ func TestEndToEnd(t *testing.T) {
 				t.Fatalf("audit.Verify() for tenant %q error = %v, want nil", tenant, err)
 			}
 		}
+	})
+
+	// proof10_create_delegation_clamps_request_to_principal_authority is
+	// Phase 2d Task 5's first proof: a principal (frank) whose cedar policies
+	// permit only INTERNAL_MODIFY and the "Read" tool requests DESTRUCTIVE
+	// with three tools, two of which ("Bash", "Write") he does not hold. The
+	// response must grant INTERNAL_MODIFY with exactly ["Read"] and list all
+	// three removals.
+	//
+	// Two cedar policies, deliberately split so each probe dimension is
+	// answered by exactly the policy meant for it:
+	//
+	//   - The tier-ceiling policy conditions on "context.derived_tier > 0" as
+	//     well as the ceiling itself. authz.Clamp's tier walk (clampTier)
+	//     never probes the zero-value tier REASONING, and its tool walk
+	//     (clampTools) always probes at exactly that zero-value tier — so
+	//     "> 0" is true for every tier-ceiling probe and false for every tool
+	//     probe. Without it, an unconditional "action, resource" tier policy
+	//     would also permit every tool (all tool probes carry
+	//     derived_tier=0, which is <= INTERNAL_MODIFY), silently defeating
+	//     this proof's own tool-denial half.
+	//   - The tool policy names Action::"Read" specifically and carries no
+	//     tier condition, so it answers the tool probe (which never varies
+	//     its tier) independent of whichever tier the walk is currently on.
+	//
+	// frank is a name not reused by any earlier subtest in this file
+	// (alice/bob/carol/dave/erin/mallory), so his policies cannot match, and
+	// cannot be matched by, any of theirs.
+	t.Run("proof10_create_delegation_clamps_request_to_principal_authority", func(t *testing.T) {
+		delegationGateAgentID = uuid.New()
+		// PLATFORM_TRUSTED, not UNVERIFIED: CreateDelegation itself never
+		// evaluates agent trust (LoadAgent only confirms the agent exists —
+		// see delegation.go's own doc comment), so this choice is inert here.
+		// It matters to proof12 below, a separate Decide call reusing this
+		// same agent, which needs the agent leg to legitimately allow a
+		// DESTRUCTIVE-deriving action for that proof to attribute its denial
+		// to the delegation leg unambiguously.
+		seedAgent(t, configuredTenant, delegationGateAgentID, "integration-agent-frank", models.TrustTierPlatformTrusted)
+
+		seedPolicy(t, configuredTenant, "frank-tier-ceiling-internal-modify",
+			fmt.Sprintf(`permit(principal == User::"frank@example.com", action, resource) when `+
+				`{ context.derived_tier > 0 && context.derived_tier <= %d };`, int(models.ActionTierInternalModify)),
+			"allow")
+		seedPolicy(t, configuredTenant, "frank-can-read",
+			`permit(principal == User::"frank@example.com", action == Action::"Read", resource);`, "allow")
+
+		resp, err := pdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
+			Subject: "frank@example.com",
+			AgentId: delegationGateAgentID.String(),
+			RequestedScope: &pdpgrpc.RequestedScope{
+				MaxActionTier: int32(models.ActionTierDestructive),
+				Tools:         []string{"Read", "Bash", "Write"},
+			},
+			Purpose:    "integration test: delegation-creation gate (D3/C6)",
+			TtlSeconds: 3600,
+		})
+		if err != nil {
+			t.Fatalf("CreateDelegation() error = %v, want a response", err)
+		}
+		t.Logf("CreateDelegation() -> delegation_id=%s granted max_action_tier=%d tools=%v removed=%d",
+			resp.GetDelegationId(), resp.GetGrantedScope().GetMaxActionTier(),
+			resp.GetGrantedScope().GetTools(), len(resp.GetGrantedScope().GetRemoved()))
+		for _, r := range resp.GetGrantedScope().GetRemoved() {
+			t.Logf("  removed: dimension=%s value=%s reason=%s", r.GetDimension(), r.GetValue(), r.GetReason())
+		}
+
+		if resp.GetGrantedScope().GetMaxActionTier() != int32(models.ActionTierInternalModify) {
+			t.Errorf("granted max_action_tier = %d, want %d (INTERNAL_MODIFY: frank's own ceiling)",
+				resp.GetGrantedScope().GetMaxActionTier(), models.ActionTierInternalModify)
+		}
+		if !slices.Equal(resp.GetGrantedScope().GetTools(), []string{"Read"}) {
+			t.Errorf("granted tools = %v, want [Read] (Bash and Write are not frank's)", resp.GetGrantedScope().GetTools())
+		}
+		if len(resp.GetGrantedScope().GetRemoved()) != 3 {
+			t.Fatalf("removed = %d entries, want exactly 3 (tier DESTRUCTIVE, tool Bash, tool Write)",
+				len(resp.GetGrantedScope().GetRemoved()))
+		}
+		if r := findRemoval(resp.GetGrantedScope().GetRemoved(), "tier", models.ActionTierDestructive.String()); r == nil || r.GetReason() != "denied" {
+			t.Errorf("tier removal = %+v, want {tier, DESTRUCTIVE, denied}", r)
+		}
+		for _, tool := range []string{"Bash", "Write"} {
+			if r := findRemoval(resp.GetGrantedScope().GetRemoved(), "tool", tool); r == nil || r.GetReason() != "denied" {
+				t.Errorf("removal for tool %s = %+v, want {tool, %s, denied}", tool, r, tool)
+			}
+		}
+		if r := findRemoval(resp.GetGrantedScope().GetRemoved(), "tool", "Read"); r != nil {
+			t.Errorf("Read was removed (%+v), want it granted", r)
+		}
+
+		delegationGateResp = resp
+	})
+
+	// proof11_persisted_delegation_matches_response is Task 5's second proof:
+	// the persisted row, read back with its own query, must match the
+	// response field by field — not merely exist. max_action_tier and
+	// approved_tools are compared directly against granted_scope; depth and
+	// root_delegation_id have no dedicated wire field (CreateDelegationResponse
+	// carries only delegation_id and granted_scope — see the proto's own doc
+	// comment on why: neither is a caller input), so "what the response
+	// reported" for those two is the structural consequence of the response's
+	// own delegation_id naming a ROOT grant (this request never set
+	// parent_delegation_id): depth 0 and a root_delegation_id that
+	// self-references that same id (store.CreateDelegation's own doc comment
+	// — a root's root_delegation_id/depth are computed server-side, never
+	// trusted from the caller). Asserting the actual persisted VALUES here,
+	// not just that the columns are non-NULL, is what the brief's own warning
+	// about provenance fields being "structurally present but never
+	// populated" requires.
+	t.Run("proof11_persisted_delegation_matches_response", func(t *testing.T) {
+		if delegationGateResp == nil {
+			t.Fatal("delegationGateResp is nil: proof10_create_delegation_clamps_request_to_principal_authority must run before this subtest")
+		}
+		id, err := uuid.Parse(delegationGateResp.GetDelegationId())
+		if err != nil {
+			t.Fatalf("parse delegation_id %q from response: %v", delegationGateResp.GetDelegationId(), err)
+		}
+
+		gotTier, gotTools, gotDepth, gotRoot := fetchDelegationRow(t, configuredTenant, id)
+		t.Logf("persisted row: max_action_tier=%d approved_tools=%v depth=%d root_delegation_id=%s",
+			gotTier, gotTools, gotDepth, gotRoot)
+
+		if wantTier := int64(delegationGateResp.GetGrantedScope().GetMaxActionTier()); gotTier != wantTier {
+			t.Errorf("persisted max_action_tier = %d, want %d (the response's granted_scope.max_action_tier)", gotTier, wantTier)
+		}
+		if wantTools := delegationGateResp.GetGrantedScope().GetTools(); !slices.Equal(gotTools, wantTools) {
+			t.Errorf("persisted approved_tools = %v, want %v (the response's granted_scope.tools)", gotTools, wantTools)
+		}
+		if gotDepth != 0 {
+			t.Errorf("persisted depth = %d, want 0 (a root delegation: this request set no parent_delegation_id)", gotDepth)
+		}
+		if gotRoot.String() != delegationGateResp.GetDelegationId() {
+			t.Errorf("persisted root_delegation_id = %s, want %s (self-referencing: a root's own id)",
+				gotRoot, delegationGateResp.GetDelegationId())
+		}
+	})
+
+	// proof12_decide_with_clamped_delegation_denies_above_granted_tier is
+	// Task 5's third proof: a Decide call presenting the delegation proof10
+	// just created must deny an action above the granted (clamped) ceiling,
+	// attributed to the delegation leg — and, so this is a genuine boundary
+	// rather than a blanket denial, must ALLOW an action exactly AT that
+	// ceiling first. Principal and agent are both confirmed to have
+	// genuinely allowed on the denying call (same reasoning
+	// proof9_cedar_permit_cannot_exceed_delegation_ceiling documents): only
+	// then does the delegation leg's denial prove the ceiling itself is what
+	// stopped this, not some other leg denying first.
+	t.Run("proof12_decide_with_clamped_delegation_denies_above_granted_tier", func(t *testing.T) {
+		if delegationGateResp == nil {
+			t.Fatal("delegationGateResp is nil: proof10_create_delegation_clamps_request_to_principal_authority must run before this subtest")
+		}
+
+		atCeiling, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: delegationGateResp.GetDelegationId(),
+			AgentId:      delegationGateAgentID.String(),
+			Subject:      "frank@example.com",
+			Tool:         "Read",
+			Verb:         "update", // -> ActionTierInternalModify: exactly the granted ceiling.
+		})
+		if err != nil {
+			t.Fatalf("Decide() at the granted ceiling: error = %v, want a decision", err)
+		}
+		t.Logf("Decide() AT the granted ceiling (INTERNAL_MODIFY) -> effect=%s", atCeiling.GetEffect())
+		if atCeiling.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Decide() at the granted ceiling: effect = %v, want EFFECT_ALLOW "+
+				"(otherwise a denial above it would not prove where the boundary actually sits)", atCeiling.GetEffect())
+		}
+
+		aboveCeiling, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: delegationGateResp.GetDelegationId(),
+			AgentId:      delegationGateAgentID.String(),
+			Subject:      "frank@example.com",
+			Tool:         "Read",
+			Verb:         "delete", // -> ActionTierDestructive: above the granted ceiling.
+		})
+		if err != nil {
+			t.Fatalf("Decide() above the granted ceiling: error = %v, want a decision", err)
+		}
+		t.Logf("Decide() ABOVE the granted ceiling -> effect=%s denied_leg=%q derived_tier=%d "+
+			"principal_effect=%s agent_effect=%s delegation_effect=%s delegation_reason=%q",
+			aboveCeiling.GetEffect(), aboveCeiling.GetDeniedLeg(), aboveCeiling.GetDerivedTier(),
+			aboveCeiling.GetPrincipalEffect(), aboveCeiling.GetAgentEffect(), aboveCeiling.GetDelegationEffect(),
+			aboveCeiling.GetDelegationReason())
+
+		if aboveCeiling.GetDerivedTier() != int32(models.ActionTierDestructive) {
+			t.Fatalf("DerivedTier = %d, want %d (DESTRUCTIVE) — this proof needs the derived tier to actually exceed the granted ceiling",
+				aboveCeiling.GetDerivedTier(), models.ActionTierDestructive)
+		}
+		if aboveCeiling.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (an action above the clamped ceiling must be denied)", aboveCeiling.GetEffect())
+		}
+		if aboveCeiling.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q — the clamp (proof10) and the runtime ceiling must agree on WHERE this is enforced",
+				aboveCeiling.GetDeniedLeg(), "delegation")
+		}
+		if aboveCeiling.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Errorf("DelegationEffect = %v, want EFFECT_DENY", aboveCeiling.GetDelegationEffect())
+		}
+		if aboveCeiling.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect = %v, want EFFECT_ALLOW (frank's unconditional Read permit must have matched)",
+				aboveCeiling.GetPrincipalEffect())
+		}
+		if aboveCeiling.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("AgentEffect = %v, want EFFECT_ALLOW (PLATFORM_TRUSTED is sufficient for DESTRUCTIVE)",
+				aboveCeiling.GetAgentEffect())
+		}
+	})
+
+	// proof13_audit_chain_records_creation_and_verifies_with_decisions is
+	// Task 5's fourth proof: the tenant's real audit chain — already carrying
+	// many "decision" entries from every earlier subtest in this file, plus
+	// proof12's two Decide calls — must also carry proof10's "delegation_
+	// created" entry, and audit.Verify must pass over the whole mixed chain,
+	// not a two-entry slice assembled just for this check. Verifying the
+	// real, full chain is strictly stronger: a hashing defect specific to the
+	// creation entry's shape would break the WHOLE chain's linkage from that
+	// entry forward, not just an isolated pair.
+	//
+	// The creation entry's fields are compared against proof10/11's own known
+	// values, not merely asserted non-nil/non-zero — the same discipline
+	// audit_row_provenance_matches_response established for Decide's audit
+	// entries, applied here to CreateDelegation's for the first time.
+	t.Run("proof13_audit_chain_records_creation_and_verifies_with_decisions", func(t *testing.T) {
+		if delegationGateResp == nil {
+			t.Fatal("delegationGateResp is nil: proof10_create_delegation_clamps_request_to_principal_authority must run before this subtest")
+		}
+		delegationID, err := uuid.Parse(delegationGateResp.GetDelegationId())
+		if err != nil {
+			t.Fatalf("parse delegation_id: %v", err)
+		}
+
+		entries := fetchAuditChain(t, configuredTenant)
+		t.Logf("audit_chain for %q has %d entries by this point in the run", configuredTenant, len(entries))
+
+		var creation *audit.Entry
+		decisionCount := 0
+		for i := range entries {
+			switch entries[i].EventType {
+			case "delegation_created":
+				if entries[i].DelegationID != nil && *entries[i].DelegationID == delegationID {
+					creation = &entries[i]
+				}
+			case "decision":
+				decisionCount++
+			}
+		}
+		if creation == nil {
+			t.Fatal("no delegation_created audit entry found for proof10's delegation")
+		}
+		if decisionCount == 0 {
+			t.Fatal("no decision audit entries found — this chain must contain at least one of each event type")
+		}
+		t.Logf("chain contains 1 delegation_created entry for %s plus %d decision entries", delegationID, decisionCount)
+
+		if creation.AgentID == nil || *creation.AgentID != delegationGateAgentID {
+			t.Errorf("creation entry AgentID = %v, want %s", creation.AgentID, delegationGateAgentID)
+		}
+		if creation.DelegationID == nil || *creation.DelegationID != delegationID {
+			t.Errorf("creation entry DelegationID = %v, want %s", creation.DelegationID, delegationID)
+		}
+		if creation.RootDelegationID == nil || *creation.RootDelegationID != delegationID {
+			t.Errorf("creation entry RootDelegationID = %v, want %s (self-referencing root)", creation.RootDelegationID, delegationID)
+		}
+		if creation.ChainDepth != 0 {
+			t.Errorf("creation entry ChainDepth = %d, want 0", creation.ChainDepth)
+		}
+		if creation.Decision != "ALLOW" {
+			t.Errorf("creation entry Decision = %q, want ALLOW", creation.Decision)
+		}
+		if creation.DeniedAtDepth != -1 {
+			t.Errorf("creation entry DeniedAtDepth = %d, want -1 (audit only runs on CreateDelegation's success path)", creation.DeniedAtDepth)
+		}
+		if creation.DeclaredTier != int16(models.ActionTierDestructive) {
+			t.Errorf("creation entry DeclaredTier = %d, want %d (DESTRUCTIVE: what proof10 REQUESTED)",
+				creation.DeclaredTier, models.ActionTierDestructive)
+		}
+		if creation.DerivedTier != int16(models.ActionTierInternalModify) {
+			t.Errorf("creation entry DerivedTier = %d, want %d (INTERNAL_MODIFY: what was actually GRANTED after the clamp)",
+				creation.DerivedTier, models.ActionTierInternalModify)
+		}
+
+		if err := audit.Verify(entries); err != nil {
+			t.Fatalf("audit.Verify() error = %v, want nil — a chain with both a creation and decision entry must still verify", err)
+		}
+		t.Logf("audit.Verify() PASSED over the tenant's full %d-entry chain, containing both delegation_created and decision event types",
+			len(entries))
+	})
+
+	// proof14_cross_tenant_create_delegation_is_not_found is Task 5's fifth
+	// proof, the CreateDelegation counterpart to proof4 above: a second
+	// tenant's principal cannot create a delegation referencing the first
+	// tenant's agent. CreateDelegation calls store.LoadAgent first, exactly
+	// as Decide does, and that query carries no tenant_id in its WHERE clause
+	// (see internal/store/store.go's loadAgentQuery and package doc) — RLS is
+	// what makes an agent belonging to secondTenantID invisible to a PDP
+	// configured for configuredTenant, surfacing identically to "does not
+	// exist" (store.ErrNotFound) either way.
+	t.Run("proof14_cross_tenant_create_delegation_is_not_found", func(t *testing.T) {
+		otherAgentID := uuid.New()
+		seedAgent(t, secondTenantID, otherAgentID, "integration-agent-tenant-two-create-delegation", models.TrustTierUnverified)
+
+		resp, err := pdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
+			Subject: "mallory@example.com",
+			AgentId: otherAgentID.String(),
+			RequestedScope: &pdpgrpc.RequestedScope{
+				MaxActionTier: int32(models.ActionTierReadOnly),
+				Tools:         []string{"Read"},
+			},
+			Purpose:    "integration test: cross-tenant create must not resolve the agent",
+			TtlSeconds: 3600,
+		})
+		if resp != nil {
+			t.Fatalf("CreateDelegation() response = %+v, want nil", resp)
+		}
+		st := wantCode(t, err, codes.NotFound)
+		t.Logf("CreateDelegation() for tenant %q's agent, against a PDP configured for %q -> NotFound: %s",
+			secondTenantID, configuredTenant, st.Message())
 	})
 
 	// chain_verifies_across_the_migration_boundary: a chain that started

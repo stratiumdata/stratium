@@ -7,6 +7,7 @@
 package authz
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -79,9 +80,63 @@ func TestC5_AgentWritableOverrideNotHonored(t *testing.T) {
 	t.Skip("Phase 2: requires the PAP override write path")
 }
 
+// TestC6_DelegationClampedToPrincipalAuthority is the property Phase 2d
+// closes (spec defect D3): a delegation cannot be issued granting authority
+// the principal does not hold. It exercises Clamp directly — the actual
+// gate CreateDelegation calls (internal/pdpgrpc/delegation.go), not a
+// re-implementation of it — the same discipline every other property in
+// this file uses (C4 calls ValidateOverride directly, C7 calls
+// models.ScopeNarrows directly). clampFixture (clamp_test.go, same package)
+// stands in for policy.Probe here for the same reason GrantProbe's own
+// probe_test.go needs the real Cedar engine and this file does not: this
+// suite is a unit-level, no-DB, no-network gate (see the package doc, and
+// C18's own skip note for why an integration-only property stays skipped
+// HERE rather than faked with a stub); the live-Cedar, live-Postgres version
+// of this exact property is proof10-14 in
+// internal/store/store_integration_test.go (build tag integration).
 func TestC6_DelegationClampedToPrincipalAuthority(t *testing.T) {
 	markRan(6)
-	t.Skip("Phase 2: requires the delegation-creation policy gate")
+
+	// A principal permitted INTERNAL_MODIFY and only the "Read" tool
+	// requests DESTRUCTIVE with two tools, one of which ("Bash") it does not
+	// hold — mirroring the D3 attack this closes: a delegation request for
+	// DESTRUCTIVE/every-tool from a principal who holds neither.
+	f := &clampFixture{
+		tiers: map[models.ActionTier]bool{models.ActionTierInternalModify: true},
+		tools: map[string]bool{"Read": true, "Bash": false},
+	}
+	req := RequestedScope{MaxActionTier: models.ActionTierDestructive, Tools: []string{"Read", "Bash"}}
+
+	got, err := Clamp(context.Background(), req, f.allows)
+	if err != nil {
+		t.Fatalf("C6: Clamp() error = %v, want nil — an over-broad request is narrowed, not rejected (Y4)", err)
+	}
+
+	// The artifact is clamped: DESTRUCTIVE was requested, but nothing above
+	// the principal's own INTERNAL_MODIFY authority may ever be granted.
+	if got.MaxActionTier != models.ActionTierInternalModify {
+		t.Fatalf("C6: MaxActionTier = %v, want %v — a delegation must never be issued above the principal's own authority",
+			got.MaxActionTier, models.ActionTierInternalModify)
+	}
+	if !equalTools(got.Tools, []string{"Read"}) {
+		t.Fatalf("C6: Tools = %v, want [Read] — the principal does not hold Bash", got.Tools)
+	}
+
+	// The clamp is recorded, not silent — an auditor and the caller must
+	// both see what was taken away and why (both dimensions here: tier and
+	// tool).
+	if len(got.Removed) != 2 {
+		t.Fatalf("C6: Removed = %+v, want exactly 2 entries (tier DESTRUCTIVE, tool Bash)", got.Removed)
+	}
+
+	// The granted scope — narrower than asked, never empty here — is what
+	// actually comes back: Y4 is clamp-and-return, not clamp-and-reject. An
+	// artifact that silently vanished instead of degrading would fail an
+	// agent framework's ordinary "ask generously, receive what's real" flow
+	// just as surely as over-granting would compromise it.
+	if len(got.Tools) == 0 {
+		t.Fatal("C6: Tools is empty — Y4 requires the narrowed grant to be returned, not withheld")
+	}
 }
 
 func TestC7_ChildCannotWidenParent(t *testing.T) {
