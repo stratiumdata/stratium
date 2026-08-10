@@ -70,6 +70,15 @@ type Action struct {
 	Verb     string // "read", "write", "delete"
 	RawInput string // the actual command or path, used for derivation
 
+	// NormalizedInput is a caller-supplied, best-effort extraction from
+	// RawInput (e.g. a PEP pulling "ls -la" out of {"command":"ls -la"}).
+	// BuiltinTier classifies both and returns the more severe result, so
+	// this field can only raise the derived tier, never lower it — an
+	// extraction that under-reports, or is left empty, degrades to today's
+	// raw-only behavior rather than opening a hole. See BuiltinTier's doc
+	// comment.
+	NormalizedInput string
+
 	// DeclaredTier is what the caller claims. It never derives the tier — it is
 	// only cross-checked against the derived value (C1, C2, C3).
 	DeclaredTier *models.ActionTier

@@ -73,6 +73,20 @@ message DecideRequest {
   // untrusted like every other field here — it narrows what a delegation
   // permits, it does not widen it.
   map<string, string> resource = 8;
+
+  // normalized_input is a best-effort extraction the caller performs from
+  // raw_input — e.g. pulling "ls -la" out of {"command":"ls -la"} before
+  // classification ever runs, so an agent framework that wraps tool input in
+  // JSON does not defeat the read-only pattern's anchoring. It never
+  // replaces raw_input: both travel on the wire, and
+  // internal/authz.BuiltinTier classifies each and takes the more severe
+  // result. An extraction that under-reports (or a caller that omits this
+  // field) can only fail to raise the tier, never lower it below what
+  // raw_input alone would produce — raw_input's own classification runs
+  // regardless of what this field says. Plain (non-optional) proto3 string:
+  // unlike declared_tier above, there is no absent-vs-empty distinction to
+  // preserve here, because an empty extraction changes nothing.
+  string normalized_input = 9;
 }
 
 // DecideResponse is the compound decision and each leg's individual

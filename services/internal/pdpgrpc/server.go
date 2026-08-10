@@ -159,10 +159,11 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	principal := authz.Principal{Subject: req.GetSubject()}
 	resource := req.GetResource()
 	action := authz.Action{
-		Tool:         req.GetTool(),
-		Verb:         req.GetVerb(),
-		RawInput:     req.GetRawInput(),
-		DeclaredTier: declaredTier,
+		Tool:            req.GetTool(),
+		Verb:            req.GetVerb(),
+		RawInput:        req.GetRawInput(),
+		NormalizedInput: req.GetNormalizedInput(),
+		DeclaredTier:    declaredTier,
 	}
 	tiers := authz.TierTable{} // tenant tier overrides load from the DB starting Phase 2; none exist yet.
 

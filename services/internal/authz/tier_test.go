@@ -165,6 +165,116 @@ func TestBuiltinTier_RawInputBeatsVerb(t *testing.T) {
 	}
 }
 
+// Claude Code sends tool_input as JSON. reReadOnly is anchored (^\s*(cat|
+// ls|...)), so a JSON blob's leading token is never one of its command
+// names, and classification falls through to the "unrecognized -> assumed
+// modifying" default no matter what the underlying command actually does.
+// Destructive detection is unaffected, because reDestructive is an
+// unanchored substring match. This pins today's (pre-normalized_input)
+// behavior as the baseline the composition tests below build on — see
+// docs/superpowers/plans/2026-08-10-phase-3b-normalized-input.md.
+func TestBuiltinTier_JSONRawInputAlone(t *testing.T) {
+	cases := map[string]models.ActionTier{
+		`{"command":"ls -la"}`:         models.ActionTierInternalModify,
+		`{"command":"cat /etc/hosts"}`: models.ActionTierInternalModify,
+		`{"file_path":"/tmp/x.txt"}`:   models.ActionTierInternalModify,
+		`{"command":"rm -rf /"}`:       models.ActionTierDestructive, // unanchored: already correct
+		"ls -la":                       models.ActionTierReadOnly,    // bare, what every other test assumed
+	}
+	for raw, want := range cases {
+		t.Run(raw, func(t *testing.T) {
+			got, ok := BuiltinTier(Action{Tool: "Bash", RawInput: raw})
+			if !ok || got != want {
+				t.Fatalf("raw %q: got %v (ok=%v), want %v", raw, got, ok, want)
+			}
+		})
+	}
+}
+
+// A correct NormalizedInput extraction composes with RawInput by "more
+// severe wins," not by replacing it — so it can only raise what RawInput's
+// own classification already produces, never lower it. For "rm -rf /" that
+// is a no-op: raw alone already lands on DESTRUCTIVE. For the read-only
+// commands, raw's classification of the opaque JSON blob floors at
+// INTERNAL_MODIFY regardless of what the correct, more specific extraction
+// says, because INTERNAL_MODIFY outranks READ_ONLY. That is the design
+// working as specified (BuiltinTier's doc comment, and the under-reporting
+// test below), not a gap this task leaves open: resolving the read cases
+// down to READ_ONLY would require RawInput's own default to change, which
+// this task deliberately does not touch.
+func TestBuiltinTier_NormalizedInputComposesWithJSONRawInput(t *testing.T) {
+	cases := []struct {
+		raw, normalized string
+		want            models.ActionTier
+	}{
+		{`{"command":"rm -rf /"}`, "rm -rf /", models.ActionTierDestructive},
+		{`{"command":"ls -la"}`, "ls -la", models.ActionTierInternalModify},
+		{`{"command":"cat /etc/hosts"}`, "cat /etc/hosts", models.ActionTierInternalModify},
+	}
+	for _, c := range cases {
+		t.Run(c.raw, func(t *testing.T) {
+			got, ok := BuiltinTier(Action{Tool: "Bash", RawInput: c.raw, NormalizedInput: c.normalized})
+			if !ok || got != c.want {
+				t.Fatalf("raw %q normalized %q: got %v (ok=%v), want %v", c.raw, c.normalized, got, ok, c.want)
+			}
+		})
+	}
+}
+
+// This is the property that makes the design safe against a buggy or
+// hostile PEP: an extraction that under-reports must not lower the tier
+// below what raw_input alone would produce. raw_input is still scanned by
+// the unanchored destructive patterns regardless of what normalized_input
+// claims. If this test does not hold, a PEP can hide "rm -rf /" behind a
+// normalized_input of "ls".
+func TestBuiltinTier_NormalizedInputCannotLowerTier(t *testing.T) {
+	got, ok := BuiltinTier(Action{
+		Tool:            "Bash",
+		RawInput:        `{"command":"rm -rf /"}`,
+		NormalizedInput: "ls",
+	})
+	if !ok || got != models.ActionTierDestructive {
+		t.Fatalf("under-reporting normalized_input lowered the tier: got %v (ok=%v), want DESTRUCTIVE", got, ok)
+	}
+}
+
+// "More severe wins" must hold in both directions: a normalized_input that
+// reveals something worse than raw_input alone would suggest must also
+// raise the tier, not just fail to lower it.
+func TestBuiltinTier_NormalizedInputMoreSevereThanRawWins(t *testing.T) {
+	got, ok := BuiltinTier(Action{
+		Tool:            "Bash",
+		RawInput:        "ls",
+		NormalizedInput: "rm -rf /",
+	})
+	if !ok || got != models.ActionTierDestructive {
+		t.Fatalf("got %v (ok=%v), want DESTRUCTIVE: a more severe normalized_input must win", got, ok)
+	}
+}
+
+// An empty normalized_input — proto3's zero value, sent by a caller that
+// never populated it, or one with nothing to add — must change nothing:
+// BuiltinTier must fall back to RawInput's classification exactly as it did
+// before this field existed.
+func TestBuiltinTier_EmptyNormalizedInputChangesNothing(t *testing.T) {
+	cases := []struct {
+		name string
+		a    Action
+		want models.ActionTier
+	}{
+		{"destructive raw unaffected", Action{Tool: "Bash", RawInput: `{"command":"rm -rf /"}`, NormalizedInput: ""}, models.ActionTierDestructive},
+		{"read-only raw unaffected", Action{Tool: "Bash", RawInput: "ls -la", NormalizedInput: ""}, models.ActionTierReadOnly},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := BuiltinTier(c.a)
+			if !ok || got != c.want {
+				t.Fatalf("got %v (ok=%v), want %v", got, ok, c.want)
+			}
+		})
+	}
+}
+
 func TestDeriveTier_OverrideBeatsCatalogAndBuiltin(t *testing.T) {
 	table := TierTable{
 		Overrides: map[string]models.ActionTier{"read": models.ActionTierDestructive},

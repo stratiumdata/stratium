@@ -123,40 +123,70 @@ var verbTiers = map[string]models.ActionTier{
 // BuiltinTier classifies an action using the shipped defaults, returning false
 // when the action is unrecognized.
 //
-// Raw input is classified first and takes precedence: the verb attached to a
-// shell call says nothing about what the command does.
+// Shell input is classified first and takes precedence over the verb: the
+// verb attached to a shell call says nothing about what the command does.
+// When both RawInput and NormalizedInput are set, each is classified
+// independently by classifyInput — identical logic, unchanged by which one
+// is being evaluated — and the more severe of the two tiers wins.
+// NormalizedInput is a caller-supplied, best-effort extraction (e.g. a PEP
+// pulling "ls -la" out of {"command":"ls -la"}); composing by "more severe
+// wins" rather than substituting it for RawInput means an extraction that
+// under-reports, or lies, can only fail to raise the tier — RawInput's own
+// classification, including the unanchored destructive and external
+// patterns classifyInput applies, runs regardless of what NormalizedInput
+// says and so cannot be suppressed by it.
 func BuiltinTier(a Action) (models.ActionTier, bool) {
+	tier := models.ActionTierReasoning
+	classified := false
 	if a.RawInput != "" {
-		// Match against the normalized form so quoting and ${IFS} cannot break
-		// the adjacency the patterns rely on. Check the raw form too:
-		// normalization only ever adds matches, never removes them.
-		norm := normalizeCommand(a.RawInput)
-		matches := func(re *regexp.Regexp) bool {
-			return re.MatchString(a.RawInput) || re.MatchString(norm)
+		tier = classifyInput(a.RawInput)
+		classified = true
+	}
+	if a.NormalizedInput != "" {
+		if t := classifyInput(a.NormalizedInput); !classified || t > tier {
+			tier = t
 		}
-		switch {
-		case matches(reDestructive):
-			return models.ActionTierDestructive, true
-		case matches(reSQLContext) && matches(reDestructiveSQL):
-			return models.ActionTierDestructive, true
-		case matches(reExternal):
-			return models.ActionTierExternalComms, true
-		case reCompound.MatchString(a.RawInput):
-			// Compound: the leading token is not the whole story, so READ_ONLY
-			// is not available. Destructive and external already had their say.
-			return models.ActionTierInternalModify, true
-		case reReadOnly.MatchString(a.RawInput):
-			return models.ActionTierReadOnly, true
-		default:
-			// An unrecognized command is assumed to modify. It is not read-only
-			// merely because no pattern matched.
-			return models.ActionTierInternalModify, true
-		}
+		classified = true
+	}
+	if classified {
+		return tier, true
 	}
 	if t, ok := verbTiers[strings.ToLower(a.Verb)]; ok {
 		return t, true
 	}
 	return models.ActionTierReasoning, false
+}
+
+// classifyInput applies the shell-pattern heuristics to a single input
+// string. BuiltinTier calls this once for RawInput and once for
+// NormalizedInput — the logic itself does not know or care which one it was
+// handed.
+func classifyInput(s string) models.ActionTier {
+	// Match against the normalized form so quoting and ${IFS} cannot break
+	// the adjacency the patterns rely on. Check the raw form too:
+	// normalization only ever adds matches, never removes them.
+	norm := normalizeCommand(s)
+	matches := func(re *regexp.Regexp) bool {
+		return re.MatchString(s) || re.MatchString(norm)
+	}
+	switch {
+	case matches(reDestructive):
+		return models.ActionTierDestructive
+	case matches(reSQLContext) && matches(reDestructiveSQL):
+		return models.ActionTierDestructive
+	case matches(reExternal):
+		return models.ActionTierExternalComms
+	case reCompound.MatchString(s):
+		// Compound: the leading token is not the whole story, so READ_ONLY
+		// is not available. Destructive and external already had their say.
+		return models.ActionTierInternalModify
+	case reReadOnly.MatchString(s):
+		return models.ActionTierReadOnly
+	default:
+		// An unrecognized string is assumed to modify. It is not read-only
+		// merely because no pattern matched.
+		return models.ActionTierInternalModify
+	}
 }
 
 // DeriveTier resolves an action's sensitivity server-side (spec §4.4):

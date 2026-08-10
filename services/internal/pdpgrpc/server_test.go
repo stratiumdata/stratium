@@ -217,6 +217,27 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	}
 }
 
+// normalized_input must reach the derivation the same way raw_input does.
+// internal/authz's TestBuiltinTier_* prove the classification itself (more
+// severe of RawInput/NormalizedInput wins); this proves the field actually
+// travels from the wire request into the Action Decide derives from, rather
+// than being parsed and dropped.
+func TestDecide_NormalizedInputReachesDerivation(t *testing.T) {
+	fs, req := wellFormedFixture()
+	req.RawInput = "ls"
+	req.NormalizedInput = "rm -rf /"
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDerivedTier() != int32(models.ActionTierDestructive) {
+		t.Errorf("DerivedTier = %d, want %d (DESTRUCTIVE): normalized_input must reach BuiltinTier",
+			resp.GetDerivedTier(), models.ActionTierDestructive)
+	}
+}
+
 // The response's provenance fields must carry policy.Unconfigured()'s
 // specific reason and source through, not FoldVerdicts's generic
 // "default deny: no policy verdict allowed" text — that is the entire point
