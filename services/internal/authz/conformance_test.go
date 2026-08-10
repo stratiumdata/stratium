@@ -272,7 +272,8 @@ func TestC15_AuditChainDetectsMutation(t *testing.T) {
 
 func TestC16_FailedAuditWriteDeniesAction(t *testing.T) {
 	markRan(16)
-	t.Skip("Phase 2: requires the PDP audit write path")
+	t.Skip("Integration: a failed audit write denying the decision is proven against " +
+		"Postgres by proof6 in store_integration_test.go (build tag integration), not in unit tests")
 }
 
 func TestC17_CryptoShreddingPreservesChain(t *testing.T) {
