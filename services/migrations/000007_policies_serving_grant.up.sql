@@ -1,0 +1,18 @@
+-- Grants the serving identity SELECT on policies.
+--
+-- 000005_serving_app_grants.up.sql granted agents and delegations only,
+-- because at the time neither policies, entitlements, nor tier_overrides had
+-- a runtime reader, and its own doc comment says explicitly: "Grant what is
+-- used, not what might be; widen this migration's down/up pair (or add
+-- another) when a Phase 2 slice gives one of those tables a caller."
+--
+-- Phase 2c Task 3 gave policies its first runtime reader,
+-- internal/store.LoadPolicies (SELECT-only, never INSERT/UPDATE/DELETE —
+-- see that file's own doc comment), but no migration granted the serving
+-- role SELECT on it. The gap was invisible until Task 5 wired a
+-- PrincipalPolicy that actually calls LoadPolicies from the live serving
+-- connection: LoadPolicies' own unit tests use sqlmock, which has no real
+-- grants to violate, so this was undetected until the first real Postgres
+-- it ran against — this task's own integration run, which failed with "pq:
+-- permission denied for table policies" before this migration existed.
+GRANT SELECT ON policies TO stratium_app;
