@@ -28,8 +28,11 @@ tests did not see it.
 
 ## The decision (spec-level, record it)
 
-**The PEP sends both the raw `tool_input` and a normalized extraction; the PDP
-classifies each and takes the more severe result.**
+**The PEP sends both the raw `tool_input` and a normalized extraction. Raw's
+positive pattern matches win and are never lowered; otherwise a normalized
+input that classifies is used; otherwise raw's default applies.** See the
+combining rule under Global constraints for why plain "take the more severe"
+does not work.
 
 The PEP knows its agent framework's schema and the PDP deliberately does not,
 so extraction belongs at the edge. But extraction is interpretation, and D1
@@ -81,16 +84,23 @@ Add `normalized_input` to `DecideRequest`, documented as a best-effort
 extraction that never replaces `raw_input` and never lowers a tier.
 
 `Action` gains a `NormalizedInput` field. `BuiltinTier` classifies **both**
-`RawInput` and `NormalizedInput` and returns the more severe result. Do not
-restructure the existing raw/normalized `matches()` logic — this is a second
-axis over the same idea, and both must compose.
+`RawInput` and `NormalizedInput` and combines them by the rule in Global
+constraints: a positive destructive or external match on raw wins outright;
+otherwise a normalized input that classifies is used; otherwise raw's result,
+including its default. Do not restructure the existing raw/normalized
+`matches()` logic — this is a second axis over the same idea, and both must
+compose.
 
 **Tests.** For each of the measured cases above: the JSON form alone still
 classifies as it does today; the JSON form plus a correct extraction classifies
 correctly; **an extraction that under-reports does not lower the tier** —
 `raw = {"command":"rm -rf /"}` with `normalized = "ls"` must still be
 `DESTRUCTIVE`, which is the property that makes the design safe against a bad
-PEP; and an empty normalized input changes nothing.
+PEP; a **correct** extraction of a read-only command yields `READ_ONLY` rather
+than being floored by raw's default — `raw = {"command":"ls -la"}` with
+`normalized = "ls -la"` must be `READ_ONLY`, and this is the test the first
+implementation lacked, which is why the defect survived it; and an empty
+normalized input changes nothing.
 
 **Mutation-test and report survivors:** take the normalized result even when
 raw matched a destructive pattern; take the raw result only; make an empty
