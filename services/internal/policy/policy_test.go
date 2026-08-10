@@ -10,10 +10,21 @@ import (
 	"testing"
 
 	"stratium/internal/authz"
+	"stratium/pkg/models"
 )
 
 func TestUnconfigured_Denies(t *testing.T) {
-	got := Unconfigured().Evaluate(context.Background(), authz.Principal{}, authz.Action{}, nil)
+	// A populated, allow-shaped input (trusted agent, wide-open delegation)
+	// proves Unconfigured truly ignores its argument, rather than merely
+	// happening to deny a zero-valued one.
+	in := EvaluationInput{
+		Principal: authz.Principal{Subject: "alice@example.com"},
+		Agent:     authz.AgentInfo{TrustTier: models.TrustTierPlatformTrusted, Enabled: true},
+		Delegation: DelegationContext{
+			MaxActionTier: models.ActionTierDestructive,
+		},
+	}
+	got := Unconfigured().Evaluate(context.Background(), in)
 
 	if len(got) != 1 {
 		t.Fatalf("Unconfigured must return exactly one verdict, got %d", len(got))
@@ -92,7 +103,7 @@ func TestNoExportedConstructorAllows(t *testing.T) {
 			t.Errorf("exported constructor %s returns PrincipalPolicy but is not wired into the constructors map in policy_test.go — add it so this guard actually checks it", name)
 			continue
 		}
-		verdicts := ctor().Evaluate(context.Background(), authz.Principal{}, authz.Action{}, nil)
+		verdicts := ctor().Evaluate(context.Background(), EvaluationInput{})
 		for _, v := range verdicts {
 			if v.Effect == authz.EffectAllow {
 				t.Errorf("%s() must not produce a verdict slice containing EffectAllow (found one from source %q, policy_id %q) — Phase 1c has no policy engine to authorize this (see package doc)", name, v.Source, v.PolicyID)

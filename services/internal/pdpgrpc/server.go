@@ -129,11 +129,42 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		RawInput:     req.GetRawInput(),
 		DeclaredTier: declaredTier,
 	}
+	tiers := authz.TierTable{} // tenant tier overrides load from the DB starting Phase 2; none exist yet.
+
+	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
+	// DeriveTier is pure, and Decide (below) derives it again, independently,
+	// from these same inputs — that second derivation stays authoritative for
+	// the actual decision, so this one cannot itself widen anything.
+	derivedTier, err := authz.DeriveTier(tiers, action)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "derive tier: %s", err)
+	}
+
+	// acting is the delegation the agent is presenting — the last hop.
+	// LoadChain guarantees chain is non-empty on a nil error (see
+	// appendAudit below, which makes the same assumption).
+	acting := chain[len(chain)-1]
 
 	// The policy provider returns every verdict it consulted for the
 	// principal leg; authz.Decide folds them with deny-overrides via
-	// authz.FoldVerdicts.
-	principalVerdicts := s.policy.Evaluate(ctx, principal, action, resource)
+	// authz.FoldVerdicts. It now sees the agent and delegation dimensions
+	// too, so a tenant can condition on them, but it still only decides the
+	// principal leg — the agent and delegation legs below are independent
+	// AND terms, so nothing returned here can widen what they allow.
+	principalVerdicts := s.policy.Evaluate(ctx, policy.EvaluationInput{
+		Principal:   principal,
+		Action:      action,
+		DerivedTier: derivedTier,
+		Resource:    resource,
+		// Environment: no wire source yet — DecideRequest carries none.
+		Agent: agent,
+		Delegation: policy.DelegationContext{
+			Depth:              acting.Depth,
+			MaxActionTier:      acting.MaxActionTier,
+			ClassificationCaps: acting.ClassificationCaps,
+			Purpose:            acting.Purpose,
+		},
+	})
 	result := authz.Decide(authz.Request{
 		TenantID:          s.cfg.TenantID, // config only. Never req — see package doc.
 		Principal:         principal,
@@ -144,7 +175,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		Now:               now,
 		PrincipalVerdicts: principalVerdicts,
 	}, authz.Config{
-		Tiers:    authz.TierTable{}, // tenant tier overrides load from the DB starting Phase 2; none exist yet.
+		Tiers:    tiers,
 		Trust:    authz.DefaultTrustTable(),
 		MaxDepth: s.cfg.MaxDepth,
 	})

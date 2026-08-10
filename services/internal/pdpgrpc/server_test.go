@@ -112,7 +112,7 @@ func wellFormedFixture() (*fakeStore, *DecideRequest) {
 // must tell these apart rather than collapsing both to empty strings.
 type emptyPolicy struct{}
 
-func (emptyPolicy) Evaluate(context.Context, authz.Principal, authz.Action, map[string]string) []authz.PolicyVerdict {
+func (emptyPolicy) Evaluate(context.Context, policy.EvaluationInput) []authz.PolicyVerdict {
 	return nil
 }
 
