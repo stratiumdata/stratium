@@ -18,6 +18,27 @@
 // provenance columns, and that the ten-way concurrency measurement is
 // unchanged by the wider audit row.
 //
+// Extended again for Phase 2c Task 5
+// (docs/superpowers/sdd/2026-08-10-phase-2c-cedar-engine/task-5-brief.md):
+// cmd/stratium-pdp/main.go now wires policy.Configured(store, cedar.New())
+// instead of policy.Unconfigured(), so this is also the first live stack
+// with a real policy engine in the path. proof2 (below) now exercises
+// Configured's own "no cedar policies for this tenant" case rather than
+// Unconfigured's "no engine at all" case — both still deny with a single,
+// named verdict, just attributed differently (see noCedarPoliciesReason).
+// proof7-proof9 seed real Cedar policies and prove: a permit produces this
+// system's first-ever ALLOW on the principal leg, with the audit row's
+// provenance compared against the response rather than merely non-empty; a
+// forbid denies with that policy attributed; and an allowing policy still
+// cannot exceed the delegation's max_action_tier (C14, end to end, with a
+// real engine rather than a synthetic verdict). They run after proof5 and
+// before the latency/concurrency measurements, deliberately: seeding them
+// there means single_decide_latency_baseline and
+// measured_concurrent_decide_split_on_the_same_tail measure Decide with
+// several real Cedar policies actually being loaded, prepared, and
+// evaluated on every call — not a zero-policy fast path — which is what
+// "Cedar in the path" is supposed to mean for those two measurements.
+//
 // Build-tagged so `go test ./...` and `golangci-lint run ./...` skip it by
 // default. `make integration` (repo root) is what runs it, against
 // deploy/docker/docker-compose.yml: bring the stack up on a fresh volume,
@@ -210,11 +231,17 @@ func withTenantTx(t *testing.T, tenant string, fn func(tx *sql.Tx)) {
 const insertAgentQuery = `INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools)
 	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
 
-func seedAgent(t *testing.T, tenant string, id uuid.UUID, name string) {
+// seedAgent inserts one enabled, unsuspended agent row. trustTier is an
+// explicit parameter, not a hardcoded default, because Phase 2c Task 5's
+// ceiling proof (proof9) needs an agent trusted enough for a DESTRUCTIVE
+// action (PLATFORM_TRUSTED — see authz.DefaultTrustTable) so its agent leg
+// legitimately allows; every earlier caller passes TrustTierUnverified,
+// preserving exactly the value this function used to hardcode.
+func seedAgent(t *testing.T, tenant string, id uuid.UUID, name string, trustTier models.AgentTrustTier) {
 	t.Helper()
 	withTenantTx(t, tenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(), insertAgentQuery,
-			id.String(), tenant, name, "anthropic", "claude", int64(models.TrustTierUnverified), true, false, []byte(`[]`),
+			id.String(), tenant, name, "anthropic", "claude", int64(trustTier), true, false, []byte(`[]`),
 		); err != nil {
 			t.Fatalf("seed agent %s: %v", name, err)
 		}
@@ -296,6 +323,53 @@ func twoHopChain(t *testing.T, tenant string, agentID uuid.UUID) (root, child *m
 		ParentDelegationID: &rootID, RootDelegationID: rootID, Depth: 1, ChainAgentIDs: []uuid.UUID{agentID, agentID},
 	})
 	return root, child
+}
+
+// singleHopDelegation seeds one root delegation (depth 0), well-formed on
+// every dimension except MaxActionTier — the caller's choice — so it can
+// stand in either as an unrestricted grant or, for
+// proof9_cedar_permit_cannot_exceed_delegation_ceiling, deliberately as a
+// low one. A single root is the simplest chain authz.ValidateChain accepts
+// (the same shape wellFormedFixture uses at the unit level, in
+// pdpgrpc/server_test.go); none of the Phase 2c Task 5 proofs below are
+// testing chain depth, so twoHopChain's second hop would only add fixture
+// noise.
+func singleHopDelegation(t *testing.T, tenant string, agentID uuid.UUID, maxTier models.ActionTier, purpose string) *models.Delegation {
+	t.Helper()
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	return seedDelegation(t, &models.Delegation{
+		ID: id, TenantID: tenant, UserID: "integration-test-user", AgentID: agentID,
+		ApprovedTools: []string{}, MaxActionTier: maxTier,
+		ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
+		Purpose: purpose, ExpiresAt: now.Add(time.Hour),
+		RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+	})
+}
+
+const insertPolicyQuery = `INSERT INTO policies (id, tenant_id, name, language, policy_content, effect, enabled)
+	VALUES ($1,$2,$3,$4,$5,$6,$7)`
+
+// seedPolicy inserts one enabled Cedar policy row for tenant and returns its
+// id — client-generated, like seedAgent/seedDelegation's ids above, so a
+// caller can assert a response's decided_policy_id against a known value
+// without a read-back. effect is 'allow'|'deny' metadata satisfying the
+// policies table's CHECK constraint only: Cedar's own engine derives the
+// actual verdict effect by parsing text's permit/forbid keyword, not by
+// reading this column back (see cedar.Engine.Prepare's doc comment) — it is
+// set consistent with text here purely so a future reader isn't misled by a
+// mismatched pair.
+func seedPolicy(t *testing.T, tenant, name, text, effect string) string {
+	t.Helper()
+	id := uuid.New().String()
+	withTenantTx(t, tenant, func(tx *sql.Tx) {
+		if _, err := tx.ExecContext(t.Context(), insertPolicyQuery,
+			id, tenant, name, "cedar", text, effect, true,
+		); err != nil {
+			t.Fatalf("seed policy %s: %v", name, err)
+		}
+	})
+	return id
 }
 
 const auditChainQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, actor,
@@ -396,11 +470,21 @@ func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
 	return st
 }
 
-// unconfiguredPrincipalReason mirrors internal/policy.Unconfigured()'s
-// literal reason string. Not imported from that package — this test only
-// reaches it through the wire response, the same way any real gRPC client
-// would — so the exact string is reproduced here deliberately.
-const unconfiguredPrincipalReason = "principal: no policy engine configured (Phase 2)"
+// noCedarPoliciesReason mirrors internal/policy.Configured's literal reason
+// string for a tenant with zero stored cedar policies. Not imported from
+// that package — this test only reaches it through the wire response, the
+// same way any real gRPC client would — so the exact string is reproduced
+// here deliberately.
+//
+// This replaces the file's earlier unconfiguredPrincipalReason: Phase 2c
+// Task 5 rewires cmd/stratium-pdp/main.go from policy.Unconfigured() to
+// policy.Configured(store, cedar.New()), so proof2 below (run before this
+// file seeds any cedar policy) now exercises Configured's own "no policies
+// for this tenant" path, not Unconfigured's "no engine at all" path. Both
+// still deny with a single, present, non-generic verdict — that property
+// (see policy.Unconfigured's own doc comment) is what changed implementation
+// but not principle.
+const noCedarPoliciesReason = "principal: no cedar policies configured for this tenant"
 
 // migrationBeforeProvenance and migrationWithProvenance pin the version
 // boundary migrations/000006_audit_policy_provenance.up.sql sits on. Package
@@ -472,9 +556,21 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 // migrates the live schema down and back up mid-run and so is the one
 // subtest that structurally depends on strict sequencing rather than merely
 // benefiting from it.
+//
+// Phase 2c Task 5 adds proof7_cedar_permit_allows_principal_leg,
+// cedar_permit_audit_row_matches_response, proof8_cedar_forbid_denies_
+// attributed_to_policy, and proof9_cedar_permit_cannot_exceed_delegation_
+// ceiling, placed after proof5 and before single_decide_latency_baseline —
+// see the package doc for why that position matters (it is what makes the
+// latency/concurrency measurements reflect Cedar actually doing work, not a
+// zero-policy tenant). Each seeds a dedicated agent, delegation, and
+// principal rather than reusing alice's — alice's fixture is what proof2's
+// "zero cedar policies" assertion and every measurement after it depend on,
+// so nothing about her decisions may change once these subtests seed
+// policies for the tenant.
 func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
-	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one")
+	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one", models.TrustTierUnverified)
 	_, acting := twoHopChain(t, configuredTenant, agentID)
 
 	// Set by single_decide_latency_baseline, read by
@@ -487,6 +583,17 @@ func TestEndToEnd(t *testing.T) {
 	// Set by proof2, read by audit_row_provenance_matches_response — same
 	// reasoning as baselineLatency above.
 	var proof2Resp *pdpgrpc.DecideResponse
+
+	// Set by proof7_cedar_permit_allows_principal_leg, read by
+	// cedar_permit_audit_row_matches_response — same reasoning as
+	// proof2Resp above. proof7PolicyID is the seeded policy's own id (the
+	// ground truth from the seeding side); proof7Resp is what the server
+	// actually returned — audit_row_matches_response compares the stored
+	// audit row against proof7Resp specifically, not against proof7PolicyID
+	// directly, so that check is a genuine stored-vs-returned comparison,
+	// not stored-vs-seeded-twice.
+	var proof7Resp *pdpgrpc.DecideResponse
+	var proof7PolicyID string
 
 	t.Run("proof1_migrations_applied_from_pdp_own_startup", func(t *testing.T) {
 		// This test never calls migrations.Up() itself — by the time
@@ -548,24 +655,27 @@ func TestEndToEnd(t *testing.T) {
 		if resp.GetDeniedLeg() != "principal" {
 			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "principal")
 		}
-		if resp.GetPrincipalReason() != unconfiguredPrincipalReason {
-			t.Errorf("PrincipalReason = %q, want %q", resp.GetPrincipalReason(), unconfiguredPrincipalReason)
+		if resp.GetPrincipalReason() != noCedarPoliciesReason {
+			t.Errorf("PrincipalReason = %q, want %q", resp.GetPrincipalReason(), noCedarPoliciesReason)
 		}
 		// decided_source/decided_policy_id are proto3 optional (*string):
 		// nil would mean "no verdict decided this at all" (an empty
 		// PrincipalVerdicts slice — see toResponse's own doc comment).
-		// policy.Unconfigured() always returns exactly one verdict, so both
-		// must be present here, not merely equal to the zero value a nil
-		// pointer's Get accessor would also produce.
+		// policy.Configured, with zero cedar policies stored for this
+		// tenant, still returns exactly one verdict (see its own doc
+		// comment on why — the same "exactly one, not zero" discipline
+		// Unconfigured established), so both fields must be present here,
+		// not merely equal to the zero value a nil pointer's Get accessor
+		// would also produce.
 		if resp.DecidedSource == nil {
 			t.Error("DecidedSource = nil, want present (a real verdict decided this)")
-		} else if *resp.DecidedSource != "none" {
-			t.Errorf("DecidedSource = %q, want %q", *resp.DecidedSource, "none")
+		} else if *resp.DecidedSource != "cedar" {
+			t.Errorf("DecidedSource = %q, want %q (a real engine ran and found nothing — not \"none\", which would mean no engine at all)", *resp.DecidedSource, "cedar")
 		}
 		if resp.DecidedPolicyId == nil {
 			t.Error("DecidedPolicyId = nil, want present (an empty string, not absent)")
 		} else if *resp.DecidedPolicyId != "" {
-			t.Errorf("DecidedPolicyId = %q, want %q (Unconfigured() names no specific policy)", *resp.DecidedPolicyId, "")
+			t.Errorf("DecidedPolicyId = %q, want %q (no cedar policy exists yet to name)", *resp.DecidedPolicyId, "")
 		}
 		// The agent and delegation legs were seeded to independently allow
 		// (see twoHopChain) — confirming the DENY really is attributable to
@@ -637,8 +747,8 @@ func TestEndToEnd(t *testing.T) {
 		if got.PolicyID != wantPolicyID {
 			t.Errorf("stored policy_id = %q, want %q (the response's decided_policy_id)", got.PolicyID, wantPolicyID)
 		}
-		if got.PolicySource != "none" {
-			t.Errorf("stored policy_source = %q, want %q", got.PolicySource, "none")
+		if got.PolicySource != "cedar" {
+			t.Errorf("stored policy_source = %q, want %q (a real engine ran, even though this tenant has no cedar policies yet)", got.PolicySource, "cedar")
 		}
 
 		// The comparison above goes through audit.Entry's plain string
@@ -668,7 +778,7 @@ func TestEndToEnd(t *testing.T) {
 
 	t.Run("proof4_cross_tenant_agent_is_not_found", func(t *testing.T) {
 		otherAgentID := uuid.New()
-		seedAgent(t, secondTenantID, otherAgentID, "integration-agent-tenant-two")
+		seedAgent(t, secondTenantID, otherAgentID, "integration-agent-tenant-two", models.TrustTierUnverified)
 
 		// delegation_id need not resolve to anything real: LoadAgent runs
 		// before LoadChain in Decide (see pdpgrpc/server.go), so an unknown
@@ -690,7 +800,7 @@ func TestEndToEnd(t *testing.T) {
 
 	t.Run("proof5_cross_tenant_chain_rejected_by_validatechain", func(t *testing.T) {
 		otherAgentID := uuid.New()
-		seedAgent(t, secondTenantID, otherAgentID, "integration-agent-tenant-two-chain")
+		seedAgent(t, secondTenantID, otherAgentID, "integration-agent-tenant-two-chain", models.TrustTierUnverified)
 		rootID := uuid.New()
 		foreignRoot := seedDelegation(t, &models.Delegation{
 			ID: rootID, TenantID: secondTenantID, UserID: "integration-test-user", AgentID: otherAgentID,
@@ -720,12 +830,241 @@ func TestEndToEnd(t *testing.T) {
 		t.Logf("ValidateChain(tenant-two's chain, expected tenant=%q) -> %v", configuredTenant, err)
 	})
 
+	// proof7_cedar_permit_allows_principal_leg seeds a Cedar permit policy
+	// scoped to a dedicated principal (carol, not alice — see this
+	// function's own doc comment) and confirms Decide returns ALLOW on the
+	// principal leg: the first ALLOW this system has ever been able to
+	// produce. Every leg is checked, not just the overall effect, so the
+	// ALLOW is not an accident of some other leg's zero value; the
+	// assertion is on the actual effect, not merely that no error occurred.
+	t.Run("proof7_cedar_permit_allows_principal_leg", func(t *testing.T) {
+		agentID := uuid.New()
+		seedAgent(t, configuredTenant, agentID, "integration-agent-carol", models.TrustTierUnverified)
+		acting := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierInternalModify, "cedar permit proof")
+		proof7PolicyID = seedPolicy(t, configuredTenant, "permit-carol",
+			`permit(principal == User::"carol@example.com", action, resource);`, "allow")
+
+		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: acting.ID.String(),
+			AgentId:      agentID.String(),
+			Subject:      "carol@example.com",
+			Tool:         "Bash",
+			Verb:         "read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() with a cedar permit policy in place -> effect=%s principal_effect=%s agent_effect=%s "+
+			"delegation_effect=%s decided_source=%q decided_policy_id=%q",
+			resp.GetEffect(), resp.GetPrincipalEffect(), resp.GetAgentEffect(), resp.GetDelegationEffect(),
+			resp.GetDecidedSource(), resp.GetDecidedPolicyId())
+
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW — the first ALLOW this system has ever produced", resp.GetEffect())
+		}
+		if resp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect = %v, want EFFECT_ALLOW", resp.GetPrincipalEffect())
+		}
+		// Sanity: agent and delegation both legitimately allow too, so the
+		// overall ALLOW is attributable to the cedar policy, not a side
+		// effect of some other leg's zero value.
+		if resp.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("AgentEffect = %v, want EFFECT_ALLOW (fixture is well-formed on this leg)", resp.GetAgentEffect())
+		}
+		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW (fixture is well-formed on this leg)", resp.GetDelegationEffect())
+		}
+		if resp.DecidedSource == nil || resp.GetDecidedSource() != "cedar" {
+			t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, "cedar")
+		}
+		if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != proof7PolicyID {
+			t.Errorf("DecidedPolicyId = %v, want present and %q (carol's seeded permit policy)", resp.DecidedPolicyId, proof7PolicyID)
+		}
+
+		proof7Resp = resp
+	})
+
+	// cedar_permit_audit_row_matches_response is the same strength of check
+	// audit_row_provenance_matches_response applies to proof2, now against a
+	// decision that actually allowed: it reads the audit row back with its
+	// own query and compares the stored values against what proof7's
+	// response actually returned, not merely that both are non-empty — the
+	// exact class of check that would have caught Task 2/3's seam defect,
+	// applied here to the first ALLOW this system has produced.
+	t.Run("cedar_permit_audit_row_matches_response", func(t *testing.T) {
+		if proof7Resp == nil {
+			t.Fatal("proof7Resp is nil: proof7_cedar_permit_allows_principal_leg must run before this subtest")
+		}
+
+		// The most recent row for the tenant: carol's Decide call above was
+		// the last one made against configuredTenant.
+		source, policyID := auditRowProvenance(t, configuredTenant)
+		t.Logf("stored (raw) policy_source=%q (valid=%t) policy_id=%q (valid=%t); response decided_source=%q decided_policy_id=%q",
+			source.String, source.Valid, policyID.String, policyID.Valid,
+			proof7Resp.GetDecidedSource(), proof7Resp.GetDecidedPolicyId())
+
+		if !source.Valid || !policyID.Valid {
+			t.Fatalf("policy_source/policy_id IS NULL (valid=%t/%t), want NOT NULL — a real decision must populate both",
+				source.Valid, policyID.Valid)
+		}
+		if source.String != proof7Resp.GetDecidedSource() {
+			t.Errorf("stored policy_source = %q, want %q (the response's decided_source)", source.String, proof7Resp.GetDecidedSource())
+		}
+		if policyID.String != proof7Resp.GetDecidedPolicyId() {
+			t.Errorf("stored policy_id = %q, want %q (the response's decided_policy_id)", policyID.String, proof7Resp.GetDecidedPolicyId())
+		}
+		if source.String != "cedar" {
+			t.Errorf("stored policy_source = %q, want %q", source.String, "cedar")
+		}
+		if policyID.String != proof7PolicyID {
+			t.Errorf("stored policy_id = %q, want %q (carol's seeded permit policy)", policyID.String, proof7PolicyID)
+		}
+
+		entries := fetchAuditChain(t, configuredTenant)
+		if len(entries) == 0 {
+			t.Fatal("audit chain is empty, want at least the row this Decide call just wrote")
+		}
+		last := entries[len(entries)-1]
+		if last.Decision != "ALLOW" {
+			t.Errorf("most recent audit entry decision = %q, want %q", last.Decision, "ALLOW")
+		}
+		if err := audit.Verify(entries); err != nil {
+			t.Fatalf("audit.Verify() error = %v, want nil", err)
+		}
+	})
+
+	// proof8_cedar_forbid_denies_attributed_to_policy seeds a Cedar forbid
+	// policy scoped to a second dedicated principal (dave) and confirms the
+	// decision denies with that specific policy attributed — provenance
+	// compared against the seeded id, not merely asserted non-empty.
+	t.Run("proof8_cedar_forbid_denies_attributed_to_policy", func(t *testing.T) {
+		agentID := uuid.New()
+		seedAgent(t, configuredTenant, agentID, "integration-agent-dave", models.TrustTierUnverified)
+		acting := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierInternalModify, "cedar forbid proof")
+		forbidPolicyID := seedPolicy(t, configuredTenant, "forbid-dave",
+			`forbid(principal == User::"dave@example.com", action, resource);`, "deny")
+
+		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: acting.ID.String(),
+			AgentId:      agentID.String(),
+			Subject:      "dave@example.com",
+			Tool:         "Bash",
+			Verb:         "read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() with a cedar forbid policy in place -> effect=%s denied_leg=%q decided_source=%q decided_policy_id=%q",
+			resp.GetEffect(), resp.GetDeniedLeg(), resp.GetDecidedSource(), resp.GetDecidedPolicyId())
+
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "principal" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "principal")
+		}
+		if resp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Errorf("PrincipalEffect = %v, want EFFECT_DENY", resp.GetPrincipalEffect())
+		}
+		if resp.DecidedSource == nil || resp.GetDecidedSource() != "cedar" {
+			t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, "cedar")
+		}
+		if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != forbidPolicyID {
+			t.Errorf("DecidedPolicyId = %v, want present and %q (dave's seeded forbid policy)", resp.DecidedPolicyId, forbidPolicyID)
+		}
+
+		source, policyID := auditRowProvenance(t, configuredTenant)
+		if !source.Valid || source.String != "cedar" || !policyID.Valid || policyID.String != forbidPolicyID {
+			t.Errorf("stored provenance policy_source=%q(valid=%t) policy_id=%q(valid=%t), want cedar/%q, both valid",
+				source.String, source.Valid, policyID.String, policyID.Valid, forbidPolicyID)
+		}
+	})
+
+	// proof9_cedar_permit_cannot_exceed_delegation_ceiling is C14 end to end,
+	// with a real engine rather than a synthetic verdict: an unconditional
+	// cedar permit for erin, but her delegation's max_action_tier caps at
+	// READ_ONLY while the request derives to DESTRUCTIVE. The overall
+	// decision must still deny, attributed to delegation — and, distinctly,
+	// the principal leg must show it genuinely allowed (a real policy
+	// matched), or this proof would not distinguish "the ceiling stopped an
+	// allowing policy" from "the policy never mattered because something
+	// else already denied."
+	t.Run("proof9_cedar_permit_cannot_exceed_delegation_ceiling", func(t *testing.T) {
+		agentID := uuid.New()
+		// PLATFORM_TRUSTED, not UNVERIFIED: the request below derives to
+		// DESTRUCTIVE, which requires PLATFORM_TRUSTED on the agent leg (see
+		// authz.DefaultTrustTable) — this proof is about the DELEGATION leg
+		// stopping an allowing policy, so the agent leg must legitimately
+		// allow too, or the denial here would be ambiguous about which leg
+		// caused it.
+		seedAgent(t, configuredTenant, agentID, "integration-agent-erin", models.TrustTierPlatformTrusted)
+		// A low cap (READ_ONLY); the request below derives to DESTRUCTIVE,
+		// well above it.
+		acting := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierReadOnly, "cedar ceiling proof")
+		permitPolicyID := seedPolicy(t, configuredTenant, "permit-erin-unconditional",
+			`permit(principal == User::"erin@example.com", action, resource);`, "allow")
+
+		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: acting.ID.String(),
+			AgentId:      agentID.String(),
+			Subject:      "erin@example.com",
+			Tool:         "Bash",
+			Verb:         "delete", // -> ActionTierDestructive (see authz's verbTiers)
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() with an unconditional cedar permit but an exceeded delegation cap -> effect=%s denied_leg=%q "+
+			"derived_tier=%d principal_effect=%s delegation_effect=%s decided_source=%q decided_policy_id=%q",
+			resp.GetEffect(), resp.GetDeniedLeg(), resp.GetDerivedTier(), resp.GetPrincipalEffect(), resp.GetDelegationEffect(),
+			resp.GetDecidedSource(), resp.GetDecidedPolicyId())
+
+		if resp.GetDerivedTier() != int32(models.ActionTierDestructive) {
+			t.Fatalf("DerivedTier = %d, want %d (DESTRUCTIVE) — this proof needs the derived tier to actually exceed the cap",
+				resp.GetDerivedTier(), models.ActionTierDestructive)
+		}
+		// C14: the overall decision denies...
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (an allowing policy must not exceed the delegation ceiling)", resp.GetEffect())
+		}
+		// ...attributed to delegation, not principal...
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Errorf("DelegationEffect = %v, want EFFECT_DENY", resp.GetDelegationEffect())
+		}
+		// ...specifically because the principal leg really did allow (a real
+		// cedar permit policy matched).
+		if resp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect = %v, want EFFECT_ALLOW (the policy must have genuinely matched for this to prove anything)", resp.GetPrincipalEffect())
+		}
+		// The principal leg's own provenance still names cedar's permit
+		// policy, even though it did not end up deciding the overall
+		// outcome — concrete proof (not just the LegResult enum) that the
+		// policy really matched.
+		if resp.DecidedSource == nil || resp.GetDecidedSource() != "cedar" {
+			t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, "cedar")
+		}
+		if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != permitPolicyID {
+			t.Errorf("DecidedPolicyId = %v, want present and %q (erin's seeded permit policy)", resp.DecidedPolicyId, permitPolicyID)
+		}
+	})
+
 	t.Run("single_decide_latency_baseline", func(t *testing.T) {
 		// Uncontended latency for one Decide() call — no other writer
 		// racing this tenant's chain tail. This is what the burst
 		// subtest's per-call average is compared against below: the
 		// difference is the advisory lock's actual per-decision cost,
 		// not an assumption.
+		//
+		// Phase 2c Task 5: by this point in the sequence, configuredTenant
+		// has three real, enabled cedar policies (carol's permit, dave's
+		// forbid, erin's permit) — none of which match alice, the subject
+		// used here, but Configured's Evaluate still loads, prepares, and
+		// evaluates all three on this call. This is "Cedar in the path" for
+		// real, not a zero-policy fast path, which is why proof7-proof9 run
+		// before this subtest rather than after it.
 		callStart := time.Now()
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
 			DelegationId: acting.ID.String(),
@@ -988,18 +1327,21 @@ func TestEndToEnd(t *testing.T) {
 		restored := false
 		defer func() {
 			// Best effort: if a step below fails before the explicit
-			// migrate-up call runs, try once more to leave the schema at
-			// the latest version so a failure here doesn't cascade into
-			// every later subtest that also calls store.AppendAudit (whose
-			// INSERT always names policy_source/policy_id). The stack this
-			// test itself brought up is destroyed on the way out regardless
-			// (see Makefile's integration target) — this only limits blast
-			// radius within one run.
+			// migrate-to-latest call runs, try once more to leave the schema
+			// at the latest version so a failure here doesn't cascade into
+			// every later subtest — not just ones calling store.AppendAudit
+			// (whose INSERT always names policy_source/policy_id), but also,
+			// since Phase 2c Task 5, proof6's pdpClient.Decide() call, which
+			// needs the stratium_app role's SELECT grant on policies that
+			// migrations/000007_policies_serving_grant restores. The stack
+			// this test itself brought up is destroyed on the way out
+			// regardless (see Makefile's integration target) — this only
+			// limits blast radius within one run.
 			if restored {
 				return
 			}
-			if err := m.Migrate(migrationWithProvenance); err != nil {
-				t.Logf("best-effort restore to v%d after a failure in this subtest: %v", migrationWithProvenance, err)
+			if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+				t.Logf("best-effort restore to the latest migration after a failure in this subtest: %v", err)
 			}
 		}()
 
@@ -1036,7 +1378,6 @@ func TestEndToEnd(t *testing.T) {
 		if err := m.Migrate(migrationWithProvenance); err != nil {
 			t.Fatalf("migrate up to v%d (provenance): %v", migrationWithProvenance, err)
 		}
-		restored = true
 		t.Logf("migrated to v%d: the genesis row's new columns now read back NULL", migrationWithProvenance)
 
 		second := audit.Entry{
@@ -1073,6 +1414,25 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("audit.Verify() across the migration boundary error = %v, want nil", err)
 		}
 		t.Logf("audit.Verify() PASSED over a %d-entry chain spanning migrations/000006_audit_policy_provenance", len(entries))
+
+		// The boundary this subtest exists to prove is exactly v5->v6, so
+		// everything above deliberately stops at v6, not "the latest."
+		// Catching up the rest of the way here — rather than leaving the
+		// schema sitting at v6 for the remainder of the run — is what keeps
+		// every later subtest's assumptions true. Concretely, since Phase 2c
+		// Task 5: migrations/000007_policies_serving_grant grants
+		// stratium_app SELECT on policies, and that grant is what makes it
+		// possible for a down-migration through v7 to have revoked it (down
+		// migrations run in descending order, so migrating to v5 above ran
+		// both v7's and v6's down scripts) — proof6 below calls
+		// pdpClient.Decide(), which needs that grant to reach the audit-write
+		// failure it is actually testing, not an unrelated permission error
+		// on policies.
+		if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			t.Fatalf("migrate up to the latest version (past v%d): %v", migrationWithProvenance, err)
+		}
+		restored = true
+		t.Logf("migrated the rest of the way to the latest version — the schema is fully current again")
 	})
 
 	t.Run("proof6_failed_audit_append_blocks_the_decision", func(t *testing.T) {
