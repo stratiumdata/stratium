@@ -81,6 +81,25 @@ func TestFoldVerdicts(t *testing.T) {
 	}
 }
 
+// A bare escalate — no accompanying allow — must escalate rather than fall
+// through to default-deny, and the reason must come from the escalate
+// verdict itself, not the generic default-deny text. This is the defect the
+// step reorder fixes: escalate is checked before default-deny.
+func TestFoldVerdicts_BareEscalateEscalates(t *testing.T) {
+	escalate := PolicyVerdict{Effect: EffectEscalate, Source: "xacml", PolicyID: "p1", Reason: "needs approval"}
+
+	leg, got := FoldVerdicts([]PolicyVerdict{escalate})
+	if leg.Effect != EffectEscalate {
+		t.Fatalf("bare escalate must escalate, got %v", leg.Effect)
+	}
+	if leg.Reason != escalate.Reason {
+		t.Fatalf("reason = %q, want the escalate verdict's reason %q (not default-deny text)", leg.Reason, escalate.Reason)
+	}
+	if got == nil || *got != escalate {
+		t.Fatalf("decided = %+v, want %+v", got, escalate)
+	}
+}
+
 // The *PolicyVerdict FoldVerdicts returns identifies which verdict decided
 // the outcome: non-nil whenever a specific verdict is decisive, nil only for
 // default-deny, where no verdict decided anything.

@@ -150,15 +150,12 @@ func TestDecide_UnknownActionDenies(t *testing.T) {
 	}
 }
 
+// A bare escalate — no companion allow — is sufficient to escalate. Escalate
+// is a grant with a condition attached ("allow, pending human approval"), so
+// it satisfies default-deny on its own (FoldVerdicts step 2).
 func TestDecide_EscalatePropagatesWhenNothingDenies(t *testing.T) {
 	req := request()
-	// Escalate is a modifier on an allow, not a standalone verdict (FoldVerdicts
-	// step 2: no allow present -> default-deny, checked before escalate in step
-	// 3). A companion allow verdict is what makes this an escalate case at all.
-	req.PrincipalVerdicts = []PolicyVerdict{
-		{Effect: EffectAllow},
-		{Effect: EffectEscalate, Reason: "approval required"},
-	}
+	req.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectEscalate, Reason: "approval required"}}
 	if got := Decide(req, config()); got.Effect != EffectEscalate {
 		t.Fatalf("expected ESCALATE, got %v", got.Effect)
 	}
@@ -167,10 +164,7 @@ func TestDecide_EscalatePropagatesWhenNothingDenies(t *testing.T) {
 // Deny-overrides applies to every non-allow, including escalate.
 func TestDecide_DenyBeatsEscalate(t *testing.T) {
 	req := request()
-	req.PrincipalVerdicts = []PolicyVerdict{
-		{Effect: EffectAllow},
-		{Effect: EffectEscalate, Reason: "approval required"},
-	}
+	req.PrincipalVerdicts = []PolicyVerdict{{Effect: EffectEscalate, Reason: "approval required"}}
 	req.Agent.Enabled = false
 	if got := Decide(req, config()); got.Effect != EffectDeny {
 		t.Fatalf("deny must beat escalate, got %v", got.Effect)
