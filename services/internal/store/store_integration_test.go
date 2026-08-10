@@ -8,6 +8,16 @@
 // denies honestly at the principal leg (the only outcome this slice can
 // produce; see that plan's "What it deliberately does not prove").
 //
+// Extended for Phase 2b Task 4
+// (docs/superpowers/plans/2026-08-09-phase-2b-policy-verdicts.md): the same
+// live stack now also proves policy-verdict provenance survives the whole
+// path into the response and the audit row — not just that the column
+// exists (Task 2's tests already proved that and still missed the seam
+// Task 3 found, where nothing ever set the field on a real decision) — that
+// the hash chain still verifies across the migration that added the
+// provenance columns, and that the ten-way concurrency measurement is
+// unchanged by the wider audit row.
+//
 // Build-tagged so `go test ./...` and `golangci-lint run ./...` skip it by
 // default. `make integration` (repo root) is what runs it, against
 // deploy/docker/docker-compose.yml: bring the stack up on a fresh volume,
@@ -32,6 +42,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
 	"google.golang.org/grpc"
@@ -43,6 +56,7 @@ import (
 	"stratium/internal/authz"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/store"
+	"stratium/migrations"
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
 )
@@ -287,13 +301,23 @@ func twoHopChain(t *testing.T, tenant string, agentID uuid.UUID) (root, child *m
 const auditChainQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, actor,
 	agent_id, delegation_id, root_delegation_id, chain_depth,
 	tool_name, action, declared_tier, derived_tier,
-	decision, denied_leg, denied_at_depth, reason, input_digest
+	decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, input_digest
 	FROM audit_chain ORDER BY seq ASC`
 
 // fetchAuditChain reads a tenant's entire chain from the first entry,
 // ordered oldest first — audit.Verify's own precondition (see its doc
 // comment) — scoped by RLS via app.tenant_id, not a WHERE clause, matching
 // every other read in this slice.
+//
+// policy_source/policy_id decode through sql.NullString into Entry's plain
+// string fields, mirroring store.scanAuditTail exactly: NULL and ""
+// resolve to the same Go zero value. That is what makes audit.Verify's hash
+// recomputation reproduce the same digest for a row written before
+// migrations/000006 as for one written after with an explicitly empty
+// verdict (see "chain_verifies_across_the_migration_boundary" below) — but
+// it also means this function alone cannot tell "never populated" apart
+// from "correctly empty." auditRowProvenance, below, is the query that
+// keeps NULL-ness visible for exactly that reason.
 func fetchAuditChain(t *testing.T, tenant string) []audit.Entry {
 	t.Helper()
 	var entries []audit.Entry
@@ -307,15 +331,23 @@ func fetchAuditChain(t *testing.T, tenant string) []audit.Entry {
 		for rows.Next() {
 			var e audit.Entry
 			var prevHash, inputDigest []byte
+			var policySource, policyID sql.NullString
 			if err := rows.Scan(
 				&prevHash, &e.TenantID, &e.OccurredAt, &e.EventType, &e.Actor,
 				&e.AgentID, &e.DelegationID, &e.RootDelegationID, &e.ChainDepth,
 				&e.ToolName, &e.Action, &e.DeclaredTier, &e.DerivedTier,
-				&e.Decision, &e.DeniedLeg, &e.DeniedAtDepth, &e.Reason, &inputDigest,
+				&e.Decision, &e.DeniedLeg, &e.DeniedAtDepth, &e.Reason,
+				&policySource, &policyID, &inputDigest,
 			); err != nil {
 				t.Fatalf("scan audit_chain row: %v", err)
 			}
 			copy(e.PrevHash[:], prevHash)
+			if policySource.Valid {
+				e.PolicySource = policySource.String
+			}
+			if policyID.Valid {
+				e.PolicyID = policyID.String
+			}
 			if inputDigest != nil {
 				copy(e.InputDigest[:], inputDigest)
 			}
@@ -326,6 +358,27 @@ func fetchAuditChain(t *testing.T, tenant string) []audit.Entry {
 		}
 	})
 	return entries
+}
+
+// auditRowProvenance reads policy_source/policy_id for a tenant's single
+// most recent audit_chain row straight into sql.NullString, deliberately
+// bypassing audit.Entry — Entry models both as plain strings, so (as
+// fetchAuditChain's doc comment above explains) a NULL column and a
+// legitimately empty one are indistinguishable once decoded there. That
+// collapse is correct for Hash(), but it would also hide the exact defect
+// Task 3 found: a column that is silently always NULL looks, at the
+// Entry layer, identical to one that is correctly empty. Only a read that
+// keeps NULL-ness visible, like this one, can tell those two apart.
+func auditRowProvenance(t *testing.T, tenant string) (source, policyID sql.NullString) {
+	t.Helper()
+	withTenantTx(t, tenant, func(tx *sql.Tx) {
+		row := tx.QueryRowContext(t.Context(),
+			`SELECT policy_source, policy_id FROM audit_chain ORDER BY seq DESC LIMIT 1`)
+		if err := row.Scan(&source, &policyID); err != nil {
+			t.Fatalf("query latest audit_chain row's provenance columns: %v", err)
+		}
+	})
+	return source, policyID
 }
 
 func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
@@ -349,6 +402,54 @@ func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
 // would — so the exact string is reproduced here deliberately.
 const unconfiguredPrincipalReason = "principal: no policy engine configured (Phase 2)"
 
+// migrationBeforeProvenance and migrationWithProvenance pin the version
+// boundary migrations/000006_audit_policy_provenance.up.sql sits on. Package
+// migrations exposes only Up, which always targets the latest version (see
+// its doc comment on why) — there is no exported constant for either
+// version, so both are pinned here against that migration's own filename
+// rather than left as bare magic numbers.
+const (
+	migrationBeforeProvenance = 5
+	migrationWithProvenance   = 6
+)
+
+// preProvenanceAuditInsertQuery is store's own (unexported) insertAuditQuery
+// reproduced here — it cannot be imported — with policy_source and
+// policy_id removed: the exact column set audit_chain had before
+// migrations/000006. "chain_verifies_across_the_migration_boundary" uses
+// this to write a row under that earlier schema directly, bypassing
+// store.AppendAudit (whose INSERT already names both columns and would
+// fail against a database migrated back to migrationBeforeProvenance).
+const preProvenanceAuditInsertQuery = `INSERT INTO audit_chain (` +
+	`tenant_id, prev_hash, entry_hash, occurred_at, event_type, actor, ` +
+	`agent_id, delegation_id, root_delegation_id, chain_depth, ` +
+	`tool_name, action, declared_tier, derived_tier, ` +
+	`decision, denied_leg, denied_at_depth, reason, input_digest` +
+	`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`
+
+// newMigrator builds a *migrate.Migrate against db from the same embedded
+// migrations migrations.Up uses, reproducing that function's own
+// construction (see its doc comment on why closing it matters) but
+// stopping short of calling Up: "chain_verifies_across_the_migration_boundary"
+// needs to stop at an exact version, which migrations.Up deliberately does
+// not support.
+func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
+	t.Helper()
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("load embedded migrations: %v", err)
+	}
+	driver, err := postgres.WithInstance(db, &postgres.Config{})
+	if err != nil {
+		t.Fatalf("create postgres migration driver: %v", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "postgres", driver)
+	if err != nil {
+		t.Fatalf("create migrator: %v", err)
+	}
+	return m
+}
+
 // TestEndToEnd runs the six proofs, in the brief's own order, plus the
 // Phase 2a Task 1 concurrency measurements: a single-call latency baseline,
 // the ten-way same-tenant burst (now expected 10/0 under the per-tenant
@@ -359,6 +460,18 @@ const unconfiguredPrincipalReason = "principal: no policy engine configured (Pha
 // measurements need proof 2's fixture already seeded; proof 6 deliberately
 // revokes the application role's INSERT privilege on audit_chain and must
 // run last, since nothing after it could append an audit row again.
+//
+// Phase 2b Task 4 adds two more, both placed after the concurrency
+// measurements (so every "ordinary" proof has already run against the real
+// schema before anything riskier happens) and before proof6 (which needs to
+// stay last): "audit_row_provenance_matches_response", the strongest
+// assertion in this file — it reads the audit row back with its own query
+// and compares stored values against what proof2's response actually
+// returned, the specific check that would have caught Task 2/3's seam
+// defect — and "chain_verifies_across_the_migration_boundary", which
+// migrates the live schema down and back up mid-run and so is the one
+// subtest that structurally depends on strict sequencing rather than merely
+// benefiting from it.
 func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one")
@@ -370,6 +483,10 @@ func TestEndToEnd(t *testing.T) {
 	// is enough to carry the measurement across them without a package-level
 	// var.
 	var baselineLatency time.Duration
+
+	// Set by proof2, read by audit_row_provenance_matches_response — same
+	// reasoning as baselineLatency above.
+	var proof2Resp *pdpgrpc.DecideResponse
 
 	t.Run("proof1_migrations_applied_from_pdp_own_startup", func(t *testing.T) {
 		// This test never calls migrations.Up() itself — by the time
@@ -419,9 +536,11 @@ func TestEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
 		}
-		t.Logf("Decide() -> effect=%s denied_leg=%q reason=%q principal_reason=%q agent_effect=%s delegation_effect=%s",
+		t.Logf("Decide() -> effect=%s denied_leg=%q reason=%q principal_reason=%q agent_effect=%s delegation_effect=%s "+
+			"decided_source=%q (present=%t) decided_policy_id=%q (present=%t)",
 			resp.GetEffect(), resp.GetDeniedLeg(), resp.GetReason(), resp.GetPrincipalReason(),
-			resp.GetAgentEffect(), resp.GetDelegationEffect())
+			resp.GetAgentEffect(), resp.GetDelegationEffect(),
+			resp.GetDecidedSource(), resp.DecidedSource != nil, resp.GetDecidedPolicyId(), resp.DecidedPolicyId != nil)
 
 		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
 			t.Errorf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
@@ -431,6 +550,22 @@ func TestEndToEnd(t *testing.T) {
 		}
 		if resp.GetPrincipalReason() != unconfiguredPrincipalReason {
 			t.Errorf("PrincipalReason = %q, want %q", resp.GetPrincipalReason(), unconfiguredPrincipalReason)
+		}
+		// decided_source/decided_policy_id are proto3 optional (*string):
+		// nil would mean "no verdict decided this at all" (an empty
+		// PrincipalVerdicts slice — see toResponse's own doc comment).
+		// policy.Unconfigured() always returns exactly one verdict, so both
+		// must be present here, not merely equal to the zero value a nil
+		// pointer's Get accessor would also produce.
+		if resp.DecidedSource == nil {
+			t.Error("DecidedSource = nil, want present (a real verdict decided this)")
+		} else if *resp.DecidedSource != "none" {
+			t.Errorf("DecidedSource = %q, want %q", *resp.DecidedSource, "none")
+		}
+		if resp.DecidedPolicyId == nil {
+			t.Error("DecidedPolicyId = nil, want present (an empty string, not absent)")
+		} else if *resp.DecidedPolicyId != "" {
+			t.Errorf("DecidedPolicyId = %q, want %q (Unconfigured() names no specific policy)", *resp.DecidedPolicyId, "")
 		}
 		// The agent and delegation legs were seeded to independently allow
 		// (see twoHopChain) — confirming the DENY really is attributable to
@@ -442,6 +577,8 @@ func TestEndToEnd(t *testing.T) {
 		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
 			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW (fixture is well-formed on this leg)", resp.GetDelegationEffect())
 		}
+
+		proof2Resp = resp
 	})
 
 	t.Run("proof3_audit_row_written_and_chain_verifies", func(t *testing.T) {
@@ -466,6 +603,67 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("audit.Verify() error = %v, want nil", err)
 		}
 		t.Logf("audit.Verify() passed over the tenant's full %d-entry chain", len(entries))
+	})
+
+	// audit_row_provenance_matches_response is the specific check that would
+	// have caught Task 2/3's seam defect. Task 2 added PolicySource/PolicyID
+	// to audit.Entry, the migration, and store.AppendAudit's carrying of
+	// them; every one of its tests passed because they all tested the
+	// plumbing — the field exists, Hash() covers it, the column is present,
+	// a chain with provenance verifies. None of them tested that a real
+	// Decide call's verdict actually reached the column, because
+	// server.go's appendAudit never read Result.Deciding at all — every real
+	// decision would have written NULL forever, silently, into an
+	// append-only table. This reads the row back with its own query,
+	// independent of proof2's in-memory resp, and compares stored bytes
+	// against returned bytes — the assertion that closes that gap.
+	t.Run("audit_row_provenance_matches_response", func(t *testing.T) {
+		if proof2Resp == nil {
+			t.Fatal("proof2Resp is nil: proof2_decide_denies_at_principal_leg must run before this subtest")
+		}
+
+		entries := fetchAuditChain(t, configuredTenant)
+		if len(entries) != 1 {
+			t.Fatalf("len(entries) = %d, want 1", len(entries))
+		}
+		got := entries[0]
+
+		wantSource, wantPolicyID := proof2Resp.GetDecidedSource(), proof2Resp.GetDecidedPolicyId()
+		t.Logf("response vs stored row: response decided_source=%q decided_policy_id=%q; stored policy_source=%q policy_id=%q",
+			wantSource, wantPolicyID, got.PolicySource, got.PolicyID)
+		if got.PolicySource != wantSource {
+			t.Errorf("stored policy_source = %q, want %q (the response's decided_source)", got.PolicySource, wantSource)
+		}
+		if got.PolicyID != wantPolicyID {
+			t.Errorf("stored policy_id = %q, want %q (the response's decided_policy_id)", got.PolicyID, wantPolicyID)
+		}
+		if got.PolicySource != "none" {
+			t.Errorf("stored policy_source = %q, want %q", got.PolicySource, "none")
+		}
+
+		// The comparison above goes through audit.Entry's plain string
+		// fields, which cannot tell "stored as ''" apart from "stored as
+		// NULL" — fetchAuditChain deliberately decodes both to the same
+		// zero value (that collapse is what keeps Hash() reproducible
+		// across the migration boundary; see the migration-boundary
+		// subtest below). That would hide the exact Task 2/3 defect: a
+		// column that is always NULL looks byte-for-byte identical, at
+		// this layer, to one that is legitimately empty. Read the raw
+		// column nullness directly instead — this is the "confirm NOT
+		// NULL in practice" check nobody had done before.
+		source, policyID := auditRowProvenance(t, configuredTenant)
+		t.Logf("raw column check: policy_source IS NOT NULL=%t value=%q, policy_id IS NOT NULL=%t value=%q",
+			source.Valid, source.String, policyID.Valid, policyID.String)
+		if !source.Valid {
+			t.Error("policy_source IS NULL, want NOT NULL — a real decision must populate it")
+		}
+		if !policyID.Valid {
+			t.Error("policy_id IS NULL, want NOT NULL (present, even though empty for Unconfigured()) — " +
+				"a real decision must populate it")
+		}
+		if source.String == "" {
+			t.Error(`policy_source stored as empty string, want a non-empty value ("none") for a real decision`)
+		}
 	})
 
 	t.Run("proof4_cross_tenant_agent_is_not_found", func(t *testing.T) {
@@ -751,6 +949,130 @@ func TestEndToEnd(t *testing.T) {
 				t.Fatalf("audit.Verify() for tenant %q error = %v, want nil", tenant, err)
 			}
 		}
+	})
+
+	// chain_verifies_across_the_migration_boundary: a chain that started
+	// before migrations/000006_audit_policy_provenance added
+	// policy_source/policy_id, migrated live while that chain already had an
+	// entry, then grew a second entry with real provenance through the real
+	// store.AppendAudit path — must still verify. audit.Link/Hash reconstruct
+	// a full Entry from whatever the tail read returns (see
+	// store.scanAuditTail's own doc comment); a column silently absent from
+	// that read — the exact shape of the Task 2/3 seam defect — changes the
+	// recomputed hash and breaks the chain invisibly, not loudly. This is a
+	// permanent, automated version of the manual proof described in the
+	// Task 2 report.
+	//
+	// A dedicated tenant that no other subtest touches: the down/up
+	// migration below changes audit_chain's SCHEMA (ALTER TABLE, not a
+	// per-row or per-tenant operation) for the window between the two
+	// Migrate calls. That is safe only because every subtest in this file
+	// runs sequentially and nothing else writes to audit_chain concurrently
+	// (see TestEndToEnd's own doc comment) — this is the one subtest that
+	// structurally depends on that rather than merely benefiting from it, so
+	// it runs late, after every other proof in this file has already
+	// completed against the real schema, and before proof6's irreversible
+	// revoke.
+	t.Run("chain_verifies_across_the_migration_boundary", func(t *testing.T) {
+		const boundaryTenant = "tenant-migration-boundary-integration"
+
+		migConn, err := sql.Open("postgres", os.Getenv("STRATIUM_IT_DATABASE_URL"))
+		if err != nil {
+			t.Fatalf("open dedicated migration connection: %v", err)
+		}
+		defer func() { _ = migConn.Close() }()
+
+		m := newMigrator(t, migConn)
+		defer func() { _, _ = m.Close() }()
+
+		restored := false
+		defer func() {
+			// Best effort: if a step below fails before the explicit
+			// migrate-up call runs, try once more to leave the schema at
+			// the latest version so a failure here doesn't cascade into
+			// every later subtest that also calls store.AppendAudit (whose
+			// INSERT always names policy_source/policy_id). The stack this
+			// test itself brought up is destroyed on the way out regardless
+			// (see Makefile's integration target) — this only limits blast
+			// radius within one run.
+			if restored {
+				return
+			}
+			if err := m.Migrate(migrationWithProvenance); err != nil {
+				t.Logf("best-effort restore to v%d after a failure in this subtest: %v", migrationWithProvenance, err)
+			}
+		}()
+
+		if err := m.Migrate(migrationBeforeProvenance); err != nil {
+			t.Fatalf("migrate down to v%d (pre-provenance): %v", migrationBeforeProvenance, err)
+		}
+		t.Logf("migrated to v%d: policy_source/policy_id do not exist", migrationBeforeProvenance)
+
+		genesis := audit.Link(nil, audit.Entry{
+			TenantID:      boundaryTenant,
+			OccurredAt:    time.Now().UTC(),
+			EventType:     "decision",
+			Actor:         "integration-test:boundary-pre-migration",
+			ToolName:      "Bash",
+			Action:        "read",
+			Decision:      "DENY",
+			DeniedLeg:     "principal",
+			DeniedAtDepth: -1,
+			Reason:        "pre-migration entry: written before policy_source/policy_id existed",
+		})
+		genesisHash := genesis.Hash()
+		withTenantTx(t, boundaryTenant, func(tx *sql.Tx) {
+			if _, err := tx.ExecContext(t.Context(), preProvenanceAuditInsertQuery,
+				genesis.TenantID, genesis.PrevHash[:], genesisHash[:], genesis.OccurredAt, genesis.EventType, genesis.Actor,
+				genesis.AgentID, genesis.DelegationID, genesis.RootDelegationID, genesis.ChainDepth,
+				genesis.ToolName, genesis.Action, genesis.DeclaredTier, genesis.DerivedTier,
+				genesis.Decision, genesis.DeniedLeg, genesis.DeniedAtDepth, genesis.Reason, genesis.InputDigest[:],
+			); err != nil {
+				t.Fatalf("insert pre-migration genesis entry: %v", err)
+			}
+		})
+		t.Logf("inserted genesis audit entry for tenant %q under the pre-migration schema (no provenance columns)", boundaryTenant)
+
+		if err := m.Migrate(migrationWithProvenance); err != nil {
+			t.Fatalf("migrate up to v%d (provenance): %v", migrationWithProvenance, err)
+		}
+		restored = true
+		t.Logf("migrated to v%d: the genesis row's new columns now read back NULL", migrationWithProvenance)
+
+		second := audit.Entry{
+			TenantID:      boundaryTenant,
+			OccurredAt:    time.Now(),
+			EventType:     "decision",
+			Actor:         "integration-test:boundary-post-migration",
+			ToolName:      "Bash",
+			Action:        "read",
+			Decision:      "DENY",
+			DeniedAtDepth: -1,
+			Reason:        "post-migration entry: real provenance through the real AppendAudit path",
+			PolicySource:  "cedar-synthetic",
+			PolicyID:      "policy-boundary-42",
+		}
+		if err := store.New(testDB, boundaryTenant).AppendAudit(t.Context(), second); err != nil {
+			t.Fatalf("AppendAudit for the post-migration entry: %v", err)
+		}
+
+		entries := fetchAuditChain(t, boundaryTenant)
+		if len(entries) != 2 {
+			t.Fatalf("len(entries) = %d, want 2 (one pre-migration, one post-migration)", len(entries))
+		}
+		if entries[0].PolicySource != "" || entries[0].PolicyID != "" {
+			t.Errorf("pre-migration entry PolicySource/PolicyID = %q/%q, want empty (NULL decoded to the zero value)",
+				entries[0].PolicySource, entries[0].PolicyID)
+		}
+		if entries[1].PolicySource != "cedar-synthetic" || entries[1].PolicyID != "policy-boundary-42" {
+			t.Errorf("post-migration entry PolicySource/PolicyID = %q/%q, want %q/%q",
+				entries[1].PolicySource, entries[1].PolicyID, "cedar-synthetic", "policy-boundary-42")
+		}
+
+		if err := audit.Verify(entries); err != nil {
+			t.Fatalf("audit.Verify() across the migration boundary error = %v, want nil", err)
+		}
+		t.Logf("audit.Verify() PASSED over a %d-entry chain spanning migrations/000006_audit_policy_provenance", len(entries))
 	})
 
 	t.Run("proof6_failed_audit_append_blocks_the_decision", func(t *testing.T) {
