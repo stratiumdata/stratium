@@ -424,8 +424,15 @@ pattern is anchored, so every read-only operation fell through to
 `INTERNAL_MODIFY`. Destructive detection was unaffected — those patterns are
 unanchored — so it failed safe, but the read/write distinction did not work.
 
-**The PEP sends both the raw `tool_input` and a normalized extraction. The PDP
-classifies each and takes the more severe result.**
+**The PEP sends both the raw `tool_input` and a normalized extraction.** Raw's
+positive pattern matches win and are never lowered; otherwise a normalized
+input that classifies is used; otherwise raw's default applies.
+
+An earlier formulation said simply "take the more severe," which does not work:
+raw JSON's `INTERNAL_MODIFY` comes from the classifier's *default* branch — "I
+do not recognise this" — so taking the max let absence of evidence override a
+correct read-only extraction, leaving the defect unfixed. A positive match is
+evidence; a default is not.
 
 The PEP knows its agent framework's schema and the PDP deliberately does not,
 so extraction belongs at the edge. Extraction is nonetheless interpretation,

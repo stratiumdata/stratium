@@ -49,8 +49,24 @@ This is the same raw-or-normalized pattern `matches()` already applies to
   object is a structural lookup, not a judgement about sensitivity — the same
   category as deriving `verb` from the tool name. No tier logic, no allowlist,
   no severity reasoning may enter the PEP.
-- **Take the more severe.** Never the extracted value alone, never the first
-  match. If raw and normalized disagree, the worse one wins.
+- **Raw's positive matches win; otherwise trust normalized.** Corrected
+  2026-08-10 after the first implementation showed "take the more severe" does
+  not fix the defect: raw JSON's `INTERNAL_MODIFY` comes from the classifier's
+  *default* branch — "I do not recognise this, assume it modifies" — which is
+  absence of evidence, not evidence. Taking the max let that default override a
+  correct read-only extraction, so every read stayed floored at tier 2 exactly
+  as before.
+
+  The rule is:
+
+  1. Raw matches a destructive or external pattern → that tier stands and is
+     never lowered. This is what keeps a lying or buggy PEP from hiding
+     `rm -rf /`.
+  2. Otherwise, if the normalized input classifies → use it.
+  3. Otherwise → raw's result, including its default.
+
+  A positive pattern match is evidence; the default is not. The original rule
+  conflated them.
 - Strict root `.golangci.yml`. `go test -race ./...`, `golangci-lint run ./...`,
   `go vet -tags integration ./...` clean before each commit.
 
@@ -76,9 +92,11 @@ correctly; **an extraction that under-reports does not lower the tier** —
 `DESTRUCTIVE`, which is the property that makes the design safe against a bad
 PEP; and an empty normalized input changes nothing.
 
-**Mutation-test and report survivors:** take the normalized result instead of
-the more severe; take the raw result only; make an empty normalized input
-suppress raw classification.
+**Mutation-test and report survivors:** take the normalized result even when
+raw matched a destructive pattern; take the raw result only; make an empty
+normalized input suppress raw classification; and — the one that catches the
+original error — restore plain "take the more severe" and confirm the
+correct-extraction test fails.
 
 ---
 
