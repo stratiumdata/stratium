@@ -72,11 +72,13 @@ type Action struct {
 
 	// NormalizedInput is a caller-supplied, best-effort extraction from
 	// RawInput (e.g. a PEP pulling "ls -la" out of {"command":"ls -la"}).
-	// BuiltinTier classifies both and returns the more severe result, so
-	// this field can only raise the derived tier, never lower it — an
-	// extraction that under-reports, or is left empty, degrades to today's
-	// raw-only behavior rather than opening a hole. See BuiltinTier's doc
-	// comment.
+	// BuiltinTier classifies both and combines them by evidence: a positive
+	// destructive-or-external match on RawInput always wins, otherwise a
+	// NormalizedInput that positively classifies is used, otherwise
+	// RawInput's own result (including its default). An extraction that
+	// under-reports, or is left empty, can only fail to raise the tier — it
+	// can never lower RawInput below what a destructive or external match on
+	// RawInput alone would produce. See BuiltinTier's doc comment.
 	NormalizedInput string
 
 	// DeclaredTier is what the caller claims. It never derives the tier — it is

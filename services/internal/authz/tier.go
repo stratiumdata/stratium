@@ -125,31 +125,50 @@ var verbTiers = map[string]models.ActionTier{
 //
 // Shell input is classified first and takes precedence over the verb: the
 // verb attached to a shell call says nothing about what the command does.
-// When both RawInput and NormalizedInput are set, each is classified
-// independently by classifyInput — identical logic, unchanged by which one
-// is being evaluated — and the more severe of the two tiers wins.
-// NormalizedInput is a caller-supplied, best-effort extraction (e.g. a PEP
-// pulling "ls -la" out of {"command":"ls -la"}); composing by "more severe
-// wins" rather than substituting it for RawInput means an extraction that
-// under-reports, or lies, can only fail to raise the tier — RawInput's own
-// classification, including the unanchored destructive and external
-// patterns classifyInput applies, runs regardless of what NormalizedInput
-// says and so cannot be suppressed by it.
+//
+// When both RawInput and NormalizedInput are set, they are combined by
+// evidence, not by severity:
+//
+//  1. If RawInput positively matches a destructive or external pattern,
+//     that tier stands and is never lowered — this is what stops a lying or
+//     buggy PEP from hiding "rm -rf /" behind a claimed-safe extraction.
+//  2. Otherwise, if NormalizedInput positively classifies (matches some
+//     pattern rather than falling through to classifyInput's "unrecognized
+//     -> assume it modifies" default), its tier is used.
+//  3. Otherwise, RawInput's own result is used, including its default.
+//
+// A positive pattern match is evidence; falling through to the default is
+// not. Taking the plain maximum of the two — the previous rule — conflated
+// them: an opaque JSON RawInput blob (e.g. {"command":"ls -la"}) never
+// positively matches anything, so it always fell to the INTERNAL_MODIFY
+// default, and INTERNAL_MODIFY outranks READ_ONLY. That let the
+// worse-informed default override a correct, more specific NormalizedInput
+// extraction, flooring every read at tier 2 regardless of what
+// NormalizedInput said. See tier_test.go's NormalizedInputComposes* cases
+// and docs/superpowers/plans/2026-08-10-phase-3b-normalized-input.md.
 func BuiltinTier(a Action) (models.ActionTier, bool) {
-	tier := models.ActionTierReasoning
-	classified := false
+	var rawTier models.ActionTier
+	var rawMatched, haveRaw bool
 	if a.RawInput != "" {
-		tier = classifyInput(a.RawInput)
-		classified = true
+		rawTier, rawMatched = classifyInput(a.RawInput)
+		haveRaw = true
 	}
+
+	// Step 1: a positive destructive-or-external match on raw is final.
+	if rawMatched && (rawTier == models.ActionTierDestructive || rawTier == models.ActionTierExternalComms) {
+		return rawTier, true
+	}
+
+	// Step 2: a normalized input that positively classifies wins.
 	if a.NormalizedInput != "" {
-		if t := classifyInput(a.NormalizedInput); !classified || t > tier {
-			tier = t
+		if normTier, normMatched := classifyInput(a.NormalizedInput); normMatched {
+			return normTier, true
 		}
-		classified = true
 	}
-	if classified {
-		return tier, true
+
+	// Step 3: raw's own result, including its default.
+	if haveRaw {
+		return rawTier, true
 	}
 	if t, ok := verbTiers[strings.ToLower(a.Verb)]; ok {
 		return t, true
@@ -158,10 +177,13 @@ func BuiltinTier(a Action) (models.ActionTier, bool) {
 }
 
 // classifyInput applies the shell-pattern heuristics to a single input
-// string. BuiltinTier calls this once for RawInput and once for
-// NormalizedInput — the logic itself does not know or care which one it was
-// handed.
-func classifyInput(s string) models.ActionTier {
+// string, reporting both the tier and whether a pattern was positively
+// matched (evidence) as opposed to falling through to the "unrecognized ->
+// assume it modifies" default (absence of evidence) — BuiltinTier's
+// combining rule treats those two cases differently. BuiltinTier calls this
+// once for RawInput and once for NormalizedInput — the logic itself does
+// not know or care which one it was handed.
+func classifyInput(s string) (tier models.ActionTier, matched bool) {
 	// Match against the normalized form so quoting and ${IFS} cannot break
 	// the adjacency the patterns rely on. Check the raw form too:
 	// normalization only ever adds matches, never removes them.
@@ -171,21 +193,22 @@ func classifyInput(s string) models.ActionTier {
 	}
 	switch {
 	case matches(reDestructive):
-		return models.ActionTierDestructive
+		return models.ActionTierDestructive, true
 	case matches(reSQLContext) && matches(reDestructiveSQL):
-		return models.ActionTierDestructive
+		return models.ActionTierDestructive, true
 	case matches(reExternal):
-		return models.ActionTierExternalComms
+		return models.ActionTierExternalComms, true
 	case reCompound.MatchString(s):
 		// Compound: the leading token is not the whole story, so READ_ONLY
 		// is not available. Destructive and external already had their say.
-		return models.ActionTierInternalModify
+		return models.ActionTierInternalModify, true
 	case reReadOnly.MatchString(s):
-		return models.ActionTierReadOnly
+		return models.ActionTierReadOnly, true
 	default:
 		// An unrecognized string is assumed to modify. It is not read-only
-		// merely because no pattern matched.
-		return models.ActionTierInternalModify
+		// merely because no pattern matched — and that assumption is not
+		// evidence, so matched is false.
+		return models.ActionTierInternalModify, false
 	}
 }
 

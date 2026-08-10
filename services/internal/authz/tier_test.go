@@ -191,25 +191,26 @@ func TestBuiltinTier_JSONRawInputAlone(t *testing.T) {
 	}
 }
 
-// A correct NormalizedInput extraction composes with RawInput by "more
-// severe wins," not by replacing it — so it can only raise what RawInput's
-// own classification already produces, never lower it. For "rm -rf /" that
-// is a no-op: raw alone already lands on DESTRUCTIVE. For the read-only
-// commands, raw's classification of the opaque JSON blob floors at
-// INTERNAL_MODIFY regardless of what the correct, more specific extraction
-// says, because INTERNAL_MODIFY outranks READ_ONLY. That is the design
-// working as specified (BuiltinTier's doc comment, and the under-reporting
-// test below), not a gap this task leaves open: resolving the read cases
-// down to READ_ONLY would require RawInput's own default to change, which
-// this task deliberately does not touch.
+// A correct NormalizedInput extraction is evidence, and evidence beats a
+// default. RawInput's own classification of an opaque JSON blob never
+// positively matches a pattern — the anchored read-only regexp cannot match
+// a `{`-leading string — so it falls through to classifyInput's
+// "unrecognized -> assume it modifies" default. That default is absence of
+// evidence, not a competing classification, so it must not outrank a
+// NormalizedInput that positively matches READ_ONLY. Plain "take the more
+// severe of the two" gets this wrong, because INTERNAL_MODIFY (the default)
+// outranks READ_ONLY — that was the original defect this task fixes: every
+// JSON-wrapped read stayed floored at tier 2 forever. The rm -rf / case is
+// unaffected by any of this: RawInput's own unanchored destructive match
+// already lands on DESTRUCTIVE without help from NormalizedInput.
 func TestBuiltinTier_NormalizedInputComposesWithJSONRawInput(t *testing.T) {
 	cases := []struct {
 		raw, normalized string
 		want            models.ActionTier
 	}{
 		{`{"command":"rm -rf /"}`, "rm -rf /", models.ActionTierDestructive},
-		{`{"command":"ls -la"}`, "ls -la", models.ActionTierInternalModify},
-		{`{"command":"cat /etc/hosts"}`, "cat /etc/hosts", models.ActionTierInternalModify},
+		{`{"command":"ls -la"}`, "ls -la", models.ActionTierReadOnly},
+		{`{"command":"cat /etc/hosts"}`, "cat /etc/hosts", models.ActionTierReadOnly},
 	}
 	for _, c := range cases {
 		t.Run(c.raw, func(t *testing.T) {
@@ -218,6 +219,31 @@ func TestBuiltinTier_NormalizedInputComposesWithJSONRawInput(t *testing.T) {
 				t.Fatalf("raw %q normalized %q: got %v (ok=%v), want %v", c.raw, c.normalized, got, ok, c.want)
 			}
 		})
+	}
+}
+
+// A bare path is not a command, and the classifier has no pattern for one:
+// RawInput's JSON wrapper falls through to the default (no positive match),
+// and NormalizedInput's bare path ALSO falls through to the default (it
+// matches none of reDestructive/reSQLContext/reExternal/reCompound/
+// reReadOnly). With neither side offering positive evidence, step 2 does
+// not apply — NormalizedInput did not "classify" in the sense that matters
+// — so the result is RawInput's own default, INTERNAL_MODIFY, exactly as if
+// NormalizedInput had been absent. Decision, stated explicitly rather than
+// left to fall out silently: a bare path gets no special-cased tier here;
+// inventing one (e.g. treating it as READ_ONLY because "it looks like a
+// file" or suppressing raw's default) would be evidence the classifier
+// never produced. A PEP that wants file reads to classify precisely should
+// extract a command, not a path.
+func TestBuiltinTier_BarePathNeitherInputMatchesAPattern(t *testing.T) {
+	got, ok := BuiltinTier(Action{
+		Tool:            "Bash",
+		RawInput:        `{"file_path":"/tmp/x"}`,
+		NormalizedInput: "/tmp/x",
+	})
+	if !ok || got != models.ActionTierInternalModify {
+		t.Fatalf("got %v (ok=%v), want INTERNAL_MODIFY: neither input positively matches a pattern, "+
+			"so the result falls through to raw's own default", got, ok)
 	}
 }
 
