@@ -123,6 +123,15 @@ type StoredPolicy struct {
 }
 ```
 
+**Where the contract lives.** Put `EngineContract` in a small
+`services/internal/policy/policytest` package, in a **non-test** file. A
+contract defined in `engine_test.go` is reachable only from test files inside
+`package policy` itself — Go excludes `_test.go` files from what other packages
+may import — so Cedar in a subpackage could not call it, and every engine would
+end up writing its own tests. That is precisely the drift a shared contract
+exists to prevent. The `httptest` package is the same pattern for the same
+reason.
+
 **Tests** are contract tests a later engine can reuse: a nil/empty policy list
 prepares to a set that evaluates to zero verdicts (not an error — no policies
 means nothing to say, and default-deny handles it downstream); `Validate`
@@ -151,7 +160,8 @@ result is not an error.
 
 ## Task 4 — The Cedar engine
 
-**Files:** `services/internal/policy/cedar/` and its tests. Add
+**Files:** `services/internal/policy/cedar/` and its tests, which must run
+against `policytest.EngineContract` rather than reimplementing it. Add
 `github.com/cedar-policy/cedar-go` (the old repo used v1.6.0; use the current
 release and record which).
 
