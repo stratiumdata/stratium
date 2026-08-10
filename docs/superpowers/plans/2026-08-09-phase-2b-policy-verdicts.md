@@ -59,12 +59,20 @@ Replace `Request.PrincipalDecision LegResult` with
 ```go
 // FoldVerdicts combines policy verdicts with deny-overrides and default-deny.
 //
-//  1. any deny            -> DENY
-//  2. otherwise no allow  -> DENY (default-deny)
-//  3. otherwise any escalate -> ESCALATE
-//  4. otherwise           -> ALLOW
+//  1. any deny               -> DENY
+//  2. otherwise any escalate -> ESCALATE
+//  3. otherwise no allow     -> DENY (default-deny)
+//  4. otherwise              -> ALLOW
 //
-// Step 2 is what preserves the invariant that an unevaluated principal leg
+// Escalate is checked BEFORE default-deny because an escalate is a grant with
+// a condition attached — "allow, pending human approval" — so it satisfies the
+// "something granted this" requirement that default-deny tests for. With the
+// checks the other way round, a policy whose only outcome is escalate produces
+// a flat DENY and the rule is dead code, which is not a conservative default
+// but a broken feature. Corrected 2026-08-09 after the original ordering was
+// found to make a bare escalate inert.
+//
+// Step 3 is what preserves the invariant that an unevaluated principal leg
 // denies. It used to hold because LegResult's zero value was EffectDeny; it
 // now holds because a nil slice contains no allow. Same guarantee, different
 // mechanism — which is why it is pinned by its own test rather than assumed
