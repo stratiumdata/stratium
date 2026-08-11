@@ -29,6 +29,7 @@ import "encoding/json"
 // policyJSON is the document (*cedarlib.Policy).MarshalJSON produces.
 type policyJSON struct {
 	Principal  scopeJSON       `json:"principal"`
+	Action     scopeJSON       `json:"action"`
 	Resource   scopeJSON       `json:"resource"`
 	Conditions []conditionJSON `json:"conditions"`
 }

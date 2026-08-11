@@ -91,6 +91,18 @@ var deadFormContextKindReferenceInput = policy.EvaluationInput{
 	Delegation: policy.DelegationContext{Depth: 2},
 }
 
+// deadFormActionScopeLiveInput is the LiveInput for the two action-scope
+// entries below — the fix for the whole-branch review's Important finding
+// that checkScopeEntityType was only ever called for the principal and
+// resource slots, never action, so `action == Widget::"Bash"` and
+// `action == User::"Bash"` both validated, prepared, and could never
+// match. Action.Tool is the only field buildRequest reads to build the
+// action entity (request.go's buildRequest).
+var deadFormActionScopeLiveInput = policy.EvaluationInput{
+	Principal: authz.Principal{Subject: "alice"},
+	Action:    authz.Action{Tool: "Bash"},
+}
+
 // deadForms is every dead shape this package rejects at authoring time.
 // The original nine are Task 2's — see deadform.go's package doc for why
 // those nine (of the thirteen the task 2 brief audited) needed new checks,
@@ -105,13 +117,14 @@ var deadFormContextKindReferenceInput = policy.EvaluationInput{
 // same-shape literal edit (see deadFormUnlessLiveInput's own doc comment
 // for why 1 == 1, the when-side fixture's own trick, does not work here).
 //
-// The two groups appended after the original nine are the whole-branch
-// review's own findings, both the same class the review named them as (see
-// this package's own doc comment): "unless:" (Critical: dead forms
-// silently widened rather than killed a policy when the enclosing clause
-// was "unless" instead of "when"), and "context field kind:" (Important:
+// The three groups appended after the original nine are the whole-branch
+// review's own three findings, all three the same class the review named
+// them as (see this package's own doc comment): "unless:" (Critical: dead
+// forms silently widened rather than killed a policy when the enclosing
+// clause was "unless" instead of "when"), "context field kind:" (Important:
 // knownTierVocabulary's two paths left every other closed-kind context
-// field uncovered).
+// field uncovered), and the two action-scope entries (Important:
+// checkScopeEntityType was never called for the action slot).
 func deadForms() []policytest.DeadForm {
 	return []policytest.DeadForm{
 		{
@@ -286,6 +299,24 @@ func deadForms() []policytest.DeadForm {
 			Dead:      `forbid(principal, action, resource) when { context.agent.allowed_tools == "Bash" };`,
 			Live:      `forbid(principal, action, resource) when { context.agent.allowed_tools.contains("Bash") };`,
 			LiveInput: deadFormContextKindReferenceInput,
+		},
+
+		// --- Important: checkScopeEntityType was called for principal and
+		// resource but never action, so a scope naming the wrong entity
+		// type in the action slot validated, prepared, and could never
+		// match — the same defect "unknown entity type" and "wrong
+		// principal type" above already cover for principal.
+		{
+			Name:      "unknown action entity type",
+			Dead:      `permit(principal, action == Widget::"Bash", resource);`,
+			Live:      `permit(principal, action == Action::"Bash", resource);`,
+			LiveInput: deadFormActionScopeLiveInput,
+		},
+		{
+			Name:      "wrong action entity type",
+			Dead:      `permit(principal, action == User::"Bash", resource);`,
+			Live:      `permit(principal, action == Action::"Bash", resource);`,
+			LiveInput: deadFormActionScopeLiveInput,
 		},
 	}
 }

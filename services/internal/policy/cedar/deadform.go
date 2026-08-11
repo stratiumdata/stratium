@@ -214,6 +214,9 @@ func checkDeadForms(parsed *cedarlib.Policy) error {
 	if err := checkScopeEntityType("principal", doc.Principal, string(entityTypeUser)); err != nil {
 		return err
 	}
+	if err := checkScopeEntityType("action", doc.Action, string(entityTypeAction)); err != nil {
+		return err
+	}
 	if err := checkScopeEntityType("resource", doc.Resource, string(entityTypeResource)); err != nil {
 		return err
 	}
@@ -246,33 +249,44 @@ func checkDeadForms(parsed *cedarlib.Policy) error {
 	return nil
 }
 
-// checkScopeEntityType rejects a principal or resource scope clause naming
-// an entity type buildRequest (request.go) could never produce in that
-// slot. buildRequest assigns User/Resource/Action to the
-// principal/resource/action slots unconditionally, from EvaluationInput
+// checkScopeEntityType rejects a principal, action, or resource scope clause
+// naming an entity type buildRequest (request.go) could never produce in
+// that slot. buildRequest assigns User/Action/Resource to the
+// principal/action/resource slots unconditionally, from EvaluationInput
 // alone, never from anything a policy says — so a single test, "is gotType
 // exactly the one type this slot is ever constructed as," is both necessary
 // and sufficient on its own: it rejects a type this engine has never heard
-// of at all ("unknown entity type": Usr) exactly the same way it rejects a
-// real Cedar type used in the wrong slot ("wrong principal type": Resource
-// is a real type, just never the *principal*'s), because neither is ever
-// equal to wantType. An earlier version of this check split those into two
-// separate conditions — "is gotType known at all" and "does gotType match
-// this slot" — reasoning they were different defects; mutation testing
-// this file (see the task report) proved the first was redundant in
-// practice: wantType is always itself a known type, so anything that fails
-// the first condition necessarily fails the second too, and no fixture
-// existed (or could exist) that isolated the first from the second. Kept
-// simple rather than restored, per this task's own instruction: over-
-// rejection is the risk to guard against here, not under-documentation of
-// a distinction with no behavioural difference.
+// of at all ("unknown entity type": Usr, or Widget for action) exactly the
+// same way it rejects a real Cedar type used in the wrong slot ("wrong
+// principal type": Resource is a real type, just never the *principal*'s;
+// "wrong action type": User is real, just never the *action*'s), because
+// neither is ever equal to wantType. An earlier version of this check split
+// those into two separate conditions — "is gotType known at all" and "does
+// gotType match this slot" — reasoning they were different defects;
+// mutation testing this file (see the task report) proved the first was
+// redundant in practice: wantType is always itself a known type, so
+// anything that fails the first condition necessarily fails the second too,
+// and no fixture existed (or could exist) that isolated the first from the
+// second. Kept simple rather than restored, per this task's own
+// instruction: over-rejection is the risk to guard against here, not
+// under-documentation of a distinction with no behavioural difference.
+//
+// checkDeadForms calls this once per scope slot — principal, action,
+// resource — the same check, just aimed at a different slot and wantType
+// each time; there being three call sites rather than two used to be a gap
+// in coverage (action's own scope clause went unchecked entirely), not a
+// reason this function needed a fourth parameter or a different shape.
 //
 // Scoped to the "==" and "is" scope operators only, the two shapes that
 // pin a slot to a single named type. "in" and "is ... in" describe group
 // membership against an entity hierarchy this engine does not model at all
 // today — see engine.go's package doc, "agent and delegation become context
 // attributes, not entities" — so they are left alone here; extend this
-// check if that changes.
+// check if that changes. Action's own grammar does not even accept "is"
+// (confirmed empirically: `action is Widget` fails to parse), so the "is"
+// branch below is only ever live for principal and resource — harmless to
+// leave shared rather than split, since a slot whose JSON never uses "is"
+// is exactly what the sc.EntityType == "" guard already handles.
 func checkScopeEntityType(slot string, sc scopeJSON, wantType string) error {
 	var gotType string
 	switch sc.Op {
