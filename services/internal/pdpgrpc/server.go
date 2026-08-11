@@ -71,40 +71,29 @@ type Server struct {
 	store Store
 
 	// policy decides the principal leg for Decide (one action, one
-	// evaluation). policySource/policyEngine are the raw ingredients
-	// CreateDelegation (delegation.go) prepares into a policy.CompiledPolicySet
-	// itself, once per call, rather than going through policy:
-	// PrincipalPolicy.Evaluate decides a single action and has no way to hand
-	// back a compiled set for Clamp to probe several times over.
-	policy       policy.PrincipalPolicy
-	policySource policy.PolicySource
-	policyEngine policy.PolicyEngine
+	// evaluation, via Evaluate) and also backs CreateDelegation's grant
+	// probes (delegation.go), which need a policy.CompiledPolicySet to
+	// probe several times over for one grant request rather than a single
+	// per-action verdict — policy.Multi's PrepareAll is what supplies that,
+	// so both RPCs are served from this one field. Earlier this was a
+	// policy.PrincipalPolicy plus a raw PolicySource/PolicyEngine pair
+	// CreateDelegation prepared itself, because policy.Configured (the
+	// single-engine predecessor) had no way to hand back a compiled set
+	// through the PrincipalPolicy interface it returned. policy.Multi
+	// exposes PrepareAll directly, so that pair — and the single-language
+	// assumption it carried — is gone rather than fixed twice.
+	policy policy.Multi
 
 	cfg config.Config
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum
 // delegation depth; both are startup configuration, never per-request.
-//
-// policySource/policyEngine back CreateDelegation's grant probes. In
-// production both are satisfied by the same values principalPolicy is
-// itself built from (see cmd/stratium-pdp/main.go) — policy.Configured does
-// not expose them back out through the PrincipalPolicy interface it
-// returns, so the caller supplies them again here rather than pdpgrpc
-// reaching into policy's unexported configured type.
-func NewServer(
-	store Store,
-	principalPolicy policy.PrincipalPolicy,
-	policySource policy.PolicySource,
-	policyEngine policy.PolicyEngine,
-	cfg config.Config,
-) *Server {
+func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config) *Server {
 	return &Server{
-		store:        store,
-		policy:       principalPolicy,
-		policySource: policySource,
-		policyEngine: policyEngine,
-		cfg:          cfg,
+		store:  store,
+		policy: principalPolicy,
+		cfg:    cfg,
 	}
 }
 

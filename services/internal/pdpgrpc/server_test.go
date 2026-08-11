@@ -84,9 +84,9 @@ func testConfig() config.Config {
 }
 
 // wellFormedFixture returns a fake store and request that, evaluated
-// together against the real policy.Unconfigured(), clear every leg except
-// the principal: the agent is enabled and trusted, the one-hop chain is
-// active and within scope. Only Unconfigured()'s unconditional deny stops
+// together against a denyAllPolicy() Multi, clear every leg except the
+// principal: the agent is enabled and trusted, the one-hop chain is active
+// and within scope. Only the principal policy's unconditional deny stops
 // this from being a "well-formed request that reaches ALLOW" fixture — which
 // this slice cannot produce (see the plan's ledger); DENY-at-principal is
 // the expected reachable decision.
@@ -122,17 +122,6 @@ func wellFormedFixture() (*fakeStore, *DecideRequest) {
 	return fs, req
 }
 
-// emptyPolicy consults no policy at all: Evaluate returns nil. It exercises
-// the default-deny-with-no-verdict path (authz.Result.Deciding is nil), which
-// is distinct from policy.Unconfigured()'s case (Deciding is non-nil and its
-// Source/PolicyID happen to be "none"/""). The response's provenance fields
-// must tell these apart rather than collapsing both to empty strings.
-type emptyPolicy struct{}
-
-func (emptyPolicy) Evaluate(context.Context, policy.EvaluationInput) []authz.PolicyVerdict {
-	return nil
-}
-
 func wantCode(t *testing.T, err error, want codes.Code) {
 	t.Helper()
 	if err == nil {
@@ -147,20 +136,57 @@ func wantCode(t *testing.T, err error, want codes.Code) {
 	}
 }
 
-// Every NewServer(...) call in this file passes nil, nil for
-// policySource/policyEngine: those two only back CreateDelegation's grant
-// probes (delegation_test.go), and Decide never reads them, so a nil
-// interface value is a safe, honest "unused by this test" rather than a
-// fake that would never be exercised.
+// denyAllPolicy returns a policy.Multi with an empty registry and a source
+// reporting no policies at all — every test in this file that only exercises
+// Decide and does not care which specific deny reason comes back uses this.
+// It is the policy.Multi-shaped equivalent of the old policy.Unconfigured()
+// fixture: NewServer now needs PrepareAll (CreateDelegation's grant probes
+// need it, see server.go's own doc comment on the policy field), which a
+// bare policy.PrincipalPolicy like Unconfigured() does not expose, so a
+// Server can no longer be built directly from Unconfigured(). Unconfigured()
+// itself is unaffected and still independently tested by
+// TestUnconfigured_Denies in internal/policy — this package never asserted
+// anything about Unconfigured() that a zero-policy Multi does not equally
+// prove about Server.Decide's plumbing (deny, attributed to principal, with
+// a non-empty reason and a "none" source, exercised at
+// TestDecide_ProvenanceReflectsZeroPoliciesVerdict below).
+func denyAllPolicy() policy.Multi {
+	return policy.NewMulti(fakeAllPolicySource{}, policy.Registry{})
+}
+
+// noOpinionPolicy returns a policy.Multi with one registered engine that has
+// a policy but never matches anything: Evaluate always returns zero
+// verdicts, not an error. This is the Multi-shaped equivalent of the old
+// emptyPolicy{} fixture (a PrincipalPolicy whose Evaluate returned a bare nil
+// slice directly) — the scenario TestDecide_NoVerdictLeavesProvenanceUnset
+// needs is "a real evaluation ran and had nothing to say," which is a
+// different, more specific case than denyAllPolicy()'s "nothing was even
+// loaded" (see policy.Multi's own doc comment on why those two verdicts
+// differ).
+func noOpinionPolicy() policy.Multi {
+	return policy.NewMulti(
+		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "p1", Language: fakeLanguage}}},
+		policy.Registry{fakeLanguage: fakePolicyEngine{set: nilVerdictSet{}}},
+	)
+}
+
+// nilVerdictSet is a policy.CompiledPolicySet that always evaluates to zero
+// verdicts and no error — an engine that ran and had nothing to say, as
+// opposed to one that was never consulted at all.
+type nilVerdictSet struct{}
+
+func (nilVerdictSet) Evaluate(context.Context, policy.EvaluationInput) ([]authz.PolicyVerdict, error) {
+	return nil, nil
+}
 
 // A well-formed request reaches a decision: DENY, attributed to principal,
-// since policy.Unconfigured() is unconditional. This also exercises the
+// since denyAllPolicy() has nothing configured. This also exercises the
 // tenant plumbing end to end — if the server sourced the tenant from
 // anywhere but cfg, the chain's TenantID would mismatch and ValidateChain
 // would deny at "delegation" instead, failing the DeniedLeg assertion below.
 func TestDecide_WellFormedRequestReachesADecision(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -194,7 +220,7 @@ func TestDecide_WellFormedRequestReachesADecision(t *testing.T) {
 // EFFECT_ALLOW back means the field was never wired.
 func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -210,7 +236,7 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 		t.Errorf("PrincipalEffect = %v, want EFFECT_DENY", resp.GetPrincipalEffect())
 	}
 	if resp.GetPrincipalReason() == "" {
-		t.Error("PrincipalReason is empty, want Unconfigured()'s reason")
+		t.Error("PrincipalReason is empty, want denyAllPolicy()'s reason")
 	}
 	if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
 		t.Errorf("DerivedTier = %d, want %d (READ_ONLY)", resp.GetDerivedTier(), models.ActionTierReadOnly)
@@ -226,7 +252,7 @@ func TestDecide_NormalizedInputReachesDerivation(t *testing.T) {
 	fs, req := wellFormedFixture()
 	req.RawInput = "ls"
 	req.NormalizedInput = "rm -rf /"
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -250,7 +276,7 @@ func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
 	req.Tool = "Read"
 	req.Verb = ""
 	req.RawInput = "/tmp/notes.txt"
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -262,15 +288,15 @@ func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
 	}
 }
 
-// The response's provenance fields must carry policy.Unconfigured()'s
+// The response's provenance fields must carry the principal policy's
 // specific reason and source through, not FoldVerdicts's generic
 // "default deny: no policy verdict allowed" text — that is the entire point
-// of Unconfigured() returning one verdict instead of zero (see the package
-// doc on policy.Unconfigured).
-func TestDecide_ProvenanceReflectsUnconfiguredVerdict(t *testing.T) {
-	const wantReason = "principal: no policy engine configured (Phase 2)"
+// of a zero-policies Multi returning one verdict instead of zero (see
+// multiSet.Evaluate's own doc comment in internal/policy/multi.go).
+func TestDecide_ProvenanceReflectsZeroPoliciesVerdict(t *testing.T) {
+	const wantReason = "principal: no policies configured for this tenant"
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -288,9 +314,9 @@ func TestDecide_ProvenanceReflectsUnconfiguredVerdict(t *testing.T) {
 	if got := resp.GetDecidedSource(); got != "none" {
 		t.Errorf("DecidedSource = %q, want %q", got, "none")
 	}
-	// PolicyID is legitimately empty for Unconfigured() — the field must
-	// still be present (non-nil) to prove it was populated from a real
-	// Deciding verdict, not left unset.
+	// PolicyID is legitimately empty for a zero-policies Multi verdict — the
+	// field must still be present (non-nil) to prove it was populated from a
+	// real Deciding verdict, not left unset.
 	if resp.DecidedPolicyId == nil {
 		t.Fatal("DecidedPolicyId is unset, want present (empty string)")
 	}
@@ -316,11 +342,11 @@ func TestDecide_ProvenanceReflectsUnconfiguredVerdict(t *testing.T) {
 // to a verdict deciding it whose Source/PolicyID happen to be empty. The
 // response must leave DecidedSource/DecidedPolicyId unset (nil pointers) in
 // that case, not populate them with zero-valued strings that would be
-// indistinguishable from TestDecide_ProvenanceReflectsUnconfiguredVerdict's
+// indistinguishable from TestDecide_ProvenanceReflectsZeroPoliciesVerdict's
 // PolicyID case above.
 func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, emptyPolicy{}, nil, nil, testConfig())
+	srv := NewServer(fs, noOpinionPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -354,7 +380,7 @@ func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
 func TestDecide_UnknownAgent_NotFound(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.agentErr = fmt.Errorf("%w: agent %s", store.ErrNotFound, req.GetAgentId())
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
@@ -366,7 +392,7 @@ func TestDecide_UnknownAgent_NotFound(t *testing.T) {
 func TestDecide_UnknownDelegation_NotFound(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.chainErr = fmt.Errorf("%w: delegation %s", store.ErrNotFound, req.GetDelegationId())
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
@@ -396,7 +422,7 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fs, req := wellFormedFixture()
 			mutate(req)
-			srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+			srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 			resp, err := srv.Decide(context.Background(), req)
 			if resp != nil {
@@ -413,15 +439,15 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 // This is the D3 guarantee under test: a failed audit write must return an
 // error and never a decision, ALLOW least of all. The assertion is written
 // against the server's contract (resp is strictly nil on any audit error),
-// not against today's policy — Unconfigured() means the underlying decision
+// not against today's policy — denyAllPolicy() means the underlying decision
 // here is already DENY, so this fixture cannot exercise an internally
 // computed ALLOW being suppressed, but the contract this proves ("no
 // DecideResponse escapes on audit failure") is exactly what stops one from
-// escaping the day Phase 2 wires in a policy engine that can allow.
+// escaping the day a policy engine wires in a language that can allow.
 func TestDecide_AuditWriteFailure_ReturnsErrorNotDecision(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.appendErr = errors.New("disk full")
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err == nil {
@@ -455,7 +481,7 @@ func TestToProtoEffect(t *testing.T) {
 func TestDecide_ConcurrentAuditAppend_Aborted(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.appendErr = fmt.Errorf("wrapped: %w", store.ErrConcurrentAppend)
-	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {

@@ -96,20 +96,25 @@ func run(logger *slog.Logger) error {
 
 	repo := store.New(db, cfg.TenantID)
 
-	// policy.Configured, not Unconfigured: Phase 2c wires a real engine.
-	// Cedar loads and prepares this tenant's policies fresh on every Decide
+	// policy.Multi, not Unconfigured: a real engine is wired in. Registry
+	// currently holds only Cedar — Rego, JSON, and XACML are later tasks —
+	// but Multi is what closes spec defect D10 even with a registry of one:
+	// a tenant whose policies.language is anything other than "cedar" now
+	// gets an honest deny naming that language (see Multi's own doc comment
+	// in internal/policy/multi.go), where the single-engine policy.Configured
+	// this replaced would have silently never loaded or evaluated it at all.
+	// Multi loads and prepares this tenant's policies fresh on every Decide
 	// call (no cache — see the Phase 2c plan's "caching is deliberately out
-	// of scope" and Task 5's measurement of why). A tenant with no cedar
-	// policies stored still denies at the principal leg, just as Unconfigured
-	// always did; Unconfigured itself remains for a deployment that wants no
-	// policy engine at all. repo satisfies both Store (pdpgrpc's own
-	// dependency interface) and policy.PolicySource structurally — repo and
-	// engine are each passed twice below: once wrapped in policy.Configured
-	// for Decide's PrincipalPolicy, once raw for CreateDelegation's own
-	// per-call policy-set preparation (see pdpgrpc.NewServer's doc comment
-	// for why it needs both) — no adapter needed either way.
-	engine := cedar.New()
-	srv := pdpgrpc.NewServer(repo, policy.Configured(repo, engine), repo, engine, cfg)
+	// of scope" and Task 5's measurement of why). A tenant with no policies
+	// stored still denies at the principal leg, just as Unconfigured always
+	// did; Unconfigured itself remains for a deployment that wants no policy
+	// engine at all. repo satisfies both Store (pdpgrpc's own dependency
+	// interface) and policy.AllPolicySource structurally, so it needs no
+	// adapter to serve both — and Multi itself now supplies pdpgrpc's
+	// CreateDelegation gate with a compiled set via PrepareAll, so repo and
+	// an engine no longer need to be passed to NewServer a second time raw.
+	registry := policy.Registry{"cedar": cedar.New()}
+	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg)
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -129,8 +134,9 @@ func run(logger *slog.Logger) error {
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
 
 	logger.Info("stratium-pdp starting", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr)
-	logger.Info("principal policy: cedar engine, policies loaded fresh from the store on every decision " +
-		"(no cache); a tenant with none stored still denies at the principal leg")
+	logger.Info("principal policy: multi-engine (registered: cedar), policies loaded fresh from the store " +
+		"on every decision (no cache); a tenant with none stored still denies at the principal leg, and a " +
+		"policy authored in an unregistered language denies naming that language rather than being skipped")
 
 	return serve(logger, grpcServer, lis)
 }

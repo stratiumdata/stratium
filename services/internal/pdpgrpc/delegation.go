@@ -3,7 +3,6 @@ package pdpgrpc
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,7 +123,20 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		parent = chain[len(chain)-1]
 	}
 
-	set, err := s.prepareGrantSet(ctx)
+	// s.policy.PrepareAll compiles this tenant's full, multi-language policy
+	// set once, so Clamp's tier walk and per-tool probes (each a call to
+	// policy.Probe) all evaluate against the same compiled set instead of
+	// recompiling per probe — the same per-request recompilation spec defect
+	// D5 already ruled out for Decide's own principal-policy path (see
+	// policy.PolicyEngine's own doc comment: "Prepare is that compile-once
+	// step"). Any non-nil err here is treated as blocking, even though
+	// policy.Multi.PrepareAll can also return a non-nil err alongside a
+	// still-usable set (a partial per-language prepare failure — see its own
+	// doc comment): folding that into PermissionDenied instead would
+	// misreport "we could not fully ask" as "you may not hold this" to
+	// anything watching gRPC status codes, so it stays Internal here exactly
+	// as a total load failure does.
+	set, err := s.policy.PrepareAll(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "prepare policy set: %s", err)
 	}
@@ -200,34 +212,6 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		DelegationId: d.ID.String(),
 		GrantedScope: toProtoGrantedScope(granted),
 	}, nil
-}
-
-// prepareGrantSet loads and compiles this tenant's policy set once, so
-// Clamp's tier walk and per-tool probes (each a call to policy.Probe) all
-// evaluate against the same compiled set instead of recompiling per probe —
-// the same per-request recompilation spec defect D5 already ruled out for
-// Decide's own principal-policy path (see policy.PolicyEngine's own doc
-// comment: "Prepare is that compile-once step").
-//
-// Unlike policy.Configured's Evaluate, a failure here is returned as an
-// error rather than folded into a deny verdict: Evaluate can only fold,
-// because PrincipalPolicy's signature has no error channel at all, but this
-// method does, and folding a policy-engine outage into PermissionDenied
-// would misreport "we could not ask" as "you may not hold this" to anything
-// watching gRPC status codes. A per-probe failure, once set exists, is a
-// different case — that is exactly what authz.ClampReasonProbeError is for,
-// and it stays inside Clamp's own fail-closed, silently-recorded path
-// rather than surfacing here.
-func (s *Server) prepareGrantSet(ctx context.Context) (policy.CompiledPolicySet, error) {
-	policies, err := s.policySource.LoadPolicies(ctx, s.policyEngine.Language())
-	if err != nil {
-		return nil, fmt.Errorf("load %s policies: %w", s.policyEngine.Language(), err)
-	}
-	set, err := s.policyEngine.Prepare(ctx, policies)
-	if err != nil {
-		return nil, fmt.Errorf("prepare %s policies: %w", s.policyEngine.Language(), err)
-	}
-	return set, nil
 }
 
 // appendDelegationAudit records d's creation. Unlike appendAudit (server.go,

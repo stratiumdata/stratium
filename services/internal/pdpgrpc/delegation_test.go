@@ -49,30 +49,42 @@ func (g *grantSet) Evaluate(_ context.Context, in policy.EvaluationInput) ([]aut
 	return []authz.PolicyVerdict{{Effect: authz.EffectDeny, Source: "fake"}}, nil
 }
 
-// fakePolicySource/fakePolicyEngine hand prepareGrantSet a fixed
-// policy.CompiledPolicySet directly, so a test controls exactly what
-// policy.Probe answers without a real engine. prepareCalls counts Prepare
-// invocations (not Evaluate — that is grantSet.evaluateCalls) so a test can
-// pin "one compile per CreateDelegation call," the reason NewServer takes
-// policySource/policyEngine at all rather than recompiling inside the
-// allows closure Clamp calls per probe (see delegation.go's prepareGrantSet
-// doc comment).
-type fakePolicySource struct{ loadErr error }
+// fakeLanguage is the sole policies.language value every fixture in this
+// file registers fakePolicyEngine under — arbitrary, but shared by every
+// caller below so a Registry built with one entry always resolves.
+const fakeLanguage = "fake"
 
-func (f fakePolicySource) LoadPolicies(context.Context, string) ([]policy.StoredPolicy, error) {
+// fakeAllPolicySource implements policy.AllPolicySource. Its zero value
+// reports no policies, and a test that needs PrepareAll to route through a
+// specific engine sets policies explicitly — every fixture in this file
+// does, since CreateDelegation's grant probes need a compiled set to probe
+// against.
+type fakeAllPolicySource struct {
+	policies []policy.StoredPolicy
+	loadErr  error
+}
+
+func (f fakeAllPolicySource) LoadAllPolicies(context.Context) ([]policy.StoredPolicy, error) {
 	if f.loadErr != nil {
 		return nil, f.loadErr
 	}
-	return []policy.StoredPolicy{{ID: "fake"}}, nil
+	return f.policies, nil
 }
 
+// fakePolicyEngine hands policy.Multi.PrepareAll a fixed policy.CompiledPolicySet
+// directly, so a test controls exactly what policy.Probe answers without a
+// real engine. prepareCalls counts Prepare invocations (not Evaluate — that
+// is grantSet.evaluateCalls) so a test can pin "one compile per
+// CreateDelegation call, however many probes Clamp makes against it" — see
+// policy.Multi.PrepareAll's own doc comment for why that compile step must
+// happen once, not per probe.
 type fakePolicyEngine struct {
 	set          policy.CompiledPolicySet
 	prepareErr   error
 	prepareCalls *int
 }
 
-func (fakePolicyEngine) Language() string { return "fake" }
+func (fakePolicyEngine) Language() string { return fakeLanguage }
 
 func (f fakePolicyEngine) Prepare(context.Context, []policy.StoredPolicy) (policy.CompiledPolicySet, error) {
 	if f.prepareCalls != nil {
@@ -87,9 +99,22 @@ func (f fakePolicyEngine) Prepare(context.Context, []policy.StoredPolicy) (polic
 func (fakePolicyEngine) Validate(context.Context, string) error { return nil }
 
 // newDelegationServer wires a Server whose CreateDelegation grant probes are
-// answered by set.
+// answered by set: a policy.Multi with exactly one registered language
+// (fakeLanguage), one fake StoredPolicy for it, and the given fakePolicyEngine
+// as the engine that prepares it into set.
 func newDelegationServer(fs *fakeStore, set policy.CompiledPolicySet) *Server {
-	return NewServer(fs, policy.Unconfigured(), fakePolicySource{}, fakePolicyEngine{set: set}, testConfig())
+	return NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set}), testConfig())
+}
+
+// singleFakeLanguagePolicy builds the policy.Multi every CreateDelegation
+// test in this file needs: one language, one policy row, engine supplied by
+// the caller so prepare-failure tests can substitute one whose Prepare call
+// itself errors.
+func singleFakeLanguagePolicy(engine fakePolicyEngine) policy.Multi {
+	return policy.NewMulti(
+		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "fake", Language: fakeLanguage}}},
+		policy.Registry{fakeLanguage: engine},
+	)
 }
 
 // wellFormedDelegationFixture returns a fake store (a known, existing agent,
@@ -434,11 +459,11 @@ func TestCreateDelegation_ChildInheritsParentClassificationAndChainAgentIDs(t *t
 
 // The policy set is prepared exactly once per call, however many probes
 // Clamp makes against it (here: a four-step tier walk plus two tool
-// probes) — the reason NewServer takes policySource/policyEngine at all
-// rather than letting the allows closure recompile per probe. A regression
-// back to per-probe preparation would reintroduce, at RPC-call
+// probes) — the reason CreateDelegation calls policy.Multi.PrepareAll once
+// up front rather than letting the allows closure recompile per probe. A
+// regression back to per-probe preparation would reintroduce, at RPC-call
 // granularity, exactly the recompile-per-request cost spec defect D5 named
-// (see delegation.go's prepareGrantSet doc comment).
+// (see policy.Multi.PrepareAll's own doc comment).
 func TestCreateDelegation_PreparesPolicySetOnceRegardlessOfProbeCount(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
 	req.RequestedScope = &RequestedScope{
@@ -447,7 +472,7 @@ func TestCreateDelegation_PreparesPolicySetOnceRegardlessOfProbeCount(t *testing
 	}
 	set := &grantSet{allowedTools: map[string]bool{"Bash": true, "Read": true}, maxTier: models.ActionTierDestructive}
 	prepareCalls := 0
-	srv := NewServer(fs, policy.Unconfigured(), fakePolicySource{}, fakePolicyEngine{set: set, prepareCalls: &prepareCalls}, testConfig())
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set, prepareCalls: &prepareCalls}), testConfig())
 
 	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
 		t.Fatalf("CreateDelegation() error = %v", err)
@@ -461,15 +486,14 @@ func TestCreateDelegation_PreparesPolicySetOnceRegardlessOfProbeCount(t *testing
 	}
 }
 
-// A policy-engine outage (LoadPolicies/Prepare failing outright, before any
-// probe can even be attempted) is Internal, not folded into PermissionDenied
-// — see prepareGrantSet's doc comment for why conflating "we could not ask"
-// with "you may not hold this" would misreport an outage as a normal
+// A policy-engine outage (Prepare failing outright, before any probe can
+// even be attempted) is Internal, not folded into PermissionDenied — see
+// policy.Multi.PrepareAll's own doc comment for why conflating "we could not
+// ask" with "you may not hold this" would misreport an outage as a normal
 // authorization outcome to anything watching gRPC status codes.
 func TestCreateDelegation_PolicySetPrepareFailure_Internal(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
-	srv := NewServer(fs, policy.Unconfigured(),
-		fakePolicySource{}, fakePolicyEngine{prepareErr: errors.New("cedar: boom")}, testConfig())
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{prepareErr: errors.New("cedar: boom")}), testConfig())
 
 	resp, err := srv.CreateDelegation(context.Background(), req)
 	if resp != nil {
