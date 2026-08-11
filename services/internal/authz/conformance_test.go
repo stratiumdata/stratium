@@ -286,9 +286,35 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 	t.Skip("Integration: RLS is proven against Postgres in Task 9, not in unit tests")
 }
 
+// C19 reads "with the PDP unreachable and no valid cache entry, every
+// surface denies." Its reason used to say "Phase 3: requires the PEP
+// client" — stale since Phase 3a: the client shipped, and
+// cmd/stratium-pep/hook_test.go's TestRunHook_UnreachablePDP_ExitsTwo
+// already proves an unreachable PDP denies, for the hook surface, with a
+// named reason ("could not reach"). That is real progress, but it is not
+// C19 itself, on two separate axes the property's own wording names:
+//
+//   - "every surface": spec §3.2 (A2) commits to four first-class surfaces —
+//     hook, mcp, proxy, extauthz. Only hook exists;
+//     cmd/stratium-pep/main.go's own package doc calls the other three
+//     "later surfaces over the same PDP call." A property naming "every
+//     surface" is not established by one of four.
+//   - "no valid cache entry": this presupposes a cache with entries that can
+//     be valid or not. No PEP decision cache exists yet anywhere in this
+//     tree — the same absence that keeps C20 (the sibling property about a
+//     stale cache entry) skipped below. hook_test.go's own unreachable-PDP
+//     case has no cache in the picture at all, so it cannot yet distinguish
+//     "no valid entry" from "no cache mechanism to have an entry in."
+//
+// Converting this to a pass would be forcing it: unskip once mcp/proxy/
+// extauthz all exist and the decision cache lands, not before.
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	t.Skip("Phase 3: requires the PEP client")
+	t.Skip("Phase 4+: the hook surface alone proves this today " +
+		"(cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), but C19 says " +
+		"'every surface' (hook, mcp, proxy, extauthz — spec §3.2 A2; only hook exists) " +
+		"'with no valid cache entry' (no PEP decision cache exists yet — same blocker as C20). " +
+		"Requires the remaining three surfaces and the decision cache.")
 }
 
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
