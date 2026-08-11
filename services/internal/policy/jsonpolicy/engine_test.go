@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"stratium/internal/authz"
+	"stratium/internal/policy"
 	"stratium/internal/policy/policytest"
+	"stratium/pkg/models"
 )
 
 // TestEngine_Contract runs the shared conformance suite every PolicyEngine
@@ -32,6 +35,31 @@ func TestEngine_Contract(t *testing.T) {
 		WellFormed: `{"effect": "allow", "match": {"subject": {"attr": "department", "equals": "finance"}}}`,
 		AllowAll:   `{"effect": "allow", "match": {}}`,
 		DenyAll:    `{"effect": "deny", "match": {}}`,
+		// Both Dead texts here are TestValidate_EmptyInListIsRejected's and
+		// TestValidate_AtMostOutOfRangeIsRejected's own fixtures
+		// (validate_test.go), reused rather than retranscribed so this
+		// contract-level property and this package's own regression tests
+		// cannot silently drift apart.
+		DeadForms: []policytest.DeadForm{
+			{
+				Name:      "vacuous empty in-list",
+				Dead:      `{"effect": "allow", "match": {"tool": {"in": []}}}`,
+				Live:      `{"effect": "allow", "match": {"tool": {"in": ["Read"]}}}`,
+				LiveInput: policy.EvaluationInput{Action: authz.Action{Tool: "Read"}},
+			},
+			{
+				// -1: no real ActionTier is negative, so this can never
+				// match — unlike the symmetric out-of-range case (at_most
+				// above the highest tier), which is rejected for the opposite
+				// reason (it matches everything, not nothing; see
+				// tierMatch.validate's own doc comment in schema.go) and so
+				// is not itself a dead form under DeadForm's definition.
+				Name:      "at_most below the tier lattice",
+				Dead:      `{"effect": "allow", "match": {"derived_tier": {"at_most": -1}}}`,
+				Live:      `{"effect": "allow", "match": {"derived_tier": {"at_most": 0}}}`,
+				LiveInput: policy.EvaluationInput{DerivedTier: models.ActionTierReasoning},
+			},
+		},
 	})
 }
 
