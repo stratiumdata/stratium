@@ -193,7 +193,7 @@ func TestCheckDeadForms_SkipsUnlessClauses(t *testing.T) {
 	// unrelated reason — the unless-wrapped contradiction must still
 	// evaluate to a real, matching verdict.
 	set, err := (Engine{}).Prepare(context.Background(), []policy.StoredPolicy{
-		{ID: "p1", Name: "unless-contradiction", Text: text, Effect: "allow", Priority: 1, Version: 1},
+		{ID: "p1", Name: "unless-contradiction", Text: text, Priority: 1, Version: 1},
 	})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)

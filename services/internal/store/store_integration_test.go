@@ -374,7 +374,7 @@ const insertPolicyQuery = `INSERT INTO policies (id, tenant_id, name, language, 
 	VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
 
 // seedPolicyPriority is the non-zero priority every seeded policy carries.
-// It exists so LoadPolicies' priority round-trip is proven against a real
+// It exists so LoadAllPolicies' priority round-trip is proven against a real
 // column rather than against sqlmock — the field sat declared-but-unpopulated
 // for two phases precisely because no test touched real Postgres for it.
 const seedPolicyPriority = 42
@@ -415,15 +415,24 @@ func seedPolicyLang(t *testing.T, tenant, name, lang, text, effect string) strin
 	return id
 }
 
-// LoadPolicies against real Postgres. Every other LoadPolicies test uses
-// sqlmock, which returns whatever columns the test names — so it can prove the
-// scan order matches the query string, and nothing at all about whether those
-// columns exist, whether the serving role may read them, or what the database
-// stores. StoredPolicy.Priority spent two phases declared, carried into
-// PolicyVerdict, and hashed into audit provenance while no column existed to
-// load it from, and no sqlmock test could have noticed. This one would have:
-// it fails on a missing column, a missing grant, and a wrong scan order alike.
-func TestIntegration_LoadPolicies_RoundTripsPriority(t *testing.T) {
+// LoadAllPolicies against real Postgres. Every other LoadAllPolicies test
+// uses sqlmock, which returns whatever columns the test names — so it can
+// prove the scan order matches the query string, and nothing at all about
+// whether those columns exist, whether the serving role may read them, or
+// what the database stores. StoredPolicy.Priority spent two phases declared,
+// carried into PolicyVerdict, and hashed into audit provenance while no
+// column existed to load it from, and no sqlmock test could have noticed.
+// This one would have: it fails on a missing column, a missing grant, and a
+// wrong scan order alike.
+//
+// Renamed from TestIntegration_LoadPolicies_RoundTripsPriority (Phase 4a
+// Task 4): it exercised store.LoadPolicies, deleted alongside policy.
+// Configured once policy.Multi's LoadAllPolicies-based path subsumed both —
+// see policy.go's own package doc. The property this test proves —
+// real-Postgres round-trip of Priority, and that Text does not land in the
+// wrong scan target — is unchanged by which loader it runs through, so it
+// was re-pointed at LoadAllPolicies rather than deleted with LoadPolicies.
+func TestIntegration_LoadAllPolicies_RoundTripsPriority(t *testing.T) {
 	// Its own tenant, like boundaryTenant below. The suite shares one database,
 	// and TestEndToEnd/proof2 asserts configuredTenant has *no* cedar policies
 	// in order to prove the unconfigured-principal denial — seeding a permit
@@ -434,9 +443,9 @@ func TestIntegration_LoadPolicies_RoundTripsPriority(t *testing.T) {
 	const text = "permit(principal, action, resource);"
 	id := seedPolicy(t, priorityTenant, "priority-round-trip", text, "allow")
 
-	got, err := store.New(testDB, priorityTenant).LoadPolicies(t.Context(), "cedar")
+	got, err := store.New(testDB, priorityTenant).LoadAllPolicies(t.Context())
 	if err != nil {
-		t.Fatalf("LoadPolicies() error = %v", err)
+		t.Fatalf("LoadAllPolicies() error = %v", err)
 	}
 
 	var found *policy.StoredPolicy
@@ -447,7 +456,7 @@ func TestIntegration_LoadPolicies_RoundTripsPriority(t *testing.T) {
 		}
 	}
 	if found == nil {
-		t.Fatalf("LoadPolicies() did not return seeded policy %s (got %d policies)", id, len(got))
+		t.Fatalf("LoadAllPolicies() did not return seeded policy %s (got %d policies)", id, len(got))
 	}
 	if found.Priority != seedPolicyPriority {
 		t.Errorf("Priority = %d, want %d — the column exists but the value did not survive the load",
@@ -668,8 +677,8 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 // Four of the six (four-languages, orphan-language, one-engine-prepare-
 // failure, cross-tenant-isolation) live here, each its own dedicated tenant
 // — never configuredTenant, for the reason
-// TestIntegration_LoadPolicies_RoundTripsPriority's own doc comment already
-// gives — and each builds policy.Multi directly against
+// TestIntegration_LoadAllPolicies_RoundTripsPriority's own doc comment
+// already gives — and each builds policy.Multi directly against
 // store.New(testDB, tenant) rather than going through pdpClient. That is not
 // a style choice; the shared docker-compose PDP this whole file's pdpClient
 // talks to is itself single-tenant, permanently: main.go builds

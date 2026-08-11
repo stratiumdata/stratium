@@ -15,7 +15,7 @@ import (
 func prepareOne(t *testing.T, text string) policy.CompiledPolicySet {
 	t.Helper()
 	set, err := New().Prepare(context.Background(), []policy.StoredPolicy{
-		{ID: "p1", Name: "under-test", Language: language, Text: text, Effect: "allow", Priority: 7, Version: 1},
+		{ID: "p1", Name: "under-test", Language: language, Text: text, Priority: 7, Version: 1},
 	})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)

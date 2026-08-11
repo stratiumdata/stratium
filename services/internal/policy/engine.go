@@ -48,12 +48,18 @@ type CompiledPolicySet interface {
 }
 
 // StoredPolicy is one row of the policies table.
+//
+// policies.effect is deliberately not represented here: no engine reads it
+// (all four derive effect from the policy text itself), and a stale row —
+// stored effect='deny' whose text says permit(...) — would read back as an
+// allow anyway, making the column actively misleading rather than merely
+// redundant. See LoadAllPolicies' own doc comment (store/policy.go) for why
+// the database column stays despite that.
 type StoredPolicy struct {
 	ID       string
 	Name     string
 	Language string
 	Text     string
-	Effect   string // "allow" | "deny"
 
 	// Priority is recorded for provenance and audit only. Spec Y7 removed
 	// priority as security-relevant: first-applicable-by-priority is a classic
@@ -62,5 +68,14 @@ type StoredPolicy struct {
 	// field — doing so would quietly reopen what Y7 closed.
 	Priority int
 
+	// Version is loaded but not yet read by anything: spec Y2 wants it as a
+	// cache key, and Phase 4 has no cache yet (Task 5/6 measure whether one
+	// is warranted before one gets built around a guessed compile-versus-
+	// evaluate ratio — see PolicyEngine's own doc comment). It is loaded now,
+	// ahead of that decision, so the next reader finds it already threaded
+	// through the store rather than needing a second migration-shaped change
+	// once caching actually lands. Do not delete this as dead: unlike Effect
+	// above, nothing about it can go stale by sitting unread — it is just
+	// early.
 	Version int64
 }

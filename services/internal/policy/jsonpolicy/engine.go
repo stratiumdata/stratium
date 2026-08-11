@@ -93,12 +93,9 @@
 //     real equals/in-comparable string representation and a named test, so
 //     only trust_tier and purpose — the two names the brief's own schema
 //     shows — are wired up. Extend agentAttrValue or delegationAttrValue
-//     when a concrete rule needs another named attribute, the same
-//     discipline Cedar's and Rego's own package docs apply to
-//     EvaluationInput.Environment ("not mapped ... extend when a rule
-//     actually needs it, rather than guessing its shape now").
-//
-// EvaluationInput.Environment is not mapped, for the same reason.
+//     when a concrete rule needs another named attribute, rather than
+//     guessing which ones matter now — the same discipline this package
+//     applies to every dimension it does not yet expose.
 //
 // # The narrowing invariant
 //
@@ -158,12 +155,11 @@ func (Engine) Language() string { return language }
 // own "does not blame the neighbor" property).
 //
 // The produced verdict's effect comes from the policy text's own "effect"
-// key (via effectOf), never from StoredPolicy.Effect — the same choice Cedar
-// and Rego make for their own languages' native effect syntax (permit/
-// forbid, allow/deny rules). StoredPolicy.Effect exists for callers that
-// need a language-independent summary without parsing policy text; this
-// engine already has the text parsed and uses that directly rather than
-// trusting a second, independently-set field to agree with the first.
+// key (via effectOf) — the same choice Cedar and Rego make for their own
+// languages' native effect syntax (permit/forbid, allow/deny rules). It is
+// the only source: StoredPolicy carries no separate effect field to trust
+// instead (Phase 4a Task 4 removed it — no engine ever read it, and a stored
+// value could actively disagree with the text sitting right next to it).
 func (Engine) Prepare(_ context.Context, policies []policy.StoredPolicy) (policy.CompiledPolicySet, error) {
 	compiled := make([]compiledPolicy, 0, len(policies))
 	for _, sp := range policies {

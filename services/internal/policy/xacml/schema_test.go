@@ -476,8 +476,8 @@ func TestPrepare_NamesMalformedPolicy(t *testing.T) {
 </Policy>`
 
 	policies := []policy.StoredPolicy{
-		{ID: neighborID, Name: "neighbor", Language: language, Text: neighborText, Effect: "allow", Priority: 1, Version: 1},
-		{ID: malformedID, Name: "quarantine-me", Language: language, Text: malformedText, Effect: "deny", Priority: 1, Version: 1},
+		{ID: neighborID, Name: "neighbor", Language: language, Text: neighborText, Priority: 1, Version: 1},
+		{ID: malformedID, Name: "quarantine-me", Language: language, Text: malformedText, Priority: 1, Version: 1},
 	}
 	_, err := New().Prepare(context.Background(), policies)
 	if err == nil {

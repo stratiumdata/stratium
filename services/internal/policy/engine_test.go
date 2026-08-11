@@ -18,9 +18,12 @@ import (
 // Validate uses, then snapshotting it — the contract requires Prepare to
 // fail on malformed text and name the offending ID, same as any real
 // engine, so this fake cannot skip that property just because doing so
-// used to be free. "Evaluating" means turning each StoredPolicy's Effect
-// into a verdict; it ignores EvaluationInput entirely — there is no
-// condition language here to evaluate it against.
+// used to be free. "Evaluating" means turning each StoredPolicy's Text into
+// a verdict via effectOfText — the same "derive effect from text, not from
+// a separate stored field" choice every real engine makes (StoredPolicy no
+// longer even has an Effect field to read instead, since nothing did); it
+// otherwise ignores EvaluationInput entirely — there is no condition
+// language here to evaluate it against.
 //
 // This lives in an external (package policy_test) file rather than an
 // internal one because it calls policytest.EngineContract, and policytest
@@ -114,12 +117,8 @@ func (f fakeCompiledSet) Evaluate(_ context.Context, _ policy.EvaluationInput) (
 	}
 	verdicts := make([]authz.PolicyVerdict, len(f.policies))
 	for i, p := range f.policies {
-		effect := authz.EffectDeny
-		if p.Effect == "allow" {
-			effect = authz.EffectAllow
-		}
 		verdicts[i] = authz.PolicyVerdict{
-			Effect:   effect,
+			Effect:   effectOfText(p.Text),
 			Reason:   "fake: " + p.Name,
 			Source:   "fake",
 			PolicyID: p.ID,
@@ -127,6 +126,24 @@ func (f fakeCompiledSet) Evaluate(_ context.Context, _ policy.EvaluationInput) (
 		}
 	}
 	return verdicts, nil
+}
+
+// effectOfText derives a verdict's effect from this fake language's own
+// text, the same choice every real engine's own effectOf makes (jsonpolicy,
+// xacml) or its equivalent parse step (Cedar's permit/forbid, Rego's allow/
+// deny rules): "deny" appearing in the text means deny, anything else means
+// allow. This fake DSL has no real grammar to speak of — every fixture text
+// across this package and policytest/contract.go is just a label like "fake:
+// allow-all" or "fake: deny-all" — but the property under test
+// (policytest.EngineContract's AllowAll/DenyAll checks) is specifically that
+// an engine's verdict tracks its policy text, so the fake has to earn that
+// the same way a real engine would rather than being told the answer
+// out-of-band.
+func effectOfText(text string) authz.Effect {
+	if strings.Contains(text, "deny") {
+		return authz.EffectDeny
+	}
+	return authz.EffectAllow
 }
 
 func TestFakeEngine_Contract(t *testing.T) {

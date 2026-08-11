@@ -325,26 +325,3 @@ func TestEvaluate_DerivedTierAtMost(t *testing.T) {
 		}
 	})
 }
-
-// TestEvaluate_EffectComesFromPolicyTextNotStoredPolicy pins a design choice
-// recorded in Prepare's own doc comment: the verdict's effect is derived
-// from the JSON text's own "effect" key — the same choice Cedar and Rego
-// make for their own languages' native effect syntax — never from
-// StoredPolicy.Effect. StoredPolicy.Effect is deliberately set to the
-// opposite of what the text says, so a Prepare that read the wrong field
-// would produce the wrong verdict here specifically, rather than merely
-// agreeing by fixture coincidence the way policytest's own AllowAll/DenyAll
-// checks do (those fixtures keep both fields in agreement by construction —
-// see Fixtures' own doc comment).
-func TestEvaluate_EffectComesFromPolicyTextNotStoredPolicy(t *testing.T) {
-	set := prepare(t, []policy.StoredPolicy{
-		{ID: "p1", Name: "text-says-deny", Text: `{"effect": "deny", "match": {}}`, Effect: "allow"},
-	})
-	verdicts := mustEvaluate(t, set, policy.EvaluationInput{})
-	if len(verdicts) != 1 {
-		t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
-	}
-	if verdicts[0].Effect != authz.EffectDeny {
-		t.Fatalf("Effect = %v, want EffectDeny (must come from the policy text's own \"effect\" key, not StoredPolicy.Effect)", verdicts[0].Effect)
-	}
-}

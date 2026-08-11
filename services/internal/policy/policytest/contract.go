@@ -219,8 +219,8 @@ func testConcurrentEvaluate(t *testing.T, engine policy.PolicyEngine, f Fixtures
 
 	t.Run("a prepared set is safe for concurrent evaluate", func(t *testing.T) {
 		policies := []policy.StoredPolicy{
-			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: 1, Version: 1},
-			{ID: "p2", Name: "deny-all", Language: engine.Language(), Text: f.DenyAll, Effect: "deny", Priority: 2, Version: 1},
+			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Priority: 1, Version: 1},
+			{ID: "p2", Name: "deny-all", Language: engine.Language(), Text: f.DenyAll, Priority: 2, Version: 1},
 		}
 		set, err := engine.Prepare(ctx, policies)
 		if err != nil {
@@ -327,7 +327,6 @@ func probeInputs() []probeInput {
 			},
 			DerivedTier: models.ActionTierDestructive,
 			Resource:    map[string]string{"id": "res-1", "classification": "restricted"},
-			Environment: map[string]string{"region": "us-east-1"},
 			Agent: authz.AgentInfo{
 				// A fixed UUID, not uuid.New(): every other value in this probe is
 				// a stable literal, and a fixture that differs run to run makes a
@@ -355,21 +354,22 @@ func testAllowDenyEffects(t *testing.T, engine policy.PolicyEngine, f Fixtures) 
 	t.Helper()
 
 	t.Run("AllowAll matches every input with exactly one EffectAllow verdict", func(t *testing.T) {
-		requireUniformVerdict(t, engine, f.AllowAll, "allow", authz.EffectAllow)
+		requireUniformVerdict(t, engine, f.AllowAll, authz.EffectAllow)
 	})
 
 	t.Run("DenyAll matches every input with exactly one EffectDeny verdict", func(t *testing.T) {
-		requireUniformVerdict(t, engine, f.DenyAll, "deny", authz.EffectDeny)
+		requireUniformVerdict(t, engine, f.DenyAll, authz.EffectDeny)
 	})
 }
 
 // requireUniformVerdict prepares a single policy from text and asserts it
 // produces exactly one verdict carrying wantEffect against every probeInput.
-// storedEffect populates StoredPolicy.Effect alongside text: an engine may
-// derive its verdict's effect from either one (Cedar reads only the Cedar
-// text; the fake test engine in package policy reads only StoredPolicy.
-// Effect), so a fixture author must keep the two in agreement — which
-// AllowAll and DenyAll's own doc comment already requires.
+// Every engine derives its verdict's effect from text alone — StoredPolicy
+// has no Effect field for one to read instead (Phase 4a Task 4 removed it:
+// no engine, including the fake test engine in package policy, ever read it,
+// and a stored value could actively disagree with the text it sat next to) —
+// so text is the only thing AllowAll and DenyAll's own doc comment needs to
+// keep honest.
 //
 // The PolicyID check matters even on the deny side: authz.EffectDeny is the
 // zero value (see authz.Effect's doc comment), so an Effect-only assertion
@@ -378,7 +378,7 @@ func testAllowDenyEffects(t *testing.T, engine policy.PolicyEngine, f Fixtures) 
 // TestEvaluate_DerivedTierReadableFromContextDrivesForbid for the same trap
 // hit during Cedar's own development. Checking PolicyID forces the verdict
 // under test to be the one this policy actually produced.
-func requireUniformVerdict(t *testing.T, engine policy.PolicyEngine, text, storedEffect string, wantEffect authz.Effect) {
+func requireUniformVerdict(t *testing.T, engine policy.PolicyEngine, text string, wantEffect authz.Effect) {
 	t.Helper()
 	// ID and Name deliberately differ, the same way testVerdictProvenance's
 	// do: mutation-testing this suite found that an ID/Name mix-up survives
@@ -387,7 +387,7 @@ func requireUniformVerdict(t *testing.T, engine policy.PolicyEngine, text, store
 	// equal by coincidence).
 	const wantID = "uniform-check"
 	set := mustPrepare(t, engine, []policy.StoredPolicy{
-		{ID: wantID, Name: "uniform-check-display-name", Language: engine.Language(), Text: text, Effect: storedEffect, Priority: 1, Version: 1},
+		{ID: wantID, Name: "uniform-check-display-name", Language: engine.Language(), Text: text, Priority: 1, Version: 1},
 	})
 
 	for _, probe := range probeInputs() {
@@ -417,7 +417,7 @@ func testVerdictProvenance(t *testing.T, engine policy.PolicyEngine, f Fixtures)
 	t.Run("every verdict names its source engine and its StoredPolicy's ID", func(t *testing.T) {
 		const wantID = "provenance-id-should-appear-verbatim"
 		set := mustPrepare(t, engine, []policy.StoredPolicy{
-			{ID: wantID, Name: "a-completely-different-display-name", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: 1, Version: 1},
+			{ID: wantID, Name: "a-completely-different-display-name", Language: engine.Language(), Text: f.AllowAll, Priority: 1, Version: 1},
 		})
 
 		verdicts := mustEvaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "someone"}})
@@ -446,7 +446,7 @@ func testPriority(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 		// silently left unpopulated would misreport as a pass if this used 0.
 		const wantPriority = 42
 		set := mustPrepare(t, engine, []policy.StoredPolicy{
-			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: wantPriority, Version: 1},
+			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Priority: wantPriority, Version: 1},
 		})
 		verdicts := mustEvaluate(t, set, policy.EvaluationInput{})
 		if len(verdicts) != 1 {
@@ -460,8 +460,8 @@ func testPriority(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	t.Run("changing only priorities does not change the verdicts", func(t *testing.T) {
 		build := func(allowPriority, denyPriority int) []policy.StoredPolicy {
 			return []policy.StoredPolicy{
-				{ID: "allow-leg", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: allowPriority, Version: 1},
-				{ID: "deny-leg", Name: "deny-all", Language: engine.Language(), Text: f.DenyAll, Effect: "deny", Priority: denyPriority, Version: 1},
+				{ID: "allow-leg", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Priority: allowPriority, Version: 1},
+				{ID: "deny-leg", Name: "deny-all", Language: engine.Language(), Text: f.DenyAll, Priority: denyPriority, Version: 1},
 			}
 		}
 		in := policy.EvaluationInput{Principal: authz.Principal{Subject: "priority-probe"}}
@@ -524,8 +524,8 @@ func testPrepareNamesMalformedPolicy(t *testing.T, engine policy.PolicyEngine, f
 			neighborID  = "well-formed-neighbor"
 		)
 		policies := []policy.StoredPolicy{
-			{ID: neighborID, Name: "neighbor", Language: engine.Language(), Text: f.WellFormed, Effect: "allow", Priority: 1, Version: 1},
-			{ID: malformedID, Name: "quarantine-me", Language: engine.Language(), Text: f.Malformed, Effect: "deny", Priority: 1, Version: 1},
+			{ID: neighborID, Name: "neighbor", Language: engine.Language(), Text: f.WellFormed, Priority: 1, Version: 1},
+			{ID: malformedID, Name: "quarantine-me", Language: engine.Language(), Text: f.Malformed, Priority: 1, Version: 1},
 		}
 
 		_, err := engine.Prepare(context.Background(), policies)
@@ -585,7 +585,7 @@ func testDeadForms(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 				t.Run("dead text is rejected by Prepare, naming the offending policy", func(t *testing.T) {
 					const deadID = "dead-form-under-test"
 					_, err := engine.Prepare(context.Background(), []policy.StoredPolicy{
-						{ID: deadID, Name: "dead: " + df.Name, Language: engine.Language(), Text: df.Dead, Effect: "allow", Priority: 1, Version: 1},
+						{ID: deadID, Name: "dead: " + df.Name, Language: engine.Language(), Text: df.Dead, Priority: 1, Version: 1},
 					})
 					if err == nil {
 						t.Fatalf("Prepare accepted the declared-dead form %q, want an error. Text: %s", df.Name, df.Dead)
@@ -605,7 +605,7 @@ func testDeadForms(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 					}
 					const liveID = "live-form-under-test"
 					set := mustPrepare(t, engine, []policy.StoredPolicy{
-						{ID: liveID, Name: "live: " + df.Name, Language: engine.Language(), Text: df.Live, Effect: "allow", Priority: 1, Version: 1},
+						{ID: liveID, Name: "live: " + df.Name, Language: engine.Language(), Text: df.Live, Priority: 1, Version: 1},
 					})
 					verdicts := mustEvaluate(t, set, df.LiveInput)
 					if len(verdicts) == 0 {
