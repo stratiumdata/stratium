@@ -218,3 +218,167 @@ func TestStore_LoadPolicies_RowsIterationErrorPropagates(t *testing.T) {
 
 	assertExpectationsMet(t, mock)
 }
+
+// --- LoadAllPolicies ---
+
+// loadAllPoliciesQuery's own text is asserted directly, the same reasoning
+// as TestLoadPoliciesQuery_FiltersEnabledAndOrdersByID: enabled = true,
+// ORDER BY id, and no WHERE tenant_id are all pinned as properties of the
+// query text itself. The one property specific to this sibling query is
+// "regardless of language" — asserted here as the query having no language
+// predicate at all, and separately, below, as a behavioral test that rows
+// from several different languages all come back in one call.
+func TestLoadAllPoliciesQuery_FiltersEnabledOrdersByIDAndIgnoresLanguage(t *testing.T) {
+	if !strings.Contains(loadAllPoliciesQuery, "enabled = true") {
+		t.Errorf("loadAllPoliciesQuery = %q, want it to filter on enabled = true", loadAllPoliciesQuery)
+	}
+	if !strings.Contains(loadAllPoliciesQuery, "ORDER BY id") {
+		t.Errorf("loadAllPoliciesQuery = %q, want ORDER BY id", loadAllPoliciesQuery)
+	}
+	if strings.Contains(loadAllPoliciesQuery, "tenant_id") {
+		t.Errorf("loadAllPoliciesQuery = %q, must not reference tenant_id — RLS is the only tenant boundary", loadAllPoliciesQuery)
+	}
+	// "language" alone would also match the selected column name, so the
+	// filter form itself is what's checked for absence.
+	if strings.Contains(loadAllPoliciesQuery, "language =") {
+		t.Errorf("loadAllPoliciesQuery = %q, must not filter on language — it is LoadPolicies' regardless-of-language sibling", loadAllPoliciesQuery)
+	}
+}
+
+// Rows spanning three different languages all come back in one call — the
+// behavioral proof that LoadAllPolicies is not LoadPolicies called once per
+// language, but a single query with no language filter at all.
+func TestStore_LoadAllPolicies_ReturnsEveryLanguage(t *testing.T) {
+	s, mock := newMockStore(t)
+	cedarPolicy := testPolicy("11111111-1111-1111-1111-111111111111", "cedar-one")
+	regoPolicy := testPolicy("22222222-2222-2222-2222-222222222222", "rego-one")
+	regoPolicy.Language = "rego"
+	jsonPolicy := testPolicy("33333333-3333-3333-3333-333333333333", "json-one")
+	jsonPolicy.Language = "json"
+	want := []policy.StoredPolicy{cedarPolicy, regoPolicy, jsonPolicy}
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	rows := sqlmock.NewRows(policyColumns())
+	for _, p := range want {
+		addPolicyRow(rows, p)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(loadAllPoliciesQuery)).WillReturnRows(rows)
+	mock.ExpectCommit()
+
+	got, err := s.LoadAllPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("LoadAllPolicies() error = %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("LoadAllPolicies() returned %d policies, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("policy[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A tenant with no policies in any language is an ordinary, empty result,
+// not an error — LoadPolicies' own contract, pinned separately here because
+// LoadAllPolicies has its own query and its own not-nil-slice guarantee to
+// keep.
+func TestStore_LoadAllPolicies_EmptyResultReturnsEmptyNonNilSlice(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAllPoliciesQuery)).WillReturnRows(sqlmock.NewRows(policyColumns()))
+	mock.ExpectCommit()
+
+	got, err := s.LoadAllPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("LoadAllPolicies() error = %v, want nil — no policies is not an error", err)
+	}
+	if got == nil {
+		t.Fatal("LoadAllPolicies() returned a nil slice, want a non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("LoadAllPolicies() returned %d policies, want 0", len(got))
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_LoadAllPolicies_QueryErrorPropagates(t *testing.T) {
+	s, mock := newMockStore(t)
+	dbErr := errors.New("connection reset")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAllPoliciesQuery)).WillReturnError(dbErr)
+	mock.ExpectRollback()
+
+	got, err := s.LoadAllPolicies(context.Background())
+	if err == nil {
+		t.Fatal("LoadAllPolicies() error = nil, want error")
+	}
+	if got != nil {
+		t.Errorf("LoadAllPolicies() = %v, want nil on query failure", got)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A row that cannot scan into StoredPolicy's types must fail loudly and roll
+// back, not silently truncate or zero the field — same discipline as
+// LoadPolicies' own scan-error test, pinned separately because the two
+// methods must share scanPolicyRows without one silently diverging from the
+// other's error behavior.
+func TestStore_LoadAllPolicies_RowScanErrorPropagates(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	rows := sqlmock.NewRows(policyColumns()).
+		AddRow("id-1", "bad-version", "cedar", "permit(principal, action, resource);", "allow", 7, "not-a-version")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAllPoliciesQuery)).WillReturnRows(rows)
+	mock.ExpectRollback()
+
+	got, err := s.LoadAllPolicies(context.Background())
+	if err == nil {
+		t.Fatal("LoadAllPolicies() error = nil, want scan error")
+	}
+	if got != nil {
+		t.Errorf("LoadAllPolicies() = %v, want nil on scan failure", got)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A failure partway through iteration must discard whatever was collected so
+// far, never a silently truncated policy set — LoadPolicies' own iteration
+// test, repeated here for the shared scanPolicyRows helper's other caller.
+func TestStore_LoadAllPolicies_RowsIterationErrorPropagates(t *testing.T) {
+	s, mock := newMockStore(t)
+	iterErr := errors.New("connection dropped mid-stream")
+
+	rows := sqlmock.NewRows(policyColumns())
+	addPolicyRow(rows, testPolicy("id-1", "first"))
+	addPolicyRow(rows, testPolicy("id-2", "second"))
+	addPolicyRow(rows, testPolicy("id-3", "third")).RowError(2, iterErr)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAllPoliciesQuery)).WillReturnRows(rows)
+	mock.ExpectRollback()
+
+	got, err := s.LoadAllPolicies(context.Background())
+	if !errors.Is(err, iterErr) {
+		t.Fatalf("LoadAllPolicies() error = %v, want it to wrap %v", err, iterErr)
+	}
+	if got != nil {
+		t.Errorf("LoadAllPolicies() = %v, want nil when row iteration fails partway through", got)
+	}
+
+	assertExpectationsMet(t, mock)
+}
