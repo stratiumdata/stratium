@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"stratium/internal/authz"
+	"stratium/internal/policy"
 	"stratium/internal/policy/policytest"
+	"stratium/pkg/models"
 )
 
 // TestEngine_Contract runs the shared conformance suite every PolicyEngine
@@ -28,6 +31,8 @@ import (
 // fixture jsonpolicy, rego, and cedar all use.
 func TestEngine_Contract(t *testing.T) {
 	policytest.EngineContract(t, New(), policytest.Fixtures{
+		DeadForms: xacmlDeadForms(),
+
 		Malformed: `<Policy PolicyId="broken" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
   <Rule RuleId="r1" Effect="Permit"`,
 
@@ -53,6 +58,63 @@ func TestEngine_Contract(t *testing.T) {
   <Rule RuleId="deny-all-rule" Effect="Deny"/>
 </Policy>`,
 	})
+}
+
+// xacmlDeadForms builds this engine's policytest.Fixtures.DeadForms from the
+// same helpers (matchDoc, categoryFor) and constants (wantMatchID,
+// wantDataType, ruleCombiningAlgDenyOverrides, effectPermit) schema_test.go's
+// and structure_test.go's own regression tests already use to build these
+// exact shapes — reused, not retranscribed, so the contract-level property
+// and this package's own tests cannot silently drift out of sync with each
+// other. Each Dead text below is a case already covered by
+// TestValidate_TierValueVocabularyIsRejected,
+// TestValidate_PaddedAttributeValueIsRejected, or
+// TestValidate_RepeatedBoundedElementIsRejected (schema_test.go,
+// structure_test.go).
+func xacmlDeadForms() []policytest.DeadForm {
+	// singleTarget is the one-Match Target fragment
+	// TestValidate_RepeatedBoundedElementIsRejected's own "target" local
+	// builds inline; duplicated here (a package-level test helper would be
+	// no smaller than the string itself) rather than exported from
+	// structure_test.go, which would widen that file's own purpose for one
+	// caller.
+	singleTarget := `<Target><AnyOf><AllOf><Match MatchId="` + wantMatchID + `"><AttributeValue DataType="` + wantDataType + `">x</AttributeValue><AttributeDesignator AttributeId="` + attrSubjectID + `" DataType="` + wantDataType + `" Category="` + categorySubject + `"/></Match></AllOf></AnyOf></Target>`
+
+	return []policytest.DeadForm{
+		{
+			// "Certified" validates as an ordinary string (MatchId is plain
+			// string-equal) but agent-trust-tier's real values are the
+			// upper-case models.AgentTrustTier spellings (see
+			// agentTrustTierValues in schema.go) — resolveAttr can never
+			// produce "Certified" for any request, only "CERTIFIED".
+			Name:      "out-of-vocabulary tier spelling",
+			Dead:      strings.Replace(matchDoc(wantMatchID, wantDataType, wantDataType, attrAgentTrustTier, categoryFor(attrAgentTrustTier)), ">x<", ">Certified<", 1),
+			Live:      strings.Replace(matchDoc(wantMatchID, wantDataType, wantDataType, attrAgentTrustTier, categoryFor(attrAgentTrustTier)), ">x<", ">CERTIFIED<", 1),
+			LiveInput: policy.EvaluationInput{Agent: authz.AgentInfo{TrustTier: models.TrustTierCertified}},
+		},
+		{
+			// xs:string preserves the leading space verbatim, so this
+			// compares against " alice", which resolveAttr can never
+			// produce for any Principal.Subject.
+			Name:      "whitespace-padded attribute value",
+			Dead:      strings.Replace(matchDoc(wantMatchID, wantDataType, wantDataType, attrSubjectID, categorySubject), ">x<", "> alice<", 1),
+			Live:      strings.Replace(matchDoc(wantMatchID, wantDataType, wantDataType, attrSubjectID, categorySubject), ">x<", ">alice<", 1),
+			LiveInput: policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}},
+		},
+		{
+			// A second sibling <Target> on a <Policy> has no defined XACML
+			// meaning and (pre-fix) was silently OR-ed with the first,
+			// widening — never narrowing — what the Policy applies to; see
+			// grammar's atMostOnce doc comment in structure.go. Validate now
+			// rejects it outright rather than accepting a document whose
+			// actual matching behaviour depends on an accept-and-ignore
+			// implementation detail.
+			Name:      "repeated Target silently widens a policy",
+			Dead:      `<Policy PolicyId="p" RuleCombiningAlgId="` + ruleCombiningAlgDenyOverrides + `">` + singleTarget + singleTarget + `<Rule RuleId="r1" Effect="` + effectPermit + `"/></Policy>`,
+			Live:      `<Policy PolicyId="p" RuleCombiningAlgId="` + ruleCombiningAlgDenyOverrides + `">` + singleTarget + `<Rule RuleId="r1" Effect="` + effectPermit + `"/></Policy>`,
+			LiveInput: policy.EvaluationInput{Principal: authz.Principal{Subject: "x"}},
+		},
+	}
 }
 
 // TestEngine_Language pins the exact string Language() returns. NewMulti
