@@ -147,16 +147,16 @@ import (
 //     file's own audited dead forms), authorizes a CERTIFIED agent instead
 //     of denying one — a fail-open widening, not a no-op.
 //
-// checkTierVocabulary, checkDerivedTierComparison, checkLiteralContradiction,
-// and checkEmptySetMembership did not need to change for any of this, and
-// that is exactly why reusing them unmodified for "unless" bodies is safe
-// rather than merely convenient: every one of them already only ever proves
-// a leaf is a CONTRADICTION (always false, for any request whatsoever),
-// never rejects a value it finds merely suspicious for some other reason —
-// see checkLiteralContradiction's own "a tautology... is left alone" note.
-// An always-false leaf is exactly the fact the "&&" argument above needs,
-// and it is a fact about the leaf, not about whether a "when" or an
-// "unless" happens to contain it.
+// checkTierVocabulary, checkContextFieldKind, checkDerivedTierComparison,
+// checkLiteralContradiction, and checkEmptySetMembership did not need to
+// change for any of this, and that is exactly why reusing them unmodified
+// for "unless" bodies is safe rather than merely convenient: every one of
+// them already only ever proves a leaf is a CONTRADICTION (always false,
+// for any request whatsoever), never rejects a value it finds merely
+// suspicious for some other reason — see checkLiteralContradiction's own
+// "a tautology... is left alone" note. An always-false leaf is exactly the
+// fact the "&&" argument above needs, and it is a fact about the leaf, not
+// about whether a "when" or an "unless" happens to contain it.
 //
 // # What stayed silent on purpose
 //
@@ -228,6 +228,9 @@ func checkDeadForms(parsed *cedarlib.Policy) error {
 	}
 	for _, expr := range leaves {
 		if err := checkTierVocabulary(expr); err != nil {
+			return err
+		}
+		if err := checkContextFieldKind(expr); err != nil {
 			return err
 		}
 		if err := checkDerivedTierComparison(expr); err != nil {
@@ -329,13 +332,29 @@ var knownTierVocabulary = map[string][]string{
 }
 
 // checkTierVocabulary rejects an == or != comparison between one of
-// knownTierVocabulary's paths and a string literal that is not a real
+// knownTierVocabulary's paths and a STRING literal that is not a real
 // member of that tier's own String() spellings. One membership check is
 // what catches three of the thirteen audited forms alike — a wrong-case
 // spelling ("Certified"), a bare ordinal ported from a Rego rule ("2"), and
 // a padded literal (" CERTIFIED ") — because all three are simply absent
 // from the set, for the same underlying reason: each reads as if it
 // configures the comparison and does not.
+//
+// This is a value-level check and deliberately only half of what these two
+// paths need: a non-string literal (5, true) is a KIND mismatch, not a
+// vocabulary miss, and is checkContextFieldKind's job below, not this
+// one's — contextFieldKind lists both paths as "string" for exactly that
+// reason. An earlier version of this function assumed a non-string literal
+// here was "already a loud evaluation-time error" and left it uncaught
+// entirely; confirmed empirically (see the task report) that assumption was
+// wrong — context.agent.trust_tier == 5 validates, prepares, and evaluates
+// to zero verdicts, the identical silent-dead shape as every field
+// contextFieldKind now covers. Splitting the value check (here) from the
+// kind check (checkContextFieldKind) rather than folding a kind branch into
+// this function keeps each check's own mutation coverage attributable to
+// one specific rejection, the same reasoning checkDerivedTierComparison's
+// own doc comment gives for why ITS kind and range checks are scoped the
+// way they are.
 func checkTierVocabulary(expr json.RawMessage) error {
 	_, b, ok := asOperator(expr, "==", "!=")
 	if !ok {
@@ -351,11 +370,8 @@ func checkTierVocabulary(expr json.RawMessage) error {
 	}
 	s, isString := lit.(string)
 	if !isString {
-		// A non-string literal against a String-typed path is a genuine
-		// Cedar type mismatch, not a vocabulary miss — already a loud
-		// evaluation-time error for these two paths (see the task report's
-		// classification table), and no audited dead form needs it caught
-		// here too.
+		// Not this check's concern — see the doc comment above:
+		// checkContextFieldKind rejects a non-string literal here instead.
 		return nil
 	}
 	if slices.Contains(vocab, s) {
@@ -363,6 +379,121 @@ func checkTierVocabulary(expr json.RawMessage) error {
 	}
 	return fmt.Errorf("condition compares %s to %q, which is not a real tier spelling — must be exactly one of %v (case-sensitive, no surrounding whitespace); this can never match any value buildRequest actually produces",
 		path, s, vocab)
+}
+
+// contextFieldKind maps every closed-kind context path this package can
+// classify — other than context.derived_tier, owned by
+// checkDerivedTierComparison's own range check below, which already
+// subsumes a kind check for that one path (its own non-numeric-literal
+// branch covers every non-Long kind, not only the ones knownTierVocabulary
+// leaves this map to cover) — to its fixed Cedar kind: "string", "boolean",
+// "long", or "set".
+//
+// context.agent.trust_tier and context.delegation.max_action_tier are
+// listed here as "string" even though knownTierVocabulary (above) already
+// checks them: that is a deliberate, non-overlapping split, not redundancy.
+// knownTierVocabulary is a VALUE check (is this string literal a real tier
+// spelling) that only ever runs once the literal is confirmed to be a
+// string; this map is a KIND check (is the literal even the right Cedar
+// type at all) that only ever fires when it is NOT a string. An earlier
+// version of this file assumed a non-string literal against these two
+// paths was "already a loud evaluation-time error" and left it unchecked
+// entirely — confirmed empirically wrong (see checkTierVocabulary's own
+// doc comment and the task report): context.agent.trust_tier == 5 is the
+// identical silent-dead shape as context.agent.suspended == "true", just on
+// a path this file had, until now, incorrectly assumed needed no kind
+// check of its own.
+//
+// agent.id and delegation.purpose are the only other String context paths
+// (see request.go's buildRequest) and are deliberately NOT listed: both are
+// open free text with no closed vocabulary, but that is not why they are
+// absent — trust_tier and max_action_tier are equally absent from any
+// *vocabulary* concern here, since this map does not check values. They
+// are left out because no audited dead form needs them, and each new entry
+// here needs its own mutation-tested DeadForms fixture (see the task
+// report) to earn its place rather than being added speculatively; add one
+// there first if a real dead form ever needs it.
+var contextFieldKind = map[string]string{
+	"context.agent.trust_tier":           "string",
+	"context.delegation.max_action_tier": "string",
+	"context.agent.suspended":            "boolean",
+	"context.agent.enabled":              "boolean",
+	"context.delegation.depth":           "long",
+	"context.agent.allowed_tools":        "set",
+}
+
+// literalKind reports the Cedar kind — "string", "long", or "boolean" — of
+// v, a literalValue result. The same three Go kinds scalarLiteral itself
+// recognizes as safe to compare (string, float64, bool); anything else (a
+// decoded map or slice — an entity-UID or Set literal) is reported not ok
+// rather than guessed at, the same caution scalarLiteral's own doc comment
+// explains. A Set literal specifically never reaches here at all: Cedar's
+// JSON format represents one as {"Set": [...]}, a shape literalValue does
+// not recognize (it only decodes {"Value": ...} nodes) — see pathAndLiteral
+// and isEmptySet, which read that shape directly rather than through
+// literalValue.
+func literalKind(v any) (kind string, ok bool) {
+	switch v.(type) {
+	case string:
+		return "string", true
+	case float64:
+		return "long", true
+	case bool:
+		return "boolean", true
+	default:
+		return "", false
+	}
+}
+
+// checkContextFieldKind rejects an == or != comparison between one of
+// contextFieldKind's paths and a literal whose own Cedar kind provably
+// disagrees with that field's fixed kind — e.g. context.agent.suspended
+// (always a Boolean, see request.go's buildRequest) compared to a String
+// literal ("true"), or context.agent.trust_tier (always a String) compared
+// to a Long literal (5). Unlike checkTierVocabulary, this is a type-level
+// check, not a value-level one: it needs no closed vocabulary of legal
+// values, only the field's fixed Cedar kind, because a Boolean, Long, Set,
+// or String is simply never equal to a value of a different kind — the
+// identical "== is total: well-typed, and simply false, for any two
+// differently-typed operands" fact checkDerivedTierComparison's own doc
+// comment establishes for context.derived_tier, applied to every other
+// closed-kind context field this package can classify. Confirmed
+// empirically for every path in contextFieldKind (see the task report):
+// each of context.agent.trust_tier == 5, context.delegation.max_action_tier
+// == 5, context.agent.suspended == "true", context.agent.enabled ==
+// "false", context.delegation.depth == "2", and context.agent.allowed_tools
+// == "Bash" validates, prepares, and evaluates to zero verdicts against an
+// input that should have matched — a forbid rule silently never denies.
+//
+// Scoped to == and != for the same reason checkTierVocabulary and
+// checkDerivedTierComparison are: confirmed empirically that a Boolean,
+// Long, or Set field compared to a mismatched-kind literal via one of the
+// four ordering operators (<, <=, >, >=, none of which Cedar defines for
+// those kinds) already fails at *evaluation* with a genuine Cedar type
+// error ("expected comparable value, got bool/set/string"), which Evaluate
+// (evaluate.go) already turns into a deny verdict naming the policy. That
+// is already fail-closed; adding an authoring-time rejection for the
+// ordering operators here would not close any additional gap, only
+// duplicate one.
+func checkContextFieldKind(expr json.RawMessage) error {
+	_, b, ok := asOperator(expr, "==", "!=")
+	if !ok {
+		return nil
+	}
+	path, lit, ok := pathAndLiteral(b.Left, b.Right)
+	if !ok {
+		return nil
+	}
+	wantKind, known := contextFieldKind[path]
+	if !known {
+		return nil
+	}
+	gotKind, litOK := literalKind(lit)
+	if !litOK || gotKind == wantKind {
+		return nil
+	}
+	return fmt.Errorf("condition compares %s (always a Cedar %s) to %#v, which is a %s — never equal at any value; this can never match any value buildRequest actually produces",
+		path, wantKind, lit, gotKind)
 }
 
 // checkDerivedTierComparison rejects a comparison between

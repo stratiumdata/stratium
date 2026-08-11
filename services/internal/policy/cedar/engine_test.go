@@ -73,6 +73,24 @@ var deadFormUnlessLiveInput = policy.EvaluationInput{
 	DerivedTier: models.ActionTierReasoning,
 }
 
+// deadFormContextKindReferenceInput is the LiveInput for the four
+// "context field kind:" entries below — the fix for the whole-branch
+// review's Important finding that knownTierVocabulary's two paths were the
+// only context fields checked for a mismatched comparison, leaving every
+// Boolean, Long, and Set field silently dead against a wrong-kind literal
+// (see deadform.go's contextFieldKind). Chosen so each field's Live
+// (correctly-typed) comparison actually matches, proving the fix produces
+// a real verdict rather than merely accepting the text.
+var deadFormContextKindReferenceInput = policy.EvaluationInput{
+	Principal: authz.Principal{Subject: "alice"},
+	Agent: authz.AgentInfo{
+		Suspended:    true,
+		Enabled:      false,
+		AllowedTools: []string{"Bash"},
+	},
+	Delegation: policy.DelegationContext{Depth: 2},
+}
+
 // deadForms is every dead shape this package rejects at authoring time.
 // The original nine are Task 2's — see deadform.go's package doc for why
 // those nine (of the thirteen the task 2 brief audited) needed new checks,
@@ -81,15 +99,19 @@ var deadFormUnlessLiveInput = policy.EvaluationInput{
 // each was added) to have validated, prepared, and produced zero verdicts
 // against its own LiveInput before its fix landed; every Live text is its
 // minimal correction, differing only in the one respect its own dead form
-// is named for — except the "unless: contradiction" entry, where the
-// minimal correction is a real, request-dependent condition rather than a
+// is named for — except "unless: contradiction," whose Dead form (1 == 2)
+// has no request-dependent path to correct in place: the minimal live
+// counterpart is a real, request-dependent condition instead of a
 // same-shape literal edit (see deadFormUnlessLiveInput's own doc comment
-// for why).
+// for why 1 == 1, the when-side fixture's own trick, does not work here).
 //
-// The "unless:"-prefixed group appended after the original nine is the
-// whole-branch review's Critical finding: dead forms silently widened
-// rather than killed a policy when the enclosing clause was "unless"
-// instead of "when" (see this package's own doc comment).
+// The two groups appended after the original nine are the whole-branch
+// review's own findings, both the same class the review named them as (see
+// this package's own doc comment): "unless:" (Critical: dead forms
+// silently widened rather than killed a policy when the enclosing clause
+// was "unless" instead of "when"), and "context field kind:" (Important:
+// knownTierVocabulary's two paths left every other closed-kind context
+// field uncovered).
 func deadForms() []policytest.DeadForm {
 	return []policytest.DeadForm{
 		{
@@ -212,6 +234,58 @@ func deadForms() []policytest.DeadForm {
 			Dead:      `permit(principal, action, resource) unless { context.derived_tier > 99 };`,
 			Live:      fmt.Sprintf(`permit(principal, action, resource) unless { context.derived_tier >= %d };`, int(models.ActionTierDestructive)),
 			LiveInput: deadFormUnlessLiveInput,
+		},
+
+		// --- Important: knownTierVocabulary's two paths were the only
+		// context fields checked for a mismatched comparison — every other
+		// closed-kind field (Boolean, Long, Set) was silently dead against
+		// a wrong-kind literal. The first two below are a second gap found
+		// while fixing the first: trust_tier and max_action_tier are
+		// STRING-vocabulary-checked by knownTierVocabulary already, but a
+		// non-string literal against either one was never checked at all
+		// (an earlier version of this file assumed, wrongly, that it was
+		// already a loud evaluation-time error — see checkTierVocabulary's
+		// own doc comment).
+		{
+			Name:      "context field kind: trust_tier vs non-string",
+			Dead:      `forbid(principal, action, resource) when { context.agent.trust_tier == 5 };`,
+			Live:      `forbid(principal, action, resource) when { context.agent.trust_tier == "CERTIFIED" };`,
+			LiveInput: deadFormReferenceInput,
+		},
+		{
+			Name: "context field kind: max_action_tier vs non-string",
+			Dead: `forbid(principal, action, resource) when { context.delegation.max_action_tier == 3 };`,
+			Live: fmt.Sprintf(`forbid(principal, action, resource) when { context.delegation.max_action_tier == %q };`,
+				models.ActionTierExternalComms.String()),
+			LiveInput: deadFormReferenceInput,
+		},
+		{
+			Name:      "context field kind: suspended vs string",
+			Dead:      `forbid(principal, action, resource) when { context.agent.suspended == "true" };`,
+			Live:      `forbid(principal, action, resource) when { context.agent.suspended == true };`,
+			LiveInput: deadFormContextKindReferenceInput,
+		},
+		{
+			Name:      "context field kind: enabled vs string",
+			Dead:      `forbid(principal, action, resource) when { context.agent.enabled == "false" };`,
+			Live:      `forbid(principal, action, resource) when { context.agent.enabled == false };`,
+			LiveInput: deadFormContextKindReferenceInput,
+		},
+		{
+			Name:      "context field kind: depth vs string",
+			Dead:      `forbid(principal, action, resource) when { context.delegation.depth == "2" };`,
+			Live:      `forbid(principal, action, resource) when { context.delegation.depth == 2 };`,
+			LiveInput: deadFormContextKindReferenceInput,
+		},
+		{
+			Name: "context field kind: allowed_tools vs string",
+			// A Set has no scalar spelling that could ever satisfy "==" —
+			// the minimal correction changes the comparison shape itself,
+			// not just the literal's kind, to Cedar's actual membership
+			// test.
+			Dead:      `forbid(principal, action, resource) when { context.agent.allowed_tools == "Bash" };`,
+			Live:      `forbid(principal, action, resource) when { context.agent.allowed_tools.contains("Bash") };`,
+			LiveInput: deadFormContextKindReferenceInput,
 		},
 	}
 }
