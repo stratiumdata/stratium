@@ -397,6 +397,31 @@ and belongs in Go. If the worst they can do is lock themselves out, it is policy
 The same monotonicity appears three times: raise-only tier overrides, child ⊆ parent on delegation,
 and policy-narrows-only.
 
+### 4.3.1 A child may narrow only dimensions the parent constrains (2026-08-10)
+
+`ScopeNarrows` treated two dimensions inconsistently: a child capping a
+classification hierarchy the parent left open was **rejected**, while a child
+adding a resource constraint the parent lacked was **accepted**. Both are
+narrowing, so one of them was wrong.
+
+**Ruling: reject both.** A child may narrow a dimension the parent already
+constrains; it may not introduce one the parent leaves open.
+
+This is stricter than logic alone requires — adding a constraint genuinely does
+restrict the child further — and it is chosen for a structural reason rather
+than a security one. It makes a child's *shape* derivable from its parent's,
+not merely its values. Reasoning about a chain then means comparing values
+across a fixed set of dimensions, rather than tracking which hop introduced
+which dimension and on what authority. A delegation chain that can grow new
+constraint dimensions at every hop is harder to audit and harder to explain,
+even though every individual step narrows.
+
+Consequence: `TestScopeNarrows_AcceptsAddedResourceConstraint` inverts. A
+parent that wishes a child to be constrained on a dimension must constrain it
+itself, however loosely.
+
+---
+
 ### 4.4 Action-tier derivation
 
 Resolution order, evaluated server-side:
