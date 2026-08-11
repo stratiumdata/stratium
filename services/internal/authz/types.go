@@ -6,6 +6,19 @@
 // reaches this code through the PDP. Nothing else may compute a decision.
 // Three parallel implementations drifting apart is the specific failure this
 // package exists to prevent.
+//
+// TierTable.Catalog (tier.go) is seeded by DefaultCatalog (catalog.go) with
+// tool names — "Read", "Write", "WebFetch" — that are Claude Code's names,
+// not a framework-agnostic vocabulary, even though this package's stated job
+// is to serve any agent framework. That mismatch is a deliberate, temporary
+// trade, not an oversight: a catalog nobody populates leaves the
+// tool-input-has-no-verb defect exactly where it was (see DeriveTier's and
+// BuiltinTier's doc comments), and the failure mode of shipping the trade is
+// silent rather than loud — a tool name this catalog does not recognize
+// simply falls through to BuiltinTier or the tenant's UnknownTier floor,
+// same as before the catalog existed, never an error. The eventual home for
+// this table is a database-backed, per-tenant catalog; DefaultCatalog is the
+// seed it starts from, not the end state.
 package authz
 
 import (

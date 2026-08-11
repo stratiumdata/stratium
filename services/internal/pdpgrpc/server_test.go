@@ -238,6 +238,30 @@ func TestDecide_NormalizedInputReachesDerivation(t *testing.T) {
 	}
 }
 
+// The catalog Task 1 wires into tiers here must reach the real server path,
+// not just the pure authz package: a bare Read call — a path, no verb, no
+// shell-command-shaped raw_input — must derive READ_ONLY through the
+// catalog. Before the catalog was connected, this fell through to
+// BuiltinTier's "unrecognized -> assume it modifies" default and came back
+// INTERNAL_MODIFY, indistinguishable from what a Write on the same path
+// would produce — the exact defect this task closes.
+func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
+	fs, req := wellFormedFixture()
+	req.Tool = "Read"
+	req.Verb = ""
+	req.RawInput = "/tmp/notes.txt"
+	srv := NewServer(fs, policy.Unconfigured(), nil, nil, testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
+		t.Errorf("DerivedTier = %d, want %d (READ_ONLY): the catalog must classify a bare Read call by tool name",
+			resp.GetDerivedTier(), models.ActionTierReadOnly)
+	}
+}
+
 // The response's provenance fields must carry policy.Unconfigured()'s
 // specific reason and source through, not FoldVerdicts's generic
 // "default deny: no policy verdict allowed" text — that is the entire point

@@ -165,7 +165,10 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		NormalizedInput: req.GetNormalizedInput(),
 		DeclaredTier:    declaredTier,
 	}
-	tiers := authz.TierTable{} // tenant tier overrides load from the DB starting Phase 2; none exist yet.
+	// Catalog is the shipped default (authz.DefaultCatalog, see that
+	// package's doc comment for the Claude-Code-shaped-names trade); tenant
+	// overrides load from the DB starting Phase 2, none exist yet.
+	tiers := authz.TierTable{Catalog: authz.DefaultCatalog()}
 
 	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
