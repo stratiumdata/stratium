@@ -36,7 +36,7 @@ var engineConstructors = map[string]policy.PolicyEngine{
 // operator who mistypes a language, or names one this build does not yet
 // ship, learns it at startup, never from a policy that silently never
 // evaluates — D10's failure mode one layer up, from configuration instead
-// of a single tenant's data (see policy.Multi's own orphanVerdict for the
+// of a single tenant's data (see policy.Multi's own orphanVerdicts for the
 // per-tenant case this configuration-level check sits above).
 //
 // Returns a nil Registry alongside the error on any failure: a deployment

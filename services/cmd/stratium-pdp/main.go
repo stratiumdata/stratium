@@ -115,7 +115,7 @@ func run(logger *slog.Logger) error {
 	// this deployment's operator left it out of STRATIUM_POLICY_LANGUAGES, or
 	// because a tenant authored in a language this build has never shipped —
 	// gets an honest deny naming that language (see Multi's own doc comment
-	// in internal/policy/multi.go and orphanVerdict specifically), rather
+	// in internal/policy/multi.go and orphanVerdicts specifically), rather
 	// than the single-engine policy.Configured this replaced, which would
 	// have silently never loaded or evaluated it at all. Multi loads and
 	// prepares this tenant's policies fresh on every Decide call (no cache —

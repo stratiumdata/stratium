@@ -105,16 +105,16 @@ func NewMulti(source AllPolicySource, engines Registry) Multi {
 // about what languages even exist, so there is nothing to fall back to.
 // Every other failure this method can encounter — a language with no
 // registered engine, or a registered engine's own Prepare call failing — is
-// folded into the returned set as a deny verdict for that specific language,
-// rather than aborting the whole call: a Rego engine that cannot compile
-// must not silence a Cedar forbid that prepared just fine.
+// folded into the returned set as one deny verdict per policy in that
+// specific language, rather than aborting the whole call: a Rego engine that
+// cannot compile must not silence a Cedar forbid that prepared just fine.
 //
 // err is still non-nil, alongside a fully usable set, when one or more
 // languages failed to *prepare* — never when a language simply has no
-// registered engine; that is not an error, only ever a deny verdict (see
-// orphanVerdict). This asymmetry is deliberate: Evaluate (below) treats a
-// non-nil set as sufficient regardless of err, because the failure is
-// already recorded as that language's deny verdict inside it and
+// registered engine; that is not an error, only ever a deny verdict per
+// policy (see orphanVerdicts). This asymmetry is deliberate: Evaluate
+// (below) treats a non-nil set as sufficient regardless of err, because the
+// failure is already recorded as that language's deny verdicts inside it and
 // deny-overrides means nothing is lost by proceeding — but pdpgrpc's
 // delegation-creation gate treats any non-nil err as blocking (see
 // delegation.go's CreateDelegation), preserving the pre-Multi distinction
@@ -149,12 +149,12 @@ func (m Multi) PrepareAll(ctx context.Context) (CompiledPolicySet, error) {
 		langPolicies := byLanguage[lang]
 		engine, ok := m.engines[lang]
 		if !ok {
-			entries = append(entries, languageEntry{language: lang, verdict: orphanVerdict(lang, langPolicies)})
+			entries = append(entries, languageEntry{language: lang, verdicts: orphanVerdicts(lang, langPolicies)})
 			continue
 		}
 		set, err := engine.Prepare(ctx, langPolicies)
 		if err != nil {
-			entries = append(entries, languageEntry{language: lang, verdict: prepareFailureVerdict(lang, err)})
+			entries = append(entries, languageEntry{language: lang, verdicts: prepareFailureVerdicts(lang, langPolicies, err)})
 			prepareFailures = append(prepareFailures, fmt.Sprintf("%s: %s", lang, err))
 			continue
 		}
@@ -202,17 +202,24 @@ func (m Multi) Evaluate(ctx context.Context, in EvaluationInput) []authz.PolicyV
 }
 
 // languageEntry is one language's contribution to a multiSet, fixed at
-// PrepareAll time. Exactly one of set/verdict is populated: set for a
+// PrepareAll time. Exactly one of set/verdicts is populated: set for a
 // language with a registered engine that prepared successfully — Evaluate
 // calls it fresh on every multiSet.Evaluate call, since only the actual
-// decision input can determine what it says; verdict for a language whose
+// decision input can determine what it says; verdicts for a language whose
 // contribution is already fully known before any EvaluationInput exists (no
 // registered engine, or Prepare itself failed) and would not change by
 // recomputing it per call.
+//
+// Plural, not a single verdict: an orphaned or prepare-failed language
+// denies once per unevaluated policy (see orphanVerdicts and
+// prepareFailureVerdicts below), the same one-verdict-per-policy shape
+// every registered engine's own Evaluate already follows, so
+// audit_chain.policy_id stays populated and queryable on exactly these
+// denials instead of every id but one living only inside free-text Reason.
 type languageEntry struct {
 	language string
 	set      CompiledPolicySet
-	verdict  *authz.PolicyVerdict
+	verdicts []authz.PolicyVerdict
 }
 
 // multiSet is Multi's CompiledPolicySet. entries is built once by
@@ -273,8 +280,8 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 
 	var verdicts []authz.PolicyVerdict
 	for _, e := range s.entries {
-		if e.verdict != nil {
-			verdicts = append(verdicts, *e.verdict)
+		if len(e.verdicts) > 0 {
+			verdicts = append(verdicts, e.verdicts...)
 			continue
 		}
 
@@ -296,32 +303,68 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 	return verdicts, nil
 }
 
-// orphanVerdict is the single deny verdict a language with policies but no
-// registered engine contributes — D10: an operator who authored a policy in
-// a language this deployment cannot run must learn it from a denial, naming
-// every policy id left unevaluated, not from a system that behaves as though
-// they never wrote it.
-func orphanVerdict(language string, policies []StoredPolicy) *authz.PolicyVerdict {
-	ids := make([]string, len(policies))
+// orphanVerdicts is one deny verdict per policy stored in a language with no
+// registered engine — D10: an operator who authored a policy in a language
+// this deployment cannot run must learn it from a denial naming that exact
+// policy, not from a system that behaves as though they never wrote it.
+//
+// One verdict per policy, not one verdict naming every policy: PolicyID is
+// singular (authz.PolicyVerdict), so a single verdict for N orphaned
+// policies can only ever populate it with one of them (or leave it empty,
+// which is what this function used to do) — audit_chain.policy_id stays
+// unqueryable either way, with every id living only inside free-text
+// Reason. Splitting into N verdicts, each carrying its own PolicyID, is what
+// makes every orphaned policy individually queryable, and is harmless under
+// deny-overrides: N denies fold to the same outcome one would, FoldVerdicts
+// simply has more equally-valid candidates to pick a stable attribution
+// from (see authz.FoldVerdicts' own tie-break).
+//
+// Sorted by PolicyID before returning, the same defensive-determinism
+// reasoning multiSet.Evaluate applies to a sub-engine's own output (see that
+// method's doc comment): AllPolicySource makes no ordering promise in its
+// interface, so this does not lean on store.LoadAllPolicies' own ORDER BY id
+// happening to hold today, or on every other implementation of the interface
+// (test doubles included) doing the same.
+func orphanVerdicts(language string, policies []StoredPolicy) []authz.PolicyVerdict {
+	verdicts := make([]authz.PolicyVerdict, len(policies))
 	for i, p := range policies {
-		ids[i] = p.ID
+		verdicts[i] = authz.PolicyVerdict{
+			Effect:   authz.EffectDeny,
+			Source:   language,
+			PolicyID: p.ID,
+			Reason:   fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy ID %s", language, p.ID),
+		}
 	}
-	return &authz.PolicyVerdict{
-		Effect: authz.EffectDeny,
-		Source: language,
-		Reason: fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy IDs %s", language, strings.Join(ids, ", ")),
-	}
+	sort.Slice(verdicts, func(i, j int) bool { return verdicts[i].PolicyID < verdicts[j].PolicyID })
+	return verdicts
 }
 
-// prepareFailureVerdict is the single deny verdict a language contributes
-// when its registered engine's Prepare call itself fails — the same
-// "preparing %s policies" wording Configured's own denyf uses for the
-// one-language case, so the two failure modes read the same way in an audit
-// log whether a tenant has one engine or four.
-func prepareFailureVerdict(language string, err error) *authz.PolicyVerdict {
-	return &authz.PolicyVerdict{
-		Effect: authz.EffectDeny,
-		Source: language,
-		Reason: fmt.Sprintf("principal: preparing %s policies: %s", language, err),
+// prepareFailureVerdicts is one deny verdict per policy stored in a language
+// whose registered engine's Prepare call itself failed for the whole batch —
+// the same "preparing %s policies" wording Configured's own denyf used for
+// the one-language case, so the two failure modes read the same way in an
+// audit log whether a tenant has one engine or four.
+//
+// One verdict per policy, the same shape orphanVerdicts uses above, and for
+// the same underlying reason rather than a coincidental resemblance: every
+// engine in this tree stops at its first bad policy and returns a single
+// error for the whole Prepare call (see e.g. cedar.Engine.Prepare's own doc
+// comment), so every policy in policies is equally unevaluated when this
+// fires — not only whichever one err's own text happens to name. err's text
+// is shared verbatim across every returned verdict, because there is
+// exactly one underlying failure to report, while PolicyID differs per
+// verdict — so audit_chain.policy_id is queryable for every one of them,
+// not only whichever id happened to reach the free-text Reason first.
+func prepareFailureVerdicts(language string, policies []StoredPolicy, err error) []authz.PolicyVerdict {
+	verdicts := make([]authz.PolicyVerdict, len(policies))
+	for i, p := range policies {
+		verdicts[i] = authz.PolicyVerdict{
+			Effect:   authz.EffectDeny,
+			Source:   language,
+			PolicyID: p.ID,
+			Reason:   fmt.Sprintf("principal: preparing %s policies: %s", language, err),
+		}
 	}
+	sort.Slice(verdicts, func(i, j int) bool { return verdicts[i].PolicyID < verdicts[j].PolicyID })
+	return verdicts
 }

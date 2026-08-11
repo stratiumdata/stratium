@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -90,38 +91,106 @@ func TestMulti_LanguageWithRegisteredEngineEvaluatesNormally(t *testing.T) {
 	}
 }
 
-// TestMulti_OrphanLanguageDeniesNamingLanguageAndPolicyIDs is D10 — the
-// reason this task exists. A language with policies and no registered
-// engine must never be silently skipped: it must produce exactly one deny
-// verdict, and that verdict's Reason must name the language and every
-// policy id left unevaluated, not just its Effect. An operator who authored
-// a rego rule this deployment cannot run needs to learn that from the
-// denial text itself.
-func TestMulti_OrphanLanguageDeniesNamingLanguageAndPolicyIDs(t *testing.T) {
+// TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy is D10 — the reason
+// this task exists — for the shape Task 5 moved it to: a language with
+// policies and no registered engine must never be silently skipped, and
+// must never be collapsed into one verdict either, because PolicyID is
+// singular and one verdict can carry only one of N orphaned ids —
+// audit_chain.policy_id stays unqueryable for the rest either way (see
+// orphanVerdicts' own doc comment). So: one deny verdict PER orphaned
+// policy, each carrying that policy's own PolicyID and a Reason naming both
+// the missing language and that one policy's id.
+func TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy(t *testing.T) {
+	// Fed in reverse of sorted order: a passing test that only happened to
+	// see them already sorted would prove nothing about orphanVerdicts'
+	// own sort (see its doc comment on why it does not trust
+	// AllPolicySource to hand back a stable order).
 	source := fakeAllSource{policies: []StoredPolicy{
-		{ID: "orphan-1", Language: "rego"},
 		{ID: "orphan-2", Language: "rego"},
+		{ID: "orphan-1", Language: "rego"},
 	}}
 	// No "rego" entry in the registry at all — an empty Registry, not nil,
 	// to prove the zero value isn't doing the work by accident.
 	got := NewMulti(source, Registry{}).Evaluate(context.Background(), EvaluationInput{})
 
-	if len(got) != 1 {
-		t.Fatalf("Evaluate() = %d verdicts, want exactly 1 (never skipped, never split per policy): %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("Evaluate() = %d verdicts, want exactly 2 (one per orphaned policy, never one verdict for the "+
+			"whole language): %+v", len(got), got)
 	}
-	v := got[0]
-	if v.Effect != authz.EffectDeny {
-		t.Fatalf("Effect = %v, want EffectDeny", v.Effect)
+	want := []struct{ id, reason string }{
+		{"orphan-1", "principal: no rego engine registered; cannot evaluate policy ID orphan-1"},
+		{"orphan-2", "principal: no rego engine registered; cannot evaluate policy ID orphan-2"},
 	}
-	if v.Source != "rego" {
-		t.Errorf("Source = %q, want %q", v.Source, "rego")
+	for i, w := range want {
+		v := got[i]
+		if v.Effect != authz.EffectDeny {
+			t.Errorf("verdict %d: Effect = %v, want EffectDeny", i, v.Effect)
+		}
+		if v.Source != "rego" {
+			t.Errorf("verdict %d: Source = %q, want %q", i, v.Source, "rego")
+		}
+		// The property this test exists for: a reverted fix leaves
+		// PolicyID at its zero value ("") here, which is exactly what
+		// made audit_chain.policy_id unqueryable for a D10 denial.
+		if v.PolicyID != w.id {
+			t.Errorf("verdict %d: PolicyID = %q, want %q (audit_chain.policy_id must be queryable for this "+
+				"verdict, not left empty)", i, v.PolicyID, w.id)
+		}
+		if v.Reason != w.reason {
+			t.Errorf("verdict %d: Reason = %q, want %q verbatim", i, v.Reason, w.reason)
+		}
 	}
-	if !strings.Contains(v.Reason, "rego") {
-		t.Errorf("Reason = %q, want it to name the orphaned language %q", v.Reason, "rego")
+}
+
+// TestMulti_ManyOrphanedPoliciesFoldToOneReadableReason checks the
+// consequence of the N-verdicts-per-language shape above one layer up, at
+// authz.FoldVerdicts — the same fold pdpgrpc.Server.Decide calls to build
+// DecideResponse.PrincipalReason and the audit row's reason/policy_id
+// columns. N deny verdicts for N orphaned policies must still fold to
+// exactly one attributed reason naming exactly one policy id, chosen
+// deterministically (FoldVerdicts' own lexicographically-smallest
+// tie-break) — not a concatenation of all five, and not garbled by having
+// five candidates instead of one to choose from. This is what turns "the
+// response is still readable with five orphaned policies" (this task's own
+// brief) into a checked fact rather than an assumption.
+func TestMulti_ManyOrphanedPoliciesFoldToOneReadableReason(t *testing.T) {
+	const n = 5
+	policies := make([]StoredPolicy, n)
+	for i := 0; i < n; i++ {
+		policies[i] = StoredPolicy{ID: fmt.Sprintf("orphan-%d", i), Language: "rego"}
 	}
-	for _, id := range []string{"orphan-1", "orphan-2"} {
-		if !strings.Contains(v.Reason, id) {
-			t.Errorf("Reason = %q, want it to name unevaluated policy id %q", v.Reason, id)
+
+	verdicts := NewMulti(fakeAllSource{policies: policies}, Registry{}).Evaluate(context.Background(), EvaluationInput{})
+	if len(verdicts) != n {
+		t.Fatalf("Evaluate() = %d verdicts, want %d (one per orphaned policy)", len(verdicts), n)
+	}
+
+	legResult, deciding := authz.FoldVerdicts(verdicts)
+	if legResult.Effect != authz.EffectDeny {
+		t.Fatalf("FoldVerdicts() effect = %v, want EffectDeny", legResult.Effect)
+	}
+	if deciding == nil {
+		t.Fatal("FoldVerdicts() deciding verdict = nil, want the one it attributed the denial to")
+	}
+	t.Logf("%d orphaned policies folded to one attributed reason: %q (policy id %q)", n, legResult.Reason, deciding.PolicyID)
+
+	// Re-derived from `deciding` rather than hardcoded, so this is both a
+	// determinism check (the fold's own Reason field must match what its
+	// own attributed verdict says) and the readability check itself: this
+	// is what "still readable" means operationally — one sentence, one id.
+	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s", deciding.PolicyID)
+	if legResult.Reason != wantReason {
+		t.Errorf("FoldVerdicts() reason = %q, want %q", legResult.Reason, wantReason)
+	}
+	// None of the four sibling ids leak into the attributed Reason: a
+	// Reason that grew with N would be the "substantially noisier" outcome
+	// the brief asks to be reported plainly rather than hidden, and this is
+	// the assertion that it did not happen.
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("orphan-%d", i)
+		if id != deciding.PolicyID && strings.Contains(legResult.Reason, id) {
+			t.Errorf("Reason = %q unexpectedly names sibling orphaned policy %q — the attributed reason must "+
+				"stay a single-policy denial, not grow to list every orphan", legResult.Reason, id)
 		}
 	}
 }
@@ -240,6 +309,10 @@ func TestMulti_PrepareFailureDeniesNamingLanguageWithoutSuppressingOthers(t *tes
 	if !strings.Contains(regoVerdict.Reason, "rego") || !strings.Contains(regoVerdict.Reason, prepareErr.Error()) {
 		t.Errorf("rego verdict Reason = %q, want it to name the language and the underlying error %q", regoVerdict.Reason, prepareErr.Error())
 	}
+	if regoVerdict.PolicyID != "rego-1" {
+		t.Errorf("rego verdict PolicyID = %q, want %q — audit_chain.policy_id must be queryable for a "+
+			"prepare-failure denial too, not only an orphan-language one", regoVerdict.PolicyID, "rego-1")
+	}
 
 	// Evaluate (the PrincipalPolicy-facing method) must also see both: the
 	// non-nil PrepareAll error must not turn into a blanket deny that drops
@@ -248,6 +321,50 @@ func TestMulti_PrepareFailureDeniesNamingLanguageWithoutSuppressingOthers(t *tes
 	principalVerdicts := m.Evaluate(context.Background(), EvaluationInput{})
 	if len(principalVerdicts) != 2 {
 		t.Fatalf("Multi.Evaluate() = %d verdicts, want 2 (PrepareAll's error must not collapse this to a single generic deny): %+v", len(principalVerdicts), principalVerdicts)
+	}
+}
+
+// TestMulti_PrepareFailureEmitsOneDenyVerdictPerPolicyInThatLanguage checks
+// prepareFailureVerdicts got the same treatment as orphanVerdicts, and for
+// the same underlying reason rather than a coincidental resemblance (see
+// prepareFailureVerdicts' own doc comment): a whole language's Prepare call
+// failing leaves every policy in that language equally unevaluated, not
+// just whichever one the underlying error's text happens to name, so every
+// one of them gets its own deny verdict and its own queryable PolicyID
+// rather than a single verdict covering all three with none of their ids
+// ever reaching audit_chain.policy_id.
+func TestMulti_PrepareFailureEmitsOneDenyVerdictPerPolicyInThatLanguage(t *testing.T) {
+	prepareErr := errors.New("boom: malformed rego module")
+	// Fed out of sorted order, same reasoning as the orphan-language test
+	// above: this also proves prepareFailureVerdicts' own sort is real.
+	source := fakeAllSource{policies: []StoredPolicy{
+		{ID: "rego-c", Language: "rego"},
+		{ID: "rego-a", Language: "rego"},
+		{ID: "rego-b", Language: "rego"},
+	}}
+	engines := Registry{"rego": stubEngine{language: "rego", prepareErr: prepareErr}}
+
+	got := NewMulti(source, engines).Evaluate(context.Background(), EvaluationInput{})
+	if len(got) != 3 {
+		t.Fatalf("Evaluate() = %d verdicts, want 3 (one per policy in the language whose Prepare call failed, "+
+			"never one verdict for the whole batch): %+v", len(got), got)
+	}
+
+	wantIDs := []string{"rego-a", "rego-b", "rego-c"}
+	for i, wantID := range wantIDs {
+		v := got[i]
+		if v.Effect != authz.EffectDeny {
+			t.Errorf("verdict %d: Effect = %v, want EffectDeny", i, v.Effect)
+		}
+		if v.Source != "rego" {
+			t.Errorf("verdict %d: Source = %q, want %q", i, v.Source, "rego")
+		}
+		if v.PolicyID != wantID {
+			t.Errorf("verdict %d: PolicyID = %q, want %q", i, v.PolicyID, wantID)
+		}
+		if !strings.Contains(v.Reason, prepareErr.Error()) {
+			t.Errorf("verdict %d: Reason = %q, want it to contain the underlying prepare error %q", i, v.Reason, prepareErr.Error())
+		}
 	}
 }
 
