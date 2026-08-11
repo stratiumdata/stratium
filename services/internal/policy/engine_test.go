@@ -3,6 +3,7 @@ package policy_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"stratium/internal/authz"
@@ -43,6 +44,9 @@ func (fakeEngine) Prepare(_ context.Context, policies []policy.StoredPolicy) (po
 		if !balancedDelimiters(p.Text) {
 			return nil, fmt.Errorf("fake: prepare policy %s (%q): malformed policy text (unbalanced delimiters): %q", p.ID, p.Name, p.Text)
 		}
+		if isVacuousEmptySet(p.Text) {
+			return nil, fmt.Errorf("fake: prepare policy %s (%q): vacuous empty set (contains \"[]\", can never match): %q", p.ID, p.Name, p.Text)
+		}
 		snapshot = append(snapshot, p)
 	}
 	return fakeCompiledSet{policies: snapshot}, nil
@@ -52,7 +56,26 @@ func (fakeEngine) Validate(_ context.Context, text string) error {
 	if !balancedDelimiters(text) {
 		return fmt.Errorf("fake: malformed policy text (unbalanced delimiters): %q", text)
 	}
+	if isVacuousEmptySet(text) {
+		return fmt.Errorf("fake: vacuous empty set (contains \"[]\", can never match): %q", text)
+	}
 	return nil
+}
+
+// isVacuousEmptySet reports whether text contains a literal empty bracket
+// pair "[]" — balanced, so balancedDelimiters alone accepts it, but with
+// nothing inside. This gives the fake's otherwise purely syntactic notion of
+// "malformed" a second, semantic failure shape of its own: this trivial
+// language's own miniature version of jsonpolicy's real "in": [] defect
+// (schema.go) — text that reads as a working condition and can never match
+// anything. policytest.EngineContract now requires every engine, including
+// this fake one, to declare at least one such shape (see
+// policytest.Fixtures.DeadForms); without this check, fakeEngine would have
+// nothing behind it to reject, since its Evaluate ignores EvaluationInput
+// entirely and every balanced-delimiter text it accepts already produces a
+// verdict unconditionally.
+func isVacuousEmptySet(text string) bool {
+	return strings.Contains(text, "[]")
 }
 
 // balancedDelimiters stands in for real parsing. Every language this
@@ -112,5 +135,13 @@ func TestFakeEngine_Contract(t *testing.T) {
 		WellFormed: "fake: well-formed",
 		AllowAll:   "fake: allow-all",
 		DenyAll:    "fake: deny-all",
+		DeadForms: []policytest.DeadForm{
+			{
+				Name:      "vacuous empty set",
+				Dead:      "fake: matches nothing []",
+				Live:      "fake: matches something [x]",
+				LiveInput: policy.EvaluationInput{},
+			},
+		},
 	})
 }

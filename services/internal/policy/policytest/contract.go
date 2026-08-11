@@ -27,6 +27,34 @@ import (
 	"stratium/pkg/models"
 )
 
+// DeadForm is a policy text that is syntactically well-formed for this
+// language but semantically incapable of ever producing its author's intended
+// verdict — a typo'd package path, a vacuous empty set, an out-of-vocabulary
+// enum spelling. Each must be rejected by BOTH Validate and Prepare, and
+// Prepare's error must name the offending policy's ID.
+//
+// This type exists because three of the four engines independently
+// discovered and independently fixed their own instance of this defect —
+// Rego's checkPackage, jsonpolicy's empty-"in"/out-of-lattice at_most
+// rejection, XACML's vocabulary/whitespace/cardinality checks — with zero
+// change to this shared contract. Nothing at the one boundary every engine
+// routes through was asking "can a policy this engine accepted ever fire?"
+// DeadForm makes that question part of what every engine must answer, not a
+// property three separate reviews happened to find by hand while a fourth
+// (Cedar, which predates this contract) was never asked at all.
+type DeadForm struct {
+	// Name identifies the shape in test output, e.g. "vacuous empty set".
+	Name string
+	// Dead is the text that must be rejected.
+	Dead string
+	// Live is the corrected form of the same intent. It must be ACCEPTED and,
+	// when evaluated against LiveInput, must produce a verdict. Without this,
+	// an engine could satisfy the contract by rejecting everything.
+	Live string
+	// LiveInput is the input Live is expected to match.
+	LiveInput policy.EvaluationInput
+}
+
 // Fixtures supplies the language-specific policy text EngineContract needs.
 // Every field is required; a zero value is a programming error, not a skip.
 type Fixtures struct {
@@ -40,6 +68,13 @@ type Fixtures struct {
 	// always match, so that a set of two always yields exactly two verdicts.
 	AllowAll string
 	DenyAll  string
+
+	// DeadForms is every syntactically-valid-but-semantically-dead shape this
+	// engine's own Validate and Prepare must reject — see DeadForm's own doc
+	// comment. Required to be non-empty, the same as every field above: an
+	// engine that declares none has proven nothing about this property, only
+	// that the field compiles. testDeadForms enforces that requirement.
+	DeadForms []DeadForm
 }
 
 // EngineContract is the reusable conformance suite every PolicyEngine
@@ -68,6 +103,12 @@ type Fixtures struct {
 //  7. Prepare on a policy set containing Fixtures.Malformed fails with the
 //     offending policy's ID in the error, not just "a policy" — see
 //     Fixtures.Malformed's own doc comment.
+//  8. Every Fixtures.DeadForms entry names a policy shape that is
+//     syntactically well-formed but semantically dead: Validate and Prepare
+//     both reject its Dead text (Prepare's error naming the offending
+//     policy), while its Live counterpart is accepted by both and, once
+//     evaluated against LiveInput, actually produces a verdict.
+//     Fixtures.DeadForms itself must be non-empty — see testDeadForms.
 func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	t.Helper()
 	requireFixtures(t, f)
@@ -79,6 +120,7 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	testVerdictProvenance(t, engine, f)
 	testPriority(t, engine, f)
 	testPrepareNamesMalformedPolicy(t, engine, f)
+	testDeadForms(t, engine, f)
 }
 
 // requireFixtures fails fast on an incomplete Fixtures value. Every field
@@ -495,6 +537,82 @@ func testPrepareNamesMalformedPolicy(t *testing.T, engine policy.PolicyEngine, f
 		}
 		if strings.Contains(err.Error(), neighborID) {
 			t.Errorf("Prepare error blames the well-formed neighbor %q instead of (or as well as) the offender: %v", neighborID, err)
+		}
+	})
+}
+
+// testDeadForms checks the property this task adds: every engine must prove
+// it rejects at least one policy shape that is syntactically well-formed but
+// structurally incapable of ever producing its author's intended verdict —
+// see DeadForm's own doc comment for what qualifies and why this exists.
+//
+// Fixtures.DeadForms must be non-empty. Rego, jsonpolicy, and xacml each
+// independently found and fixed their own dead-policy defect with zero
+// change to this shared contract; Cedar predates the contract and was never
+// audited the same way — it still accepts several dead forms today (Task 2).
+// A silently empty DeadForms slice is exactly how that gap would persist into
+// a fifth engine — the same failure this project's own D5 structural guards
+// each close with a "found zero call sites" tripwire (rego's
+// TestPrepareForEval_OnlyCalledFromPrepareOrValidate, jsonpolicy's
+// TestDecodeOnlyCalledFromParseDoc, xacml's
+// TestXMLParsingOnlyCalledFromPrepareOrValidate). This is that same tripwire
+// one level up, guarding the contract itself rather than one engine's
+// internals — and it is deliberately its own subtest, not folded into
+// requireFixtures' early-fatal check at the top of EngineContract, so an
+// engine missing DeadForms still gets properties 1-7 verified and reported
+// instead of the whole contract run aborting before it learns anything else
+// about that engine.
+func testDeadForms(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+
+	t.Run("dead forms", func(t *testing.T) {
+		if len(f.DeadForms) == 0 {
+			t.Fatal("Fixtures.DeadForms is empty — this engine has declared no dead forms. Every engine must prove it rejects at least one syntactically-valid-but-semantically-dead policy shape (see DeadForm's own doc comment); a silently empty slice would let this property quietly stop applying to this engine.")
+		}
+
+		for _, df := range f.DeadForms {
+			if df.Name == "" {
+				t.Fatal("a Fixtures.DeadForms entry has an empty Name — test output could not attribute a failure to a specific shape")
+			}
+
+			t.Run(df.Name, func(t *testing.T) {
+				t.Run("dead text is rejected by Validate", func(t *testing.T) {
+					if err := engine.Validate(context.Background(), df.Dead); err == nil {
+						t.Fatalf("Validate accepted the declared-dead form %q, want an error. Text: %s", df.Name, df.Dead)
+					}
+				})
+
+				t.Run("dead text is rejected by Prepare, naming the offending policy", func(t *testing.T) {
+					const deadID = "dead-form-under-test"
+					_, err := engine.Prepare(context.Background(), []policy.StoredPolicy{
+						{ID: deadID, Name: "dead: " + df.Name, Language: engine.Language(), Text: df.Dead, Effect: "allow", Priority: 1, Version: 1},
+					})
+					if err == nil {
+						t.Fatalf("Prepare accepted the declared-dead form %q, want an error. Text: %s", df.Name, df.Dead)
+					}
+					if !strings.Contains(err.Error(), deadID) {
+						t.Errorf("Prepare error for dead form %q does not name the offending policy's ID %q: %v", df.Name, deadID, err)
+					}
+				})
+
+				// Positive control: without this half, an engine could
+				// satisfy "the dead form is rejected" by rejecting every
+				// policy, dead or not — the same role Fixtures.WellFormed
+				// plays for Fixtures.Malformed, applied to this property.
+				t.Run("live text is accepted and produces a verdict", func(t *testing.T) {
+					if err := engine.Validate(context.Background(), df.Live); err != nil {
+						t.Fatalf("Validate rejected the live (corrected) form of %q: %v", df.Name, err)
+					}
+					const liveID = "live-form-under-test"
+					set := mustPrepare(t, engine, []policy.StoredPolicy{
+						{ID: liveID, Name: "live: " + df.Name, Language: engine.Language(), Text: df.Live, Effect: "allow", Priority: 1, Version: 1},
+					})
+					verdicts := mustEvaluate(t, set, df.LiveInput)
+					if len(verdicts) == 0 {
+						t.Fatalf("the live (corrected) form of %q produced zero verdicts against its own LiveInput — a Live fixture that never actually matches proves nothing about Dead being what is broken", df.Name)
+					}
+				})
+			})
 		}
 	})
 }
