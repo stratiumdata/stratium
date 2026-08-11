@@ -21,7 +21,15 @@ func TestEngine_Contract(t *testing.T) {
 	})
 }
 
-func TestPrepare_MalformedPolicyNamesTheOffender(t *testing.T) {
+// TestPrepare_MalformedPolicyErrorNamesTheOffenderByName covers what
+// policytest.EngineContract's "prepare on malformed text fails and names
+// the offending policy's ID" property does not: Cedar's error already names
+// the offender by ID there, checked engine-independently against every
+// engine. This test is only for the Name half, which is Cedar's own
+// formatting choice (see Prepare's fmt.Errorf call site, which interpolates
+// sp.Name alongside sp.ID) — a courtesy to an operator who recognizes
+// policies by name, not a promise every future engine must keep.
+func TestPrepare_MalformedPolicyErrorNamesTheOffenderByName(t *testing.T) {
 	ctx := context.Background()
 	policies := []policy.StoredPolicy{
 		{ID: "good-1", Name: "always-permit", Text: "permit(principal, action, resource);"},
@@ -32,22 +40,13 @@ func TestPrepare_MalformedPolicyNamesTheOffender(t *testing.T) {
 	if err == nil {
 		t.Fatal("Prepare accepted a malformed policy, want an error")
 	}
-
-	// An operator with fifty policies needs to know which one is broken, not
-	// that "a policy" is. The error must name the offending policy well
-	// enough to find it — both its ID (the thing an operator would look up)
-	// and its name are checked so a message naming only one of them still
-	// fails loudly here rather than passing by accident.
-	if !strings.Contains(err.Error(), "bad-owner-7") {
-		t.Errorf("error does not name the offending policy's ID: %v", err)
-	}
 	if !strings.Contains(err.Error(), "quarantine-rule") {
 		t.Errorf("error does not name the offending policy's name: %v", err)
 	}
 	// And it must not, say, blame the well-formed policy that happens to
 	// share the same Prepare call.
-	if strings.Contains(err.Error(), "good-1") || strings.Contains(err.Error(), "always-permit") {
-		t.Errorf("error blames the well-formed policy instead of the malformed one: %v", err)
+	if strings.Contains(err.Error(), "always-permit") {
+		t.Errorf("error blames the well-formed policy's name instead of the malformed one's: %v", err)
 	}
 }
 
@@ -69,10 +68,10 @@ func TestPrepare_RejectsTextWithoutExactlyOneStatement(t *testing.T) {
 	}
 }
 
-func TestValidate_MirrorsPrepareOnMalformedText(t *testing.T) {
-	ctx := context.Background()
-	const malformed = "permit(principal, action, resource) when { unbalanced ]["
-	if err := New().Validate(ctx, malformed); err == nil {
-		t.Fatal("Validate accepted malformed text, want an error")
-	}
-}
+// TestValidate_MirrorsPrepareOnMalformedText used to check that Cedar's
+// Validate and Prepare treat the same malformed text the same way. Both
+// halves of that claim are now proven by policytest.EngineContract, which
+// runs "unbalanced ][" (this test's own fixture, verbatim) through both
+// Validate ("validate" property) and Prepare ("prepare on malformed text"
+// property) already — this test would only be checking the same input
+// against the same two code paths a second time.

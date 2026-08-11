@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -62,6 +63,9 @@ type Fixtures struct {
 //  6. StoredPolicy.Priority round-trips into the verdict, and changing only
 //     the priorities in a policy set changes none of the verdicts it
 //     produces (spec Y7: priority is provenance, never combining logic).
+//  7. Prepare on a policy set containing Fixtures.Malformed fails with the
+//     offending policy's ID in the error, not just "a policy" — see
+//     Fixtures.Malformed's own doc comment.
 func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	t.Helper()
 	requireFixtures(t, f)
@@ -72,6 +76,7 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	testAllowDenyEffects(t, engine, f)
 	testVerdictProvenance(t, engine, f)
 	testPriority(t, engine, f)
+	testPrepareNamesMalformedPolicy(t, engine, f)
 }
 
 // requireFixtures fails fast on an incomplete Fixtures value. Every field
@@ -409,4 +414,41 @@ func requireSameEffectsByPolicyID(t *testing.T, before, after []authz.PolicyVerd
 				i, beforeSorted[i].PolicyID, beforeSorted[i].Effect, afterSorted[i].PolicyID, afterSorted[i].Effect)
 		}
 	}
+}
+
+// testPrepareNamesMalformedPolicy checks Prepare's own error path.
+// Rejecting bad text is not enough on its own — testValidate already proves
+// an engine can tell malformed text apart from well-formed — the error must
+// say which policy, by ID, so an operator with forty policies knows which
+// one to fix rather than being told only that "a policy" broke.
+//
+// Fixtures.WellFormed is prepared alongside Fixtures.Malformed in the same
+// call so the test can also confirm the error does not misattribute the
+// well-formed neighbor: without that half, a Prepare that dumped every
+// policy's ID into every error message would pass an ID-only check by
+// accident, without ever actually identifying the offender.
+func testPrepareNamesMalformedPolicy(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+
+	t.Run("prepare on malformed text fails and names the offending policy's ID", func(t *testing.T) {
+		const (
+			malformedID = "malformed-under-test"
+			neighborID  = "well-formed-neighbor"
+		)
+		policies := []policy.StoredPolicy{
+			{ID: neighborID, Name: "neighbor", Language: engine.Language(), Text: f.WellFormed, Effect: "allow", Priority: 1, Version: 1},
+			{ID: malformedID, Name: "quarantine-me", Language: engine.Language(), Text: f.Malformed, Effect: "deny", Priority: 1, Version: 1},
+		}
+
+		_, err := engine.Prepare(context.Background(), policies)
+		if err == nil {
+			t.Fatal("Prepare accepted a policy set containing malformed text, want an error")
+		}
+		if !strings.Contains(err.Error(), malformedID) {
+			t.Errorf("Prepare error does not name the offending policy's ID %q: %v", malformedID, err)
+		}
+		if strings.Contains(err.Error(), neighborID) {
+			t.Errorf("Prepare error blames the well-formed neighbor %q instead of (or as well as) the offender: %v", neighborID, err)
+		}
+	})
 }

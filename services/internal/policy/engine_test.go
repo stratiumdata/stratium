@@ -13,8 +13,12 @@ import (
 // fakeEngine is a trivial PolicyEngine that exists only to prove
 // EngineContract actually exercises the contract, before any real engine
 // (Cedar, Task 4) exists to run it against. "Compiling" a policy set means
-// snapshotting it; "evaluating" means turning each StoredPolicy's Effect
-// into a verdict. It ignores EvaluationInput entirely — there is no
+// validating each policy's text with the same balancedDelimiters check
+// Validate uses, then snapshotting it — the contract requires Prepare to
+// fail on malformed text and name the offending ID, same as any real
+// engine, so this fake cannot skip that property just because doing so
+// used to be free. "Evaluating" means turning each StoredPolicy's Effect
+// into a verdict; it ignores EvaluationInput entirely — there is no
 // condition language here to evaluate it against.
 //
 // This lives in an external (package policy_test) file rather than an
@@ -31,9 +35,16 @@ func (fakeEngine) Language() string { return "fake" }
 func (fakeEngine) Prepare(_ context.Context, policies []policy.StoredPolicy) (policy.CompiledPolicySet, error) {
 	// Defensive copy: a caller that mutates the slice it passed in after
 	// Prepare returns must not be able to change what a concurrently running
-	// Evaluate sees.
-	snapshot := make([]policy.StoredPolicy, len(policies))
-	copy(snapshot, policies)
+	// Evaluate sees. Built element-by-element, rather than copy() over a
+	// pre-sized slice, so the malformed check below can bail out before
+	// snapshotting the rest.
+	snapshot := make([]policy.StoredPolicy, 0, len(policies))
+	for _, p := range policies {
+		if !balancedDelimiters(p.Text) {
+			return nil, fmt.Errorf("fake: prepare policy %s (%q): malformed policy text (unbalanced delimiters): %q", p.ID, p.Name, p.Text)
+		}
+		snapshot = append(snapshot, p)
+	}
 	return fakeCompiledSet{policies: snapshot}, nil
 }
 
