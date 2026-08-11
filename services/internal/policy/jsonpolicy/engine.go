@@ -31,10 +31,48 @@
 // The three operators are equals (exact string), in (membership), and
 // at_most (integer ceiling, valid only under derived_tier — the only tier
 // dimension match exposes). No wildcards, no regex, no ranges, no type
-// coercion: every one of those is a place a widening can hide, which is
-// exactly what this engine exists to close off. Unknown keys — a typo'd
-// operator, a typo'd match key, a typo'd top-level field, at any nesting
-// depth — fail Validate; see parseDoc.
+// coercion, and no negation: every one of those is a place a widening can
+// hide, which is exactly what this engine exists to close off. Unknown keys
+// — a typo'd operator, a typo'd match key, a typo'd top-level field, at any
+// nesting depth — fail Validate; see parseDoc.
+//
+// # The at_most ceiling trap
+//
+// Negation's absence is not free. There is no "not equals," no "not in,"
+// and — the case that actually bites — no at_least or greater-than
+// counterpart to at_most, so a genuine tier *ceiling* (deny everything
+// above tier N, allow N and below) cannot be written in this schema at all.
+// Only two spellings are reachable with the operators that exist, and both
+// fail, in opposite directions, an author reaching for at_most to build one:
+//
+//	{"effect": "allow", "match": {"derived_tier": {"at_most": N}}}
+//	{"effect": "deny",  "match": {"derived_tier": {"at_most": N}}}
+//
+// The allow form grants tier N and below; it does not withhold anything
+// above N. Under deny-overrides an allow can never cancel an allow some
+// other policy — in this language or another — already grants for a higher
+// tier, so the instant any other policy allows something above N, this
+// "ceiling" is inert: it was never a ceiling, only an additional grant that
+// happens to carry its own upper bound.
+//
+// The deny form is the more dangerous of the two because it reads as the
+// ceiling it is not. "deny derived_tier at_most N" sounds like "deny
+// exceeding N," but at_most means exactly what it says literally: this
+// denies when derived_tier <= N and is silent above N, which default-deny
+// then leaves available to whatever else would allow it. That is the
+// opposite of a ceiling at N, spelled the way a ceiling would naturally be
+// written by a tenant transcribing "cap at tier N" into this schema's own
+// vocabulary.
+//
+// A tenant who needs an actual ceiling has to match tiers STRICTLY ABOVE N
+// and deny those — an operator this schema does not have — so today that
+// policy has to be written in Cedar, Rego, or XACML instead, each of which
+// exposes a real ordinal comparison (>, >=) on derived_tier. This is a
+// deliberate expressiveness limit, not an oversight (see the package doc's
+// opening paragraph on auditability over expressiveness); the trap is that
+// its two nearest-looking workarounds fail silently rather than refusing to
+// validate, which is why it is documented here rather than left for a
+// tenant to discover the hard way.
 //
 // Two operator shapes are rejected even though they are structurally
 // well-formed JSON, because Validate accepting them would let a rule read as
