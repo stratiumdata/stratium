@@ -87,12 +87,20 @@ func (Engine) Language() string { return "cedar" }
 // returns — can be attributed back to the specific policy that produced it.
 // A nil or empty policies prepares successfully to a set that evaluates to
 // zero verdicts.
+//
+// checkDeadForms runs right after parseOne succeeds, not after — a policy
+// that parses cleanly but can never fire (see deadform.go) must be rejected
+// before it is ever added to the set, the same "authoring time, not
+// decision time" placement rego's checkPackage uses.
 func (Engine) Prepare(_ context.Context, policies []policy.StoredPolicy) (policy.CompiledPolicySet, error) {
 	set := cedarlib.NewPolicySet()
 	meta := make(map[string]policyMeta, len(policies))
 	for _, sp := range policies {
 		parsed, err := parseOne(sp.ID, sp.Text)
 		if err != nil {
+			return nil, fmt.Errorf("cedar: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
+		}
+		if err := checkDeadForms(parsed); err != nil {
 			return nil, fmt.Errorf("cedar: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
 		}
 		set.Add(cedarlib.PolicyID(sp.ID), parsed)
@@ -103,9 +111,14 @@ func (Engine) Prepare(_ context.Context, policies []policy.StoredPolicy) (policy
 
 // Validate checks policy text without persisting or evaluating it, for the
 // PAP's authoring path: a bad policy is refused at write time rather than
-// discovered at decision time.
+// discovered at decision time. It runs the same checkDeadForms check
+// Prepare does, so anything Validate accepts, Prepare accepts too.
 func (Engine) Validate(_ context.Context, text string) error {
-	if _, err := parseOne("validate", text); err != nil {
+	parsed, err := parseOne("validate", text)
+	if err != nil {
+		return fmt.Errorf("cedar: validate: %w", err)
+	}
+	if err := checkDeadForms(parsed); err != nil {
 		return fmt.Errorf("cedar: validate: %w", err)
 	}
 	return nil

@@ -1,0 +1,459 @@
+package cedar
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+
+	cedarlib "github.com/cedar-policy/cedar-go"
+
+	"stratium/pkg/models"
+)
+
+// This file is Cedar's contribution to contract property 8 (see
+// policytest/contract.go's DeadForm doc comment): every policy engine must
+// refuse, at authoring time, a policy that is syntactically well-formed but
+// can never produce its author's intended verdict. Rego (checkPackage),
+// jsonpolicy, and xacml (schema.go) each already do this for their own
+// language; Cedar predates the contract and had never been audited for the
+// class until this task.
+//
+// # Why targeted checks, not schema validation
+//
+// cedar-go v1.8.0 does ship real schema support — x/exp/schema (parsing,
+// resolution) and x/exp/schema/validate (a Validator that typechecks policy
+// scope and conditions against a resolved schema, catching unknown entity
+// types, undeclared record attributes, and operand type mismatches all at
+// once). It was evaluated first, and rejected for two independent reasons,
+// either of which alone would be enough:
+//
+//  1. Every package under x/exp carries this module's own explicit
+//     disclaimer (see its README's "Backward Compatibility Considerations"):
+//     "code in this directory is not subject to the semantic versioning
+//     constraints of the rest of the module and breaking changes may be
+//     made at any time." Building a permanent authoring-time gate — the
+//     thing standing between a tenant and a silently-dead policy — on code
+//     the library itself declines to make any stability promise about is a
+//     worse bet than a hand-written check this package fully owns.
+//  2. More fundamentally, Cedar's schema records are closed by construction
+//     (x/exp/schema/validate's checkRecord rejects any attribute not
+//     declared in the schema — "unexpected attribute" — by design, matching
+//     Cedar's real validator). This engine's request shape has THREE
+//     genuinely open, tenant-supplied maps reachable from policy text:
+//     Principal's entity attributes, Resource's entity attributes, and
+//     context.delegation.classification_caps — every one of them
+//     deliberately unenumerable (see request.go's buildRequest and
+//     xacml/schema.go's own identical note that "Principal.Attributes and
+//     Resource are tenant-supplied free-form maps with no fixed field set
+//     to enumerate"). A Cedar schema cannot express "this record's shape is
+//     open" — there is no wildcard/"additional attributes allowed" record
+//     type in the language — so validating against one would force a
+//     choice between two bad options: declare a closed, guessed-at set of
+//     keys (silently breaking every tenant policy that references a resource
+//     or principal attribute this package's author didn't happen to
+//     anticipate — exactly the over-rejection risk this task was warned
+//     against), or leave those three maps so permissive the validator
+//     catches nothing there at all, at which point most of its value is
+//     gone anyway.
+//
+// Even where schema validation WOULD have applied cleanly (the closed
+// parts: context's own top-level shape, the agent record), it still could
+// not have caught the two most consequential dead forms named in the task
+// brief — a wrong-case enum ("Certified") and a bare ordinal ported from
+// Rego ("2") — because both are ordinary, well-typed String-to-String
+// comparisons. Cedar's type system checks that the *shapes* line up, not
+// that a String literal is one of a *specific set* of strings; that is a
+// value-level constraint no schema-driven type checker (Cedar's or anyone
+// else's) expresses. Those two, plus the third value-vocabulary case
+// (padded whitespace), needed a hand-written closed-vocabulary check no
+// matter which route was taken — see checkTierVocabulary below, built the
+// same way xacml/schema.go's own agentTrustTierValues/actionTierValues are:
+// from models' own String() methods, never a second copy of the spelling.
+//
+// # Why cedar-go's stable JSON policy format, not x/exp/ast
+//
+// Having ruled out x/exp/schema, walking a parsed policy's structure at all
+// requires *some* representation of it — and cedar-go v1.8.0 has no stable,
+// exported way to inspect an already-parsed policy's scope and condition
+// expressions except by round-tripping through
+// (*cedarlib.Policy).MarshalJSON. Its return type is Cedar's own spec'd
+// JSON policy format (https://docs.cedarpolicy.com/policies/json-format.html),
+// which every Cedar implementation (this one, the Rust reference engine,
+// Java) reads and writes for interop — a stable, cross-SDK wire contract,
+// not an internal Go type. The alternative, (*cedarlib.Policy).AST(),
+// returns a type from the *stable* top-level ast package, but that
+// package's own Node type is defined by embedding x/exp/ast.Node (see
+// cedar-go's ast/node.go), so any code that actually reads a returned
+// scope or condition — as opposed to only building new policies with the
+// package's fluent constructors — ends up depending on x/exp/ast's field
+// layout regardless of which door it walked through. That reintroduces
+// exactly the "no semver guarantee" exposure the schema-validator decision
+// above already ruled out, for the same reason. deadform_json.go's structs
+// are this package's own, minimal, and stay correct as long as cedar-go
+// keeps emitting the format its README calls "the JSON format" (i.e.
+// forever) rather than as long as one experimental Go package's internal
+// struct layout is unchanged.
+//
+// # Why only "when", and only through "&&"
+//
+// checkDeadForms walks a condition body looking for a handful of specific
+// dead shapes, but only within conjuncts reached by unwrapping "&&" nodes
+// (conjuncts, deadform_json.go), and only inside "when" clauses. Both
+// restrictions exist for the same reason: a dead subexpression only makes
+// the *whole* policy dead if nothing else could make it match instead.
+//
+//   - Stopping at "||" and "!" instead of recursing through them is
+//     required, not merely conservative: `when { a || (1 == 2) }` is a
+//     perfectly live policy whenever `a` holds — flagging it over a dead
+//     disjunct buried inside an OR would reject a policy this task's own
+//     fail-closed constraint says must not be rejected. Every "&&" conjunct,
+//     by contrast, is independently necessary for the clause to hold, so a
+//     dead one kills the whole clause (and, since every top-level "when"
+//     clause is itself AND-ed together by Cedar's own semantics, the whole
+//     policy) regardless of what the other conjuncts say.
+//   - "unless { X }" requires !X, so a *dead* (always-false) X inside an
+//     unless clause makes that clause vacuously always-true — a no-op, not
+//     a reason the enclosing policy can never match. Reusing the "when"
+//     logic there unmodified would silently invert every one of these
+//     checks; rather than duplicate them with the logic flipped for one
+//     clause kind never exercised by any of the thirteen audited forms,
+//     "unless" bodies are simply never inspected. Extend this if a future
+//     dead form actually needs it.
+//
+// # What stayed silent on purpose
+//
+// Four of the thirteen forms audited for this task (see the task report's
+// full classification table) already produce a loud, named deny at
+// *evaluation* time as of commit d84009d, which made Evaluate turn a
+// cedar.Diagnostic evaluation error into a deny verdict instead of
+// discarding it like a non-match: a typo'd context key, a typo'd nested
+// record name, a String compared to context.derived_tier via an ordering
+// operator, and a reference to a resource attribute the request doesn't
+// carry. None of the four gained a *new* authoring-time check here, for two
+// different reasons:
+//
+//   - The resource-attribute case cannot be checked statically at all
+//     without the same over-rejection risk schema validation was rejected
+//     for above: Resource is a tenant-open map with no fixed key set this
+//     package could enumerate (see request.go's buildRequest), so there is
+//     no way to tell "resource.nonexistent" apart from a real, merely
+//     unfamiliar-to-this-package, tenant attribute name.
+//   - The two context-typo cases (context.agent.trust_teir,
+//     context.delegaton.purpose) could in principle be caught by walking
+//     every context.X / context.X.Y dot-path and checking it against a
+//     closed registry — context's own shape, unlike Resource's, is fully
+//     fixed. But that exact shape of check would also flag
+//     TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy's own
+//     `context.nope` fixture, whose entire purpose is proving the
+//     evaluation-time attribute-error path still works; that test needs
+//     Prepare to succeed so Evaluate's error path is what runs. Adding an
+//     authoring-time rejection for the same shape would break it, for a
+//     case already fail-closed one layer down. See
+//     checkDerivedTierComparison's doc comment for the equivalent collision
+//     worked through for the fourth (String-vs-Long) case, which is why
+//     that check is scoped to == and != only rather than all six
+//     comparison operators.
+
+// checkDeadForms rejects parsed if it matches any of this file's known dead
+// shapes. Called from both Prepare and Validate, immediately after parseOne
+// succeeds — same placement as rego's checkPackage, for the same reason:
+// an author is told at authoring time, not left to discover a permanently
+// dead rule on its first (and every) real request.
+func checkDeadForms(parsed *cedarlib.Policy) error {
+	body, err := parsed.MarshalJSON()
+	if err != nil {
+		// parsed just came from this package's own parseOne, which means
+		// cedar-go's own parser and its own JSON marshaler disagree about a
+		// policy cedar-go itself just produced — a cedar-go bug this
+		// checker has no meaningful way to recover from.
+		return fmt.Errorf("marshal parsed policy for dead-form checks: %w", err)
+	}
+	var doc policyJSON
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return fmt.Errorf("decode parsed policy for dead-form checks: %w", err)
+	}
+
+	if err := checkScopeEntityType("principal", doc.Principal, string(entityTypeUser)); err != nil {
+		return err
+	}
+	if err := checkScopeEntityType("resource", doc.Resource, string(entityTypeResource)); err != nil {
+		return err
+	}
+
+	var leaves []json.RawMessage
+	for _, c := range doc.Conditions {
+		if c.Kind != "when" {
+			continue // see this file's package doc, "Why only when"
+		}
+		leaves = append(leaves, conjuncts(c.Body)...)
+	}
+	for _, expr := range leaves {
+		if err := checkTierVocabulary(expr); err != nil {
+			return err
+		}
+		if err := checkDerivedTierComparison(expr); err != nil {
+			return err
+		}
+		if err := checkLiteralContradiction(expr); err != nil {
+			return err
+		}
+		if err := checkEmptySetMembership(expr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkScopeEntityType rejects a principal or resource scope clause naming
+// an entity type buildRequest (request.go) could never produce in that
+// slot. buildRequest assigns User/Resource/Action to the
+// principal/resource/action slots unconditionally, from EvaluationInput
+// alone, never from anything a policy says — so a single test, "is gotType
+// exactly the one type this slot is ever constructed as," is both necessary
+// and sufficient on its own: it rejects a type this engine has never heard
+// of at all ("unknown entity type": Usr) exactly the same way it rejects a
+// real Cedar type used in the wrong slot ("wrong principal type": Resource
+// is a real type, just never the *principal*'s), because neither is ever
+// equal to wantType. An earlier version of this check split those into two
+// separate conditions — "is gotType known at all" and "does gotType match
+// this slot" — reasoning they were different defects; mutation testing
+// this file (see the task report) proved the first was redundant in
+// practice: wantType is always itself a known type, so anything that fails
+// the first condition necessarily fails the second too, and no fixture
+// existed (or could exist) that isolated the first from the second. Kept
+// simple rather than restored, per this task's own instruction: over-
+// rejection is the risk to guard against here, not under-documentation of
+// a distinction with no behavioural difference.
+//
+// Scoped to the "==" and "is" scope operators only, the two shapes that
+// pin a slot to a single named type. "in" and "is ... in" describe group
+// membership against an entity hierarchy this engine does not model at all
+// today — see engine.go's package doc, "agent and delegation become context
+// attributes, not entities" — so they are left alone here; extend this
+// check if that changes.
+func checkScopeEntityType(slot string, sc scopeJSON, wantType string) error {
+	var gotType string
+	switch sc.Op {
+	case "==":
+		if sc.Entity == nil {
+			return nil
+		}
+		gotType = sc.Entity.Type
+	case "is":
+		if sc.EntityType == "" {
+			return nil
+		}
+		gotType = sc.EntityType
+	default:
+		return nil
+	}
+
+	if gotType == wantType {
+		return nil
+	}
+	return fmt.Errorf("%s scope names entity type %q, but buildRequest always constructs the %s entity as type %s — this can never match a real request",
+		slot, gotType, slot, wantType)
+}
+
+// agentTrustTierValues and actionTierNameValues are this package's own
+// closed vocabularies, independently derived from models' own String()
+// methods — the same way xacml/schema.go's identically-named vars are (see
+// that file's doc comment for the review finding this pattern fixes). Built
+// here, not imported from xacml (whose copies are unexported) and not
+// hand-copied as bare string literals either: both packages build the same
+// set from models the same way, so a tier models ever adds or renames is
+// picked up automatically instead of either vocabulary silently going
+// stale relative to the type that actually owns the spelling.
+var (
+	agentTrustTierValues = []string{
+		models.TrustTierUnverified.String(), models.TrustTierRegistered.String(),
+		models.TrustTierCertified.String(), models.TrustTierPlatformTrusted.String(),
+	}
+	actionTierNameValues = []string{
+		models.ActionTierReasoning.String(), models.ActionTierReadOnly.String(),
+		models.ActionTierInternalModify.String(), models.ActionTierExternalComms.String(),
+		models.ActionTierDestructive.String(),
+	}
+)
+
+// knownTierVocabulary maps the two String-typed, closed-vocabulary context
+// paths (see request.go's buildRequest) to the set of spellings each may
+// legally be compared against. context.agent.trust_tier and
+// context.delegation.max_action_tier are the only two: derived_tier is a
+// Long (see checkDerivedTierComparison), and every other context path
+// (purpose, depth, id, enabled, suspended, allowed_tools,
+// classification_caps and its open keys) is either free text or has no
+// closed spelling of its own to violate.
+var knownTierVocabulary = map[string][]string{
+	"context.agent.trust_tier":           agentTrustTierValues,
+	"context.delegation.max_action_tier": actionTierNameValues,
+}
+
+// checkTierVocabulary rejects an == or != comparison between one of
+// knownTierVocabulary's paths and a string literal that is not a real
+// member of that tier's own String() spellings. One membership check is
+// what catches three of the thirteen audited forms alike — a wrong-case
+// spelling ("Certified"), a bare ordinal ported from a Rego rule ("2"), and
+// a padded literal (" CERTIFIED ") — because all three are simply absent
+// from the set, for the same underlying reason: each reads as if it
+// configures the comparison and does not.
+func checkTierVocabulary(expr json.RawMessage) error {
+	_, b, ok := asOperator(expr, "==", "!=")
+	if !ok {
+		return nil
+	}
+	path, lit, ok := pathAndLiteral(b.Left, b.Right)
+	if !ok {
+		return nil
+	}
+	vocab, known := knownTierVocabulary[path]
+	if !known {
+		return nil
+	}
+	s, isString := lit.(string)
+	if !isString {
+		// A non-string literal against a String-typed path is a genuine
+		// Cedar type mismatch, not a vocabulary miss — already a loud
+		// evaluation-time error for these two paths (see the task report's
+		// classification table), and no audited dead form needs it caught
+		// here too.
+		return nil
+	}
+	if slices.Contains(vocab, s) {
+		return nil
+	}
+	return fmt.Errorf("condition compares %s to %q, which is not a real tier spelling — must be exactly one of %v (case-sensitive, no surrounding whitespace); this can never match any value buildRequest actually produces",
+		path, s, vocab)
+}
+
+// checkDerivedTierComparison rejects a comparison between
+// context.derived_tier (always a Cedar Long — see request.go's buildRequest)
+// and a literal that cannot be its real value: either a non-numeric literal
+// compared via == or != ("name instead of ordinal": derived_tier ==
+// "DESTRUCTIVE" can never be true, since a Long is never equal to a String),
+// or a numeric literal outside ActionTier's real ordinal range, compared via
+// any of the six operators ("out-of-lattice ceiling": derived_tier > 99 can
+// never be true, since no ActionTier value exceeds DESTRUCTIVE's ordinal).
+// models.ParseActionTier — not a hand-rolled min/max here — is the range
+// check, the same range-checking function models already exports for
+// exactly this purpose (see its own doc comment: "casting an untrusted int
+// directly to ActionTier would admit values outside the lattice").
+//
+// The non-numeric check is deliberately narrower than the range check: only
+// == and != are rejected, never the four ordering operators. A non-numeric
+// literal compared to derived_tier via <, <=, >, or >= already raises a
+// genuine Cedar type error at evaluation time (confirmed empirically
+// against this exact cedar-go release — see the task report), because
+// those operators require comparable operands where == and != do not
+// (Cedar's == is total: it is well-typed, and simply false, for any two
+// differently-typed operands). Rejecting the ordering-operator case here
+// too would not add coverage, only duplicate it — and would reject
+// TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy's own
+// `context.derived_tier > "2"` fixture, whose entire purpose is proving
+// that evaluation-time path still works.
+func checkDerivedTierComparison(expr json.RawMessage) error {
+	op, b, ok := asOperator(expr, "==", "!=", "<", "<=", ">", ">=")
+	if !ok {
+		return nil
+	}
+	path, lit, ok := pathAndLiteral(b.Left, b.Right)
+	if !ok || path != "context.derived_tier" {
+		return nil
+	}
+
+	n, isNumber := lit.(float64)
+	if !isNumber {
+		if op == "==" || op == "!=" {
+			return fmt.Errorf("condition compares context.derived_tier (always a Long) to %#v, which is never a Long — this can never match any value buildRequest actually produces", lit)
+		}
+		return nil
+	}
+	if _, err := models.ParseActionTier(int(n)); err != nil {
+		return fmt.Errorf("condition compares context.derived_tier to %v, which is not a valid action tier ordinal — this can never match any value buildRequest actually produces: %w", lit, err)
+	}
+	return nil
+}
+
+// checkLiteralContradiction rejects an == or != comparison between two pure
+// literals (no reference to principal, action, resource, or context at
+// all) that is always false — e.g. `1 == 2`. Cedar's == is total (it never
+// errors, even across mismatched types — see checkDerivedTierComparison's
+// doc comment), so a policy whose entire condition reduces to a false
+// equality between constants parses, prepares, and evaluates cleanly, and
+// then simply never matches, ever, for any request: nothing about it
+// depends on the request in the first place.
+//
+// This is narrower than a general tautology/contradiction checker on
+// purpose: proving an arbitrary boolean expression can never be true is
+// SAT-hard in general, and nothing among the thirteen audited forms needs
+// more than this direct case. A tautology (1 == 1) is left alone — it is
+// not the defect class this task audits, and flagging it would reject a
+// policy that, however oddly written, matches every request it is asked
+// about.
+//
+// Restricted to scalarLiteral operands (string, float64, bool) — not every
+// {"Value": ...} node literalValue accepts decodes to one. An entity-UID
+// literal (User::"a", inside a `when` clause rather than a scope position)
+// marshals as {"Value": {"__entity": {"type": "User", "id": "a"}}}, which
+// decodes to a Go map[string]any; comparing two maps with == panics at
+// runtime (confirmed empirically: `when { User::"a" == User::"b" } `
+// crashed this function before this guard was added). Whether two distinct
+// entity literals, or two extension-type constants, can ever compare equal
+// is a real question — just a different and larger one than "is this
+// specific numeral contradiction dead," the one case the thirteen audited
+// forms actually need, and not worth widening this check's scope (or its
+// panic surface) to answer today.
+func checkLiteralContradiction(expr json.RawMessage) error {
+	op, b, ok := asOperator(expr, "==", "!=")
+	if !ok {
+		return nil
+	}
+	l, lok := literalValue(b.Left)
+	r, rok := literalValue(b.Right)
+	if !lok || !rok {
+		return nil // at least one side references the request; nothing to fold
+	}
+	ls, lok := scalarLiteral(l)
+	rs, rok := scalarLiteral(r)
+	if !lok || !rok {
+		return nil
+	}
+	equal := ls == rs
+	if (op == "==" && equal) || (op == "!=" && !equal) {
+		return nil // a tautology, not a contradiction — not this check's concern
+	}
+	return fmt.Errorf("condition compares literal %v %s literal %v, which does not depend on the request at all and is always false — this policy can never match", l, op, r)
+}
+
+// scalarLiteral reports whether v — a literalValue result — is a Cedar
+// String, Long, or Boolean, decoded by encoding/json as a string, float64,
+// or bool respectively, the three Go kinds safe to compare with ==. Any
+// other decoded shape (map[string]any for an entity/extension literal,
+// []any were a Value node ever to wrap a Set — not observed, but not ruled
+// out either) is reported not ok rather than risking a panic on Go's
+// comparison of an uncomparable type.
+func scalarLiteral(v any) (any, bool) {
+	switch v.(type) {
+	case string, float64, bool:
+		return v, true
+	default:
+		return nil, false
+	}
+}
+
+// checkEmptySetMembership rejects a membership test against an empty set
+// literal — `expr in []` or `[].contains(expr)` — either of which is
+// well-typed and can never be true for any request, since nothing is ever a
+// member of the empty set. This is the Cedar-syntax instance of the same
+// "an empty collection can never mean what its author intended" defect
+// jsonpolicy's own empty `"in": []` check guards against (see
+// policytest/contract.go's DeadForm doc comment).
+func checkEmptySetMembership(expr json.RawMessage) error {
+	if _, b, ok := asOperator(expr, "in"); ok && isEmptySet(b.Right) {
+		return fmt.Errorf("condition tests membership in an empty set literal (`in []`), which is never true for any request — this policy can never match")
+	}
+	if _, b, ok := asOperator(expr, "contains"); ok && isEmptySet(b.Left) {
+		return fmt.Errorf("condition calls .contains(...) on an empty set literal, which is never true for any request — this policy can never match")
+	}
+	return nil
+}
