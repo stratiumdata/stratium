@@ -3,6 +3,10 @@ package cedar
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -186,3 +190,169 @@ func TestPrepare_RejectsTextWithoutExactlyOneStatement(t *testing.T) {
 // Validate ("validate" property) and Prepare ("prepare on malformed text"
 // property) already — this test would only be checking the same input
 // against the same two code paths a second time.
+
+// sensitiveCedarCalls are this package's spec-defect-D5-relevant operations:
+// parsing policy text, and (since Task 2) walking a parsed policy for dead
+// forms. Both must happen only once per policy, at Prepare or Validate time
+// — never per Evaluate call, or every decision repeats work (parsing,
+// JSON re-serialization, dead-form analysis) that changes nothing about the
+// policy set that already-compiled it once. See
+// TestParseAndDeadFormChecksOnlyReachableFromPrepareOrValidate's own doc
+// comment for why this is a reachability check, not the simpler direct-
+// caller scan rego/engine_test.go's equivalent guard uses.
+var sensitiveCedarCalls = []string{"NewPolicyListFromBytes", "checkDeadForms"}
+
+// allowedEntryPoints are the only functions permitted to (transitively)
+// reach a sensitiveCedarCalls target: Prepare, the compile-once step, and
+// Validate, the PAP's authoring-time check, which compiles and analyses
+// text the same way but is never called on a per-decision path.
+var allowedEntryPoints = map[string]bool{
+	"Prepare":  true,
+	"Validate": true,
+}
+
+// buildCallGraph parses every non-test .go file in this package and returns
+// callers: for each function or method name, the set of names (also by bare
+// identifier, ignoring receiver type and package qualification — sufficient
+// here because this package defines exactly one function or method per name
+// used below) that directly call it anywhere in their body.
+func buildCallGraph(t *testing.T) map[string][]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("listing package source: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	callers := map[string][]string{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			for _, callee := range calleeNames(fn.Body) {
+				callers[callee] = append(callers[callee], fn.Name.Name)
+			}
+		}
+	}
+	return callers
+}
+
+// calleeNames returns the bare name of every function or method called
+// anywhere within node, whether reached through a selector
+// (x.NewPolicyListFromBytes(...), pkg.NewPolicyListFromBytes(...)) or a bare
+// identifier (checkDeadForms(...)) — the same dual form
+// rego/engine_test.go's prepareForEvalCallCount already handles, generalized
+// here to collect every distinct callee name instead of counting one fixed
+// name.
+func calleeNames(node ast.Node) []string {
+	var names []string
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			names = append(names, fun.Sel.Name)
+		case *ast.Ident:
+			names = append(names, fun.Name)
+		}
+		return true
+	})
+	return names
+}
+
+// unauthorizedRoots walks callers backward from target — "who calls the
+// thing that calls the thing that calls target" — stopping each branch the
+// moment it reaches a name in allowed (that branch is fine: the sensitive
+// call only happens because Prepare or Validate chose to make it). A name
+// with no recorded caller at all (a "root" in this graph — every exported
+// method is one, since nothing in this package calls its own public API)
+// that is reached this way and is NOT in allowed is reported: that is a
+// path from outside {Prepare, Validate} straight to target, whether direct
+// or through any number of intermediate helpers.
+func unauthorizedRoots(target string, callers map[string][]string, allowed map[string]bool) []string {
+	var bad []string
+	visited := map[string]bool{}
+	var walk func(name string)
+	walk = func(name string) {
+		if allowed[name] || visited[name] {
+			return
+		}
+		visited[name] = true
+		callersOfName := callers[name]
+		if len(callersOfName) == 0 {
+			bad = append(bad, name)
+			return
+		}
+		for _, c := range callersOfName {
+			walk(c)
+		}
+	}
+	for _, c := range callers[target] {
+		walk(c)
+	}
+	return bad
+}
+
+// TestParseAndDeadFormChecksOnlyReachableFromPrepareOrValidate guards spec
+// defect D5 for Cedar — see rego/engine_test.go's
+// TestPrepareForEval_OnlyCalledFromPrepareOrValidate for the full defect
+// description; this is that same guard, adapted for a wrinkle Cedar has and
+// Rego does not.
+//
+// A direct scan for calls to cedarlib.NewPolicyListFromBytes — mirroring
+// rego's guard structurally — is not sufficient here: unlike rego, which
+// calls PrepareForEval straight from both Prepare and Validate, this
+// package routes every parse through parseOne, a shared helper that exists
+// so the "expect exactly one policy statement" rule cannot drift between
+// the two call sites (see parseOne's own doc comment). A scan that only
+// recognizes the literal library call would find it inside parseOne — a
+// function named neither "Prepare" nor "Validate" — and would either false-
+// positive against this package's own correct code today, or, worse, miss
+// a future regression entirely: if Evaluate were ever changed to call
+// parseOne directly (reintroducing D5 without ever writing the words
+// "NewPolicyListFromBytes" inside Evaluate itself), a same-shaped direct-
+// caller scan would still see NewPolicyListFromBytes's only caller as
+// parseOne, exactly as it does today, and report nothing wrong. This is the
+// trap a Phase 4 task hit, named directly in this task's own brief.
+//
+// unauthorizedRoots closes that gap by walking the call graph BACKWARD from
+// each sensitive target, through any number of intermediate helpers,
+// stopping only at Prepare or Validate — so parseOne (and checkDeadForms,
+// this task's own second sensitive operation) are correctly treated as
+// "parse-shaped" without needing to name them as a special case: the walk
+// discovers the indirection from the graph itself, and would discover a
+// *new* helper introduced tomorrow the same way.
+func TestParseAndDeadFormChecksOnlyReachableFromPrepareOrValidate(t *testing.T) {
+	callers := buildCallGraph(t)
+
+	totalDirectCallSites := 0
+	for _, target := range sensitiveCedarCalls {
+		direct := callers[target]
+		totalDirectCallSites += len(direct)
+
+		if bad := unauthorizedRoots(target, callers, allowedEntryPoints); len(bad) > 0 {
+			t.Errorf("%s is reachable from %v without passing through Prepare or Validate — a call from here re-parses or re-analyses a policy on every decision instead of once at Prepare time (spec defect D5); direct callers: %v",
+				target, bad, direct)
+		}
+	}
+
+	// Positive control, the same shape as rego's own: if the scan found no
+	// call sites for either sensitive name at all, both checks above pass
+	// vacuously regardless of what Evaluate does — a renamed function
+	// (parseOne, checkDeadForms, NewPolicyListFromBytes itself) or a wrong
+	// glob would silently defeat this test rather than failing it.
+	if totalDirectCallSites == 0 {
+		t.Fatal("found zero call sites for either sensitive operation anywhere in this package — the guard isn't exercising anything, fix the scan")
+	}
+}
