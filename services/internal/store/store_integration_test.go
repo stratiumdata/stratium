@@ -75,6 +75,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -94,6 +95,10 @@ import (
 	"stratium/internal/authz"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
+	"stratium/internal/policy/cedar"
+	"stratium/internal/policy/jsonpolicy"
+	"stratium/internal/policy/rego"
+	"stratium/internal/policy/xacml"
 	"stratium/internal/store"
 	"stratium/migrations"
 	"stratium/pkg/audit"
@@ -383,14 +388,28 @@ const seedPolicyPriority = 42
 // reading this column back (see cedar.Engine.Prepare's doc comment) — it is
 // set consistent with text here purely so a future reader isn't misled by a
 // mismatched pair.
+//
+// A thin wrapper around seedPolicyLang (below), fixed to "cedar" — every
+// call site that predates Task 6 is Cedar-only, and stays that way
+// unchanged; seedPolicyLang exists for the multi-language proofs Task 6
+// adds, without touching this signature or any of its ~20 existing callers.
 func seedPolicy(t *testing.T, tenant, name, text, effect string) string {
+	t.Helper()
+	return seedPolicyLang(t, tenant, name, "cedar", text, effect)
+}
+
+// seedPolicyLang is seedPolicy's general form: same contract, with the
+// language column an explicit parameter instead of a hardcoded "cedar", for
+// Task 6's multi-language end-to-end proofs (TestIntegration_Decide_*,
+// TestIntegration_Multi_*, TestIntegration_CreateDelegation_*, below).
+func seedPolicyLang(t *testing.T, tenant, name, lang, text, effect string) string {
 	t.Helper()
 	id := uuid.New().String()
 	withTenantTx(t, tenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(), insertPolicyQuery,
-			id, tenant, name, "cedar", text, effect, true, seedPolicyPriority,
+			id, tenant, name, lang, text, effect, true, seedPolicyPriority,
 		); err != nil {
-			t.Fatalf("seed policy %s: %v", name, err)
+			t.Fatalf("seed policy %s (%s): %v", name, lang, err)
 		}
 	})
 	return id
@@ -642,6 +661,345 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 	return m
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 Task 6 (docs/superpowers/sdd/2026-08-11-phase-4-policy-engines/
+// task-6-brief.md): the six multi-language end-to-end proofs.
+//
+// Four of the six (four-languages, orphan-language, one-engine-prepare-
+// failure, cross-tenant-isolation) live here, each its own dedicated tenant
+// — never configuredTenant, for the reason
+// TestIntegration_LoadPolicies_RoundTripsPriority's own doc comment already
+// gives — and each builds policy.Multi directly against
+// store.New(testDB, tenant) rather than going through pdpClient. That is not
+// a style choice; the shared docker-compose PDP this whole file's pdpClient
+// talks to is itself single-tenant, permanently: main.go builds
+// repo := store.New(db, cfg.TenantID) once at startup, cfg.TenantID never
+// varies per request, and store.beginTenantTx always sets app.tenant_id to
+// that one fixed value — so pdpClient can only ever resolve agents,
+// delegations, and policies belonging to configuredTenant ("tenant-one" in
+// deploy/docker/docker-compose.yml). A dedicated tenant is exactly what
+// TestEndToEnd's own proof4/proof5/proof14 already rely on to prove
+// cross-tenant rows are invisible to it — the same fact that rules pdpClient
+// out for any proof below that genuinely needs a SECOND tenant, or a
+// language the schema permits but nothing forces the shared PDP's own
+// registry to be missing. Three more reasons converge on building
+// policy.Multi directly instead:
+//
+//   - DecideResponse carries only ONE decided_source/decided_policy_id pair
+//     (proto/pdp/v1/pdp.proto's own doc comment: "the policy verdict the
+//     decision was attributed to"), the single verdict authz.FoldVerdicts
+//     picked. "Four verdicts, each with the right Source and PolicyID" and
+//     "confirm both appear" cannot be observed through that response, or
+//     through the audit row (audit_chain.policy_source/policy_id are the
+//     same singular pair) — only through the full []authz.PolicyVerdict
+//     slice policy.Multi.Evaluate itself returns.
+//   - policies.language carries a CHECK constraint
+//     (migrations/000001_baseline.up.sql) restricting it to exactly
+//     'json','cedar','rego','xacml' — the four languages this system
+//     implements. There is no language string the real schema would accept
+//     that pdpClient's own registry (all four, by cfg's default) does not
+//     also have an engine for, so "a language absent from the registry"
+//     cannot be produced against the shared PDP without narrowing ITS
+//     configuration — which would also remove that language from every
+//     other proof here that needs it registered. Building policy.Multi
+//     locally, with a registry one language short of the schema's own set,
+//     reproduces exactly the shape a smaller STRATIUM_POLICY_LANGUAGES
+//     deployment would have, against a real Postgres-loaded StoredPolicy.
+//   - Cross-tenant isolation (proof 6) needs two tenants observed
+//     independently. pdpClient is one client wired to one PDP wired to one
+//     tenant; there is no second tenant it could ever be asked about.
+//
+// This is still genuinely "against a live stack": real Postgres, real
+// migrated schema, real RLS-scoped store, the actual production policy.Multi
+// — only the transport (in-process call vs. a network round trip to a
+// separately-configured PDP process) differs.
+//
+// The other two (cedar+rego deny-overrides, and the rego-only delegation-
+// creation clamp) genuinely need pdpClient — one for a real audit row
+// written through the server's own appendAudit, the other for the
+// CreateDelegation RPC itself — which means they genuinely need
+// configuredTenant. They are added as new subtests INSIDE TestEndToEnd
+// instead, at the positions marked "Phase 4 Task 6" below, the same pattern
+// Phase 2c Task 5 (proof7-9) and Phase 2d Task 5 (proof10-14) already
+// established for extending that one sequential run rather than fighting
+// its ordering constraints from outside it.
+// ---------------------------------------------------------------------------
+
+// fourLanguagePurpose is the delegation purpose every one of
+// TestIntegration_Multi_FourLanguagesProduceFourVerdicts' four policies
+// conditions on. Delegation.Purpose, not Principal.Subject: jsonpolicy's
+// schema can only match a principal via Principal.Attributes (subject.attr —
+// see that package's own doc comment), which a real EvaluationInput never
+// populates from a wire request (pdpgrpc/server.go builds
+// authz.Principal{Subject: ...} alone), so subject is not a dimension all
+// four languages can be proven against uniformly. purpose is: every engine's
+// own package doc lists it among the shared-name dimensions (trust_tier,
+// max_action_tier, purpose, derived_tier) cedar/request.go, rego/input.go,
+// jsonpolicy/engine.go, and xacml/engine.go all expose identically.
+const fourLanguagePurpose = "multi-language four-verdict proof"
+
+// cedarPurposeCondition, regoPurposeCondition, jsonPurposeCondition, and
+// xacmlPurposeCondition each match a StoredPolicy in their own language
+// against Delegation.Purpose == fourLanguagePurpose — the one dimension
+// every engine maps identically (see fourLanguagePurpose's own doc comment).
+// Shared by TestIntegration_Multi_FourLanguagesProduceFourVerdicts and
+// TestIntegration_Multi_OrphanLanguageDeniesNamingIt, so the four fixtures
+// exist in exactly one place each.
+func cedarPurposeCondition(purpose string) string {
+	return fmt.Sprintf(`permit(principal, action, resource) when { context.delegation.purpose == "%s" };`, purpose)
+}
+
+func regoPurposeCondition(purpose string) string {
+	return fmt.Sprintf(`package stratium.policy
+
+allow if {
+	input.delegation.purpose == %q
+}`, purpose)
+}
+
+func jsonPurposeCondition(purpose string) string {
+	return fmt.Sprintf(`{"effect": "allow", "match": {"delegation": {"attr": "purpose", "equals": %q}}}`, purpose)
+}
+
+func xacmlPurposeCondition(policyID, purpose string) string {
+	return fmt.Sprintf(`<Policy PolicyId=%q RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  <Target>
+    <AnyOf>
+      <AllOf>
+        <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
+          <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">%s</AttributeValue>
+          <AttributeDesignator AttributeId="delegation-purpose" DataType="http://www.w3.org/2001/XMLSchema#string" Category="urn:oasis:names:tc:xacml:3.0:attribute-category:environment"/>
+        </Match>
+      </AllOf>
+    </AnyOf>
+  </Target>
+  <Rule RuleId=%q Effect="Permit"/>
+</Policy>`, policyID, purpose, policyID+"-rule")
+}
+
+// fullRegistry is every engine main.go's own default STRATIUM_POLICY_LANGUAGES
+// wires — built fresh per call (each policy.PolicyEngine implementation here
+// is a stateless zero-value struct, so there is no cost or shared-state risk
+// to doing so) rather than shared as a package var, so nothing here could
+// accidentally alias engine state across proofs even if a future engine
+// stopped being stateless.
+func fullRegistry() policy.Registry {
+	return policy.Registry{
+		"cedar": cedar.New(),
+		"rego":  rego.New(),
+		"json":  jsonpolicy.New(),
+		"xacml": xacml.New(),
+	}
+}
+
+// TestIntegration_Multi_FourLanguagesProduceFourVerdicts is proof 2: a
+// tenant with one matching policy in each of the four languages gets four
+// verdicts back from policy.Multi.Evaluate, each correctly attributed.
+func TestIntegration_Multi_FourLanguagesProduceFourVerdicts(t *testing.T) {
+	const tenant = "tenant-multilang-four-verdicts-integration"
+
+	cedarID := seedPolicyLang(t, tenant, "four-lang-cedar", "cedar", cedarPurposeCondition(fourLanguagePurpose), "allow")
+	regoID := seedPolicyLang(t, tenant, "four-lang-rego", "rego", regoPurposeCondition(fourLanguagePurpose), "allow")
+	jsonID := seedPolicyLang(t, tenant, "four-lang-json", "json", jsonPurposeCondition(fourLanguagePurpose), "allow")
+	xacmlID := seedPolicyLang(t, tenant, "four-lang-xacml", "xacml", xacmlPurposeCondition("four-lang-xacml", fourLanguagePurpose), "allow")
+
+	multi := policy.NewMulti(store.New(testDB, tenant), fullRegistry())
+	verdicts := multi.Evaluate(t.Context(), policy.EvaluationInput{
+		Delegation: policy.DelegationContext{Purpose: fourLanguagePurpose},
+	})
+	t.Logf("Evaluate() with one matching policy per language -> %d verdicts: %+v", len(verdicts), verdicts)
+
+	if len(verdicts) != 4 {
+		t.Fatalf("got %d verdicts, want 4 (one per language)", len(verdicts))
+	}
+	want := map[string]string{"cedar": cedarID, "rego": regoID, "json": jsonID, "xacml": xacmlID}
+	byLang := make(map[string]authz.PolicyVerdict, len(verdicts))
+	for _, v := range verdicts {
+		byLang[v.Source] = v
+	}
+	for lang, wantID := range want {
+		v, ok := byLang[lang]
+		if !ok {
+			t.Errorf("no verdict from source %q", lang)
+			continue
+		}
+		if v.PolicyID != wantID {
+			t.Errorf("source %q: PolicyID = %q, want %q", lang, v.PolicyID, wantID)
+		}
+		if v.Effect != authz.EffectAllow {
+			t.Errorf("source %q: Effect = %v, want EffectAllow", lang, v.Effect)
+		}
+	}
+}
+
+// TestIntegration_Multi_OrphanLanguageDeniesNamingIt is proof 3 — D10's own
+// proof, and the reason the whole multi-engine seam exists: a policy in a
+// language absent from the registry must deny, naming that language, not be
+// silently skipped. Asserts the exact Reason string (orphanVerdict, multi.go),
+// not merely Effect==Deny: an effect-only check would also pass a denial for
+// a completely different reason, which is precisely the failure mode D10
+// names — a policy an operator believes is protecting them, silently never
+// evaluated. See this file's own "Phase 4 Task 6" banner above for why this
+// builds policy.Multi directly instead of going through pdpClient.
+func TestIntegration_Multi_OrphanLanguageDeniesNamingIt(t *testing.T) {
+	const tenant = "tenant-multilang-orphan-integration"
+	const purpose = "orphan-language proof"
+
+	policyID := seedPolicyLang(t, tenant, "orphan-rego-policy", "rego", regoPurposeCondition(purpose), "allow")
+
+	registry := fullRegistry()
+	delete(registry, "rego") // the one language this registry deliberately does not implement.
+	multi := policy.NewMulti(store.New(testDB, tenant), registry)
+
+	verdicts := multi.Evaluate(t.Context(), policy.EvaluationInput{
+		Delegation: policy.DelegationContext{Purpose: purpose},
+	})
+	t.Logf("Evaluate() for a tenant whose only policy is in an unregistered language -> %+v", verdicts)
+
+	if len(verdicts) != 1 {
+		t.Fatalf("got %d verdicts, want 1", len(verdicts))
+	}
+	v := verdicts[0]
+	if v.Effect != authz.EffectDeny {
+		t.Fatalf("Effect = %v, want EffectDeny — an unevaluatable policy must deny, not be silently skipped", v.Effect)
+	}
+	if v.Source != "rego" {
+		t.Errorf("Source = %q, want %q", v.Source, "rego")
+	}
+	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy IDs %s", policyID)
+	if v.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q — the effect alone is not enough; D10 requires naming the unregistered language and the orphaned policy ID",
+			v.Reason, wantReason)
+	}
+}
+
+// TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother is
+// proof 4: a malformed XACML policy alongside a valid Cedar forbid. XACML's
+// Prepare fails for the whole tenant (one malformed policy poisons that
+// language's group — see policy.PolicyEngine.Prepare's own contract), but
+// that failure must not take Cedar's own, independently-prepared verdict
+// down with it: multiSet.Evaluate folds a per-language prepare failure into
+// its own deny verdict (prepareFailureVerdict, multi.go) rather than
+// aborting the whole call. Calls Multi.Evaluate directly — the exact method
+// pdpgrpc.Server.Decide itself calls — so this exercises the real
+// production path, not a hand-rolled PrepareAll+Evaluate substitute.
+func TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother(t *testing.T) {
+	const tenant = "tenant-multilang-partial-prepare-fail-integration"
+	const purpose = "partial prepare failure proof"
+
+	cedarID := seedPolicyLang(t, tenant, "partial-fail-cedar-forbid", "cedar",
+		fmt.Sprintf(`forbid(principal, action, resource) when { context.delegation.purpose == %q };`, purpose), "deny")
+	// Malformed: an unclosed tag, the same "a syntax error is a syntax error
+	// in any language" shape xacml/engine_test.go's own Fixtures.Malformed
+	// uses — enough to fail Prepare, not merely Validate.
+	seedPolicyLang(t, tenant, "partial-fail-xacml-malformed", "xacml",
+		`<Policy PolicyId="broken" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  <Rule RuleId="r1" Effect="Permit"`, "deny")
+
+	multi := policy.NewMulti(store.New(testDB, tenant), fullRegistry())
+	verdicts := multi.Evaluate(t.Context(), policy.EvaluationInput{
+		Delegation: policy.DelegationContext{Purpose: purpose},
+	})
+	t.Logf("Evaluate() with a malformed xacml policy alongside a valid cedar forbid -> %+v", verdicts)
+
+	if len(verdicts) != 2 {
+		t.Fatalf("got %d verdicts, want 2 (cedar's forbid AND xacml's prepare-failure deny — "+
+			"one engine's failure must not suppress the other's verdict)", len(verdicts))
+	}
+	var sawCedar, sawXACML bool
+	for _, v := range verdicts {
+		if v.Effect != authz.EffectDeny {
+			t.Errorf("verdict %+v: Effect = %v, want EffectDeny", v, v.Effect)
+		}
+		switch v.Source {
+		case "cedar":
+			sawCedar = true
+			if v.PolicyID != cedarID {
+				t.Errorf("cedar verdict PolicyID = %q, want %q", v.PolicyID, cedarID)
+			}
+		case "xacml":
+			sawXACML = true
+			if !strings.Contains(v.Reason, "xacml") {
+				t.Errorf("xacml verdict Reason = %q, want it to name xacml", v.Reason)
+			}
+		}
+	}
+	if !sawCedar {
+		t.Error("no verdict from cedar — its valid forbid must still appear despite xacml's prepare failure")
+	}
+	if !sawXACML {
+		t.Error("no verdict from xacml — its prepare failure must still surface as a deny verdict, not vanish silently")
+	}
+}
+
+// TestIntegration_Multi_CrossTenantIsolationAcrossLanguages is proof 6:
+// tenantA and tenantB both hold a policy for the SAME subject
+// ("laura@example.com"), in different languages, deliberately — if RLS ever
+// leaked tenant B's rows into tenant A's LoadAllPolicies, tenant B's cedar
+// forbid would join tenant A's fold and flip its verdict list from a single
+// rego allow to an additional cedar deny, which is exactly the
+// discriminating signal this proof relies on (the same "same identifiers
+// across a tenant boundary" logic TestEndToEnd's own proof4/proof5/proof14
+// already use for cross-tenant checks, applied here across two different
+// policy languages instead of within one, and via policy.Multi.Evaluate
+// directly rather than pdpClient — see this file's own "Phase 4 Task 6"
+// banner above for why pdpClient cannot reach a second tenant at all).
+// LoadAllPolicies is checked first, at the data layer — the exact seam
+// policy.Multi's own isolation depends on — before the same property is
+// confirmed one layer up, through Multi.Evaluate itself, which is what a
+// real Decide call for either tenant would actually consult.
+func TestIntegration_Multi_CrossTenantIsolationAcrossLanguages(t *testing.T) {
+	const tenantA = "tenant-multilang-cross-a-integration"
+	const tenantB = "tenant-multilang-cross-b-integration"
+	const subject = "laura@example.com"
+
+	regoAllowID := seedPolicyLang(t, tenantA, "laura-a-rego-allow", "rego", fmt.Sprintf(`package stratium.policy
+
+allow if {
+	input.principal.subject == %q
+}`, subject), "allow")
+	cedarForbidID := seedPolicy(t, tenantB, "laura-b-cedar-forbid",
+		fmt.Sprintf(`forbid(principal == User::"%s", action, resource);`, subject), "deny")
+
+	polsA, err := store.New(testDB, tenantA).LoadAllPolicies(t.Context())
+	if err != nil {
+		t.Fatalf("LoadAllPolicies(tenantA) error = %v", err)
+	}
+	if len(polsA) != 1 || polsA[0].ID != regoAllowID {
+		t.Fatalf("LoadAllPolicies(tenantA) = %+v, want exactly tenant A's own rego policy (%s), never tenant B's", polsA, regoAllowID)
+	}
+	polsB, err := store.New(testDB, tenantB).LoadAllPolicies(t.Context())
+	if err != nil {
+		t.Fatalf("LoadAllPolicies(tenantB) error = %v", err)
+	}
+	if len(polsB) != 1 || polsB[0].ID != cedarForbidID {
+		t.Fatalf("LoadAllPolicies(tenantB) = %+v, want exactly tenant B's own cedar policy (%s), never tenant A's", polsB, cedarForbidID)
+	}
+
+	// The decisive check, one layer up: evaluate exactly the same way a
+	// real Decide call would (policy.Multi.Evaluate, the method
+	// pdpgrpc.Server.Decide itself calls) for the SAME subject in both
+	// tenants. If tenant B's cedar forbid ever leaked into tenant A's fold,
+	// tenant A would report two verdicts instead of one; if tenant A's rego
+	// allow ever leaked into tenant B's, tenant B would report a spurious
+	// allow verdict alongside its own forbid.
+	verdictsA := policy.NewMulti(store.New(testDB, tenantA), fullRegistry()).
+		Evaluate(t.Context(), policy.EvaluationInput{Principal: authz.Principal{Subject: subject}})
+	t.Logf("tenant A Evaluate() -> %+v", verdictsA)
+	if len(verdictsA) != 1 || verdictsA[0].Source != "rego" || verdictsA[0].PolicyID != regoAllowID || verdictsA[0].Effect != authz.EffectAllow {
+		t.Errorf("tenant A verdicts = %+v, want exactly [{rego %s Allow}] — tenant B's cedar forbid must never appear here",
+			verdictsA, regoAllowID)
+	}
+
+	verdictsB := policy.NewMulti(store.New(testDB, tenantB), fullRegistry()).
+		Evaluate(t.Context(), policy.EvaluationInput{Principal: authz.Principal{Subject: subject}})
+	t.Logf("tenant B Evaluate() -> %+v", verdictsB)
+	if len(verdictsB) != 1 || verdictsB[0].Source != "cedar" || verdictsB[0].PolicyID != cedarForbidID || verdictsB[0].Effect != authz.EffectDeny {
+		t.Errorf("tenant B verdicts = %+v, want exactly [{cedar %s Deny}] — tenant A's rego allow must never appear here",
+			verdictsB, cedarForbidID)
+	}
+}
+
 // TestEndToEnd runs the six proofs, in the brief's own order, plus the
 // Phase 2a Task 1 concurrency measurements: a single-call latency baseline,
 // the ten-way same-tenant burst (now expected 10/0 under the per-tenant
@@ -700,6 +1058,40 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 // delegations had no writer until now. migrations/000008_delegations_
 // serving_grant.up.sql is the fix — found by this task's own run against a
 // real Postgres, exactly as 000007's gap was.
+//
+// Phase 4 Task 6 (docs/superpowers/sdd/2026-08-11-phase-4-policy-engines/
+// task-6-brief.md) adds two more groups of subtests here, not as their own
+// top-level functions, and not by coincidence: this file's shared
+// docker-compose PDP (what pdpClient talks to) is permanently scoped to
+// configuredTenant (main.go fixes cfg.TenantID once at startup), so any
+// proof needing a real audit row or a real CreateDelegation RPC can only
+// ever run against configuredTenant — which means it can only safely run
+// inside this one sequential chain, at a position after whatever earlier
+// state it depends on and before proof6's irreversible privilege
+// revocation. (This file's own "Phase 4 Task 6" banner above, before this
+// function, covers the other four of the six proofs — the ones that build
+// policy.Multi directly and so have no such constraint.)
+//
+//   - proof_multilang_cedar_permit_and_rego_forbid_denies_attributed_to_rego,
+//     decide_latency_with_all_four_engines_in_path, and
+//     decide_concurrency_with_all_four_engines_in_path are placed after
+//     appendaudit_lock_is_per_tenant_not_global and before proof10: after,
+//     so seeding heidi's and ivan's policies cannot affect
+//     single_decide_latency_baseline or measured_concurrent_decide_split_
+//     on_the_same_tail, both of which must stay directly comparable to
+//     Phase 2c's own Cedar-only figures; before, because proof10-14 are one
+//     tightly sequential unit around delegationGateResp/
+//     delegationGateAgentID that must not be split.
+//   - The rego-only delegation-creation clamp is placed after proof14 and
+//     before chain_verifies_across_the_migration_boundary: after, so it
+//     does not disturb frank's own shared state; before the migration
+//     dance and proof6's revocation, since it needs both a working
+//     CreateDelegation and a working Decide.
+//
+// heidi, ivan, and gina are principals not reused by any earlier or later
+// subtest in this file, so their policies cannot match, and cannot be
+// matched by, anyone else's — the same discipline frank's own doc comment
+// states for proof10-14.
 func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one", models.TrustTierUnverified)
@@ -711,6 +1103,11 @@ func TestEndToEnd(t *testing.T) {
 	// is enough to carry the measurement across them without a package-level
 	// var.
 	var baselineLatency time.Duration
+
+	// Set by decide_latency_with_all_four_engines_in_path, read by
+	// decide_concurrency_with_all_four_engines_in_path — same reasoning as
+	// baselineLatency above, for Task 6's own multi-engine measurement.
+	var fourEngineLatency time.Duration
 
 	// Set by proof2, read by audit_row_provenance_matches_response — same
 	// reasoning as baselineLatency above.
@@ -1430,6 +1827,164 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
+	// proof_multilang_cedar_permit_and_rego_forbid_denies_attributed_to_rego
+	// is Task 6's proof 1: a Cedar permit and a Rego forbid on the same
+	// request. Deny-overrides must hold across languages exactly as it
+	// holds within one — authz.FoldVerdicts sees both verdicts regardless
+	// of which engine produced them — so the decision denies, and the
+	// audit trail attributes it to rego specifically (the only verdict
+	// with EffectDeny; cedar's permit is not a deny candidate at all, so
+	// this is not a coincidence of alphabetical ordering — see
+	// authz.FoldVerdicts' own doc comment on decisiveVerdict).
+	t.Run("proof_multilang_cedar_permit_and_rego_forbid_denies_attributed_to_rego", func(t *testing.T) {
+		const subject = "heidi@example.com"
+		heidiAgentID := uuid.New()
+		seedAgent(t, configuredTenant, heidiAgentID, "integration-agent-heidi", models.TrustTierUnverified)
+		heidiActing := singleHopDelegation(t, configuredTenant, heidiAgentID, models.ActionTierInternalModify, "cedar+rego deny-overrides proof")
+
+		seedPolicy(t, configuredTenant, "heidi-cedar-permit",
+			fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
+		regoPolicyID := seedPolicyLang(t, configuredTenant, "heidi-rego-forbid", "rego", fmt.Sprintf(`package stratium.policy
+
+deny if {
+	input.principal.subject == %q
+}`, subject), "deny")
+
+		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: heidiActing.ID.String(),
+			AgentId:      heidiAgentID.String(),
+			Subject:      subject,
+			Tool:         "Bash",
+			Verb:         "read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() with a cedar permit + rego forbid on the same request -> effect=%s principal_reason=%q decided_source=%q decided_policy_id=%q",
+			resp.GetEffect(), resp.GetPrincipalReason(), resp.GetDecidedSource(), resp.GetDecidedPolicyId())
+
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY — deny-overrides must hold across languages, not just within one", resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "principal" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "principal")
+		}
+		if resp.DecidedSource == nil || resp.GetDecidedSource() != "rego" {
+			t.Fatalf("DecidedSource = %v, want present and %q — the cedar permit must not out-rank the rego forbid", resp.DecidedSource, "rego")
+		}
+		if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != regoPolicyID {
+			t.Errorf("DecidedPolicyId = %v, want present and %q (heidi's seeded rego forbid)", resp.DecidedPolicyId, regoPolicyID)
+		}
+		// The reason string, not merely the effect: a caller reading only
+		// Effect/DeniedLeg cannot tell this apart from a denial some other
+		// policy caused.
+		if !strings.Contains(resp.GetPrincipalReason(), regoPolicyID) {
+			t.Errorf("PrincipalReason = %q, want it to name the deciding policy %q", resp.GetPrincipalReason(), regoPolicyID)
+		}
+
+		// The audit row is independent, stored evidence of the same
+		// attribution — auditRowProvenance reads the tenant's latest row,
+		// which this call's own append is (nothing else writes
+		// configuredTenant's audit_chain between this Decide call and this
+		// read), the same strength audit_row_provenance_matches_response
+		// applies to proof2 above.
+		source, policyID := auditRowProvenance(t, configuredTenant)
+		t.Logf("raw column check: policy_source=%q policy_id=%q", source.String, policyID.String)
+		if source.String != "rego" || policyID.String != regoPolicyID {
+			t.Errorf("stored policy_source/policy_id = %q/%q, want %q/%q", source.String, policyID.String, "rego", regoPolicyID)
+		}
+	})
+
+	// decide_latency_with_all_four_engines_in_path and
+	// decide_concurrency_with_all_four_engines_in_path are Task 6's own
+	// measurement (brief items 3-4): end-to-end decision latency and 10-way
+	// concurrency with all four engines actually loading, preparing, and
+	// evaluating real policies on every call, against Phase 1c's ~2.5ms
+	// baseline and Phase 2c's Cedar-only figure — not a synthetic minimal
+	// case: by this point configuredTenant already carries carol's, dave's,
+	// and erin's cedar policies (proof7-9) plus heidi's cedar+rego pair
+	// (above), and ivan's own four-language set below adds json and xacml
+	// for the first time, so this call and every one of the burst below
+	// exercises the tenant's full, real, cross-language policy set. See
+	// task-6-report.md for the full comparison table — these two subtests'
+	// own t.Logf lines are that number's source.
+	ivanAgentID := uuid.New()
+	seedAgent(t, configuredTenant, ivanAgentID, "integration-agent-ivan", models.TrustTierUnverified)
+	const ivanPurpose = "four-engine end-to-end latency proof"
+	ivanActing := singleHopDelegation(t, configuredTenant, ivanAgentID, models.ActionTierInternalModify, ivanPurpose)
+	seedPolicyLang(t, configuredTenant, "ivan-cedar", "cedar", cedarPurposeCondition(ivanPurpose), "allow")
+	seedPolicyLang(t, configuredTenant, "ivan-rego", "rego", regoPurposeCondition(ivanPurpose), "allow")
+	seedPolicyLang(t, configuredTenant, "ivan-json", "json", jsonPurposeCondition(ivanPurpose), "allow")
+	seedPolicyLang(t, configuredTenant, "ivan-xacml", "xacml", xacmlPurposeCondition("ivan-xacml", ivanPurpose), "allow")
+
+	t.Run("decide_latency_with_all_four_engines_in_path", func(t *testing.T) {
+		callStart := time.Now()
+		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: ivanActing.ID.String(),
+			AgentId:      ivanAgentID.String(),
+			Subject:      "ivan@example.com",
+			Tool:         "Bash",
+			Verb:         "read",
+		})
+		fourEngineLatency = time.Since(callStart)
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("single uncontended Decide() call with all four engines in the path: %s", fourEngineLatency)
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("Effect = %v, want EFFECT_ALLOW (every one of ivan's four seeded policies allows)", resp.GetEffect())
+		}
+	})
+
+	t.Run("decide_concurrency_with_all_four_engines_in_path", func(t *testing.T) {
+		const n = 10
+		var succeeded, aborted, otherFail int64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		before := fetchAuditChain(t, configuredTenant)
+
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+					DelegationId: ivanActing.ID.String(),
+					AgentId:      ivanAgentID.String(),
+					Subject:      "ivan@example.com",
+					Tool:         "Bash",
+					Verb:         "read",
+				})
+				switch {
+				case err == nil:
+					atomic.AddInt64(&succeeded, 1)
+				case status.Code(err) == codes.Aborted:
+					atomic.AddInt64(&aborted, 1)
+				default:
+					atomic.AddInt64(&otherFail, 1)
+				}
+			}()
+		}
+		burstStart := time.Now()
+		close(start)
+		wg.Wait()
+		elapsed := time.Since(burstStart)
+		t.Logf("fired %d concurrent Decide() calls (four engines each) in %s (avg %s/call, vs %s single-call baseline): "+
+			"%d ok, %d Aborted, %d other failures", n, elapsed, elapsed/n, fourEngineLatency, succeeded, aborted, otherFail)
+
+		if succeeded != n || aborted != 0 || otherFail != 0 {
+			t.Errorf("succeeded=%d aborted=%d other=%d, want %d/0/0 (advisory lock should serialize every call for one tenant, four engines or one)",
+				succeeded, aborted, otherFail, n)
+		}
+		after := fetchAuditChain(t, configuredTenant)
+		if err := audit.Verify(after); err != nil {
+			t.Fatalf("audit.Verify() after the concurrent burst error = %v, want nil", err)
+		}
+		if gotNewRows := int64(len(after) - len(before)); gotNewRows != succeeded {
+			t.Errorf("audit_chain grew by %d rows, want %d (one per successful decision)", gotNewRows, succeeded)
+		}
+	})
+
 	// proof10_create_delegation_clamps_request_to_principal_authority is
 	// Phase 2d Task 5's first proof: a principal (frank) whose cedar policies
 	// permit only INTERNAL_MODIFY and the "Read" tool requests DESTRUCTIVE
@@ -1605,8 +2160,8 @@ func TestEndToEnd(t *testing.T) {
 			DelegationId: delegationGateResp.GetDelegationId(),
 			AgentId:      delegationGateAgentID.String(),
 			Subject:      "frank@example.com",
-			Tool: "Read",
-			Verb: "delete",
+			Tool:         "Read",
+			Verb:         "delete",
 			// The tier has to come from the input, not the verb: Read's catalog
 			// entry pins a catalogued tool's tier, and a verb cannot raise it.
 			// A destructive raw input can — that is the evidence rule in
@@ -1759,6 +2314,122 @@ func TestEndToEnd(t *testing.T) {
 		st := wantCode(t, err, codes.NotFound)
 		t.Logf("CreateDelegation() for tenant %q's agent, against a PDP configured for %q -> NotFound: %s",
 			secondTenantID, configuredTenant, st.Message())
+	})
+
+	// proof_multilang_rego_only_clamps_like_cedar_would is Task 6's proof 5.
+	// It mirrors proof10 above exactly in shape — same split into a
+	// tier-ceiling policy and a tool policy, same reasoning for why
+	// (policy.Probe, called from authz.Clamp inside CreateDelegation, leaves
+	// Delegation at its zero value: there is no delegation yet at creation
+	// time, only Principal/Action.Tool/DerivedTier — see policy.GrantProbe's
+	// own doc comment, which is why this cannot key off Delegation.Purpose
+	// the way the direct-Multi proofs in this file's earlier section do) —
+	// but gina's authority is granted entirely in rego, never cedar. Before
+	// Task 6 wired more than cedar into the registry a delegation-creation
+	// gate ever consults, a rego-only grant would have clamped to nothing
+	// (an unregistered language behaves as "no policy" — orphanVerdict) and
+	// this call would have failed with PermissionDenied instead of
+	// narrowing. A later Decide call against the freshly-clamped delegation
+	// must then agree with what the probe granted, in both directions: the
+	// tool it was granted (Read) is allowed, and a tool it was not (Bash)
+	// is still denied, now at the delegation leg specifically
+	// (internal/authz/delegation.go's own ApprovedTools check).
+	t.Run("proof_multilang_rego_only_clamps_like_cedar_would", func(t *testing.T) {
+		const subject = "gina@example.com"
+		ginaAgentID := uuid.New()
+		// PLATFORM_TRUSTED for the same reason proof10 gives: inert to
+		// CreateDelegation itself (LoadAgent only confirms the agent
+		// exists), but needed so the later Decide calls' agent leg
+		// legitimately allows.
+		seedAgent(t, configuredTenant, ginaAgentID, "integration-agent-gina", models.TrustTierPlatformTrusted)
+
+		seedPolicyLang(t, configuredTenant, "gina-tier-ceiling-internal-modify", "rego", fmt.Sprintf(`package stratium.policy
+
+allow if {
+	input.principal.subject == %q
+	input.derived_tier > 0
+	input.derived_tier <= %d
+}`, subject, int(models.ActionTierInternalModify)), "allow")
+		seedPolicyLang(t, configuredTenant, "gina-can-read", "rego", fmt.Sprintf(`package stratium.policy
+
+allow if {
+	input.principal.subject == %q
+	input.action.tool == "Read"
+}`, subject), "allow")
+
+		resp, err := pdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
+			Subject: subject,
+			AgentId: ginaAgentID.String(),
+			RequestedScope: &pdpgrpc.RequestedScope{
+				MaxActionTier: int32(models.ActionTierDestructive),
+				Tools:         []string{"Read", "Bash", "Write"},
+			},
+			Purpose:    "integration test: rego-only delegation-creation clamp",
+			TtlSeconds: 3600,
+		})
+		if err != nil {
+			t.Fatalf("CreateDelegation() error = %v, want a response — a rego-only grant must clamp, not fail", err)
+		}
+		t.Logf("CreateDelegation() (rego-only principal) -> max_action_tier=%d tools=%v removed=%d",
+			resp.GetGrantedScope().GetMaxActionTier(), resp.GetGrantedScope().GetTools(), len(resp.GetGrantedScope().GetRemoved()))
+
+		if resp.GetGrantedScope().GetMaxActionTier() != int32(models.ActionTierInternalModify) {
+			t.Errorf("granted max_action_tier = %d, want %d (INTERNAL_MODIFY: gina's rego ceiling)",
+				resp.GetGrantedScope().GetMaxActionTier(), models.ActionTierInternalModify)
+		}
+		if !slices.Equal(resp.GetGrantedScope().GetTools(), []string{"Read"}) {
+			t.Errorf("granted tools = %v, want [Read] (Bash and Write are not gina's, per her rego policy)", resp.GetGrantedScope().GetTools())
+		}
+		if len(resp.GetGrantedScope().GetRemoved()) != 3 {
+			t.Fatalf("removed = %d entries, want exactly 3 (tier DESTRUCTIVE, tool Bash, tool Write)", len(resp.GetGrantedScope().GetRemoved()))
+		}
+
+		// Agreement, direction 1: what the clamp granted (Read, within
+		// INTERNAL_MODIFY) is allowed at runtime too — both the
+		// creation-time probe and the principal leg must agree, now that
+		// both consult rego.
+		decideResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: resp.GetDelegationId(),
+			AgentId:      ginaAgentID.String(),
+			Subject:      subject,
+			Tool:         "Read",
+			Verb:         "read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() against the freshly-clamped rego delegation (Read) -> effect=%s principal_effect=%s decided_source=%q",
+			decideResp.GetEffect(), decideResp.GetPrincipalEffect(), decideResp.GetDecidedSource())
+		if decideResp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("Effect = %v, want EFFECT_ALLOW — the clamp (probe-time) and Decide (runtime) must agree gina may use Read", decideResp.GetEffect())
+		}
+		if decideResp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect = %v, want EFFECT_ALLOW", decideResp.GetPrincipalEffect())
+		}
+		if decideResp.DecidedSource == nil || decideResp.GetDecidedSource() != "rego" {
+			t.Errorf("DecidedSource = %v, want present and %q", decideResp.DecidedSource, "rego")
+		}
+
+		// Agreement, direction 2: a tool the clamp removed (Bash) is still
+		// denied at runtime, using the SAME delegation — the delegation
+		// leg's own ApprovedTools check, independent of what the principal
+		// leg says.
+		bashResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: resp.GetDelegationId(),
+			AgentId:      ginaAgentID.String(),
+			Subject:      subject,
+			Tool:         "Bash",
+			Verb:         "read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() against the freshly-clamped rego delegation (Bash, never granted) -> effect=%s denied_leg=%q",
+			bashResp.GetEffect(), bashResp.GetDeniedLeg())
+		if bashResp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY || bashResp.GetDeniedLeg() != "delegation" {
+			t.Errorf("Decide() for Bash = %v/%s, want EFFECT_DENY/delegation — the clamp's removal must hold at runtime too",
+				bashResp.GetEffect(), bashResp.GetDeniedLeg())
+		}
 	})
 
 	// chain_verifies_across_the_migration_boundary: a chain that started
