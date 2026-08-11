@@ -293,18 +293,23 @@ func TestEvaluate_EmptyTargetMatchesEverything(t *testing.T) {
 	})
 }
 
-// TestEvaluate_AnyOfIsDisjunctionOfAllOfConjunctions pins the DNF structure
-// the package doc promises: Target = OR of AnyOf's AllOf branches, each
-// AllOf = AND of its Matches. A single branch or a single Match failing
-// must not sink the whole Target if another AnyOf branch is fully
-// satisfied; a single Match failing WITHIN the satisfied branch must sink
-// that branch.
-func TestEvaluate_AnyOfIsDisjunctionOfAllOfConjunctions(t *testing.T) {
+// TestEvaluate_TargetIsConjunctionOfAnyOfDisjunctions pins the actual XACML
+// 3.0 structure the package doc now describes: Target = AND across every
+// AnyOf (§5.5: "The <Target> element SHALL contain a conjunctive sequence
+// of <AnyOf> elements"; §7.7 Table 4: a Target is "No Match" if at least
+// one <AnyOf> is "No Match"), each AnyOf itself = OR across its AllOf
+// branches, each AllOf = AND across its Matches. This test used to assert
+// the Target level was ALSO a disjunction — the bug (*xmlTarget).evaluate
+// has since been fixed to no longer have. A single AnyOf branch failing
+// must now sink the whole Target even if another AnyOf branch is fully
+// satisfied; a single Match failing WITHIN one AnyOf's AllOf must still
+// sink that branch (still exercised below, via the first AnyOf's two-Match
+// conjunction).
+func TestEvaluate_TargetIsConjunctionOfAnyOfDisjunctions(t *testing.T) {
 	// Two AnyOf branches: the first requires (subject-id=alice AND
-	// action-id=Bash) — a conjunction this input only half-satisfies — the
-	// second requires only subject-id=alice. A correct OR-of-AND
-	// evaluation matches via the second branch; a buggy implementation that
-	// flattened everything into one AND would not.
+	// action-id=Bash) — a conjunction — the second requires only
+	// subject-id=alice. Per §5.5 the Target as a whole matches only when
+	// BOTH AnyOf branches match, not either alone.
 	text := `<Policy PolicyId="p1" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
   <Target>
     <AnyOf>
@@ -332,21 +337,125 @@ func TestEvaluate_AnyOfIsDisjunctionOfAllOfConjunctions(t *testing.T) {
 </Policy>`
 	set := prepareOne(t, text)
 
-	in := policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Read"}}
-	verdicts := evaluate(t, set, in)
-	if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectAllow {
-		t.Fatalf("got %+v, want exactly one EffectAllow verdict via the second AnyOf branch", verdicts)
-	}
+	// Positive control: alice+Bash satisfies BOTH AnyOf branches (the
+	// first's full two-Match conjunction, and the second) — the Target
+	// must match. Without this, the negative case below could not be told
+	// apart from the Target degrading to always-false.
+	t.Run("request satisfying every AnyOf branch matches", func(t *testing.T) {
+		in := policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Bash"}}
+		verdicts := evaluate(t, set, in)
+		if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectAllow {
+			t.Fatalf("got %+v, want exactly one EffectAllow verdict (alice+Bash satisfies every AnyOf branch)", verdicts)
+		}
+	})
 
-	// Positive control: a subject satisfying NEITHER branch's AllOf must
-	// not match — proves the second AnyOf branch actually constrains
-	// something rather than the Target degrading to always-true.
-	t.Run("subject satisfying neither branch does not match", func(t *testing.T) {
-		in := policy.EvaluationInput{Principal: authz.Principal{Subject: "bob"}, Action: authz.Action{Tool: "Read"}}
+	// alice+Read satisfies only the second AnyOf branch (subject-id=alice)
+	// — the first requires action-id=Bash too, which Read does not
+	// satisfy. Under the pre-fix OR-across-AnyOf bug this matched via the
+	// second branch alone; §5.5 requires every AnyOf to match, so this must
+	// be No Match.
+	t.Run("request satisfying only one AnyOf branch does not match (XACML 3.0 §5.5, §7.7 Table 4)", func(t *testing.T) {
+		in := policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Read"}}
 		verdicts := evaluate(t, set, in)
 		if len(verdicts) != 0 {
-			t.Fatalf("got %+v, want zero verdicts", verdicts)
+			t.Fatalf("got %+v, want zero verdicts — alice+Read satisfies only the second AnyOf branch, and every AnyOf must match", verdicts)
 		}
+	})
+}
+
+// twoAnyOfTarget builds a <Target> in the canonical one-AnyOf-per-category
+// shape a XACML 3.0 author writes for "principal AND action, both
+// constrained": one AnyOf pinning subject-id, a second pinning action-id.
+// Shared by both cases in
+// TestEvaluate_TargetConjunctionFailOpenRegression below, at Policy level
+// and at Rule level.
+func twoAnyOfTarget(subjectWant, actionWant string) string {
+	return `<Target>
+    <AnyOf>
+      <AllOf>
+        <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
+          <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">` + subjectWant + `</AttributeValue>
+          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categorySubject + `"/>
+        </Match>
+      </AllOf>
+    </AnyOf>
+    <AnyOf>
+      <AllOf>
+        <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
+          <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">` + actionWant + `</AttributeValue>
+          <AttributeDesignator AttributeId="action-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categoryAction + `"/>
+        </Match>
+      </AllOf>
+    </AnyOf>
+  </Target>`
+}
+
+// TestEvaluate_TargetConjunctionFailOpenRegression pins the two concrete
+// fail-open/over-deny scenarios review found live in the pre-fix
+// OR-across-AnyOf (*xmlTarget).evaluate, both built from twoAnyOfTarget's
+// canonical shape: a request that satisfies only ONE of the two AnyOf
+// branches used to be treated as a Match — XACML 3.0 §5.5 ("conjunctive
+// sequence of <AnyOf> elements") and §7.7 Table 4 ("No Match if at least
+// one <AnyOf> is No Match") both require every AnyOf to match, so each
+// single-branch case below must produce zero verdicts. Checked at both
+// Policy level and Rule level: the bug was identical at both, since both
+// call through the same (*xmlTarget).evaluate.
+func TestEvaluate_TargetConjunctionFailOpenRegression(t *testing.T) {
+	// Policy-level Target = AnyOf(subject-id=alice) + AnyOf(action-id=Read)
+	// wrapping an unconditional Permit rule — meaning "alice, and only for
+	// Read."
+	t.Run("policy-level Target", func(t *testing.T) {
+		text := `<Policy PolicyId="p1" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  ` + twoAnyOfTarget("alice", "Read") + `
+  <Rule RuleId="r1" Effect="Permit"/>
+</Policy>`
+		set := prepareOne(t, text)
+
+		t.Run("alice+Read satisfies both branches: ALLOW", func(t *testing.T) {
+			verdicts := evaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Read"}})
+			if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectAllow {
+				t.Fatalf("got %+v, want exactly one EffectAllow verdict", verdicts)
+			}
+		})
+
+		t.Run("bob+Read: right action, wrong subject — No Match, not ALLOW (used to fail open)", func(t *testing.T) {
+			verdicts := evaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "bob"}, Action: authz.Action{Tool: "Read"}})
+			if len(verdicts) != 0 {
+				t.Fatalf("got %+v, want zero verdicts — bob does not satisfy the subject-id AnyOf branch", verdicts)
+			}
+		})
+
+		t.Run("alice+Bash: right subject, wrong action — No Match, not ALLOW (used to fail open)", func(t *testing.T) {
+			verdicts := evaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Bash"}})
+			if len(verdicts) != 0 {
+				t.Fatalf("got %+v, want zero verdicts — Bash does not satisfy the action-id AnyOf branch", verdicts)
+			}
+		})
+	})
+
+	// Rule-level Target = AnyOf(subject-id=alice) + AnyOf(action-id=Bash)
+	// on a Deny rule — the same shape, one level down.
+	t.Run("rule-level Target", func(t *testing.T) {
+		text := `<Policy PolicyId="p1" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  <Rule RuleId="r1" Effect="Deny">
+    ` + twoAnyOfTarget("alice", "Bash") + `
+  </Rule>
+</Policy>`
+		set := prepareOne(t, text)
+
+		t.Run("alice+Bash satisfies both branches: DENY", func(t *testing.T) {
+			verdicts := evaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Bash"}})
+			if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectDeny {
+				t.Fatalf("got %+v, want exactly one EffectDeny verdict", verdicts)
+			}
+		})
+
+		t.Run("alice+Read: right subject, wrong action — No Match, not DENY (used to over-deny)", func(t *testing.T) {
+			verdicts := evaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, Action: authz.Action{Tool: "Read"}})
+			if len(verdicts) != 0 {
+				t.Fatalf("got %+v, want zero verdicts — Read does not satisfy the action-id AnyOf branch", verdicts)
+			}
+		})
 	})
 }
 

@@ -226,23 +226,38 @@ func (o xmlAnyOf) evaluate(in policy.EvaluationInput) (matched bool, indetermina
 	return false, ""
 }
 
-// evaluate is Target's tri-state outcome: OR across every AnyOf, with one
-// deliberate special case ahead of the loop. t is a pointer specifically so
-// this method can be called directly on a nil Target (Policy- or
-// Rule-level Target entirely absent) without its caller needing a separate
-// nil check first — Go permits calling a pointer-receiver method on a nil
-// receiver as long as the method itself does not dereference it before
-// checking, which is exactly what happens here.
+// evaluate is Target's tri-state outcome: AND across every AnyOf — XACML
+// 3.0 §5.5 ("The <Target> element SHALL contain a conjunctive sequence of
+// <AnyOf> elements") and §7.7 Table 4 (a Target is "No Match" if at least
+// one <AnyOf> is "No Match") — with one deliberate special case ahead of
+// the loop. Previously this loop returned true on the *first* matching
+// AnyOf (a disjunction), one level of nesting too high: XACML's actual
+// grammar is Target = AND of AnyOf, AnyOf = OR of AllOf, AllOf = AND of
+// Match, and the disjunction belongs one level down, at AnyOf, not here
+// (see (*xmlAnyOf).evaluate, unchanged). Under the old OR reading, a Target
+// built from the canonical one-AnyOf-per-category shape — AnyOf(subject-id
+// = alice) + AnyOf(action-id = Read), meaning "alice, and only for
+// Read" — matched a request satisfying *either* AnyOf alone: bob doing
+// Read, or alice doing Bash, both "No Match" per the spec, both used to
+// come back a Match, and on a Permit rule that fails open. t is a pointer
+// specifically so this method can be called directly on a nil Target
+// (Policy- or Rule-level Target entirely absent) without its caller
+// needing a separate nil check first — Go permits calling a
+// pointer-receiver method on a nil receiver as long as the method itself
+// does not dereference it before checking, which is exactly what happens
+// here.
 func (t *xmlTarget) evaluate(in policy.EvaluationInput) (matched bool, indeterminateOn string) {
 	if t == nil || len(t.AnyOf) == 0 {
 		// XACML defines a Target with no AnyOf — including one that is
 		// entirely absent, the shape this engine's own AllowAll/DenyAll
-		// fixtures use — as an unconditional Match, not as the "OR of zero
-		// terms is false" a naive reading of the loop below would produce.
-		// This is a deliberate branch, not a fallthrough: without it, the
-		// loop's zero-iteration default would report NoMatch, and every
-		// "applies to everything" policy or rule in this engine would
-		// silently stop matching anything.
+		// fixtures use — as an unconditional Match. Under the AND fold
+		// below this is now also the loop's own natural identity ("AND of
+		// zero terms is true" — unlike the OR this replaced, where zero
+		// terms would instead have been false), but it stays an explicit
+		// branch rather than a fallthrough: the nil-receiver case above can
+		// never even reach the loop, and this is a deliberately
+		// spec-defined case, worth reading as intentional rather than as a
+		// coincidence of the loop's shape.
 		return true, ""
 	}
 	for _, a := range t.AnyOf {
@@ -250,9 +265,9 @@ func (t *xmlTarget) evaluate(in policy.EvaluationInput) (matched bool, indetermi
 		if indet != "" {
 			return false, indet
 		}
-		if aMatched {
-			return true, ""
+		if !aMatched {
+			return false, ""
 		}
 	}
-	return false, ""
+	return true, ""
 }

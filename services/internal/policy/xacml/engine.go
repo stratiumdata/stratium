@@ -43,8 +43,10 @@
 // below, it fails open rather than closed if left unchecked.
 //
 // <Target> — at Policy level or Rule level, identical grammar and
-// semantics either place — is a disjunction of conjunctions of attribute
-// matches:
+// semantics either place — is a conjunction of <AnyOf> elements (XACML 3.0
+// §5.5: "The <Target> element SHALL contain a conjunctive sequence of
+// <AnyOf> elements"), each <AnyOf> itself a disjunction of <AllOf>
+// conjunctions of attribute matches:
 //
 //	<Target>
 //	  <AnyOf>               <!-- zero or more; Target itself may also be absent -->
