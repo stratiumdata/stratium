@@ -155,16 +155,27 @@ func (Engine) Language() string { return "rego" }
 // any package compiles cleanly (data.stratium.policy simply never resolves
 // to anything for a differently-packaged module — see checkPackage's own
 // doc comment), so nothing about a successful PrepareForEval call would
-// ever have caught this on its own.
+// ever have caught this on its own. checkComparisonTypes runs right after
+// checkPackage for the identical reason, one layer up: PrepareForEval
+// accepts input.agent.trust_tier > 2 as cleanly as any other well-formed
+// comparison — see schema.go's package comment for why that is Rego's
+// documented total-order behavior, not a bug, and why a schema attached to
+// PrepareForEval alone cannot catch it either. regolib.Schemas(inputSchemaSet)
+// is still attached below, for the mismatched-== forms it does catch (also
+// schema.go).
 func (Engine) Prepare(ctx context.Context, policies []policy.StoredPolicy) (policy.CompiledPolicySet, error) {
 	compiled := make(map[string]compiledPolicy, len(policies))
 	for _, sp := range policies {
 		if err := checkPackage(sp.ID, sp.Text); err != nil {
 			return nil, fmt.Errorf("rego: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
 		}
+		if err := checkComparisonTypes(sp.ID, sp.Text); err != nil {
+			return nil, fmt.Errorf("rego: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
+		}
 		pq, err := regolib.New(
 			regolib.Query(queryPath),
 			regolib.Module(sp.ID, sp.Text),
+			regolib.Schemas(inputSchemaSet),
 		).PrepareForEval(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("rego: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
@@ -177,17 +188,23 @@ func (Engine) Prepare(ctx context.Context, policies []policy.StoredPolicy) (poli
 // Validate checks policy text without persisting or evaluating it, for the
 // PAP's authoring path: a bad policy is refused at write time rather than
 // discovered at decision time. It compiles text the same way Prepare does —
-// same query, same syntax requirements, same checkPackage call — so
-// anything Validate accepts, Prepare accepts too, and a tenant who
-// mistypes their package declaration is told at authoring time rather than
-// shipping a rule that is dead on arrival.
+// same query, same syntax requirements, same checkPackage and
+// checkComparisonTypes calls, same schema — so anything Validate accepts,
+// Prepare accepts too, and a tenant who mistypes their package declaration,
+// or ports a Cedar ordinal comparison onto the wrong Rego field, is told at
+// authoring time rather than shipping a rule that is dead on arrival, or
+// worse, unconditionally true.
 func (Engine) Validate(ctx context.Context, text string) error {
 	if err := checkPackage("validate", text); err != nil {
+		return fmt.Errorf("rego: validate: %w", err)
+	}
+	if err := checkComparisonTypes("validate", text); err != nil {
 		return fmt.Errorf("rego: validate: %w", err)
 	}
 	if _, err := regolib.New(
 		regolib.Query(queryPath),
 		regolib.Module("validate", text),
+		regolib.Schemas(inputSchemaSet),
 	).PrepareForEval(ctx); err != nil {
 		return fmt.Errorf("rego: validate: %w", err)
 	}
