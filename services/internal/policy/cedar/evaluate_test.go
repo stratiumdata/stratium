@@ -189,38 +189,11 @@ func TestEvaluate_DerivedTierReadableFromContextDrivesForbid(t *testing.T) {
 	})
 }
 
-// TestEvaluate_PriorityDoesNotChangeOutcome constructs a high-priority
-// permit against a low-priority forbid. Spec Y7 removed
-// first-applicable-by-priority; deny-overrides (applied downstream by
-// authz.FoldVerdicts, not this package) replaced it. If Evaluate sorted,
-// filtered, or short-circuited on Priority, the low-priority forbid could go
-// missing from the result. It must not: both verdicts come back, regardless
-// of order — Cedar's own PolicySet is a map, so relying on returned order
-// would itself be a latent bug this test also guards against.
-func TestEvaluate_PriorityDoesNotChangeOutcome(t *testing.T) {
-	set := prepare(t, []policy.StoredPolicy{
-		{ID: "low-forbid", Name: "low-priority-forbid", Text: "forbid(principal, action, resource);", Priority: 1},
-		{ID: "high-permit", Name: "high-priority-permit", Text: "permit(principal, action, resource);", Priority: 100},
-	})
-
-	verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
-		Principal: authz.Principal{Subject: "alice"},
-	})
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if len(verdicts) != 2 {
-		t.Fatalf("got %d verdicts, want 2 (both must survive regardless of priority): %+v", len(verdicts), verdicts)
-	}
-
-	byID := make(map[string]authz.Effect, len(verdicts))
-	for _, v := range verdicts {
-		byID[v.PolicyID] = v.Effect
-	}
-	if got, want := byID["low-forbid"], authz.EffectDeny; got != want {
-		t.Errorf("low-forbid effect = %v, want %v", got, want)
-	}
-	if got, want := byID["high-permit"], authz.EffectAllow; got != want {
-		t.Errorf("high-permit effect = %v, want %v", got, want)
-	}
-}
+// Priority's round-trip onto the verdict, and re-prioritising a policy set
+// leaving every verdict's effect unchanged, used to be checked here — a
+// high-priority permit against a low-priority forbid, asserting both
+// survived regardless of order (Cedar's own PolicySet is a map, so the
+// order was never something to assert on directly). Both properties now
+// live in policytest.EngineContract's "priority" checks, run against every
+// engine, with the same order-independent-by-sorting comparison this test
+// used to do inline.

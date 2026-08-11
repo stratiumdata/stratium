@@ -15,6 +15,7 @@ package policytest
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 
@@ -58,6 +59,9 @@ type Fixtures struct {
 //  5. Every verdict's Source is the engine's own Language(), and its
 //     PolicyID is the producing StoredPolicy's ID — never a hardcoded
 //     string, a display Name, or a slice index.
+//  6. StoredPolicy.Priority round-trips into the verdict, and changing only
+//     the priorities in a policy set changes none of the verdicts it
+//     produces (spec Y7: priority is provenance, never combining logic).
 func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	t.Helper()
 	requireFixtures(t, f)
@@ -67,6 +71,7 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	testConcurrentEvaluate(t, engine, f)
 	testAllowDenyEffects(t, engine, f)
 	testVerdictProvenance(t, engine, f)
+	testPriority(t, engine, f)
 }
 
 // requireFixtures fails fast on an incomplete Fixtures value. Every field
@@ -335,4 +340,73 @@ func testVerdictProvenance(t *testing.T, engine policy.PolicyEngine, f Fixtures)
 			t.Errorf("PolicyID = %q, want %q (the StoredPolicy's ID — never its Name, never a positional index)", v.PolicyID, wantID)
 		}
 	})
+}
+
+// testPriority checks spec Y7's guard as it applies to every engine:
+// Priority is recorded on the verdict for provenance only, and is never
+// consulted to decide which verdicts come back.
+func testPriority(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+
+	t.Run("priority round-trips from StoredPolicy into the verdict", func(t *testing.T) {
+		// Nonzero: Priority's own zero value is a legitimate int, so a field
+		// silently left unpopulated would misreport as a pass if this used 0.
+		const wantPriority = 42
+		set := mustPrepare(t, engine, []policy.StoredPolicy{
+			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: wantPriority, Version: 1},
+		})
+		verdicts := mustEvaluate(t, set, policy.EvaluationInput{})
+		if len(verdicts) != 1 {
+			t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
+		}
+		if verdicts[0].Priority != wantPriority {
+			t.Errorf("Priority = %d, want %d (StoredPolicy.Priority must round-trip into the verdict)", verdicts[0].Priority, wantPriority)
+		}
+	})
+
+	t.Run("changing only priorities does not change the verdicts", func(t *testing.T) {
+		build := func(allowPriority, denyPriority int) []policy.StoredPolicy {
+			return []policy.StoredPolicy{
+				{ID: "allow-leg", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: allowPriority, Version: 1},
+				{ID: "deny-leg", Name: "deny-all", Language: engine.Language(), Text: f.DenyAll, Effect: "deny", Priority: denyPriority, Version: 1},
+			}
+		}
+		in := policy.EvaluationInput{Principal: authz.Principal{Subject: "priority-probe"}}
+
+		before := mustEvaluate(t, mustPrepare(t, engine, build(1, 2)), in)
+		after := mustEvaluate(t, mustPrepare(t, engine, build(100, 1)), in)
+		requireSameEffectsByPolicyID(t, before, after)
+	})
+}
+
+// requireSameEffectsByPolicyID asserts before and after name the same set of
+// PolicyIDs with the same Effect each, regardless of the order either slice
+// happened to be returned in. The comparison is order-independent by design,
+// not by oversight: Cedar's own Evaluate documents that its return order
+// follows Go's (randomised) map iteration, unrelated to priority, so
+// asserting on raw slice order here would fail for reasons that have
+// nothing to do with the property under test. Sorting both sides by
+// PolicyID first is what makes "same effects, same order, same count" a
+// single comparison once the order either engine happened to return is
+// canonicalised away.
+func requireSameEffectsByPolicyID(t *testing.T, before, after []authz.PolicyVerdict) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("got %d verdicts after re-prioritising, want %d (count changed): before=%+v after=%+v", len(after), len(before), before, after)
+	}
+
+	sortByPolicyID := func(vs []authz.PolicyVerdict) []authz.PolicyVerdict {
+		sorted := make([]authz.PolicyVerdict, len(vs))
+		copy(sorted, vs)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].PolicyID < sorted[j].PolicyID })
+		return sorted
+	}
+	beforeSorted, afterSorted := sortByPolicyID(before), sortByPolicyID(after)
+
+	for i := range beforeSorted {
+		if beforeSorted[i].PolicyID != afterSorted[i].PolicyID || beforeSorted[i].Effect != afterSorted[i].Effect {
+			t.Errorf("verdict %d changed after re-prioritising: before={PolicyID:%q Effect:%v} after={PolicyID:%q Effect:%v} — priority is provenance only (spec Y7) and must not change which policies match or their effects",
+				i, beforeSorted[i].PolicyID, beforeSorted[i].Effect, afterSorted[i].PolicyID, afterSorted[i].Effect)
+		}
+	}
 }
