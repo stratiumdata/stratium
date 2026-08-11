@@ -20,6 +20,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"stratium/internal/authz"
 	"stratium/internal/policy"
 	"stratium/pkg/models"
@@ -244,23 +246,59 @@ type probeInput struct {
 	in   policy.EvaluationInput
 }
 
+// tierPtr returns a pointer to t. Action.DeclaredTier is *models.ActionTier,
+// and Go cannot address a composite literal field's value directly.
+func tierPtr(t models.ActionTier) *models.ActionTier { return &t }
+
 // probeInputs is deliberately more than one shape: a zero-value input and a
 // fully populated one exercising every EvaluationInput dimension an engine
 // might (wrongly) condition on. AllowAll and DenyAll are documented to match
 // all of them — a single hardcoded probe would not catch a fixture
 // accidentally scoped to it, e.g. a stray principal condition left over from
 // copy-pasting a narrower fixture.
+//
+// Every field is set to a non-zero value, distinct from every other field's
+// value. Both halves of that matter: a field left at its zero value in both
+// probes makes "conditioned on this field being absent" indistinguishable
+// from "genuinely unconditional" — either reading agrees on both probes, so
+// a wrongly-conditional fixture still reports exactly one verdict for each
+// and the gap passes undetected (mutation testing found exactly this: Cedar
+// mutated to require a non-empty Delegation.ClassificationCaps survived here
+// while that field was left nil in both probes). Distinct values matter
+// separately: two fields sharing a value would not catch one being read in
+// place of the other, the same reasoning behind the ID/Name fix in
+// fb448be. Agent.Enabled and Agent.Suspended are the one unavoidable
+// exception — bool has only one non-zero value, so both are true here;
+// telling them apart is what the context-mapping tests (not this probe)
+// are for.
 func probeInputs() []probeInput {
 	return []probeInput{
 		{"zero-value input", policy.EvaluationInput{}},
 		{"fully populated input", policy.EvaluationInput{
-			Principal:   authz.Principal{Subject: "probe-subject", Attributes: map[string]string{"dept": "eng"}},
-			Action:      authz.Action{Tool: "Bash", Verb: "write", RawInput: "rm -rf /tmp/x"},
+			Principal: authz.Principal{Subject: "probe-subject", Attributes: map[string]string{"dept": "eng"}},
+			Action: authz.Action{
+				Tool:            "Bash",
+				Verb:            "write",
+				RawInput:        "rm -rf /tmp/x",
+				NormalizedInput: "probe-normalized-input",
+				DeclaredTier:    tierPtr(models.ActionTierReadOnly),
+			},
 			DerivedTier: models.ActionTierDestructive,
 			Resource:    map[string]string{"id": "res-1", "classification": "restricted"},
 			Environment: map[string]string{"region": "us-east-1"},
-			Agent:       authz.AgentInfo{TrustTier: models.TrustTierCertified, Enabled: true},
-			Delegation:  policy.DelegationContext{Depth: 2, MaxActionTier: models.ActionTierExternalComms, Purpose: "quarterly-close"},
+			Agent: authz.AgentInfo{
+				ID:           uuid.New(),
+				TrustTier:    models.TrustTierCertified,
+				Enabled:      true,
+				Suspended:    true,
+				AllowedTools: []string{"probe-allowed-tool-a", "probe-allowed-tool-b"},
+			},
+			Delegation: policy.DelegationContext{
+				Depth:              2,
+				MaxActionTier:      models.ActionTierExternalComms,
+				ClassificationCaps: map[string]string{"probe-classification-key": "probe-classification-value"},
+				Purpose:            "quarterly-close",
+			},
 		}},
 	}
 }
