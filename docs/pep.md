@@ -46,7 +46,7 @@ Shared by both subcommands:
 | Variable | Meaning |
 |---|---|
 | `STRATIUM_PEP_REQUESTED_TIER` | Action-tier ceiling to request: `0` REASONING, `1` READ_ONLY, `2` INTERNAL_MODIFY, `3` EXTERNAL_COMMS, `4` DESTRUCTIVE. The PDP may grant less than this — the session file records what was actually granted, not what was requested. |
-| `STRATIUM_PEP_REQUESTED_TOOLS` | Comma-separated tool names to request, e.g. `Read,Grep,Bash`. Must not be empty. |
+| `STRATIUM_PEP_REQUESTED_TOOLS` | Comma-separated tool names to request, e.g. `Read,Grep,Bash`. Must not be empty. Include discovery tools — see below. |
 | `STRATIUM_PEP_TTL_SECONDS` | How long the new delegation is valid for, in seconds. |
 | `STRATIUM_PEP_PURPOSE` (optional) | Free-text reason for the delegation, for audit legibility. |
 
@@ -71,6 +71,34 @@ Exit 0 means a session file now exists at that path. A non-zero exit means
 it does not (and any stale file at that path was removed) — check stderr
 for why before starting the agent: PDP unreachable, the requested scope
 denied outright, etc.
+
+### Grant discovery tools, not just access tools
+
+`Grep` and `Glob` are in the example above deliberately. A scope of
+`Read,Write` looks complete and is not: it lets an agent open a file it can
+already name, and gives it no way to find out what exists. Observed against a
+real agent under exactly that scope — it guessed ten plausible filenames, was
+denied or found nothing on all ten, and gave up without reading anything.
+Nothing was misconfigured and no denial was wrong; the grant was simply
+unusable.
+
+The failure is quiet in a way worth planning around. The agent is not denied
+at a discovery tool — it never gets to call one — so the audit chain records a
+run that did very little and no denial explaining why. A scope that omits
+discovery reads as a working grant right up until someone asks why the agent
+accomplished nothing.
+
+Least privilege still applies; discovery tools are not an exception to it.
+They are read-only, and a delegation capped at `READ_ONLY` bounds them exactly
+as it bounds `Read`. Grant the ones the agent's task actually needs:
+
+- **Finding files by name or path** — `Glob`
+- **Finding files by content** — `Grep`
+- **Listing a directory** — `LS`, or `Bash` if the tier permits it
+
+If a scope must stay narrow enough to exclude discovery, expect to name every
+resource up front, and treat "the agent did nothing" as the predicted outcome
+rather than a bug.
 
 ## `.claude/settings.json`
 
