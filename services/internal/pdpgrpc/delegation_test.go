@@ -110,9 +110,15 @@ func newDelegationServer(fs *fakeStore, set policy.CompiledPolicySet) *Server {
 // test in this file needs: one language, one policy row, engine supplied by
 // the caller so prepare-failure tests can substitute one whose Prepare call
 // itself errors.
+//
+// The policy row's ID deliberately differs from fakeLanguage ("fake"): if
+// policy.Multi ever grouped by StoredPolicy.ID instead of .Language, using
+// the same literal for both would let that bug pass every test in this file
+// by coincidence — the ID/Name-mixup class of defect this project has hit
+// before (see policytest.EngineContract's own fixtures for the same rule).
 func singleFakeLanguagePolicy(engine fakePolicyEngine) policy.Multi {
 	return policy.NewMulti(
-		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "fake", Language: fakeLanguage}}},
+		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "fake-policy-1", Language: fakeLanguage}}},
 		policy.Registry{fakeLanguage: engine},
 	)
 }

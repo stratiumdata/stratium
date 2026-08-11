@@ -28,6 +28,12 @@ type AllPolicySource interface {
 // Registry maps policies.language to the engine that evaluates it. A
 // language present in a tenant's policies but absent from Registry is an
 // orphan — see PrepareAll — never silently skipped.
+//
+// Multi routes purely by map key (see PrepareAll) and never itself calls an
+// engine's Language() to cross-check — NewMulti validates once, at
+// construction, that every key agrees with its own engine's Language()
+// instead, so a typo'd key (Registry{"rego": xacml.New()}) cannot silently
+// route one language's policies to the wrong engine.
 type Registry map[string]PolicyEngine
 
 // Multi evaluates a tenant's policies across every registered engine. It is
@@ -61,7 +67,22 @@ var _ PrincipalPolicy = Multi{}
 // be a hardcoded, zero-configuration bypass any more than Configured can —
 // see TestNoExportedConstructorAllows in policy_test.go for how the no-allow
 // guard accounts for that.
+//
+// Panics if any Registry entry's key disagrees with its own engine's
+// Language() (see Registry's own doc comment on why nothing downstream
+// would otherwise catch that). NewMulti is called once, at startup, to wire
+// a static configuration — never per request — so a mistake here is a
+// wiring bug, not a runtime condition, and failing loudly immediately beats
+// silently misattributing every verdict the mismatched engine produces
+// later. A returned error was the other option; a panic keeps NewMulti's
+// single-value return, which is what lets TestNoExportedConstructorAllows
+// find it in the first place (see guardedReturnTypes).
 func NewMulti(source AllPolicySource, engines Registry) Multi {
+	for key, engine := range engines {
+		if lang := engine.Language(); lang != key {
+			panic(fmt.Sprintf("policy: NewMulti: Registry key %q does not match its engine's Language() %q", key, lang))
+		}
+	}
 	return Multi{source: source, engines: engines}
 }
 
@@ -211,6 +232,17 @@ var _ CompiledPolicySet = multiSet{}
 // is untestable and unexplainable — the property this method exists to
 // guarantee.
 //
+// The sort runs on a copy appended into verdicts, never on the slice a
+// sub-engine's Evaluate handed back: CompiledPolicySet's own contract
+// (engine.go) requires the *set* to be goroutine-safe, not the slice a call
+// to Evaluate returns, and it says nothing about that slice being freshly
+// allocated per call. An engine that precomputes and reuses one backing
+// array across calls (plausible for a cache — see Task 6) would have that
+// array mutated by two concurrent Decides sorting it at once: a data race,
+// and interleaved verdict order landing in the audit trail. Sorting
+// verdicts' own tail after appending avoids touching the sub-engine's slice
+// at all.
+//
 // A sub-engine's own Evaluate failing is caught per language, converted to a
 // deny verdict naming that language, and does not stop the loop: a Rego
 // outage must not silence a Cedar forbid that evaluated just fine — the same
@@ -250,8 +282,11 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 			})
 			continue
 		}
-		sort.Slice(vs, func(i, j int) bool { return vs[i].PolicyID < vs[j].PolicyID })
+		start := len(verdicts)
 		verdicts = append(verdicts, vs...)
+		sort.Slice(verdicts[start:], func(i, j int) bool {
+			return verdicts[start+i].PolicyID < verdicts[start+j].PolicyID
+		})
 	}
 	return verdicts, nil
 }

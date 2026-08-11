@@ -107,12 +107,24 @@ func run(logger *slog.Logger) error {
 	// call (no cache — see the Phase 2c plan's "caching is deliberately out
 	// of scope" and Task 5's measurement of why). A tenant with no policies
 	// stored still denies at the principal leg, just as Unconfigured always
-	// did; Unconfigured itself remains for a deployment that wants no policy
-	// engine at all. repo satisfies both Store (pdpgrpc's own dependency
-	// interface) and policy.AllPolicySource structurally, so it needs no
-	// adapter to serve both — and Multi itself now supplies pdpgrpc's
-	// CreateDelegation gate with a compiled set via PrepareAll, so repo and
-	// an engine no longer need to be passed to NewServer a second time raw.
+	// did.
+	//
+	// Unconfigured itself is not wireable here any more: pdpgrpc.NewServer
+	// takes a concrete policy.Multi (it needs PrepareAll for the
+	// delegation-creation gate, which Unconfigured — a bare PrincipalPolicy —
+	// does not expose), so a deployment that wants no policy engine at all
+	// would need an explicitly empty Multi (NewMulti(repo, policy.Registry{}))
+	// instead. Unconfigured, policy.Configured, policy.PolicySource, and
+	// store.LoadPolicies all remain in the tree — nothing here calls them —
+	// left for a future task to decide whether they still earn their keep now
+	// that Multi covers the single-engine case too (an empty Registry with
+	// one entry behaves identically to Configured with that entry's engine).
+	//
+	// repo satisfies both Store (pdpgrpc's own dependency interface) and
+	// policy.AllPolicySource structurally, so it needs no adapter to serve
+	// both — and Multi itself now supplies pdpgrpc's CreateDelegation gate
+	// with a compiled set via PrepareAll, so repo and an engine no longer
+	// need to be passed to NewServer a second time raw.
 	registry := policy.Registry{"cedar": cedar.New()}
 	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg)
 

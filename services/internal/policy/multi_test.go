@@ -29,15 +29,6 @@ func (f fakeAllSource) LoadAllPolicies(context.Context) ([]StoredPolicy, error) 
 	return f.policies, nil
 }
 
-// evaluateFunc adapts a plain function to CompiledPolicySet, for tests that
-// need per-call behavior stubEngine/stubSet's static fields can't express
-// (e.g. returning different verdicts, or shuffled ones, on each call).
-type evaluateFunc func(context.Context, EvaluationInput) ([]authz.PolicyVerdict, error)
-
-func (f evaluateFunc) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.PolicyVerdict, error) {
-	return f(ctx, in)
-}
-
 // verdictIDs returns the PolicyIDs of vs, in order — the compact form most
 // of the assertions below compare, since exact Reason text is checked
 // separately where it matters (the D10 orphan test).
@@ -302,9 +293,20 @@ func TestMulti_PrepareAllTotalLoadFailureReturnsNilSetAndError(t *testing.T) {
 // sorted by id — regardless of what order a sub-engine's own Evaluate
 // happens to return them in (Cedar's documented map-order caveat is exactly
 // what this guards against). Two languages are used, each returning its
-// policies in an order deliberately reversed from sorted, and the check
-// repeats across several calls to catch order that merely happens to be
-// stable once by accident.
+// policies in an order deliberately reversed from sorted.
+//
+// The 5-call loop only proves "re-sorts every call, not just once" because
+// each stubEngine's stubSet hands back the exact same backing array on
+// every call (stubSet.Evaluate returns s.verdicts directly, unmodified).
+// That property depends on multiSet.Evaluate never mutating a sub-engine's
+// own slice: before the fix that sorts a copy appended into verdicts
+// instead of sorting vs in place, the first call's in-place sort left the
+// stub's shared array permanently ordered, so calls 2-5 received
+// already-sorted input and would have passed even if multiSet stopped
+// sorting entirely after call 1 — the loop was not actually exercising
+// "re-sorts every call" pre-fix, only "sorts once." Now that the sub-engine's
+// own slice is never touched, every call independently receives the same
+// reversed input and must independently re-sort it.
 func TestMulti_VerdictOrderIsDeterministicAcrossCalls(t *testing.T) {
 	source := fakeAllSource{policies: []StoredPolicy{
 		{ID: "z-cedar", Language: "cedar"},
@@ -371,20 +373,35 @@ func TestMulti_PrepareAllCalledOncePerEvaluate(t *testing.T) {
 // CompiledPolicySet PrepareAll returns — tolerates the concurrent Evaluate
 // calls its own contract requires (one prepared set serves every concurrent
 // decision for a tenant). Meaningful only under -race, per this project's
-// Makefile `test` target. Two languages are used so the per-language sort
-// inside Evaluate also runs under contention, not just the trivial
-// single-entry path.
+// Makefile `test` target.
+//
+// stubSet, deliberately, not a fresh-slice-per-call fixture: stubSet.Evaluate
+// returns s.verdicts directly, so every call — across every goroutine —
+// gets back the exact same backing array. That is the scenario that
+// actually exercises the concurrency claim: a sub-engine that precomputes
+// its verdict slice once (plausible for a cache, see Task 6) and hands the
+// same array back on every call. A fixture that allocates fresh per call
+// cannot distinguish "multiSet is safe" from "nothing shared ever collided
+// by construction" — this one can and, before the fix that sorts a copy
+// instead of the sub-engine's own slice, does: substituting this exact
+// fixture in reproduced a real WARNING: DATA RACE at the in-place sort.
+// Two verdicts per language, deliberately out of PolicyID order, so the
+// per-language sort has actual work to do — sorting a single-element slice
+// never writes, so never races.
 func TestMulti_PreparedSetSafeForConcurrentEvaluate(t *testing.T) {
 	source := fakeAllSource{policies: []StoredPolicy{
-		{ID: "p1", Language: "cedar"}, {ID: "p2", Language: "rego"},
+		{ID: "p1", Language: "cedar"}, {ID: "p2", Language: "cedar"},
+		{ID: "p3", Language: "rego"}, {ID: "p4", Language: "rego"},
 	}}
 	engines := Registry{
-		"cedar": stubEngine{language: "cedar", set: evaluateFunc(func(context.Context, EvaluationInput) ([]authz.PolicyVerdict, error) {
-			return []authz.PolicyVerdict{{Effect: authz.EffectAllow, Source: "cedar", PolicyID: "p1"}}, nil
-		})},
-		"rego": stubEngine{language: "rego", set: evaluateFunc(func(context.Context, EvaluationInput) ([]authz.PolicyVerdict, error) {
-			return []authz.PolicyVerdict{{Effect: authz.EffectDeny, Source: "rego", PolicyID: "p2"}}, nil
-		})},
+		"cedar": stubEngine{language: "cedar", set: stubSet{verdicts: []authz.PolicyVerdict{
+			{Effect: authz.EffectAllow, Source: "cedar", PolicyID: "p2"},
+			{Effect: authz.EffectAllow, Source: "cedar", PolicyID: "p1"},
+		}}},
+		"rego": stubEngine{language: "rego", set: stubSet{verdicts: []authz.PolicyVerdict{
+			{Effect: authz.EffectDeny, Source: "rego", PolicyID: "p4"},
+			{Effect: authz.EffectDeny, Source: "rego", PolicyID: "p3"},
+		}}},
 	}
 
 	set, err := NewMulti(source, engines).PrepareAll(context.Background())
@@ -406,7 +423,7 @@ func TestMulti_PreparedSetSafeForConcurrentEvaluate(t *testing.T) {
 					errs <- err
 					return
 				}
-				if len(vs) != 2 {
+				if len(vs) != 4 {
 					errs <- errors.New("wrong verdict count")
 					return
 				}
@@ -418,6 +435,29 @@ func TestMulti_PreparedSetSafeForConcurrentEvaluate(t *testing.T) {
 	for err := range errs {
 		t.Error(err)
 	}
+}
+
+// TestNewMulti_PanicsOnRegistryKeyLanguageMismatch defends the invariant
+// Registry's own doc comment claims: NewMulti, not silent routing, is what
+// catches a typo'd key. Without this check, Registry{"rego": xacml.New()}
+// would compile and route every "rego" policy to an XACML engine, silently
+// misattributing every verdict it produces — Multi routes purely by map
+// key and never itself calls Language() to cross-check (see PrepareAll), so
+// nothing downstream would ever catch the mismatch.
+func TestNewMulti_PanicsOnRegistryKeyLanguageMismatch(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NewMulti did not panic on a Registry key that disagrees with its engine's Language()")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "rego") || !strings.Contains(msg, "xacml") {
+			t.Errorf("panic value = %v, want it to name both the mismatched key %q and the engine's actual language %q", r, "rego", "xacml")
+		}
+	}()
+
+	NewMulti(fakeAllSource{}, Registry{"rego": stubEngine{language: "xacml"}})
+	t.Fatal("unreachable: NewMulti should have panicked before returning")
 }
 
 // TestMulti_ConstructorCannotAllow is the same behavioral check
