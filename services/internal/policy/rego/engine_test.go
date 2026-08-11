@@ -1,6 +1,7 @@
 package rego
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"stratium/internal/policy"
 	"stratium/internal/policy/policytest"
 )
 
@@ -34,6 +36,75 @@ allow := true`,
 		DenyAll: `package stratium.policy
 
 deny := true`,
+	})
+}
+
+// TestPrepare_RejectsWrongPackage guards the fix for a review-found Critical:
+// rego.New(...).PrepareForEval accepts a module declaring any package, and
+// this engine only ever queries queryPath (data.stratium.policy) — so a
+// policy whose module declared, say, `package stratium.oops` used to
+// compile cleanly and then never produce a verdict for any input, forever,
+// with nothing at Prepare time or decision time distinguishing it from a
+// rule that correctly never fires. See checkPackage's own doc comment for
+// the full reasoning and why a runtime probe cannot substitute for this
+// static check. Names the offending policy's ID, the same property
+// policytest.EngineContract's own "malformed" case checks for other kinds
+// of bad text.
+func TestPrepare_RejectsWrongPackage(t *testing.T) {
+	t.Run("wrong package is rejected, naming the policy ID", func(t *testing.T) {
+		const wantID = "wrong-package-under-test"
+		_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
+			{ID: wantID, Name: "typo'd package", Text: `package stratium.oops
+
+allow := true`},
+		})
+		if err == nil {
+			t.Fatal("Prepare accepted a policy declaring the wrong package, want an error")
+		}
+		if !strings.Contains(err.Error(), wantID) {
+			t.Errorf("error does not name the offending policy's ID %q: %v", wantID, err)
+		}
+	})
+
+	// Positive control: the check above must reject the wrong package
+	// specifically, not policies in general — otherwise this "fix" would be
+	// indistinguishable from Prepare rejecting everything.
+	t.Run("correct package still prepares normally", func(t *testing.T) {
+		_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
+			{ID: "right-package-under-test", Name: "correct", Text: `package stratium.policy
+
+allow := true`},
+		})
+		if err != nil {
+			t.Fatalf("Prepare rejected a correctly-packaged policy: %v", err)
+		}
+	})
+}
+
+// TestValidate_RejectsWrongPackage is TestPrepare_RejectsWrongPackage's
+// counterpart for the PAP's authoring-time gate — deliberately a separate
+// test function, not a subtest folded into the one above, because the fix
+// touches Prepare and Validate independently (checkPackage is called from
+// both, but each call site can regress on its own) and a single test
+// covering both call sites would leave whichever one broke first still
+// green.
+func TestValidate_RejectsWrongPackage(t *testing.T) {
+	t.Run("wrong package is rejected", func(t *testing.T) {
+		err := New().Validate(context.Background(), `package stratium.oops
+
+allow := true`)
+		if err == nil {
+			t.Fatal("Validate accepted text declaring the wrong package, want an error")
+		}
+	})
+
+	t.Run("correct package still validates normally", func(t *testing.T) {
+		err := New().Validate(context.Background(), `package stratium.policy
+
+allow := true`)
+		if err != nil {
+			t.Fatalf("Validate rejected correctly-packaged text: %v", err)
+		}
 	})
 }
 

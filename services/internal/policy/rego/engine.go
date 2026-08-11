@@ -71,8 +71,10 @@
 // attributes exactly — trust_tier, max_action_tier, classification_caps, and
 // so on — so the same rule reads the same way in both languages. Two
 // deliberate departures from Cedar's mapping, both because Rego has no
-// entity system: everything Cedar models as an entity (principal, resource)
-// is just another input field here.
+// entity system: everything Cedar models as an entity (principal, resource,
+// action) is just another input field here — a Cedar rule reads
+// `action == Action::"Bash"`, a Rego rule reads `input.action.tool ==
+// "Bash"`.
 //
 //   - input.principal is {subject, attributes}, not a flat object the way
 //     Cedar's principal entity attributes are (a Cedar policy reads
@@ -116,6 +118,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/open-policy-agent/opa/v1/ast"
 	regolib "github.com/open-policy-agent/opa/v1/rego"
 
 	"stratium/internal/policy"
@@ -147,9 +150,18 @@ func (Engine) Language() string { return "rego" }
 // at the first policy that fails: the error names only that policy, never a
 // well-formed neighbor that happened to share the same Prepare call (see
 // policytest's own "does not blame the neighbor" property).
+//
+// checkPackage runs before PrepareForEval, not after: a module declaring
+// any package compiles cleanly (data.stratium.policy simply never resolves
+// to anything for a differently-packaged module — see checkPackage's own
+// doc comment), so nothing about a successful PrepareForEval call would
+// ever have caught this on its own.
 func (Engine) Prepare(ctx context.Context, policies []policy.StoredPolicy) (policy.CompiledPolicySet, error) {
 	compiled := make(map[string]compiledPolicy, len(policies))
 	for _, sp := range policies {
+		if err := checkPackage(sp.ID, sp.Text); err != nil {
+			return nil, fmt.Errorf("rego: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
+		}
 		pq, err := regolib.New(
 			regolib.Query(queryPath),
 			regolib.Module(sp.ID, sp.Text),
@@ -165,14 +177,54 @@ func (Engine) Prepare(ctx context.Context, policies []policy.StoredPolicy) (poli
 // Validate checks policy text without persisting or evaluating it, for the
 // PAP's authoring path: a bad policy is refused at write time rather than
 // discovered at decision time. It compiles text the same way Prepare does —
-// same query, same syntax requirements — so anything Validate accepts,
-// Prepare accepts too.
+// same query, same syntax requirements, same checkPackage call — so
+// anything Validate accepts, Prepare accepts too, and a tenant who
+// mistypes their package declaration is told at authoring time rather than
+// shipping a rule that is dead on arrival.
 func (Engine) Validate(ctx context.Context, text string) error {
+	if err := checkPackage("validate", text); err != nil {
+		return fmt.Errorf("rego: validate: %w", err)
+	}
 	if _, err := regolib.New(
 		regolib.Query(queryPath),
 		regolib.Module("validate", text),
 	).PrepareForEval(ctx); err != nil {
 		return fmt.Errorf("rego: validate: %w", err)
+	}
+	return nil
+}
+
+// checkPackage parses text with ast.ParseModule and confirms its declared
+// package is exactly stratium.policy (queryPath, reused here rather than a
+// second literal, so the query and the requirement it depends on cannot
+// drift apart). This is the fix for a review finding: rego.New(...).
+// PrepareForEval accepts a module declaring any package without complaint —
+// queryPath simply never resolves to anything for a differently-packaged
+// module, and decision (evaluate.go) cannot tell that apart from "this
+// policy's rules are legitimately undefined for this input" — so a typo'd
+// package (`stratium.polic`, `stratium.oops`) used to compile cleanly and
+// stay silently dead at every later decision: no error at write time, no
+// verdict distinguishing it from a rule that correctly never fires, ever.
+// That is spec defect D10's failure mode — a policy that cannot be
+// evaluated must deny, never be silently ignored — reappearing one layer
+// below where D10 itself was closed, and multi.go's orphanVerdict cannot
+// help here: the rego engine *is* registered and Prepare *does* succeed.
+//
+// A runtime probe (compiling the text and evaluating it once against a
+// generic input, checking for an empty result) was considered and
+// rejected: this package's own WellFormed fixture — `allow if {
+// input.principal.subject == "nobody-in-particular" }` — also yields an
+// empty result against a generic input, because it legitimately does not
+// match. An empty result cannot distinguish "wrong package" from
+// "correctly did not match," so only a static check of the declared
+// package, independent of any input, is reliable.
+func checkPackage(id, text string) error {
+	mod, err := ast.ParseModule(id, text)
+	if err != nil {
+		return err
+	}
+	if got := mod.Package.Path.String(); got != queryPath {
+		return fmt.Errorf("policy declares package %s, want %s (every policy's module must declare `package stratium.policy`)", got, queryPath)
 	}
 	return nil
 }
