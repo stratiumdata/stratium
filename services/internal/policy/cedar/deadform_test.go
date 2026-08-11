@@ -3,9 +3,12 @@ package cedar
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"stratium/internal/authz"
 	"stratium/internal/policy"
+	"stratium/pkg/models"
 )
 
 // firstWhenBody parses text (expected to be exactly one policy with exactly
@@ -135,6 +138,9 @@ func TestCheckLiteralContradiction_NonScalarLiteralsDoNotPanic(t *testing.T) {
 // accidentally recursing one level into an || — would make checkDeadForms
 // reject policies that are still genuinely satisfiable through their other
 // disjunct, which this task's fail-closed constraint explicitly forbids.
+// This applies identically to "when" and "unless" clause bodies (see
+// deadform.go's package doc, "Why only through &&, for either clause
+// kind") — the last two subtests below pin both.
 func TestConjuncts_StopsAtOrAndNot(t *testing.T) {
 	t.Run("&& decomposes into its two conjuncts", func(t *testing.T) {
 		body := firstWhenBody(t, `permit(principal, action, resource) when { 1 == 1 && 2 == 2 };`)
@@ -170,39 +176,120 @@ func TestConjuncts_StopsAtOrAndNot(t *testing.T) {
 			t.Errorf("checkDeadForms rejected a policy with a live || arm: %v (over-rejection: the contradiction is buried inside ||, where the other arm can still make the policy match)", err)
 		}
 	})
+
+	// The unless-side twin of the subtest above, and the "give it a test
+	// either way" half of this task's Critical fix: a dead disjunct inside
+	// an unless body must not be rejected either. Derived independently,
+	// not assumed identical to the when-side case: an unless body Y is
+	// only a fail-open widening when Y is always false (see deadform.go's
+	// package doc), and `real || dead` is not always false — it is exactly
+	// as true as `real` alone, so this exception still genuinely narrows
+	// the policy whenever `real` holds. Rejecting it here would be the
+	// same over-rejection the when-side subtest above guards against, one
+	// clause kind over.
+	t.Run("a dead conjunct under || inside unless does not reject the policy", func(t *testing.T) {
+		text := `permit(principal, action, resource) unless { context.agent.trust_tier == "CERTIFIED" || 1 == 2 };`
+		parsed, err := parseOne("test", text)
+		if err != nil {
+			t.Fatalf("parseOne: %v", err)
+		}
+		if err := checkDeadForms(parsed); err != nil {
+			t.Errorf("checkDeadForms rejected a policy with a live || arm inside unless: %v (over-rejection: the other disjunct can still make the exception trigger)", err)
+		}
+	})
 }
 
-// TestCheckDeadForms_SkipsUnlessClauses pins why "unless" bodies are never
-// inspected (see deadform.go's package doc): unless {X} requires !X, so a
-// dead (always-false) X makes that unless clause vacuously true — a no-op,
-// not a reason the policy can never match. Applying the "when" logic to
-// "unless" unmodified would invert this and reject a policy that is, in
-// fact, perfectly satisfiable.
-func TestCheckDeadForms_SkipsUnlessClauses(t *testing.T) {
+// TestCheckDeadForms_RejectsDeadConjunctInUnlessClauses pins this task's
+// Critical fix: a dead (always-false) conjunct inside an "unless" body used
+// to be silently accepted — an earlier version of this file reasoned it was
+// a harmless no-op ("unless{1==2} means unless{false}, i.e. no constraint
+// at all"). That reasoning was correct about whether the clause holds and
+// wrong about what that means: unless{false} does not add "no constraint,"
+// it deletes whatever restriction the author intended the clause to
+// express — a fail-open widening, not a no-op. See deadform.go's package
+// doc, "Why only through &&, for either clause kind," for the full
+// derivation this test pins.
+func TestCheckDeadForms_RejectsDeadConjunctInUnlessClauses(t *testing.T) {
 	text := `permit(principal, action, resource) unless { 1 == 2 };`
 	parsed, err := parseOne("test", text)
 	if err != nil {
 		t.Fatalf("parseOne: %v", err)
 	}
-	if err := checkDeadForms(parsed); err != nil {
-		t.Errorf("checkDeadForms rejected %q: %v (unless{1==2} means unless{false}, i.e. no constraint at all — this policy unconditionally permits)", text, err)
+	if err := checkDeadForms(parsed); err == nil {
+		t.Errorf("checkDeadForms accepted %q, want an error — unless{1==2} means unless{false}, which deletes this policy's own restriction instead of narrowing it", text)
 	}
 
-	// Positive control: prove the fixture actually means what the comment
-	// above claims, not just that checkDeadForms stayed quiet for some
-	// unrelated reason — the unless-wrapped contradiction must still
-	// evaluate to a real, matching verdict.
+	// The same property through the real entry point every StoredPolicy
+	// actually goes through, not only when checkDeadForms is called
+	// directly above — Prepare must reject it too, naming the offender.
+	_, err = (Engine{}).Prepare(context.Background(), []policy.StoredPolicy{
+		{ID: "unless-contradiction", Name: "unless-contradiction", Text: text, Priority: 1, Version: 1},
+	})
+	if err == nil {
+		t.Fatal("Prepare accepted a dead conjunct inside an unless clause, want an error")
+	}
+	if !strings.Contains(err.Error(), "unless-contradiction") {
+		t.Errorf("Prepare error does not name the offending policy: %v", err)
+	}
+}
+
+// TestCheckDeadForms_UnlessReachesEveryLeafCheck proves the fix generalizes
+// to all four leaf checks, not only checkLiteralContradiction (the one
+// TestCheckDeadForms_RejectsDeadConjunctInUnlessClauses above exercises).
+// checkTierVocabulary and checkDerivedTierComparison are pinned under
+// unless by the "unless:"-prefixed entries in Fixtures.DeadForms
+// (engine_test.go) via the shared contract; checkEmptySetMembership has no
+// dedicated DeadForms entry of its own (see
+// TestCheckEmptySetMembership_BothShapes' own doc comment for why one
+// shape of it doesn't get a second contract entry either), so without this
+// test, checkEmptySetMembership never being reached for an unless body at
+// all would cause no test anywhere to fail.
+func TestCheckDeadForms_UnlessReachesEveryLeafCheck(t *testing.T) {
+	text := `permit(principal, action, resource) unless { [].contains(context.agent.trust_tier) };`
+	parsed, err := parseOne("test", text)
+	if err != nil {
+		t.Fatalf("parseOne: %v", err)
+	}
+	if err := checkDeadForms(parsed); err == nil {
+		t.Errorf("checkDeadForms accepted %q, want an error (checkEmptySetMembership must be reached for unless bodies too)", text)
+	}
+}
+
+// TestCheckDeadForms_UnlessExceptionStillNarrowsBothWays is the positive
+// control for the fix above: a REAL (non-dead) unless clause must still
+// narrow a permit policy in both directions — refusing to match when its
+// exception applies, matching normally when it does not. Without this,
+// rejecting the dead form alone would not distinguish "the checker now
+// correctly rejects dead unless bodies" from "the checker now rejects
+// unless clauses in general," which would itself be a different
+// over-rejection bug.
+func TestCheckDeadForms_UnlessExceptionStillNarrowsBothWays(t *testing.T) {
+	text := `permit(principal, action, resource) unless { context.agent.trust_tier == "CERTIFIED" };`
 	set, err := (Engine{}).Prepare(context.Background(), []policy.StoredPolicy{
-		{ID: "p1", Name: "unless-contradiction", Text: text, Priority: 1, Version: 1},
+		{ID: "p1", Name: "real-exception", Text: text, Priority: 1, Version: 1},
 	})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{})
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if len(verdicts) != 1 {
-		t.Fatalf("got %d verdicts, want 1 — unless{1==2} does not narrow this policy at all", len(verdicts))
+
+	for _, tc := range []struct {
+		name        string
+		trustTier   models.AgentTrustTier
+		wantMatched bool
+	}{
+		{"exception applies: a CERTIFIED agent does not match", models.TrustTierCertified, false},
+		{"exception does not apply: an UNVERIFIED agent matches", models.TrustTierUnverified, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
+				Agent: authz.AgentInfo{TrustTier: tc.trustTier},
+			})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if matched := len(verdicts) > 0; matched != tc.wantMatched {
+				t.Errorf("got %d verdicts (matched=%v), want matched=%v", len(verdicts), matched, tc.wantMatched)
+			}
+		})
 	}
 }

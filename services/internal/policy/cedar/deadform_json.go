@@ -47,10 +47,12 @@ type entityUIDJSON struct {
 	Type string `json:"type"`
 }
 
-// conditionJSON is one `when { ... }` or `unless { ... }` clause. Kind is
-// read by checkDeadForms to skip "unless" bodies entirely — see its own
-// doc comment for why inspecting them would need inverted, and easy to get
-// backwards, logic.
+// conditionJSON is one `when { ... }` or `unless { ... }` clause.
+// checkDeadForms (deadform.go) walks both kinds identically — see its own
+// package doc, "Why only through &&, for either clause kind" — so Kind is
+// not read there at all; it stays a decoded field because deadform_test.go
+// still needs to pick out one specific clause's body by kind when testing a
+// leaf check in isolation (see e.g. firstWhenBody).
 type conditionJSON struct {
 	Kind string          `json:"kind"`
 	Body json.RawMessage `json:"body"`

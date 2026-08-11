@@ -94,31 +94,69 @@ import (
 // forever) rather than as long as one experimental Go package's internal
 // struct layout is unchanged.
 //
-// # Why only "when", and only through "&&"
+// # Why only through "&&", for either clause kind
 //
-// checkDeadForms walks a condition body looking for a handful of specific
-// dead shapes, but only within conjuncts reached by unwrapping "&&" nodes
-// (conjuncts, deadform_json.go), and only inside "when" clauses. Both
-// restrictions exist for the same reason: a dead subexpression only makes
-// the *whole* policy dead if nothing else could make it match instead.
+// checkDeadForms walks every "when" AND every "unless" clause body the same
+// way: looking for a handful of specific dead shapes, but only within
+// conjuncts reached by unwrapping "&&" nodes (conjuncts, deadform_json.go),
+// never "||" or "!". That restriction is required, not merely conservative
+// — and, importantly, it does not depend on which clause kind is being
+// walked. The && / || split is a fact about how those two operators compose
+// truth values; nothing about it changes depending on what the enclosing
+// clause does with the result:
 //
-//   - Stopping at "||" and "!" instead of recursing through them is
-//     required, not merely conservative: `when { a || (1 == 2) }` is a
-//     perfectly live policy whenever `a` holds — flagging it over a dead
-//     disjunct buried inside an OR would reject a policy this task's own
-//     fail-closed constraint says must not be rejected. Every "&&" conjunct,
-//     by contrast, is independently necessary for the clause to hold, so a
-//     dead one kills the whole clause (and, since every top-level "when"
-//     clause is itself AND-ed together by Cedar's own semantics, the whole
-//     policy) regardless of what the other conjuncts say.
-//   - "unless { X }" requires !X, so a *dead* (always-false) X inside an
-//     unless clause makes that clause vacuously always-true — a no-op, not
-//     a reason the enclosing policy can never match. Reusing the "when"
-//     logic there unmodified would silently invert every one of these
-//     checks; rather than duplicate them with the logic flipped for one
-//     clause kind never exercised by any of the thirteen audited forms,
-//     "unless" bodies are simply never inspected. Extend this if a future
-//     dead form actually needs it.
+//   - Every "&&" conjunct is independently necessary for its clause body to
+//     hold, so a dead (always-false) conjunct forces the *whole* body false
+//     regardless of what the other conjuncts say — the same reason one
+//     false term in a chain of ANDs forces the chain false no matter how
+//     many true terms sit beside it.
+//   - "||" does not have that property: `a || (1 == 2)` is exactly as true
+//     as `a` alone, for every value of `a`. Recursing into an "||" and
+//     flagging its dead arm would reject a clause body that is still,
+//     genuinely, sometimes true — over-rejection this task's fail-closed
+//     constraint forbids. "!" is opaque for a related reason: this file has
+//     no general-purpose boolean prover, only a handful of "is this one
+//     leaf always false" checks, and the negation of an always-false leaf
+//     is an always-*true* one — a different question none of those checks
+//     answer.
+//
+// What an always-false clause BODY means for the enclosing POLICY, though,
+// does depend on which clause kind wraps it — this is the one place clause
+// polarity matters, and it is why both kinds must be checked rather than
+// one of them being "the safe one to leave alone":
+//
+//   - "when { X }" requires X to hold. An always-false X (via a dead
+//     conjunct) means the clause can never hold, so the policy built around
+//     it can never match at all — dead in the most literal sense.
+//   - "unless { Y }" requires !Y to hold. An always-false Y (via a dead
+//     conjunct — the identical structural fact, just fed to a clause with
+//     the opposite polarity) makes !Y always TRUE: the clause is
+//     unconditionally satisfied, imposing no restriction whatsoever. On a
+//     permit policy this silently deletes the exception its author wrote —
+//     every request the exception existed to carve out now matches anyway.
+//     An earlier version of this file reasoned that made "unless" bodies
+//     safe to skip ("a no-op, not a reason the enclosing policy can never
+//     match") — true about *whether the policy can match*, and beside the
+//     point: DeadForm's own contract is "semantically incapable of ever
+//     producing its author's INTENDED verdict" (see policytest/contract.go),
+//     not narrowly "can never match at all," and a policy that now matches
+//     UNCONDITIONALLY when its author wrote a conditional one already fails
+//     that test. Verified against the real engine (see the task report): a
+//     policy reading "permit everyone except CERTIFIED agents", spelled
+//     `unless { trust_tier == "Certified" }` (wrong case — one of this
+//     file's own audited dead forms), authorizes a CERTIFIED agent instead
+//     of denying one — a fail-open widening, not a no-op.
+//
+// checkTierVocabulary, checkDerivedTierComparison, checkLiteralContradiction,
+// and checkEmptySetMembership did not need to change for any of this, and
+// that is exactly why reusing them unmodified for "unless" bodies is safe
+// rather than merely convenient: every one of them already only ever proves
+// a leaf is a CONTRADICTION (always false, for any request whatsoever),
+// never rejects a value it finds merely suspicious for some other reason —
+// see checkLiteralContradiction's own "a tautology... is left alone" note.
+// An always-false leaf is exactly the fact the "&&" argument above needs,
+// and it is a fact about the leaf, not about whether a "when" or an
+// "unless" happens to contain it.
 //
 // # What stayed silent on purpose
 //
@@ -180,11 +218,12 @@ func checkDeadForms(parsed *cedarlib.Policy) error {
 		return err
 	}
 
+	// Both "when" and "unless" clause bodies are decomposed into && conjuncts
+	// and fed through the identical leaf checks — see this file's package
+	// doc, "Why only through &&, for either clause kind," for why that is
+	// correct for both clause kinds despite their opposite polarity.
 	var leaves []json.RawMessage
 	for _, c := range doc.Conditions {
-		if c.Kind != "when" {
-			continue // see this file's package doc, "Why only when"
-		}
 		leaves = append(leaves, conjuncts(c.Body)...)
 	}
 	for _, expr := range leaves {

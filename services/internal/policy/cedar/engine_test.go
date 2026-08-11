@@ -52,15 +52,44 @@ var deadFormReferenceInput = policy.EvaluationInput{
 	Resource: map[string]string{"id": "res-1", "classification": "restricted"},
 }
 
-// deadForms is the nine dead shapes Task 2 now rejects at authoring time —
-// see deadform.go's package doc for why these nine (of the thirteen the
-// task brief audited) needed new checks, and the task report for the full
-// classification of all thirteen. Every Dead text is verified (in
-// deadform_test.go, and empirically before this file was written) to have
-// validated, prepared, and produced zero verdicts against
-// deadFormReferenceInput before this task; every Live text is its minimal
-// correction, differing only in the one respect its own dead form is named
-// for.
+// deadFormUnlessLiveInput is the LiveInput for every "unless:"-prefixed
+// entry below — the fix for the whole-branch review's Critical finding: a
+// dead (always-false) conjunct inside an "unless" body used to be silently
+// accepted as a harmless no-op, when it actually deletes the enclosing
+// policy's own exception (see deadform.go's package doc, "Why only through
+// &&, for either clause kind"). Unlike deadFormReferenceInput — chosen so a
+// WHEN clause's live condition MATCHES it — an unless clause's Live form
+// must NOT have its exception triggered by LiveInput: an unless-guarded
+// permit whose exception fires produces zero verdicts for that policy
+// alone, which would fail testDeadForms' own "live text ... produces a
+// verdict" check (policytest/contract.go) for a reason unrelated to
+// whether Dead was rejected. TrustTier and DerivedTier are therefore held
+// well clear of every value the "unless:" dead forms below spell wrong, so
+// each Live counterpart's real (correctly-spelled) exception does not
+// apply and the base permit matches normally.
+var deadFormUnlessLiveInput = policy.EvaluationInput{
+	Principal:   authz.Principal{Subject: "alice"},
+	Agent:       authz.AgentInfo{TrustTier: models.TrustTierUnverified},
+	DerivedTier: models.ActionTierReasoning,
+}
+
+// deadForms is every dead shape this package rejects at authoring time.
+// The original nine are Task 2's — see deadform.go's package doc for why
+// those nine (of the thirteen the task 2 brief audited) needed new checks,
+// and the task report for the full classification of all thirteen. Every
+// Dead text below is verified (in deadform_test.go, and empirically before
+// each was added) to have validated, prepared, and produced zero verdicts
+// against its own LiveInput before its fix landed; every Live text is its
+// minimal correction, differing only in the one respect its own dead form
+// is named for — except the "unless: contradiction" entry, where the
+// minimal correction is a real, request-dependent condition rather than a
+// same-shape literal edit (see deadFormUnlessLiveInput's own doc comment
+// for why).
+//
+// The "unless:"-prefixed group appended after the original nine is the
+// whole-branch review's Critical finding: dead forms silently widened
+// rather than killed a policy when the enclosing clause was "unless"
+// instead of "when" (see this package's own doc comment).
 func deadForms() []policytest.DeadForm {
 	return []policytest.DeadForm{
 		{
@@ -132,6 +161,57 @@ func deadForms() []policytest.DeadForm {
 			Dead:      `permit(principal, action, resource) when { [].contains(context.agent.trust_tier) };`,
 			Live:      `permit(principal, action, resource) when { ["CERTIFIED", "PLATFORM_TRUSTED"].contains(context.agent.trust_tier) };`,
 			LiveInput: deadFormReferenceInput,
+		},
+
+		// --- Critical: dead forms inside "unless" widened instead of
+		// killed a policy (deadform.go's checkDeadForms used to skip every
+		// "unless" clause body entirely). Each of these six mirrors one of
+		// the nine "when:" forms above, wrapped in "unless" instead —
+		// verified against the real engine, pre-fix: every one of them
+		// validated, prepared, and folded to ALLOW for a CERTIFIED /
+		// DESTRUCTIVE agent that a correctly-spelled exception would have
+		// denied (see deadFormUnlessLiveInput's own doc comment).
+		{
+			Name:      "unless: wrong-case enum",
+			Dead:      `permit(principal, action, resource) unless { context.agent.trust_tier == "Certified" };`,
+			Live:      `permit(principal, action, resource) unless { context.agent.trust_tier == "CERTIFIED" };`,
+			LiveInput: deadFormUnlessLiveInput,
+		},
+		{
+			Name:      "unless: ordinal instead of name",
+			Dead:      `permit(principal, action, resource) unless { context.agent.trust_tier == "2" };`,
+			Live:      `permit(principal, action, resource) unless { context.agent.trust_tier == "CERTIFIED" };`,
+			LiveInput: deadFormUnlessLiveInput,
+		},
+		{
+			Name:      "unless: padded literal",
+			Dead:      `permit(principal, action, resource) unless { context.agent.trust_tier == " CERTIFIED " };`,
+			Live:      `permit(principal, action, resource) unless { context.agent.trust_tier == "CERTIFIED" };`,
+			LiveInput: deadFormUnlessLiveInput,
+		},
+		{
+			Name: "unless: contradiction",
+			// Live is NOT "unless { 1 == 1 }" — the when-side "contradiction"
+			// entry's own trick. Flipping a contradiction to a tautology
+			// inside an unless body makes the clause's own requirement (!Y)
+			// impossible instead of vacuous: still dead, just in the
+			// opposite direction (see deadform.go's package doc). Only a
+			// real, request-dependent condition actually narrows.
+			Dead:      `permit(principal, action, resource) unless { 1 == 2 };`,
+			Live:      `permit(principal, action, resource) unless { context.agent.trust_tier == "CERTIFIED" };`,
+			LiveInput: deadFormUnlessLiveInput,
+		},
+		{
+			Name:      "unless: name instead of ordinal",
+			Dead:      `permit(principal, action, resource) unless { context.derived_tier == "DESTRUCTIVE" };`,
+			Live:      fmt.Sprintf(`permit(principal, action, resource) unless { context.derived_tier == %d };`, int(models.ActionTierDestructive)),
+			LiveInput: deadFormUnlessLiveInput,
+		},
+		{
+			Name:      "unless: out-of-lattice ceiling",
+			Dead:      `permit(principal, action, resource) unless { context.derived_tier > 99 };`,
+			Live:      fmt.Sprintf(`permit(principal, action, resource) unless { context.derived_tier >= %d };`, int(models.ActionTierDestructive)),
+			LiveInput: deadFormUnlessLiveInput,
 		},
 	}
 }
