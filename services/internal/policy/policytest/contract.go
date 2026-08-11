@@ -20,6 +20,7 @@ import (
 
 	"stratium/internal/authz"
 	"stratium/internal/policy"
+	"stratium/pkg/models"
 )
 
 // Fixtures supplies the language-specific policy text EngineContract needs.
@@ -52,6 +53,11 @@ type Fixtures struct {
 //  2. Validate rejects Fixtures.Malformed and accepts Fixtures.WellFormed.
 //  3. A prepared CompiledPolicySet is safe for concurrent Evaluate calls (run
 //     this package under -race; that is what actually checks it).
+//  4. Fixtures.AllowAll and Fixtures.DenyAll each match every input with
+//     exactly one verdict, carrying EffectAllow and EffectDeny respectively.
+//  5. Every verdict's Source is the engine's own Language(), and its
+//     PolicyID is the producing StoredPolicy's ID — never a hardcoded
+//     string, a display Name, or a slice index.
 func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	t.Helper()
 	requireFixtures(t, f)
@@ -59,6 +65,8 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
 	testPrepareWithNoPolicies(t, engine)
 	testValidate(t, engine, f)
 	testConcurrentEvaluate(t, engine, f)
+	testAllowDenyEffects(t, engine, f)
+	testVerdictProvenance(t, engine, f)
 }
 
 // requireFixtures fails fast on an incomplete Fixtures value. Every field
@@ -192,6 +200,139 @@ func testConcurrentEvaluate(t *testing.T, engine policy.PolicyEngine, f Fixtures
 		close(errs)
 		for err := range errs {
 			t.Error(err)
+		}
+	})
+}
+
+// mustPrepare prepares policies and fails the test immediately on error —
+// the shared setup every property below needs before it can assert anything
+// about the verdicts a set produces.
+func mustPrepare(t *testing.T, engine policy.PolicyEngine, policies []policy.StoredPolicy) policy.CompiledPolicySet {
+	t.Helper()
+	set, err := engine.Prepare(context.Background(), policies)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	return set
+}
+
+// mustEvaluate evaluates in against set and fails the test immediately on
+// error.
+func mustEvaluate(t *testing.T, set policy.CompiledPolicySet, in policy.EvaluationInput) []authz.PolicyVerdict {
+	t.Helper()
+	verdicts, err := set.Evaluate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	return verdicts
+}
+
+// probeInput names one EvaluationInput shape used to prove a fixture matches
+// more than one coincidental input.
+type probeInput struct {
+	name string
+	in   policy.EvaluationInput
+}
+
+// probeInputs is deliberately more than one shape: a zero-value input and a
+// fully populated one exercising every EvaluationInput dimension an engine
+// might (wrongly) condition on. AllowAll and DenyAll are documented to match
+// all of them — a single hardcoded probe would not catch a fixture
+// accidentally scoped to it, e.g. a stray principal condition left over from
+// copy-pasting a narrower fixture.
+func probeInputs() []probeInput {
+	return []probeInput{
+		{"zero-value input", policy.EvaluationInput{}},
+		{"fully populated input", policy.EvaluationInput{
+			Principal:   authz.Principal{Subject: "probe-subject", Attributes: map[string]string{"dept": "eng"}},
+			Action:      authz.Action{Tool: "Bash", Verb: "write", RawInput: "rm -rf /tmp/x"},
+			DerivedTier: models.ActionTierDestructive,
+			Resource:    map[string]string{"id": "res-1", "classification": "restricted"},
+			Environment: map[string]string{"region": "us-east-1"},
+			Agent:       authz.AgentInfo{TrustTier: models.TrustTierCertified, Enabled: true},
+			Delegation:  policy.DelegationContext{Depth: 2, MaxActionTier: models.ActionTierExternalComms, Purpose: "quarterly-close"},
+		}},
+	}
+}
+
+// testAllowDenyEffects checks the positive control several other properties
+// lean on: AllowAll and DenyAll each produce exactly one verdict, with the
+// documented effect, regardless of what is being asked.
+func testAllowDenyEffects(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+
+	t.Run("AllowAll matches every input with exactly one EffectAllow verdict", func(t *testing.T) {
+		requireUniformVerdict(t, engine, f.AllowAll, "allow", authz.EffectAllow)
+	})
+
+	t.Run("DenyAll matches every input with exactly one EffectDeny verdict", func(t *testing.T) {
+		requireUniformVerdict(t, engine, f.DenyAll, "deny", authz.EffectDeny)
+	})
+}
+
+// requireUniformVerdict prepares a single policy from text and asserts it
+// produces exactly one verdict carrying wantEffect against every probeInput.
+// storedEffect populates StoredPolicy.Effect alongside text: an engine may
+// derive its verdict's effect from either one (Cedar reads only the Cedar
+// text; the fake test engine in package policy reads only StoredPolicy.
+// Effect), so a fixture author must keep the two in agreement — which
+// AllowAll and DenyAll's own doc comment already requires.
+//
+// The PolicyID check matters even on the deny side: authz.EffectDeny is the
+// zero value (see authz.Effect's doc comment), so an Effect-only assertion
+// would also pass a completely unpopulated authz.PolicyVerdict{}. This
+// project has shipped exactly that gap before — see cedar's
+// TestEvaluate_DerivedTierReadableFromContextDrivesForbid for the same trap
+// hit during Cedar's own development. Checking PolicyID forces the verdict
+// under test to be the one this policy actually produced.
+func requireUniformVerdict(t *testing.T, engine policy.PolicyEngine, text, storedEffect string, wantEffect authz.Effect) {
+	t.Helper()
+	const wantID = "uniform-check"
+	set := mustPrepare(t, engine, []policy.StoredPolicy{
+		{ID: wantID, Name: "uniform-check", Language: engine.Language(), Text: text, Effect: storedEffect, Priority: 1, Version: 1},
+	})
+
+	for _, probe := range probeInputs() {
+		t.Run(probe.name, func(t *testing.T) {
+			verdicts := mustEvaluate(t, set, probe.in)
+			if len(verdicts) != 1 {
+				t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
+			}
+			if verdicts[0].PolicyID != wantID {
+				t.Fatalf("PolicyID = %q, want %q", verdicts[0].PolicyID, wantID)
+			}
+			if verdicts[0].Effect != wantEffect {
+				t.Errorf("Effect = %v, want %v", verdicts[0].Effect, wantEffect)
+			}
+		})
+	}
+}
+
+// testVerdictProvenance checks the field audit provenance depends on most:
+// every verdict must carry the engine's own Language() as Source and the
+// producing StoredPolicy's ID as PolicyID. ID and Name are deliberately
+// different strings below so a bug that reports the Name, or a slice index,
+// instead of the ID fails loudly here rather than coincidentally matching.
+func testVerdictProvenance(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+
+	t.Run("every verdict names its source engine and its StoredPolicy's ID", func(t *testing.T) {
+		const wantID = "provenance-id-should-appear-verbatim"
+		set := mustPrepare(t, engine, []policy.StoredPolicy{
+			{ID: wantID, Name: "a-completely-different-display-name", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: 1, Version: 1},
+		})
+
+		verdicts := mustEvaluate(t, set, policy.EvaluationInput{Principal: authz.Principal{Subject: "someone"}})
+		if len(verdicts) != 1 {
+			t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
+		}
+
+		v := verdicts[0]
+		if v.Source != engine.Language() {
+			t.Errorf("Source = %q, want %q (engine.Language(), not a hardcoded string)", v.Source, engine.Language())
+		}
+		if v.PolicyID != wantID {
+			t.Errorf("PolicyID = %q, want %q (the StoredPolicy's ID — never its Name, never a positional index)", v.PolicyID, wantID)
 		}
 	})
 }

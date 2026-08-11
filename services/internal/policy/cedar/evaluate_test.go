@@ -19,53 +19,12 @@ func prepare(t *testing.T, policies []policy.StoredPolicy) policy.CompiledPolicy
 	return set
 }
 
-func TestEvaluate_PermitYieldsAllow(t *testing.T) {
-	set := prepare(t, []policy.StoredPolicy{
-		{ID: "p1", Name: "allow-all", Text: "permit(principal, action, resource);", Priority: 7},
-	})
-
-	verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
-		Principal: authz.Principal{Subject: "alice"},
-	})
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if len(verdicts) != 1 {
-		t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
-	}
-	v := verdicts[0]
-	if v.Effect != authz.EffectAllow {
-		t.Errorf("Effect = %v, want EffectAllow", v.Effect)
-	}
-	if v.Source != "cedar" {
-		t.Errorf("Source = %q, want %q", v.Source, "cedar")
-	}
-	if v.PolicyID != "p1" {
-		t.Errorf("PolicyID = %q, want %q", v.PolicyID, "p1")
-	}
-	if v.Priority != 7 {
-		t.Errorf("Priority = %d, want 7 (recorded, not acted on)", v.Priority)
-	}
-}
-
-func TestEvaluate_ForbidYieldsDeny(t *testing.T) {
-	set := prepare(t, []policy.StoredPolicy{
-		{ID: "p1", Name: "deny-all", Text: "forbid(principal, action, resource);"},
-	})
-
-	verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
-		Principal: authz.Principal{Subject: "alice"},
-	})
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if len(verdicts) != 1 {
-		t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
-	}
-	if verdicts[0].Effect != authz.EffectDeny {
-		t.Errorf("Effect = %v, want EffectDeny", verdicts[0].Effect)
-	}
-}
+// Permit-yields-allow, forbid-yields-deny, and the Source/PolicyID
+// provenance on the resulting verdict used to be checked here individually.
+// They now live in policytest.EngineContract (the "AllowAll"/"DenyAll" and
+// "verdict provenance" properties), which every engine — not just Cedar —
+// is run against; keeping a duplicate here would just be the same assertion
+// twice under two different names.
 
 func TestEvaluate_NonMatchingPolicyYieldsNoVerdict(t *testing.T) {
 	// Scoped to a specific principal, which also doubles as proof that the
