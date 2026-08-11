@@ -98,6 +98,29 @@ func TestBuildRegistry_EmptyLanguagesIsEmptyRegistryNotError(t *testing.T) {
 	}
 }
 
+// TestBuildRegistry_DuplicateLanguageDedupesToOneEntry pins a behaviour that
+// was previously true only by accident of registry being a map: nothing
+// documented or tested that STRATIUM_POLICY_LANGUAGES=cedar,cedar collapses
+// to a one-engine registry rather than, say, an error naming the duplicate,
+// or two engine instances silently double-evaluating the same tenant
+// policies. The collapse is harmless — registry[lang] = engine is
+// idempotent, and NewMulti's own key/Language() check (multi.go) has
+// nothing to object to when both writes agree — but "harmless and
+// untested" is still a behaviour someone could change without any test
+// failing, which is the gap this pins shut.
+func TestBuildRegistry_DuplicateLanguageDedupesToOneEntry(t *testing.T) {
+	registry, err := buildRegistry([]string{"cedar", "cedar"})
+	if err != nil {
+		t.Fatalf("buildRegistry() error = %v, want nil (a repeated known language is not a configuration error)", err)
+	}
+	if len(registry) != 1 {
+		t.Fatalf("len(registry) = %d, want 1 (a duplicate key collapses in the underlying map, not an error and not two entries)", len(registry))
+	}
+	if engine, ok := registry["cedar"]; !ok || engine.Language() != "cedar" {
+		t.Errorf(`registry["cedar"] = %v (ok=%t), want the cedar engine`, engine, ok)
+	}
+}
+
 func TestKnownLanguages_SortedAndComplete(t *testing.T) {
 	got := knownLanguages()
 	want := []string{"cedar", "json", "rego", "xacml"}
