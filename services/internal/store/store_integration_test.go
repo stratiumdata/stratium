@@ -20,12 +20,12 @@
 //
 // Extended again for Phase 2c Task 5
 // (docs/superpowers/sdd/2026-08-10-phase-2c-cedar-engine/task-5-brief.md):
-// cmd/stratium-pdp/main.go now wires policy.Configured(store, cedar.New())
-// instead of policy.Unconfigured(), so this is also the first live stack
-// with a real policy engine in the path. proof2 (below) now exercises
+// cmd/stratium-pdp/main.go wired policy.Configured(store, cedar.New())
+// instead of policy.Unconfigured(), so this became the first live stack
+// with a real policy engine in the path. proof2 (below) exercised
 // Configured's own "no cedar policies for this tenant" case rather than
 // Unconfigured's "no engine at all" case — both still deny with a single,
-// named verdict, just attributed differently (see noCedarPoliciesReason).
+// named verdict, just attributed differently (see noPoliciesReason).
 // proof7-proof9 seed real Cedar policies and prove: a permit produces this
 // system's first-ever ALLOW on the principal leg, with the audit row's
 // provenance compared against the response rather than merely non-empty; a
@@ -38,6 +38,22 @@
 // several real Cedar policies actually being loaded, prepared, and
 // evaluated on every call — not a zero-policy fast path — which is what
 // "Cedar in the path" is supposed to mean for those two measurements.
+//
+// Extended again for Phase 4 Task 2
+// (docs/superpowers/sdd/2026-08-11-phase-4-policy-engines/task-2-brief.md):
+// main.go now wires policy.NewMulti(store, policy.Registry{"cedar":
+// cedar.New()}) instead of policy.Configured — a registry of one engine
+// today, but the seam that lets Rego/JSON/XACML (Tasks 3-5) join it without
+// main.go changing again. proof2's zero-policies case now goes through
+// Multi's own "no policies configured for this tenant" verdict rather than
+// Configured's "no cedar policies" one — attributed to Source "none", not
+// "cedar": with N possible registered languages instead of one, there is no
+// single language left to name once a tenant has authored nothing in any
+// of them, and literally no engine's Prepare is even invoked in that case
+// (see policy.Multi's own doc comment in internal/policy/multi.go). Once
+// this tenant's first cedar policy is seeded (proof7 onward), Source goes
+// back to "cedar" — a real engine ran and decided something — exactly as
+// before.
 //
 // Build-tagged so `go test ./...` and `golangci-lint run ./...` skip it by
 // default. `make integration` (repo root) is what runs it, against
@@ -561,21 +577,22 @@ func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
 	return st
 }
 
-// noCedarPoliciesReason mirrors internal/policy.Configured's literal reason
-// string for a tenant with zero stored cedar policies. Not imported from
-// that package — this test only reaches it through the wire response, the
-// same way any real gRPC client would — so the exact string is reproduced
-// here deliberately.
+// noPoliciesReason mirrors internal/policy.Multi's literal reason string for
+// a tenant with zero stored policies in any language. Not imported from that
+// package — this test only reaches it through the wire response, the same
+// way any real gRPC client would — so the exact string is reproduced here
+// deliberately.
 //
-// This replaces the file's earlier unconfiguredPrincipalReason: Phase 2c
-// Task 5 rewires cmd/stratium-pdp/main.go from policy.Unconfigured() to
-// policy.Configured(store, cedar.New()), so proof2 below (run before this
-// file seeds any cedar policy) now exercises Configured's own "no policies
-// for this tenant" path, not Unconfigured's "no engine at all" path. Both
-// still deny with a single, present, non-generic verdict — that property
-// (see policy.Unconfigured's own doc comment) is what changed implementation
-// but not principle.
-const noCedarPoliciesReason = "principal: no cedar policies configured for this tenant"
+// Renamed from noCedarPoliciesReason (it named cedar specifically, matching
+// policy.Configured's own single-language message) when Phase 4 Task 2
+// rewired main.go from policy.Configured to policy.NewMulti: proof2 below
+// (run before this file seeds any cedar policy) now exercises Multi's
+// tenant-wide "no policies configured for this tenant" path, which no
+// longer names any one language, rather than Configured's "no cedar
+// policies for this tenant" path. Both still deny with a single, present,
+// non-generic verdict — that property (see policy.Unconfigured's own doc
+// comment) is what changed implementation but not principle.
+const noPoliciesReason = "principal: no policies configured for this tenant"
 
 // migrationBeforeProvenance and migrationWithProvenance pin the version
 // boundary migrations/000006_audit_policy_provenance.up.sql sits on. Package
@@ -778,22 +795,22 @@ func TestEndToEnd(t *testing.T) {
 		if resp.GetDeniedLeg() != "principal" {
 			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "principal")
 		}
-		if resp.GetPrincipalReason() != noCedarPoliciesReason {
-			t.Errorf("PrincipalReason = %q, want %q", resp.GetPrincipalReason(), noCedarPoliciesReason)
+		if resp.GetPrincipalReason() != noPoliciesReason {
+			t.Errorf("PrincipalReason = %q, want %q", resp.GetPrincipalReason(), noPoliciesReason)
 		}
 		// decided_source/decided_policy_id are proto3 optional (*string):
 		// nil would mean "no verdict decided this at all" (an empty
 		// PrincipalVerdicts slice — see toResponse's own doc comment).
-		// policy.Configured, with zero cedar policies stored for this
-		// tenant, still returns exactly one verdict (see its own doc
-		// comment on why — the same "exactly one, not zero" discipline
-		// Unconfigured established), so both fields must be present here,
-		// not merely equal to the zero value a nil pointer's Get accessor
-		// would also produce.
+		// policy.Multi, with zero policies stored for this tenant in any
+		// language, still returns exactly one verdict (see multiSet.
+		// Evaluate's own doc comment on why — the same "exactly one, not
+		// zero" discipline Unconfigured established), so both fields must
+		// be present here, not merely equal to the zero value a nil
+		// pointer's Get accessor would also produce.
 		if resp.DecidedSource == nil {
 			t.Error("DecidedSource = nil, want present (a real verdict decided this)")
-		} else if *resp.DecidedSource != "cedar" {
-			t.Errorf("DecidedSource = %q, want %q (a real engine ran and found nothing — not \"none\", which would mean no engine at all)", *resp.DecidedSource, "cedar")
+		} else if *resp.DecidedSource != "none" {
+			t.Errorf("DecidedSource = %q, want %q (no policies in any language means no engine's Prepare was even invoked — see policy.Multi's own doc comment on why this differs from Configured's single-language \"cedar\")", *resp.DecidedSource, "none")
 		}
 		if resp.DecidedPolicyId == nil {
 			t.Error("DecidedPolicyId = nil, want present (an empty string, not absent)")
@@ -870,8 +887,8 @@ func TestEndToEnd(t *testing.T) {
 		if got.PolicyID != wantPolicyID {
 			t.Errorf("stored policy_id = %q, want %q (the response's decided_policy_id)", got.PolicyID, wantPolicyID)
 		}
-		if got.PolicySource != "cedar" {
-			t.Errorf("stored policy_source = %q, want %q (a real engine ran, even though this tenant has no cedar policies yet)", got.PolicySource, "cedar")
+		if got.PolicySource != "none" {
+			t.Errorf("stored policy_source = %q, want %q (this tenant has no policies in any language yet, so no engine's Prepare was invoked)", got.PolicySource, "none")
 		}
 
 		// The comparison above goes through audit.Entry's plain string
