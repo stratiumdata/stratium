@@ -74,9 +74,14 @@ var _ PrincipalPolicy = Multi{}
 // a static configuration — never per request — so a mistake here is a
 // wiring bug, not a runtime condition, and failing loudly immediately beats
 // silently misattributing every verdict the mismatched engine produces
-// later. A returned error was the other option; a panic keeps NewMulti's
-// single-value return, which is what lets TestNoExportedConstructorAllows
-// find it in the first place (see guardedReturnTypes).
+// later. A returned error was the other option, and it remains available:
+// the no-allow guard used to see only single-value returns, which made an
+// error return cost this constructor its coverage, but that was a hole in
+// the guard rather than a constraint on constructors and has been fixed.
+// The panic stands on its own merits — this is the canonical Go case for
+// one, a static wiring mistake detectable before the process serves any
+// traffic, in the shape of regexp.MustCompile — not because a signature
+// forced it.
 func NewMulti(source AllPolicySource, engines Registry) Multi {
 	for key, engine := range engines {
 		if lang := engine.Language(); lang != key {

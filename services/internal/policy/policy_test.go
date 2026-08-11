@@ -215,10 +215,33 @@ var guardedReturnTypes = map[string]bool{
 // returnsPrincipalPolicy reports whether fn's declared return type is one
 // guardedReturnTypes recognizes.
 func returnsPrincipalPolicy(fn *ast.FuncDecl) bool {
-	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+	if fn.Type.Results == nil {
 		return false
 	}
-	ident, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
+	results := fn.Type.Results.List
+
+	// One result, or two where the second is error. Requiring exactly one
+	// result was a hole in this guard rather than a property of it: a
+	// constructor declared `func NewThing(...) (PrincipalPolicy, error)` —
+	// the most ordinary shape in Go for a constructor that can fail — was
+	// not merely exempted, it was never examined at all. The guard's name
+	// promises no exported constructor allows for free, and a bypass had
+	// only to add an error return to escape it entirely. NewMulti's own doc
+	// comment reasoned from the old shape, treating a single-value return as
+	// something to preserve; with this fixed, that constraint is gone and a
+	// future constructor may return an error without losing coverage.
+	switch len(results) {
+	case 1:
+	case 2:
+		second, ok := results[1].Type.(*ast.Ident)
+		if !ok || second.Name != "error" {
+			return false
+		}
+	default:
+		return false
+	}
+
+	ident, ok := results[0].Type.(*ast.Ident)
 	return ok && guardedReturnTypes[ident.Name]
 }
 
