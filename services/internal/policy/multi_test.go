@@ -118,8 +118,8 @@ func TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy(t *testing.T) {
 			"whole language): %+v", len(got), got)
 	}
 	want := []struct{ id, reason string }{
-		{"orphan-1", "principal: no rego engine registered; cannot evaluate policy ID orphan-1"},
-		{"orphan-2", "principal: no rego engine registered; cannot evaluate policy ID orphan-2"},
+		{"orphan-1", "principal: no rego engine registered; cannot evaluate policy ID orphan-1 (1 of 2 rego policies for this tenant)"},
+		{"orphan-2", "principal: no rego engine registered; cannot evaluate policy ID orphan-2 (2 of 2 rego policies for this tenant)"},
 	}
 	for i, w := range want {
 		v := got[i]
@@ -139,6 +139,26 @@ func TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy(t *testing.T) {
 		if v.Reason != w.reason {
 			t.Errorf("verdict %d: Reason = %q, want %q verbatim", i, v.Reason, w.reason)
 		}
+	}
+}
+
+// TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically pins the
+// deliberate choice for the one-policy edge case of countSuffix: "1 of 1
+// rego policy for this tenant" (singular "policy"), not the mechanically
+// pluralized "1 of 1 rego policies for this tenant" a naive %d-driven "s"
+// suffix would produce. Chosen, not incidental — see countSuffix's own doc
+// comment — and pinned here so a future change to that pluralization is a
+// deliberate decision again, not a silent regression.
+func TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically(t *testing.T) {
+	source := fakeAllSource{policies: []StoredPolicy{{ID: "lonely-orphan", Language: "rego"}}}
+	got := NewMulti(source, Registry{}).Evaluate(context.Background(), EvaluationInput{})
+
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() = %d verdicts, want exactly 1", len(got))
+	}
+	const want = "principal: no rego engine registered; cannot evaluate policy ID lonely-orphan (1 of 1 rego policy for this tenant)"
+	if got[0].Reason != want {
+		t.Errorf("Reason = %q, want %q verbatim (singular \"policy\", not \"policies\")", got[0].Reason, want)
 	}
 }
 
@@ -174,11 +194,24 @@ func TestMulti_ManyOrphanedPoliciesFoldToOneReadableReason(t *testing.T) {
 	}
 	t.Logf("%d orphaned policies folded to one attributed reason: %q (policy id %q)", n, legResult.Reason, deciding.PolicyID)
 
+	// Grounds the "1 of 5" claim below in an independently-checked fact
+	// rather than assuming it: "orphan-0" is the lexicographically smallest
+	// of orphan-0..orphan-4, so it is the one FoldVerdicts' own tie-break
+	// (decisiveVerdict, verdict.go) must pick, and orphanVerdicts' own sort
+	// (multi.go) is what makes it rank 1 of the 5.
+	if deciding.PolicyID != "orphan-0" {
+		t.Fatalf("FoldVerdicts() attributed policy id = %q, want %q (the lexicographically smallest)", deciding.PolicyID, "orphan-0")
+	}
+
 	// Re-derived from `deciding` rather than hardcoded, so this is both a
 	// determinism check (the fold's own Reason field must match what its
 	// own attributed verdict says) and the readability check itself: this
-	// is what "still readable" means operationally — one sentence, one id.
-	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s", deciding.PolicyID)
+	// is what "still readable" means operationally — one sentence, one id,
+	// AND the "how many" signal (countSuffix) that tells the operator there
+	// are four more orphaned rego policies to go looking for, not just this
+	// one.
+	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s (1 of %d rego policies for this tenant)",
+		deciding.PolicyID, n)
 	if legResult.Reason != wantReason {
 		t.Errorf("FoldVerdicts() reason = %q, want %q", legResult.Reason, wantReason)
 	}
@@ -313,6 +346,15 @@ func TestMulti_PrepareFailureDeniesNamingLanguageWithoutSuppressingOthers(t *tes
 		t.Errorf("rego verdict PolicyID = %q, want %q — audit_chain.policy_id must be queryable for a "+
 			"prepare-failure denial too, not only an orphan-language one", regoVerdict.PolicyID, "rego-1")
 	}
+	// Exact match, not another Contains: the single-policy case is where a
+	// naive %d-driven pluralization would read "1 of 1 rego policies" — this
+	// pins the deliberate singular "policy" for prepareFailureVerdicts too,
+	// the same decision TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically
+	// pins for orphanVerdicts.
+	wantRegoReason := fmt.Sprintf("principal: preparing rego policies: %s (1 of 1 rego policy for this tenant)", prepareErr)
+	if regoVerdict.Reason != wantRegoReason {
+		t.Errorf("rego verdict Reason = %q, want %q verbatim", regoVerdict.Reason, wantRegoReason)
+	}
 
 	// Evaluate (the PrincipalPolicy-facing method) must also see both: the
 	// non-nil PrepareAll error must not turn into a blanket deny that drops
@@ -362,8 +404,15 @@ func TestMulti_PrepareFailureEmitsOneDenyVerdictPerPolicyInThatLanguage(t *testi
 		if v.PolicyID != wantID {
 			t.Errorf("verdict %d: PolicyID = %q, want %q", i, v.PolicyID, wantID)
 		}
-		if !strings.Contains(v.Reason, prepareErr.Error()) {
-			t.Errorf("verdict %d: Reason = %q, want it to contain the underlying prepare error %q", i, v.Reason, prepareErr.Error())
+		// Exact match, not a widened Contains: this is the dedicated check
+		// for the "how many" signal — whichever one of these three
+		// FoldVerdicts ends up attributing a denial to, its own Reason must
+		// say "N of 3", not merely mention rego and the underlying error
+		// (both of which a count-dropping regression would leave intact).
+		wantReason := fmt.Sprintf("principal: preparing rego policies: %s (%d of %d rego policies for this tenant)",
+			prepareErr, i+1, len(wantIDs))
+		if v.Reason != wantReason {
+			t.Errorf("verdict %d: Reason = %q, want %q verbatim", i, v.Reason, wantReason)
 		}
 	}
 }

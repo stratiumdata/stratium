@@ -319,23 +319,36 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 // simply has more equally-valid candidates to pick a stable attribution
 // from (see authz.FoldVerdicts' own tie-break).
 //
-// Sorted by PolicyID before returning, the same defensive-determinism
-// reasoning multiSet.Evaluate applies to a sub-engine's own output (see that
-// method's doc comment): AllPolicySource makes no ordering promise in its
-// interface, so this does not lean on store.LoadAllPolicies' own ORDER BY id
-// happening to hold today, or on every other implementation of the interface
-// (test doubles included) doing the same.
+// Sorted by ID before returning, the same defensive-determinism reasoning
+// multiSet.Evaluate applies to a sub-engine's own output (see that method's
+// doc comment): AllPolicySource makes no ordering promise in its interface,
+// so this does not lean on store.LoadAllPolicies' own ORDER BY id happening
+// to hold today, or on every other implementation of the interface (test
+// doubles included) doing the same. The sorted rank also feeds countSuffix
+// below, so "1 of 5" is as stable across calls as which policy is "1".
+//
+// Splitting into N verdicts costs something the single-verdict form did not:
+// FoldVerdicts (unmodified) still picks exactly one to attribute
+// PrincipalReason and the audit row to, so an operator reading either sees
+// one policy id and, without more, cannot tell a single orphaned policy from
+// fifteen. countSuffix restores that signal in every verdict's own Reason,
+// so whichever one FoldVerdicts happens to pick still tells the operator
+// there are others to go looking for.
 func orphanVerdicts(language string, policies []StoredPolicy) []authz.PolicyVerdict {
-	verdicts := make([]authz.PolicyVerdict, len(policies))
-	for i, p := range policies {
+	sorted := make([]StoredPolicy, len(policies))
+	copy(sorted, policies)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	verdicts := make([]authz.PolicyVerdict, len(sorted))
+	for i, p := range sorted {
 		verdicts[i] = authz.PolicyVerdict{
 			Effect:   authz.EffectDeny,
 			Source:   language,
 			PolicyID: p.ID,
-			Reason:   fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy ID %s", language, p.ID),
+			Reason: fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy ID %s (%s)",
+				language, p.ID, countSuffix(i, len(sorted), language)),
 		}
 	}
-	sort.Slice(verdicts, func(i, j int) bool { return verdicts[i].PolicyID < verdicts[j].PolicyID })
 	return verdicts
 }
 
@@ -355,16 +368,45 @@ func orphanVerdicts(language string, policies []StoredPolicy) []authz.PolicyVerd
 // exactly one underlying failure to report, while PolicyID differs per
 // verdict — so audit_chain.policy_id is queryable for every one of them,
 // not only whichever id happened to reach the free-text Reason first.
+//
+// Carries the same countSuffix orphanVerdicts does, and for the same reason:
+// err's text already names one specific offending policy, but FoldVerdicts
+// still picks only one verdict to surface, so an operator reading it cannot
+// tell "this language's whole batch is one policy" from "this language's
+// whole batch is fifteen policies, all now unevaluated" without it.
 func prepareFailureVerdicts(language string, policies []StoredPolicy, err error) []authz.PolicyVerdict {
-	verdicts := make([]authz.PolicyVerdict, len(policies))
-	for i, p := range policies {
+	sorted := make([]StoredPolicy, len(policies))
+	copy(sorted, policies)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	verdicts := make([]authz.PolicyVerdict, len(sorted))
+	for i, p := range sorted {
 		verdicts[i] = authz.PolicyVerdict{
 			Effect:   authz.EffectDeny,
 			Source:   language,
 			PolicyID: p.ID,
-			Reason:   fmt.Sprintf("principal: preparing %s policies: %s", language, err),
+			Reason: fmt.Sprintf("principal: preparing %s policies: %s (%s)",
+				language, err, countSuffix(i, len(sorted), language)),
 		}
 	}
-	sort.Slice(verdicts, func(i, j int) bool { return verdicts[i].PolicyID < verdicts[j].PolicyID })
 	return verdicts
+}
+
+// countSuffix reports the 1-indexed rank of index i among total policies
+// stored for language, e.g. "1 of 5 rego policies for this tenant" -- the
+// "how many" signal orphanVerdicts and prepareFailureVerdicts both attach to
+// every verdict's Reason, so whichever one FoldVerdicts picks still tells an
+// operator there are (or are not) siblings to go looking for, not just which
+// one policy this particular denial names.
+//
+// Pluralized to "policy" only when total == 1, decided deliberately rather
+// than left to read "1 of 1 policies": see multi_test.go's own single-orphan
+// case, which pins this exact wording. Shared by both callers so neither
+// denial's wording can drift out of sync with the other.
+func countSuffix(i, total int, language string) string {
+	word := "policies"
+	if total == 1 {
+		word = "policy"
+	}
+	return fmt.Sprintf("%d of %d %s %s for this tenant", i+1, total, language, word)
 }

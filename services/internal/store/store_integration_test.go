@@ -941,9 +941,13 @@ func TestIntegration_Multi_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	if v.PolicyID != policyID {
 		t.Errorf("PolicyID = %q, want %q — audit_chain.policy_id must be queryable for this denial, not empty", v.PolicyID, policyID)
 	}
-	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s", policyID)
+	// "1 of 1", singular "policy": this tenant's only rego policy is the
+	// whole orphaned set, so the "how many" signal (countSuffix, multi.go)
+	// must say so explicitly rather than reading as though a count was
+	// merely omitted.
+	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s (1 of 1 rego policy for this tenant)", policyID)
 	if v.Reason != wantReason {
-		t.Errorf("Reason = %q, want %q — the effect alone is not enough; D10 requires naming the unregistered language and the orphaned policy ID",
+		t.Errorf("Reason = %q, want %q — the effect alone is not enough; D10 requires naming the unregistered language, the orphaned policy ID, and how many orphaned policies exist",
 			v.Reason, wantReason)
 	}
 }
@@ -1013,10 +1017,26 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	// PrincipalReason broken by a bad copy (empty, truncated, or naming the
 	// wrong verdict entirely), which is exactly the regression this test is
 	// for (see the mutation-testing note in this task's own report).
-	wantReason := fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy ID %s",
-		narrowRegistryMissingLanguage, policyID)
-	if resp.GetPrincipalReason() != wantReason {
-		t.Errorf("PrincipalReason = %q, want %q verbatim", resp.GetPrincipalReason(), wantReason)
+	//
+	// Two separate substring checks, not one verbatim comparison: multi_test.go
+	// already pins orphanVerdicts' exact wording cheaply and precisely, many
+	// times over (single- and multi-policy cases alike) — this expensive,
+	// Docker-backed test does not need to re-pin the same literal a second
+	// time, and re-pinning it would make this test brittle to a wording
+	// tweak (spacing, punctuation) that changes nothing this test actually
+	// cares about. What it cares about are the two facts D10 and this fix
+	// round exist for: which policy (the id, still the queryable part, kept
+	// first) and that there were others to go looking for (the count).
+	principalReason := resp.GetPrincipalReason()
+	wantIDPhrase := fmt.Sprintf("cannot evaluate policy ID %s", policyID)
+	if !strings.Contains(principalReason, wantIDPhrase) {
+		t.Errorf("PrincipalReason = %q, want it to contain %q", principalReason, wantIDPhrase)
+	}
+	wantCountPhrase := fmt.Sprintf("1 of 1 %s policy for this tenant", narrowRegistryMissingLanguage)
+	if !strings.Contains(principalReason, wantCountPhrase) {
+		t.Errorf("PrincipalReason = %q, want it to contain %q — an operator must learn there was only one "+
+			"orphaned policy, not just which one, so a lone denial doesn't read as if a count was silently dropped",
+			principalReason, wantCountPhrase)
 	}
 	if resp.DecidedSource == nil || resp.GetDecidedSource() != narrowRegistryMissingLanguage {
 		t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, narrowRegistryMissingLanguage)
