@@ -42,7 +42,7 @@ func subjectMatchPolicy(effect, wantSubject string) string {
       <AllOf>
         <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
           <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">` + wantSubject + `</AttributeValue>
-          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categorySubject + `"/>
         </Match>
       </AllOf>
     </AnyOf>
@@ -114,7 +114,7 @@ func TestEvaluate_IndeterminateDesignatorDenies(t *testing.T) {
       <AllOf>
         <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
           <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">finance</AttributeValue>
-          <AttributeDesignator AttributeId="subject:department" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+          <AttributeDesignator AttributeId="subject:department" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categorySubject + `"/>
         </Match>
       </AllOf>
     </AnyOf>
@@ -165,7 +165,7 @@ func TestEvaluate_IndeterminateAtRuleTargetDenies(t *testing.T) {
         <AllOf>
           <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
             <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">restricted</AttributeValue>
-            <AttributeDesignator AttributeId="resource:classification" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+            <AttributeDesignator AttributeId="resource:classification" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categoryResource + `"/>
           </Match>
         </AllOf>
       </AnyOf>
@@ -187,6 +187,50 @@ func TestEvaluate_IndeterminateAtRuleTargetDenies(t *testing.T) {
 	if !strings.Contains(verdicts[0].Reason, "resource:classification") {
 		t.Errorf("Reason does not name the unresolvable designator: %q", verdicts[0].Reason)
 	}
+}
+
+// TestEvaluate_RuleLevelDefiniteNonMatchIsSkipped pins evaluate.go's rule
+// loop `if !rMatched { continue }` branch directly. Review found this
+// branch had no behavioural test of its own: every existing Rule-level
+// Target fixture in this package either matched or was Indeterminate — a
+// resolvable designator whose value simply differs (a genuine, definite
+// non-match) was never exercised. Rule 1's Deny only fires if a
+// non-matching Target is wrongly treated as a match; Rule 2's
+// unconditional Permit only wins if Rule 1 is correctly skipped rather
+// than, say, denying by default or short-circuiting the rest of the loop.
+func TestEvaluate_RuleLevelDefiniteNonMatchIsSkipped(t *testing.T) {
+	text := `<Policy PolicyId="p1" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  <Rule RuleId="deny-if-bash" Effect="Deny">
+    <Target>
+      <AnyOf>
+        <AllOf>
+          <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
+            <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">Bash</AttributeValue>
+            <AttributeDesignator AttributeId="action-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categoryAction + `"/>
+          </Match>
+        </AllOf>
+      </AnyOf>
+    </Target>
+  </Rule>
+  <Rule RuleId="permit-all" Effect="Permit"/>
+</Policy>`
+	set := prepareOne(t, text)
+
+	verdicts := evaluate(t, set, policy.EvaluationInput{Action: authz.Action{Tool: "Read"}})
+	if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectAllow {
+		t.Fatalf(`got %+v, want exactly one EffectAllow verdict — the Deny rule's Target definitely does not match (action-id is "Read", not "Bash") and must be skipped, not fire`, verdicts)
+	}
+
+	// Positive control: the same policy, given an action that DOES match
+	// the first rule's Target, denies — proving the skip above is real
+	// (Target-conditioned), not the Deny rule being unreachable for some
+	// unrelated reason (e.g. a typo in the fixture).
+	t.Run("the same Target does fire on a genuinely matching action", func(t *testing.T) {
+		verdicts := evaluate(t, set, policy.EvaluationInput{Action: authz.Action{Tool: "Bash"}})
+		if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectDeny {
+			t.Fatalf("got %+v, want exactly one EffectDeny verdict", verdicts)
+		}
+	})
 }
 
 // TestEvaluate_DenyOverridesWithinPolicy checks the one combining decision
@@ -267,11 +311,11 @@ func TestEvaluate_AnyOfIsDisjunctionOfAllOfConjunctions(t *testing.T) {
       <AllOf>
         <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
           <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">alice</AttributeValue>
-          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categorySubject + `"/>
         </Match>
         <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
           <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">Bash</AttributeValue>
-          <AttributeDesignator AttributeId="action-id" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+          <AttributeDesignator AttributeId="action-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categoryAction + `"/>
         </Match>
       </AllOf>
     </AnyOf>
@@ -279,7 +323,7 @@ func TestEvaluate_AnyOfIsDisjunctionOfAllOfConjunctions(t *testing.T) {
       <AllOf>
         <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
           <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">alice</AttributeValue>
-          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="` + categorySubject + `"/>
         </Match>
       </AllOf>
     </AnyOf>
@@ -331,7 +375,7 @@ func TestEvaluate_AttributeDesignators(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			text := matchDoc(wantMatchID, wantDataType, wantDataType, tc.attributeID)
+			text := matchDoc(wantMatchID, wantDataType, wantDataType, tc.attributeID, categoryFor(tc.attributeID))
 			// matchDoc's AttributeValue text is fixed to "x"; swap it for
 			// this case's expected value so the comparison is meaningful.
 			text = strings.Replace(text, ">x<", ">"+tc.value+"<", 1)

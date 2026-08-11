@@ -16,9 +16,9 @@
 // One <Policy> per StoredPolicy row:
 //
 //	<Policy PolicyId="..." RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
-//	  <Target> ... </Target>              <!-- optional -->
+//	  <Target> ... </Target>              <!-- optional, at most one -->
 //	  <Rule RuleId="..." Effect="Permit"> <!-- one or more -->
-//	    <Target> ... </Target>            <!-- optional -->
+//	    <Target> ... </Target>            <!-- optional, at most one -->
 //	  </Rule>
 //	</Policy>
 //
@@ -26,6 +26,21 @@
 // "rule combining" below for why no other algorithm is accepted, including
 // ones that sound close (ordered-deny-overrides, deny-unless-permit,
 // permit-overrides).
+//
+// Every element named above is bounded to *at most one* occurrence in the
+// position shown — Policy's own Target, a Rule's own Target, and (further
+// below) a Match's AttributeValue and AttributeDesignator. Rule itself,
+// and AnyOf/AllOf/Match inside a Target, are the only things meant to
+// repeat. This is enforced by validateStructure (structure.go), not left
+// to xml.Unmarshal's own binding: every one of those four bounded fields
+// binds to a non-slice Go value, which silently keeps only the last
+// occurrence written for AttributeValue/AttributeDesignator — or, worse,
+// for a duplicated Target specifically, evaluates as if the two were
+// OR-ed together (see (*xmlTarget).evaluate), silently *widening* what a
+// Policy or Rule applies to. A stray copy-pasted or template-emitted
+// second Target is exactly the kind of accept-and-ignore this package
+// exists to prevent, and unlike the missing-Rule or empty-AnyOf cases
+// below, it fails open rather than closed if left unchecked.
 //
 // <Target> — at Policy level or Rule level, identical grammar and
 // semantics either place — is a disjunction of conjunctions of attribute
@@ -36,7 +51,7 @@
 //	    <AllOf>              <!-- one or more per AnyOf -->
 //	      <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal"> <!-- one or more per AllOf -->
 //	        <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">VALUE</AttributeValue>
-//	        <AttributeDesignator AttributeId="..." DataType="http://www.w3.org/2001/XMLSchema#string"/>
+//	        <AttributeDesignator AttributeId="..." DataType="http://www.w3.org/2001/XMLSchema#string" Category="..."/>
 //	      </Match>
 //	    </AllOf>
 //	  </AnyOf>
@@ -62,6 +77,30 @@
 // reason: an unstated or different DataType is a place a silent type
 // mismatch could hide.
 //
+// AttributeValue's text must carry no leading or trailing whitespace.
+// xs:string preserves it verbatim, so a value written across lines — the
+// ordinary way to format XML by hand, and the one authoring style absent
+// from this package's own pre-review fixtures, which all wrote values
+// inline — compares against the padded string, never the trimmed one an
+// author almost certainly meant, and can never match anything.
+//
+// AttributeDesignator's Category must match the category implied by its
+// own AttributeId: the access-subject category for subject-id/subject:*,
+// the resource category for resource-id/resource:*, the action category
+// for action-id, and the environment category — XACML's catch-all for
+// contextual attributes belonging to none of the other three — for the
+// four Stratium-specific designators (agent-trust-tier, derived-tier,
+// delegation-purpose, delegation-max-tier). Category is real XACML schema
+// machinery, required by any general-purpose authoring tool, so accepting
+// it while never checking it would be exactly the "reads as configurable,
+// isn't" trap this package exists to close.
+//
+// agent-trust-tier, derived-tier, and delegation-max-tier each have a
+// closed value space of their own — see "Attribute designators" below —
+// and AttributeValue's text must be one of the real enum spellings
+// (CERTIFIED, DESTRUCTIVE, and so on), never a typo, a wrong case, or a
+// bare ordinal digit.
+//
 // A <Policy> with zero <Rule> children is rejected: it can carry a Target,
 // validate cleanly, and never produce a verdict for any request, ever — the
 // same silently-dead-policy shape as a JSON policy missing its match block.
@@ -84,16 +123,26 @@
 //	resource-id           Resource["id"]
 //	resource:<key>        Resource[<key>]                    (open, tenant-supplied)
 //	action-id             Action.Tool
-//	agent-trust-tier      Agent.TrustTier.String()
+//	agent-trust-tier      Agent.TrustTier.String()                  (closed vocabulary — see below)
 //	delegation-purpose    Delegation.Purpose
-//	delegation-max-tier   Delegation.MaxActionTier.String()
-//	derived-tier          DerivedTier.String()
+//	delegation-max-tier   Delegation.MaxActionTier.String()         (closed vocabulary — see below)
+//	derived-tier          DerivedTier.String()                     (closed vocabulary — see below)
 //
 // These are the same dimensions cedar/request.go and rego/input.go expose
 // (trust_tier, max_action_tier, purpose, derived_tier), spelled with
 // XACML's own hyphenated AttributeId convention instead of Cedar's flat
 // context-record fields or Rego's dotted input paths — a naming
-// difference, not a scope difference. subject:<key> and resource:<key> are
+// difference, not a scope difference for three of the four: trust_tier,
+// max_action_tier, and purpose line up exactly. derived-tier is also a
+// *value-encoding* difference, not only a naming one: Cedar
+// (request.go:49) and Rego expose the tier as its ordinal int, this
+// engine's Match compares against DerivedTier.String() (a name like
+// "DESTRUCTIVE") because XACML's own AttributeValue is text, not a typed
+// integer literal — a rule ported from `context.derived_tier == 3` reads
+// as `<AttributeValue>3</AttributeValue>` here and will validate (subject
+// to the closed vocabulary below rejecting it, since "3" is not a real
+// ActionTier spelling) rather than silently keep working. subject:<key>
+// and resource:<key> are
 // this package's own convention (the brief specifies which dimensions to
 // expose, not an XML syntax for the open-ended ones): a Match's
 // AttributeDesignator carries exactly one AttributeId with no path
@@ -111,6 +160,14 @@
 //     concrete rule needs one of them, rather than guessing now.
 //   - EvaluationInput.Environment is not mapped, for the same reason Cedar
 //     and Rego leave it unmapped: no rule in scope needs it.
+//
+// Every AttributeDesignator also carries a Category, checked against
+// categoryFor(AttributeId) (schema.go) — the access-subject category for
+// subject-id/subject:*, the resource category for resource-id/resource:*,
+// the action category for action-id, and the environment category (XACML's
+// own catch-all for contextual attributes belonging to none of the other
+// three) for the four Stratium-specific designators, none of which
+// describe the subject, the resource, or the action itself.
 //
 // # Indeterminate: an unresolvable designator denies
 //

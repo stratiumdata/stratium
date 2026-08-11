@@ -37,7 +37,7 @@ func TestEngine_Contract(t *testing.T) {
       <AllOf>
         <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
           <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">nobody-in-particular</AttributeValue>
-          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string"/>
+          <AttributeDesignator AttributeId="subject-id" DataType="http://www.w3.org/2001/XMLSchema#string" Category="urn:oasis:names:tc:xacml:1.0:subject-category:access-subject"/>
         </Match>
       </AllOf>
     </AnyOf>

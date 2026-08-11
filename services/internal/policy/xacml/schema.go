@@ -3,9 +3,11 @@ package xacml
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"stratium/internal/policy"
+	"stratium/pkg/models"
 )
 
 // The fixed AttributeDesignator vocabulary this engine understands — see
@@ -27,6 +29,78 @@ const (
 
 	subjectAttrPrefix  = "subject:"
 	resourceAttrPrefix = "resource:"
+)
+
+// The four standard XACML 3.0 attribute-category URNs. Every
+// AttributeDesignator's Category must equal the one categoryFor derives
+// from its AttributeId — review found this engine accepted Category as an
+// unchecked attribute, which is exactly the "reads as configurable, isn't
+// really checked" failure this package exists to close off, one level
+// below an outright unsupported construct: a designator whose Category
+// disagrees with its own AttributeId (a subject attribute labeled with the
+// resource category, say) still resolves and compares correctly today,
+// since resolveAttr dispatches on AttributeId alone and never reads
+// Category — but nothing stops the value from becoming semantically
+// meaningless to a human or a future consumer of this text, and a
+// generic-purpose XACML authoring tool emits Category unconditionally, so
+// silently ignoring it would make this engine reject some schema-valid
+// documents (see Important 3, engine.go's package doc) while quietly
+// mis-recording others.
+const (
+	categorySubject     = "urn:oasis:names:tc:xacml:1.0:subject-category:access-subject"
+	categoryResource    = "urn:oasis:names:tc:xacml:3.0:attribute-category:resource"
+	categoryAction      = "urn:oasis:names:tc:xacml:3.0:attribute-category:action"
+	categoryEnvironment = "urn:oasis:names:tc:xacml:3.0:attribute-category:environment"
+)
+
+// categoryFor returns the Category an AttributeDesignator naming
+// attributeID must carry. subject-id and subject:<key> are the access-
+// subject category; resource-id and resource:<key> are the resource
+// category; action-id is the action category. The four Stratium-specific
+// dimensions (agent-trust-tier, derived-tier, and the two delegation
+// designators) have no natural home in subject/resource/action — none of
+// them describe the subject, the resource, or the action itself, they
+// describe the surrounding circumstances of the request — so they take
+// the environment category, XACML's own catch-all for exactly that kind
+// of contextual attribute. Called only after attributeIDKnown has already
+// confirmed attributeID is one this engine recognizes; an unknown id
+// reaching this function is a caller bug, not a case this function itself
+// guards against.
+func categoryFor(attributeID string) string {
+	switch {
+	case attributeID == attrSubjectID, strings.HasPrefix(attributeID, subjectAttrPrefix):
+		return categorySubject
+	case attributeID == attrResourceID, strings.HasPrefix(attributeID, resourceAttrPrefix):
+		return categoryResource
+	case attributeID == attrActionID:
+		return categoryAction
+	default:
+		return categoryEnvironment
+	}
+}
+
+// agentTrustTierValues and actionTierValues are the closed vocabularies an
+// AttributeValue compared against a tier-valued designator must belong to
+// — agent-trust-tier reads models.AgentTrustTier.String(); derived-tier
+// and delegation-max-tier both read models.ActionTier.String() (see
+// resolveAttr). Built by calling each enum member's own String() rather
+// than copying its spelling as a second literal, so a future tier added to
+// either enum is picked up here automatically instead of this vocabulary
+// silently going stale relative to models' own definition — review found
+// this check missing entirely: "Certified", "3", "EXTERNAL-COMMS", and
+// "READONLY" all validated and prepared cleanly, and could never match any
+// value resolveAttr actually produces, the same defect BASE commit 6abf998
+// fixed for jsonpolicy one commit before this engine existed.
+var (
+	agentTrustTierValues = []string{
+		models.TrustTierUnverified.String(), models.TrustTierRegistered.String(),
+		models.TrustTierCertified.String(), models.TrustTierPlatformTrusted.String(),
+	}
+	actionTierValues = []string{
+		models.ActionTierReasoning.String(), models.ActionTierReadOnly.String(),
+		models.ActionTierInternalModify.String(), models.ActionTierExternalComms.String(),
+		models.ActionTierDestructive.String(),
+	}
 )
 
 // xmlPolicy is the root element's typed shape — the values parseAndValidate
@@ -176,11 +250,43 @@ func (m xmlMatch) validate() error {
 	if m.Designator.DataType != dataTypeString {
 		return fmt.Errorf("match's AttributeDesignator DataType %q is not supported — only %q is", m.Designator.DataType, dataTypeString)
 	}
+	// xs:string preserves surrounding whitespace verbatim, so
+	// "<AttributeValue>\n  alice\n</AttributeValue>" (the natural result of
+	// writing XML across multiple lines, the one authoring style every
+	// fixture in this package used to write inline as ">value<" to avoid)
+	// compares against "\n  alice\n", never "alice" — a rule that reads as
+	// comparing against alice and can never actually match alice. Rejecting
+	// the padded form, by name, is the same "reject anything that reads as
+	// configurable but isn't" instinct behind rejecting an empty "in" list
+	// in jsonpolicy; the comparison semantics themselves are untouched.
+	if trimmed := strings.TrimSpace(m.Value.Text); trimmed != m.Value.Text {
+		return fmt.Errorf("match's AttributeValue %q has leading or trailing whitespace, which xs:string preserves verbatim — it can never equal the value %q an author most likely intended; write it inline with no surrounding whitespace", m.Value.Text, trimmed)
+	}
 	if m.Designator.AttributeID == "" {
 		return errors.New("match's AttributeDesignator is missing its required AttributeId attribute")
 	}
 	if !attributeIDKnown(m.Designator.AttributeID) {
 		return fmt.Errorf("match's AttributeDesignator has unknown AttributeId %q — see the package doc for the complete supported list", m.Designator.AttributeID)
+	}
+	if want := categoryFor(m.Designator.AttributeID); m.Designator.Category != want {
+		return fmt.Errorf("match's AttributeDesignator has Category %q, want %q for AttributeId %q", m.Designator.Category, want, m.Designator.AttributeID)
+	}
+	// Three of the seven designators have a closed value space of their
+	// own (see resolveAttr): agent-trust-tier reads an AgentTrustTier,
+	// derived-tier and delegation-max-tier both read an ActionTier. A
+	// value outside that enum's real String() spellings — a typo, a wrong
+	// case, an ordinal digit instead of the name — validates as an
+	// ordinary string comparison and can never match anything resolveAttr
+	// actually produces.
+	switch m.Designator.AttributeID {
+	case attrAgentTrustTier:
+		if !slices.Contains(agentTrustTierValues, m.Value.Text) {
+			return fmt.Errorf("match's AttributeValue %q is not a valid agent-trust-tier — must be one of %s", m.Value.Text, strings.Join(agentTrustTierValues, ", "))
+		}
+	case attrDerivedTier, attrDelegationMaxTier:
+		if !slices.Contains(actionTierValues, m.Value.Text) {
+			return fmt.Errorf("match's AttributeValue %q is not a valid %s — must be one of %s", m.Value.Text, m.Designator.AttributeID, strings.Join(actionTierValues, ", "))
+		}
 	}
 	return nil
 }
@@ -193,10 +299,15 @@ type xmlAttributeValue struct {
 }
 
 // xmlAttributeDesignator is <AttributeDesignator>: a leaf element (always
-// self-closed) naming which EvaluationInput dimension to read.
+// self-closed) naming which EvaluationInput dimension to read. Category is
+// required and checked against categoryFor(AttributeID) in
+// (xmlMatch).validate, not merely accepted — see categoryFor's own doc
+// comment for why an unchecked Category would be a silent-drift risk of
+// its own.
 type xmlAttributeDesignator struct {
 	AttributeID string `xml:"AttributeId,attr"`
 	DataType    string `xml:"DataType,attr"`
+	Category    string `xml:"Category,attr"`
 }
 
 // attributeIDKnown reports whether id is an AttributeId this engine
@@ -212,7 +323,21 @@ func attributeIDKnown(id string) bool {
 	case attrSubjectID, attrResourceID, attrActionID, attrAgentTrustTier, attrDelegationPurpose, attrDelegationMaxTier, attrDerivedTier:
 		return true
 	}
-	return strings.HasPrefix(id, subjectAttrPrefix) || strings.HasPrefix(id, resourceAttrPrefix)
+	// len(id) > len(prefix), not merely HasPrefix: a bare "subject:" or
+	// "resource:" with nothing after the colon has the right shape but
+	// names no key at all — Principal.Attributes[""] / Resource[""] can
+	// never be what an author meant, and unlike a typo'd real key (which
+	// fails only in the safe direction, never matching), an empty key is
+	// permanently dead by construction, the same defect class as an empty
+	// "in" list. Review found this: the old HasPrefix-only check accepted
+	// it.
+	if strings.HasPrefix(id, subjectAttrPrefix) {
+		return len(id) > len(subjectAttrPrefix)
+	}
+	if strings.HasPrefix(id, resourceAttrPrefix) {
+		return len(id) > len(resourceAttrPrefix)
+	}
+	return false
 }
 
 // resolveAttr reads attributeID's value out of in. ok is false exactly when
