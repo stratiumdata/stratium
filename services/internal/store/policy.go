@@ -20,7 +20,7 @@ import (
 // implementation of the tenant boundary. idx_policies_tenant_enabled
 // indexes (tenant_id, enabled), so RLS's rewrite plus this query's own
 // enabled = true still reaches that index.
-const loadPoliciesQuery = `SELECT id, name, language, policy_content, effect, version ` +
+const loadPoliciesQuery = `SELECT id, name, language, policy_content, effect, priority, version ` +
 	`FROM policies WHERE language = $1 AND enabled = true ORDER BY id`
 
 // LoadPolicies loads the tenant's enabled policies for language, ordered by
@@ -31,12 +31,13 @@ const loadPoliciesQuery = `SELECT id, name, language, policy_content, effect, ve
 // policy.PolicyEngine.Prepare's own doc comment).
 //
 // policies.policy_content is the policy text column; it maps to
-// StoredPolicy.Text, not a same-named field. StoredPolicy.Priority has no
-// column in this schema at all — it is left at its Go zero value, which is
-// consistent with StoredPolicy's own doc comment (Priority is
-// provenance-only, and nothing may sort, filter, or short-circuit
-// evaluation by it): there is genuinely nothing stored under that name to
-// read back, so zero is not a loss of data, just an absence of it.
+// StoredPolicy.Text, not a same-named field.
+//
+// Priority is loaded but never ordered by. ORDER BY stays on id: priority is
+// provenance only (spec Y7), so sorting the compiled set by it would suggest
+// an evaluation order that authz.FoldVerdicts does not have, and would make
+// the set's identity change whenever an operator renumbered policies without
+// changing any of them.
 func (s *Store) LoadPolicies(ctx context.Context, language string) ([]policy.StoredPolicy, error) {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
@@ -53,7 +54,7 @@ func (s *Store) LoadPolicies(ctx context.Context, language string) ([]policy.Sto
 	policies := make([]policy.StoredPolicy, 0)
 	for rows.Next() {
 		var p policy.StoredPolicy
-		if err := rows.Scan(&p.ID, &p.Name, &p.Language, &p.Text, &p.Effect, &p.Version); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Language, &p.Text, &p.Effect, &p.Priority, &p.Version); err != nil {
 			return nil, fmt.Errorf("store: scan policy row (language=%q): %w", language, err)
 		}
 		policies = append(policies, p)

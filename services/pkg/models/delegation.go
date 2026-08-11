@@ -63,9 +63,16 @@ func (d *Delegation) HasTool(tool string) bool {
 // of the first widening found.
 //
 // "Narrows" means no wider — an identical child is valid. Every dimension is
-// checked: action tier, tools, classification caps, and expiry. Classification
-// caps are compared by rank via classification.Index; an unknown level on
-// either side is a rejection, never an equal comparison.
+// checked: action tier, tools, classification caps, resource constraints, and
+// expiry. Classification caps are compared by rank via classification.Index;
+// an unknown level on either side is a rejection, never an equal comparison.
+//
+// A child may narrow a dimension its parent constrains; it may not introduce
+// one the parent leaves open (spec §4.3.1). That is stricter than narrowing
+// logic requires — adding a constraint does restrict the child further — and
+// is deliberate: it makes a child's shape derivable from its parent's, so
+// auditing a chain means comparing values across a fixed set of dimensions
+// rather than tracking which hop introduced which dimension.
 func ScopeNarrows(parent, child *Delegation) string {
 	if child.MaxActionTier > parent.MaxActionTier {
 		return "child max_action_tier " + child.MaxActionTier.String() +
@@ -122,11 +129,10 @@ func ScopeNarrows(parent, child *Delegation) string {
 		}
 	}
 
-	// Resource constraints may only be added, never dropped or altered. Every
-	// constraint the parent sets must appear in the child with an identical
-	// value; extra child constraints are further narrowing and permitted.
-	// Values are opaque caller-defined strings, so the comparison is exact —
-	// it does not try to reason about wildcards or ranges, because every such
+	// Resource constraints may be neither dropped nor altered. Every constraint
+	// the parent sets must appear in the child with an identical value. Values
+	// are opaque caller-defined strings, so the comparison is exact — it does
+	// not try to reason about wildcards or ranges, because every such
 	// interpretation is a place a widening could hide.
 	for key, parentVal := range parent.ResourceConstraints {
 		childVal, ok := child.ResourceConstraints[key]
@@ -136,6 +142,17 @@ func ScopeNarrows(parent, child *Delegation) string {
 		if childVal != parentVal {
 			return "child resource constraint " + key + "=" + childVal +
 				" differs from parent " + key + "=" + parentVal
+		}
+	}
+
+	// Nor may the child introduce a constraint on a key the parent leaves
+	// unconstrained — the same rule the caps loop above applies, for the same
+	// reason (spec §4.3.1). Adding a constraint genuinely does narrow, so this
+	// is stricter than logic alone requires; it is chosen so a child's shape is
+	// derivable from its parent's and not only its values.
+	for key := range child.ResourceConstraints {
+		if _, ok := parent.ResourceConstraints[key]; !ok {
+			return "child constrains resource key " + key + " which parent does not constrain"
 		}
 	}
 

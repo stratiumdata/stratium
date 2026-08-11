@@ -77,6 +77,7 @@ import (
 
 	"stratium/internal/authz"
 	"stratium/internal/pdpgrpc"
+	"stratium/internal/policy"
 	"stratium/internal/store"
 	"stratium/migrations"
 	"stratium/pkg/audit"
@@ -348,8 +349,14 @@ func singleHopDelegation(t *testing.T, tenant string, agentID uuid.UUID, maxTier
 	})
 }
 
-const insertPolicyQuery = `INSERT INTO policies (id, tenant_id, name, language, policy_content, effect, enabled)
-	VALUES ($1,$2,$3,$4,$5,$6,$7)`
+const insertPolicyQuery = `INSERT INTO policies (id, tenant_id, name, language, policy_content, effect, enabled, priority)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
+
+// seedPolicyPriority is the non-zero priority every seeded policy carries.
+// It exists so LoadPolicies' priority round-trip is proven against a real
+// column rather than against sqlmock — the field sat declared-but-unpopulated
+// for two phases precisely because no test touched real Postgres for it.
+const seedPolicyPriority = 42
 
 // seedPolicy inserts one enabled Cedar policy row for tenant and returns its
 // id — client-generated, like seedAgent/seedDelegation's ids above, so a
@@ -365,12 +372,55 @@ func seedPolicy(t *testing.T, tenant, name, text, effect string) string {
 	id := uuid.New().String()
 	withTenantTx(t, tenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(), insertPolicyQuery,
-			id, tenant, name, "cedar", text, effect, true,
+			id, tenant, name, "cedar", text, effect, true, seedPolicyPriority,
 		); err != nil {
 			t.Fatalf("seed policy %s: %v", name, err)
 		}
 	})
 	return id
+}
+
+// LoadPolicies against real Postgres. Every other LoadPolicies test uses
+// sqlmock, which returns whatever columns the test names — so it can prove the
+// scan order matches the query string, and nothing at all about whether those
+// columns exist, whether the serving role may read them, or what the database
+// stores. StoredPolicy.Priority spent two phases declared, carried into
+// PolicyVerdict, and hashed into audit provenance while no column existed to
+// load it from, and no sqlmock test could have noticed. This one would have:
+// it fails on a missing column, a missing grant, and a wrong scan order alike.
+func TestIntegration_LoadPolicies_RoundTripsPriority(t *testing.T) {
+	// Its own tenant, like boundaryTenant below. The suite shares one database,
+	// and TestEndToEnd/proof2 asserts configuredTenant has *no* cedar policies
+	// in order to prove the unconfigured-principal denial — seeding a permit
+	// policy there turned that denial into an allow and broke four later
+	// proofs. RLS makes an isolated tenant a complete fix rather than a
+	// cleanup-ordering bet.
+	const priorityTenant = "tenant-policy-priority-integration"
+	const text = "permit(principal, action, resource);"
+	id := seedPolicy(t, priorityTenant, "priority-round-trip", text, "allow")
+
+	got, err := store.New(testDB, priorityTenant).LoadPolicies(t.Context(), "cedar")
+	if err != nil {
+		t.Fatalf("LoadPolicies() error = %v", err)
+	}
+
+	var found *policy.StoredPolicy
+	for i := range got {
+		if got[i].ID == id {
+			found = &got[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("LoadPolicies() did not return seeded policy %s (got %d policies)", id, len(got))
+	}
+	if found.Priority != seedPolicyPriority {
+		t.Errorf("Priority = %d, want %d — the column exists but the value did not survive the load",
+			found.Priority, seedPolicyPriority)
+	}
+	if found.Text != text {
+		t.Errorf("Text = %q, want %q — adjacent scan targets are transposed", found.Text, text)
+	}
 }
 
 const auditChainQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, actor,

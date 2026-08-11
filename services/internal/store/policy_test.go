@@ -13,19 +13,22 @@ import (
 )
 
 func policyColumns() []string {
-	return []string{"id", "name", "language", "policy_content", "effect", "version"}
+	return []string{"id", "name", "language", "policy_content", "effect", "priority", "version"}
 }
 
 // addPolicyRow appends p as one loadPoliciesQuery result row, in that
 // query's column order.
 func addPolicyRow(rows *sqlmock.Rows, p policy.StoredPolicy) *sqlmock.Rows {
-	return rows.AddRow(p.ID, p.Name, p.Language, p.Text, p.Effect, p.Version)
+	return rows.AddRow(p.ID, p.Name, p.Language, p.Text, p.Effect, p.Priority, p.Version)
 }
 
 // testPolicy returns a StoredPolicy with every queried field set to a
-// distinguishable value. Priority is deliberately left at its zero value:
-// the policies table has no column for it (see LoadPolicies's doc comment),
-// so a row read back from the database can never populate it either.
+// distinguishable value. Priority is non-zero on purpose: it is the field
+// 000009_policy_priority added a column for, and a zero here would let a
+// dropped scan target pass every round-trip assertion below, which is exactly
+// how the value went unnoticed as structurally-always-zero for two phases.
+// Version differs from Priority so transposing the two adjacent scan targets
+// fails rather than silently swapping equal numbers.
 func testPolicy(id, name string) policy.StoredPolicy {
 	return policy.StoredPolicy{
 		ID:       id,
@@ -33,6 +36,7 @@ func testPolicy(id, name string) policy.StoredPolicy {
 		Language: "cedar",
 		Text:     "permit(principal, action, resource);",
 		Effect:   "allow",
+		Priority: 7,
 		Version:  1,
 	}
 }
@@ -92,8 +96,12 @@ func TestStore_LoadPolicies_Success(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("policy[%d] = %+v, want %+v", i, got[i], want[i])
 		}
-		if got[i].Priority != 0 {
-			t.Errorf("policy[%d].Priority = %d, want 0 (no column in this schema)", i, got[i].Priority)
+		// Redundant with the struct comparison above, and kept deliberately:
+		// it fails loudly if testPolicy's Priority is ever reset to zero,
+		// which would make the comparison above pass while proving nothing
+		// about the column 000009 added.
+		if got[i].Priority == 0 {
+			t.Errorf("policy[%d].Priority = 0, want the stored value round-tripped", i)
 		}
 	}
 
@@ -157,7 +165,7 @@ func TestStore_LoadPolicies_RowScanErrorPropagates(t *testing.T) {
 	s, mock := newMockStore(t)
 
 	rows := sqlmock.NewRows(policyColumns()).
-		AddRow("id-1", "bad-version", "cedar", "permit(principal, action, resource);", "allow", "not-a-version")
+		AddRow("id-1", "bad-version", "cedar", "permit(principal, action, resource);", "allow", 7, "not-a-version")
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)

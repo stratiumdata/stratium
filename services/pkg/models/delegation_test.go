@@ -149,14 +149,32 @@ func TestScopeNarrows_RejectsDroppedResourceConstraint(t *testing.T) {
 	}
 }
 
-// Adding a constraint narrows and is permitted.
-func TestScopeNarrows_AcceptsAddedResourceConstraint(t *testing.T) {
+// A child may not introduce a constraint on a key the parent leaves open, even
+// though doing so narrows. Spec §4.3.1 rules that a child narrows dimensions
+// its parent constrains and introduces none of its own, so a chain is audited
+// by comparing values across a fixed set of dimensions. This mirrors
+// TestScopeNarrows_RejectsCapForHierarchyParentLacks; the two dimensions
+// disagreed until the ruling, and this test is the half that changed.
+func TestScopeNarrows_RejectsAddedResourceConstraint(t *testing.T) {
 	p := parentDelegation()
 	p.ResourceConstraints = map[string]string{"project": "alpha"}
 	c := validChild()
 	c.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
+	if ScopeNarrows(p, c) == "" {
+		t.Fatal("child constraining a key the parent leaves open must be rejected")
+	}
+}
+
+// The corollary: a child repeating exactly its parent's constraint keys, with
+// exactly its parent's values, is valid. Without this the rule above could be
+// satisfied by rejecting every non-empty constraint map.
+func TestScopeNarrows_AcceptsIdenticalResourceConstraints(t *testing.T) {
+	p := parentDelegation()
+	p.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
+	c := validChild()
+	c.ResourceConstraints = map[string]string{"project": "alpha", "region": "us-east"}
 	if reason := ScopeNarrows(p, c); reason != "" {
-		t.Fatalf("adding a constraint is narrowing and must be accepted, got: %s", reason)
+		t.Fatalf("identical constraints must be accepted, got: %s", reason)
 	}
 }
 
