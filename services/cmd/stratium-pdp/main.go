@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,7 +34,6 @@ import (
 	"stratium/internal/config"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
-	"stratium/internal/policy/cedar"
 	"stratium/internal/store"
 	"stratium/migrations"
 )
@@ -56,6 +56,17 @@ func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Checked before anything stateful (migrations, the serving DB
+	// connection): buildRegistry only needs cfg.PolicyLanguages, so a
+	// misconfigured language name is caught for free, before this process
+	// has opened a single network connection — the cheapest possible fail
+	// fast, and the same principle DatabaseURL/TenantID's own presence
+	// checks already apply above.
+	registry, err := buildRegistry(cfg.PolicyLanguages)
+	if err != nil {
+		return fmt.Errorf("build policy registry: %w", err)
 	}
 
 	if cfg.MigrationDatabaseURL != "" {
@@ -96,36 +107,42 @@ func run(logger *slog.Logger) error {
 
 	repo := store.New(db, cfg.TenantID)
 
-	// policy.Multi, not Unconfigured: a real engine is wired in. Registry
-	// currently holds only Cedar — Rego, JSON, and XACML are later tasks —
-	// but Multi is what closes spec defect D10 even with a registry of one:
-	// a tenant whose policies.language is anything other than "cedar" now
+	// policy.Multi, not Unconfigured: a real engine is wired in — registry
+	// (built above, from cfg.PolicyLanguages, before this process opened any
+	// network connection) holds every language this deployment enabled,
+	// default all four. Multi is what closes spec defect D10: a tenant whose
+	// policies.language names a language with no registered engine — because
+	// this deployment's operator left it out of STRATIUM_POLICY_LANGUAGES, or
+	// because a tenant authored in a language this build has never shipped —
 	// gets an honest deny naming that language (see Multi's own doc comment
-	// in internal/policy/multi.go), where the single-engine policy.Configured
-	// this replaced would have silently never loaded or evaluated it at all.
-	// Multi loads and prepares this tenant's policies fresh on every Decide
-	// call (no cache — see the Phase 2c plan's "caching is deliberately out
-	// of scope" and Task 5's measurement of why). A tenant with no policies
-	// stored still denies at the principal leg, just as Unconfigured always
-	// did.
+	// in internal/policy/multi.go and orphanVerdict specifically), rather
+	// than the single-engine policy.Configured this replaced, which would
+	// have silently never loaded or evaluated it at all. Multi loads and
+	// prepares this tenant's policies fresh on every Decide call (no cache —
+	// see the Phase 2c plan's "caching is deliberately out of scope" and
+	// Task 5's and Task 6's own measurements of why). A tenant with no
+	// policies stored still denies at the principal leg, just as Unconfigured
+	// always did.
 	//
 	// Unconfigured itself is not wireable here any more: pdpgrpc.NewServer
 	// takes a concrete policy.Multi (it needs PrepareAll for the
 	// delegation-creation gate, which Unconfigured — a bare PrincipalPolicy —
 	// does not expose), so a deployment that wants no policy engine at all
 	// would need an explicitly empty Multi (NewMulti(repo, policy.Registry{}))
-	// instead. Unconfigured, policy.Configured, policy.PolicySource, and
-	// store.LoadPolicies all remain in the tree — nothing here calls them —
-	// left for a future task to decide whether they still earn their keep now
-	// that Multi covers the single-engine case too (an empty Registry with
-	// one entry behaves identically to Configured with that entry's engine).
+	// instead — not reachable through STRATIUM_POLICY_LANGUAGES today, since
+	// an empty configured value is treated as unset (see config.Load's own
+	// envOr-style default), only by code choosing to build one. Unconfigured,
+	// policy.Configured, policy.PolicySource, and store.LoadPolicies all
+	// remain in the tree — nothing here calls them — left for a future task
+	// to decide whether they still earn their keep now that Multi covers the
+	// single-engine case too (a Registry with one entry behaves identically
+	// to Configured with that entry's engine).
 	//
 	// repo satisfies both Store (pdpgrpc's own dependency interface) and
 	// policy.AllPolicySource structurally, so it needs no adapter to serve
 	// both — and Multi itself now supplies pdpgrpc's CreateDelegation gate
 	// with a compiled set via PrepareAll, so repo and an engine no longer
 	// need to be passed to NewServer a second time raw.
-	registry := policy.Registry{"cedar": cedar.New()}
 	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg)
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
@@ -146,9 +163,15 @@ func run(logger *slog.Logger) error {
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
 
 	logger.Info("stratium-pdp starting", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr)
-	logger.Info("principal policy: multi-engine (registered: cedar), policies loaded fresh from the store " +
-		"on every decision (no cache); a tenant with none stored still denies at the principal leg, and a " +
-		"policy authored in an unregistered language denies naming that language rather than being skipped")
+	// registryLanguages(registry), not cfg.PolicyLanguages: this reports what
+	// actually got wired (registry's own keys), not the configured value that
+	// produced it — the two agree whenever config is well-formed (the only
+	// way run() reaches this line at all, per buildRegistry's own fail-fast
+	// check above), but the registry is the ground truth to log.
+	logger.Info("principal policy: multi-engine (registered: " + strings.Join(registryLanguages(registry), ", ") +
+		"), policies loaded fresh from the store on every decision (no cache); a tenant with none stored still " +
+		"denies at the principal leg, and a policy authored in an unregistered language denies naming that " +
+		"language rather than being skipped")
 
 	return serve(logger, grpcServer, lis)
 }
