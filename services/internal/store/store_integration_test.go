@@ -128,6 +128,16 @@ var (
 	testDB           *sql.DB
 	pdpClient        pdpgrpc.PDPServiceClient
 	configuredTenant string
+
+	// narrowPdpClient and narrowTenant back
+	// TestIntegration_Live_OrphanLanguageDeniesNamingIt: a second,
+	// independently configured PDP (deploy/docker/docker-compose.yml's
+	// pdp-narrow service) with its own fixed tenant and a registry one
+	// language short of pdpClient's own four — see that test's own doc
+	// comment for why the orphan-language case needs a second service to
+	// reach live at all, rather than a second tenant on pdpClient's PDP.
+	narrowPdpClient pdpgrpc.PDPServiceClient
+	narrowTenant    string
 )
 
 func TestMain(m *testing.M) {
@@ -140,14 +150,17 @@ func runTestMain(m *testing.M) int {
 	dbURL := os.Getenv("STRATIUM_IT_DATABASE_URL")
 	pdpAddr := os.Getenv("STRATIUM_IT_PDP_ADDR")
 	configuredTenant = os.Getenv("STRATIUM_IT_TENANT_ID")
-	if dbURL == "" || pdpAddr == "" || configuredTenant == "" {
+	narrowPdpAddr := os.Getenv("STRATIUM_IT_PDP_NARROW_ADDR")
+	narrowTenant = os.Getenv("STRATIUM_IT_NARROW_TENANT_ID")
+	if dbURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" {
 		fmt.Fprintln(os.Stderr,
-			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_PDP_ADDR, and STRATIUM_IT_TENANT_ID must all be set — "+
-				"run via `make integration`, not `go test` directly")
+			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, STRATIUM_IT_PDP_NARROW_ADDR, "+
+				"and STRATIUM_IT_NARROW_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
-	if configuredTenant == secondTenantID {
-		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID must not equal the test's hardcoded second tenant")
+	if configuredTenant == secondTenantID || narrowTenant == secondTenantID || narrowTenant == configuredTenant {
+		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID and STRATIUM_IT_NARROW_TENANT_ID must be distinct from "+
+			"each other and from the test's hardcoded second tenant")
 		return 1
 	}
 
@@ -166,21 +179,44 @@ func runTestMain(m *testing.M) int {
 	}
 	testDB = db
 
-	conn, err := grpc.NewClient(pdpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	client, closeConn, err := dialAndWaitForServing(ctx, pdpAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create gRPC client: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pdp: %v\n", err)
 		return 1
 	}
-	defer func() { _ = conn.Close() }()
-	waited, err := waitForServing(ctx, conn)
+	defer closeConn()
+	pdpClient = client
+
+	narrowClient, closeNarrowConn, err := dialAndWaitForServing(ctx, narrowPdpAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "PDP never reported SERVING: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pdp-narrow: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stdout, "PDP reported SERVING after %s (this is the measured wait, not an assumption)\n", waited)
-	pdpClient = pdpgrpc.NewPDPServiceClient(conn)
+	defer closeNarrowConn()
+	narrowPdpClient = narrowClient
 
 	return m.Run()
+}
+
+// dialAndWaitForServing dials addr and blocks until its health service
+// reports SERVING (waitForServing), returning a ready-to-use client and a
+// closer for the underlying connection — the closer is returned rather than
+// deferred here so runTestMain can keep closing both connections only after
+// m.Run() completes, exactly as it did before this was factored out.
+// Factored out so dialing the second, pdp-narrow service (Phase 4a Task 5)
+// is one call instead of a second copy of the same dial-wait-log sequence.
+func dialAndWaitForServing(ctx context.Context, addr string) (pdpgrpc.PDPServiceClient, func(), error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("create gRPC client for %s: %w", addr, err)
+	}
+	waited, err := waitForServing(ctx, conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("%s never reported SERVING: %w", addr, err)
+	}
+	fmt.Fprintf(os.Stdout, "%s reported SERVING after %s (this is the measured wait, not an assumption)\n", addr, waited)
+	return pdpgrpc.NewPDPServiceClient(conn), func() { _ = conn.Close() }, nil
 }
 
 // waitForDB retries PingContext instead of assuming the first attempt
@@ -708,12 +744,13 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 //     implements. There is no language string the real schema would accept
 //     that pdpClient's own registry (all four, by cfg's default) does not
 //     also have an engine for, so "a language absent from the registry"
-//     cannot be produced against the shared PDP without narrowing ITS
-//     configuration — which would also remove that language from every
-//     other proof here that needs it registered. Building policy.Multi
-//     locally, with a registry one language short of the schema's own set,
-//     reproduces exactly the shape a smaller STRATIUM_POLICY_LANGUAGES
-//     deployment would have, against a real Postgres-loaded StoredPolicy.
+//     cannot be produced against pdpClient specifically without narrowing
+//     `pdp`'s own configuration — which would also remove that language
+//     from every other proof here that needs it registered. Building
+//     policy.Multi locally, with a registry one language short of the
+//     schema's own set, reproduces exactly the shape a smaller
+//     STRATIUM_POLICY_LANGUAGES deployment would have, against a real
+//     Postgres-loaded StoredPolicy, without touching `pdp` at all.
 //   - Cross-tenant isolation (proof 6) needs two tenants observed
 //     independently. pdpClient is one client wired to one PDP wired to one
 //     tenant; there is no second tenant it could ever be asked about.
@@ -722,6 +759,28 @@ func newMigrator(t *testing.T, db *sql.DB) *migrate.Migrate {
 // migrated schema, real RLS-scoped store, the actual production policy.Multi
 // — only the transport (in-process call vs. a network round trip to a
 // separately-configured PDP process) differs.
+//
+// A prior version of the first bullet above concluded from it that the
+// orphan-language case "cannot be produced against the shared PDP at all" —
+// true only of `pdp` specifically (correct: it is wired for all four
+// languages, permanently, for every other proof's sake), and false as read
+// more broadly, the way Phase 4's Task 6 report stated it and a later task
+// took at face value. Nothing about pdpClient being unable to reach this
+// case implies no live PDP can: deploy/docker/docker-compose.yml's
+// pdp-narrow service (added by Phase 4a Task 5, its own STRATIUM_TENANT_ID
+// and a STRATIUM_POLICY_LANGUAGES one language short of all four) is a
+// second, independently configured PDP built for exactly this gap, and
+// TestIntegration_Live_OrphanLanguageDeniesNamingIt (below,
+// near TestIntegration_Multi_OrphanLanguageDeniesNamingIt) is the live proof
+// it enables — over real gRPC, through pdpgrpc.Server.Decide and toResponse,
+// not just policy.Multi.Evaluate in-process. The two tests are complementary,
+// not redundant: this file's own in-process TestIntegration_Multi_
+// OrphanLanguageDeniesNamingIt still earns its keep for the reasons the rest
+// of this banner gives (no live PDP is wired one language short of only the
+// four this repo ships without dedicating a whole second service to it, and
+// the full four-verdict slice these other proofs need is not observable
+// through any wire response) — it was just never true that it was the only
+// proof available, and it no longer is the only one that exists.
 //
 // The other two (cedar+rego deny-overrides, and the rego-only delegation-
 // creation clamp) genuinely need pdpClient — one for a real audit row
@@ -844,12 +903,16 @@ func TestIntegration_Multi_FourLanguagesProduceFourVerdicts(t *testing.T) {
 // TestIntegration_Multi_OrphanLanguageDeniesNamingIt is proof 3 — D10's own
 // proof, and the reason the whole multi-engine seam exists: a policy in a
 // language absent from the registry must deny, naming that language, not be
-// silently skipped. Asserts the exact Reason string (orphanVerdict, multi.go),
+// silently skipped. Asserts the exact Reason string (orphanVerdicts, multi.go),
 // not merely Effect==Deny: an effect-only check would also pass a denial for
 // a completely different reason, which is precisely the failure mode D10
 // names — a policy an operator believes is protecting them, silently never
 // evaluated. See this file's own "Phase 4 Task 6" banner above for why this
-// builds policy.Multi directly instead of going through pdpClient.
+// builds policy.Multi directly instead of going through pdpClient, and
+// TestIntegration_Live_OrphanLanguageDeniesNamingIt (below) for the live,
+// over-the-wire counterpart Phase 4a Task 5 added — this test alone does not
+// exercise pdpgrpc.Server.Decide or its copy of FoldVerdicts' chosen reason
+// into DecideResponse.PrincipalReason at all, only policy.Multi.Evaluate.
 func TestIntegration_Multi_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	const tenant = "tenant-multilang-orphan-integration"
 	const purpose = "orphan-language proof"
@@ -875,10 +938,106 @@ func TestIntegration_Multi_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	if v.Source != "rego" {
 		t.Errorf("Source = %q, want %q", v.Source, "rego")
 	}
-	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy IDs %s", policyID)
+	if v.PolicyID != policyID {
+		t.Errorf("PolicyID = %q, want %q — audit_chain.policy_id must be queryable for this denial, not empty", v.PolicyID, policyID)
+	}
+	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s", policyID)
 	if v.Reason != wantReason {
 		t.Errorf("Reason = %q, want %q — the effect alone is not enough; D10 requires naming the unregistered language and the orphaned policy ID",
 			v.Reason, wantReason)
+	}
+}
+
+// narrowRegistryMissingLanguage is the one language deploy/docker/
+// docker-compose.yml's pdp-narrow service deliberately leaves out of its own
+// STRATIUM_POLICY_LANGUAGES (cedar,json,xacml) — reproduced here the same
+// deliberate way noPoliciesReason (above) reproduces policy.Multi's own
+// literal text, rather than imported: this test only ever reaches
+// pdp-narrow's configuration through its observable behaviour over gRPC, the
+// same way a real operator would, never by reading its environment.
+const narrowRegistryMissingLanguage = "rego"
+
+// TestIntegration_Live_OrphanLanguageDeniesNamingIt is the live counterpart
+// to TestIntegration_Multi_OrphanLanguageDeniesNamingIt above, and the
+// permanent test this file's own "Phase 4 Task 6" banner used to claim was
+// impossible (see the correction inside that banner). policy.Multi.Evaluate
+// is exercised directly there, never through pdpgrpc.Server.Decide or its
+// toResponse — so a regression in how DecideResponse.PrincipalReason is
+// copied from FoldVerdicts' chosen reason would leave that test green while
+// operators silently stopped being told which language went unevaluated.
+// Only a test that goes all the way over gRPC, as this one does, exercises
+// that copy at all.
+//
+// Reaching this case live needs a second, independently configured PDP —
+// deploy/docker/docker-compose.yml's pdp-narrow, with its own
+// STRATIUM_TENANT_ID and a STRATIUM_POLICY_LANGUAGES one language short —
+// rather than a second tenant on pdpClient's own PDP: main.go builds one
+// tenant-scoped store.Store and one policy.Multi at startup and neither
+// varies per request, so `pdp` can never be asked about a tenant, let alone
+// a registry, other than the one it was started with.
+func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
+	const purpose = "live orphan-language proof"
+
+	agentID := uuid.New()
+	seedAgent(t, narrowTenant, agentID, "integration-agent-narrow-registry", models.TrustTierUnverified)
+	acting := singleHopDelegation(t, narrowTenant, agentID, models.ActionTierInternalModify, purpose)
+	policyID := seedPolicyLang(t, narrowTenant, "live-orphan-rego-policy", narrowRegistryMissingLanguage,
+		regoPurposeCondition(purpose), "allow")
+
+	resp, err := narrowPdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+		DelegationId: acting.ID.String(),
+		AgentId:      agentID.String(),
+		Subject:      "live-orphan-subject@example.com",
+		Tool:         "Bash",
+		Verb:         "read",
+	})
+	if err != nil {
+		t.Fatalf("Decide() against pdp-narrow error = %v, want a decision", err)
+	}
+	t.Logf("Decide() against pdp-narrow (registered: cedar,json,xacml; missing: %s) for a tenant whose only "+
+		"policy is in the missing language -> effect=%s denied_leg=%q principal_reason=%q decided_source=%q "+
+		"(present=%t) decided_policy_id=%q (present=%t)",
+		narrowRegistryMissingLanguage, resp.GetEffect(), resp.GetDeniedLeg(), resp.GetPrincipalReason(),
+		resp.GetDecidedSource(), resp.DecidedSource != nil, resp.GetDecidedPolicyId(), resp.DecidedPolicyId != nil)
+
+	if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+		t.Fatalf("Effect = %v, want EFFECT_DENY — an unevaluatable policy must deny, not be silently skipped", resp.GetEffect())
+	}
+	if resp.GetDeniedLeg() != "principal" {
+		t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "principal")
+	}
+	// The assertion this test exists for: PrincipalReason itself — the field
+	// toResponse copies from FoldVerdicts' chosen reason (pdpgrpc/server.go)
+	// — must name the missing language and the orphaned policy over the
+	// wire, not merely Effect. An effect-only check would also pass a
+	// PrincipalReason broken by a bad copy (empty, truncated, or naming the
+	// wrong verdict entirely), which is exactly the regression this test is
+	// for (see the mutation-testing note in this task's own report).
+	wantReason := fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy ID %s",
+		narrowRegistryMissingLanguage, policyID)
+	if resp.GetPrincipalReason() != wantReason {
+		t.Errorf("PrincipalReason = %q, want %q verbatim", resp.GetPrincipalReason(), wantReason)
+	}
+	if resp.DecidedSource == nil || resp.GetDecidedSource() != narrowRegistryMissingLanguage {
+		t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, narrowRegistryMissingLanguage)
+	}
+	if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != policyID {
+		t.Errorf("DecidedPolicyId = %v, want present and %q", resp.DecidedPolicyId, policyID)
+	}
+
+	// The audit row, independently queried — not merely that response and
+	// row agree (audit_row_provenance_matches_response, elsewhere in this
+	// file, already covers that general property), but that the orphaned
+	// policy's own id specifically reached a real audit_chain row: the
+	// second half of what "PolicyID empty on exactly the denials D10 exists
+	// to surface" (this task's own brief) was about.
+	source, auditPolicyID := auditRowProvenance(t, narrowTenant)
+	if !source.Valid || source.String != narrowRegistryMissingLanguage {
+		t.Errorf("stored policy_source = %q (valid=%t), want %q", source.String, source.Valid, narrowRegistryMissingLanguage)
+	}
+	if !auditPolicyID.Valid || auditPolicyID.String != policyID {
+		t.Errorf("stored policy_id = %q (valid=%t), want %q — the orphaned policy id must reach the audit row, "+
+			"not just live in free-text Reason", auditPolicyID.String, auditPolicyID.Valid, policyID)
 	}
 }
 

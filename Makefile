@@ -61,10 +61,13 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	$(COMPOSE) up -d --build --wait --wait-timeout 120; \
 	pg_port=$$($(COMPOSE) port postgres 5432 | sed -E 's/.*://'); \
 	pdp_port=$$($(COMPOSE) port pdp 50051 | sed -E 's/.*://'); \
-	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port"; \
+	pdp_narrow_port=$$($(COMPOSE) port pdp-narrow 50051 | sed -E 's/.*://'); \
+	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PDP_ADDR="localhost:$$pdp_port" \
 	STRATIUM_IT_TENANT_ID="tenant-one" \
+	STRATIUM_IT_PDP_NARROW_ADDR="localhost:$$pdp_narrow_port" \
+	STRATIUM_IT_NARROW_TENANT_ID="tenant-narrow-registry-integration" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
 .PHONY: help build test vet fmt lint proto conformance integration

@@ -50,5 +50,50 @@ services:
     ports:
       - "50051"
 
+  # Second PDP instance, wired for one purpose: internal/store/
+  # store_integration_test.go's TestIntegration_Live_OrphanLanguageDeniesNamingIt
+  # (Phase 4a Task 5) needs to seed a policy in a language absent from a
+  # running PDP's own registry and observe the resulting denial over real
+  # gRPC. `pdp` above cannot serve that test — its STRATIUM_TENANT_ID is
+  # fixed for the life of the process (main.go builds one tenant-scoped
+  # store.Store at startup; nothing about a request can change it), and its
+  # own STRATIUM_POLICY_LANGUAGES is every language this build ships,
+  # because every OTHER proof in that test file needs all four registered.
+  # Narrowing `pdp`'s own languages to reach this one test would silently
+  # break every one of those. A second, independently configured service —
+  # its own tenant, its own registry one language short — is what makes the
+  # orphan-language case reachable at all without touching `pdp`.
+  #
+  # Shares the same postgres instance as `pdp` (RLS keyed on
+  # STRATIUM_TENANT_ID keeps the two tenants apart) rather than a second
+  # database: nothing about this proof needs isolated storage, only an
+  # isolated policy-engine registry.
+  pdp-narrow:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-narrow-registry-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # Deliberately omits "rego" — one of the four languages this build
+      # ships, not an invented fifth one, so the gap this proves is exactly
+      # "an operator's own STRATIUM_POLICY_LANGUAGES left something out,"
+      # not "an unimplemented language was named." store_integration_test.go's
+      # narrowRegistryMissingLanguage constant must name the same language;
+      # nothing here re-derives that from the other, but a drift between the
+      # two does not fail silently — the live test seeds a policy in
+      # whatever language that constant names and asserts a DENY naming it,
+      # so if this list ever registered that language after all, the test
+      # would see an ALLOW (or a different Source) and fail loudly on the
+      # mismatch, not pass by accident.
+      STRATIUM_POLICY_LANGUAGES: cedar,json,xacml
+    ports:
+      - "50051"
+
 volumes:
   pgdata:
