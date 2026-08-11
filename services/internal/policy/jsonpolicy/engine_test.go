@@ -35,6 +35,19 @@ func TestEngine_Contract(t *testing.T) {
 	})
 }
 
+// TestEngine_Language pins the exact string Language() returns. It was
+// correct by inspection (const language = "json") but had no test of its
+// own — worth one directly, per review: NewMulti panics on any mismatch
+// between a Registry key and its engine's own Language() (see that
+// constructor's own doc comment), and Task 6 wires all four engines into
+// that Registry by key, so a silent typo here would surface as a startup
+// panic far from this package rather than a local test failure.
+func TestEngine_Language(t *testing.T) {
+	if got := New().Language(); got != "json" {
+		t.Fatalf(`Language() = %q, want "json"`, got)
+	}
+}
+
 // allowedToDecode is the only functions in this package permitted to
 // decode (directly or by calling parseDoc) policy JSON. See
 // TestDecodeOnlyCalledFromParseDoc — parseDoc is deliberately in this set

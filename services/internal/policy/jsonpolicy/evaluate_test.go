@@ -272,14 +272,19 @@ func TestEvaluate_DelegationPurpose(t *testing.T) {
 	})
 }
 
-// TestEvaluate_DerivedTierAtMost is the property that justifies
-// tierMatch.matches comparing tier and AtMost as real integers rather than
-// as strings — see that method's own doc comment. The "ceiling above the
-// tier lattice" subtest is the one that actually forces integer and
-// lexicographic comparison apart: every real models.ActionTier value is a
-// single digit (0-4), so an AtMost also confined to that range would agree
-// under either comparison, and a string-comparison mutant would slip
-// through undetected by the other subtests alone.
+// TestEvaluate_DerivedTierAtMost covers the in-range ceiling behaviour:
+// matching at and under the ceiling, not matching above it. It used to also
+// carry the subtest that forced tierMatch.matches' integer-vs-string
+// comparison apart (an out-of-lattice at_most: 10, since every in-range
+// pair is single-digit and lexicographic order agrees with numeric order
+// there) — review correctly flagged that value as itself a vacuous-in-the-
+// other-direction defect (an at_most above the highest tier can never
+// filter anything out, functionally identical to omitting derived_tier
+// entirely) and asked for it to be rejected by Validate. Now that
+// tierMatch.validate does reject it, that subtest's own fixture no longer
+// prepares, so the integer-vs-string property is pinned directly against
+// tierMatch.matches instead — see TestTierMatch_MatchesComparesNumerically
+// in schema_test.go — rather than through this engine-level Evaluate path.
 func TestEvaluate_DerivedTierAtMost(t *testing.T) {
 	set := prepare(t, []policy.StoredPolicy{
 		{ID: "p1", Name: "at-most-internal-modify", Text: `{"effect": "allow", "match": {"derived_tier": {"at_most": 2}}}`},
@@ -306,19 +311,17 @@ func TestEvaluate_DerivedTierAtMost(t *testing.T) {
 		}
 	})
 
-	t.Run("ceiling above the tier lattice matches the highest tier (numeric, not lexicographic, comparison)", func(t *testing.T) {
-		// at_most: 10 has no ActionTier that could exceed it — this is only
-		// reachable because the schema permits any JSON integer under
-		// at_most, not just 0-4. "4" <= "10" is FALSE lexicographically
-		// (leading '4' > leading '1') but 4 <= 10 is true numerically: a
-		// string-comparison mutant fails this specific case while passing
-		// every subtest above, where every value involved is a single digit.
-		above := prepare(t, []policy.StoredPolicy{
-			{ID: "p1", Name: "at-most-ten", Text: `{"effect": "allow", "match": {"derived_tier": {"at_most": 10}}}`},
+	// Positive control for the range check added in review: the highest
+	// legal at_most (4, models.ActionTierDestructive) is not itself
+	// rejected — only values outside [0, 4] are — and still both validates
+	// and matches the tier it names exactly.
+	t.Run("at_most at the top of the valid range still matches", func(t *testing.T) {
+		top := prepare(t, []policy.StoredPolicy{
+			{ID: "p1", Name: "at-most-destructive", Text: `{"effect": "allow", "match": {"derived_tier": {"at_most": 4}}}`},
 		})
-		verdicts := mustEvaluate(t, above, policy.EvaluationInput{DerivedTier: models.ActionTierDestructive})
+		verdicts := mustEvaluate(t, top, policy.EvaluationInput{DerivedTier: models.ActionTierDestructive})
 		if len(verdicts) != 1 {
-			t.Fatalf("got %d verdicts, want 1 (DESTRUCTIVE=4 is numerically <= 10): %+v", len(verdicts), verdicts)
+			t.Fatalf("got %d verdicts, want 1: %+v", len(verdicts), verdicts)
 		}
 	})
 }

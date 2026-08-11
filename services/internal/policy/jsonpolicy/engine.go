@@ -36,6 +36,21 @@
 // operator, a typo'd match key, a typo'd top-level field, at any nesting
 // depth — fail Validate; see parseDoc.
 //
+// Two operator shapes are rejected even though they are structurally
+// well-formed JSON, because Validate accepting them would let a rule read as
+// working when it is not: an empty in list ("in": []) can never match any
+// value, the same failure class as a missing match block (see
+// valueMatch.validate). at_most outside models.ActionTier's own valid range
+// is rejected for two related but distinct reasons depending on direction
+// (see tierMatch.validate): negative is the identical "can never match"
+// defect an empty in list has (no real tier is negative); above the highest
+// tier is not vacuous — it matches every tier there is, exactly as if
+// derived_tier had been omitted from match entirely — but a tenant who
+// wrote an explicit ceiling almost certainly meant it to constrain
+// something, and a schema that lets "no real ceiling" be spelled two
+// different ways (omit the key, or write a number large enough to be a
+// no-op) works against the same auditability this engine exists for.
+//
 // # Compile once, evaluate many
 //
 // Prepare parses and validates every StoredPolicy's text exactly once,

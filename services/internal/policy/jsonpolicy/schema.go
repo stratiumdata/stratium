@@ -77,12 +77,27 @@ type valueMatch struct {
 	In     []string `json:"in"`
 }
 
+// validate rejects the two shapes review found this schema could otherwise
+// carry silently: both operators set (ambiguous — which one governs?) or
+// neither (no comparison at all). A third case sits in the same "can never
+// match" family review flagged by name: "in": [] decodes to a non-nil,
+// zero-length slice — it satisfies "not both nil" and is therefore neither
+// of the first two branches — but membership in the empty set is false for
+// every possible value, so a constraint built from it can never be
+// satisfied by any input, ever. That is the identical failure shape a
+// missing match block has (parseDoc's own "match is required" check): text
+// that reads as a working rule and is actually permanently dead. Unlike a
+// missing match block, an empty "in" list is not visibly suspicious on
+// read, which is exactly why Validate — not a code reviewer skimming the
+// JSON — has to be the one that catches it.
 func (v valueMatch) validate() error {
 	switch {
 	case v.Equals != nil && v.In != nil:
 		return errors.New("equals and in are mutually exclusive; exactly one operator is required")
 	case v.Equals == nil && v.In == nil:
 		return errors.New("exactly one operator (equals or in) is required")
+	case v.In != nil && len(v.In) == 0:
+		return errors.New(`in must not be empty — an empty list can never match any value, the same "reads as working, never fires" failure a missing match block has`)
 	}
 	return nil
 }
@@ -136,9 +151,32 @@ type tierMatch struct {
 	AtMost *int `json:"at_most"`
 }
 
+// validate requires AtMost to be present and, per review, inside
+// models.ActionTier's own valid range — rejected in both directions, for
+// two different reasons (see the package doc's fuller explanation). Below
+// zero: the same "can never match" defect an empty "in" list has, since no
+// real tier is negative — permanently dead the moment it is written, not
+// merely under some inputs. Above the highest tier: not vacuous — it
+// matches every tier there is, identical to derived_tier being absent from
+// match entirely — but indistinguishable-from-no-constraint is not what an
+// author who bothered to write an explicit ceiling meant, and a schema that
+// admits two different spellings of "no real ceiling" undercuts the
+// auditability this whole engine exists for.
+//
+// models.ParseActionTier is reused rather than re-deriving the bounds
+// [0, 4] here as a second literal range check: it is the one place in the
+// codebase that already defines "what counts as a valid ActionTier," and
+// duplicating that range as a second, independent bounds check is exactly
+// the kind of drift risk this function's own existence (reuse over
+// reimplementation) is meant to avoid. Only the error is used —
+// ParseActionTier's returned tier is discarded — because validate's job
+// here is "reject or don't," not "produce a value."
 func (t tierMatch) validate() error {
 	if t.AtMost == nil {
 		return errors.New("at_most is required")
+	}
+	if _, err := models.ParseActionTier(*t.AtMost); err != nil {
+		return fmt.Errorf("at_most: %w", err)
 	}
 	return nil
 }
@@ -148,13 +186,23 @@ func (t tierMatch) validate() error {
 // models.ActionTier's ordinal order is load-bearing (see that type's own
 // doc comment), and string comparison is lexicographic, which disagrees
 // with numeric order for any pair spanning a digit-count boundary ("10" <
-// "9" as strings). ActionTier's five members (0-4) never reach two digits on
-// their own, so a lexicographic mutant here would still agree with the
-// correct comparison for every real ActionTier value; TestEvaluate_
-// DerivedTierAtMost's "ceiling above the tier lattice" subtest
-// (evaluate_test.go) deliberately uses an AtMost value the schema permits
-// but no ActionTier reaches, to force the two comparisons apart rather than
-// assume in-range values alone would ever expose the bug.
+// "9" as strings).
+//
+// validate now restricts AtMost to [0, 4] (models.ParseActionTier's own
+// range), which removes the out-of-lattice value
+// (TestEvaluate_DerivedTierAtMost used to use at_most: 10) this package
+// previously relied on to force a lexicographic-vs-numeric mutant to
+// disagree with the correct comparison: every value either side of <= can
+// now take is a single decimal digit (0-4), and single-digit lexicographic
+// order is numeric order by construction (the ASCII digits '0'-'9' are
+// ordered the same as their values) — no pair drawn from that range can
+// ever expose a string-comparison bug through Evaluate. TestTierMatch_
+// MatchesComparesNumerically (schema_test.go) pins this method's own
+// contract directly instead, constructing a tierMatch whose AtMost is
+// outside what Validate would ever accept — deliberately, and commented
+// there as to why: it is testing this method's own arithmetic in isolation,
+// not the validated policy pipeline, and the two are allowed to diverge
+// exactly here.
 func (t tierMatch) matches(tier models.ActionTier) bool {
 	return int(tier) <= *t.AtMost
 }
