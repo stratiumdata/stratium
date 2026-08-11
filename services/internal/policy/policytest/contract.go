@@ -297,9 +297,14 @@ func testAllowDenyEffects(t *testing.T, engine policy.PolicyEngine, f Fixtures) 
 // under test to be the one this policy actually produced.
 func requireUniformVerdict(t *testing.T, engine policy.PolicyEngine, text, storedEffect string, wantEffect authz.Effect) {
 	t.Helper()
+	// ID and Name deliberately differ, the same way testVerdictProvenance's
+	// do: mutation-testing this suite found that an ID/Name mix-up survives
+	// here if the fixture happens to use the same string for both (Name
+	// silently substituted for ID still reads as "correct" when the two are
+	// equal by coincidence).
 	const wantID = "uniform-check"
 	set := mustPrepare(t, engine, []policy.StoredPolicy{
-		{ID: wantID, Name: "uniform-check", Language: engine.Language(), Text: text, Effect: storedEffect, Priority: 1, Version: 1},
+		{ID: wantID, Name: "uniform-check-display-name", Language: engine.Language(), Text: text, Effect: storedEffect, Priority: 1, Version: 1},
 	})
 
 	for _, probe := range probeInputs() {
