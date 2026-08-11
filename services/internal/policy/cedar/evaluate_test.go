@@ -3,6 +3,7 @@ package cedar
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"stratium/internal/authz"
@@ -197,3 +198,104 @@ func TestEvaluate_DerivedTierReadableFromContextDrivesForbid(t *testing.T) {
 // live in policytest.EngineContract's "priority" checks, run against every
 // engine, with the same order-independent-by-sorting comparison this test
 // used to do inline.
+
+// TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy covers the review-
+// found Critical: a policy whose `when`/`unless` condition raises a genuine
+// Cedar evaluation error (diag.Errors non-empty) must produce a deny
+// verdict naming that policy, not be silently discarded the way a true
+// non-match is. Both cases below are real Cedar evaluation errors, not
+// contrived Go values — confirmed against this exact cedar-go release
+// before writing this test: each policy parses and prepares cleanly (the
+// error is a property of the request, not the text) and Cedar's own
+// Diagnostic reports zero Reasons and exactly one Error for each.
+func TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy(t *testing.T) {
+	// derived_tier is mapped as a Cedar Long (see request.go); comparing it
+	// to a string literal is a type error only Cedar's evaluator can catch,
+	// once it actually walks the expression against a request.
+	const typeErrorText = `forbid(principal, action, resource) when { context.derived_tier > "2" };`
+	// context has no "nope" field (see buildRequest) — Cedar records raise
+	// an evaluation error for an absent attribute, unlike Rego's
+	// undefined-on-missing-key semantics.
+	const missingAttrText = `forbid(principal, action, resource) when { context.nope == "x" };`
+
+	anyInput := policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}, DerivedTier: models.ActionTierDestructive}
+
+	t.Run("type error denies and names the policy", func(t *testing.T) {
+		const wantID = "type-error-policy"
+		set := prepare(t, []policy.StoredPolicy{{ID: wantID, Name: "bad-comparison", Text: typeErrorText}})
+
+		verdicts, err := set.Evaluate(context.Background(), anyInput)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		if len(verdicts) != 1 {
+			t.Fatalf("got %d verdicts, want exactly 1 (a deny): %+v", len(verdicts), verdicts)
+		}
+		v := verdicts[0]
+		if v.Effect != authz.EffectDeny {
+			t.Errorf("Effect = %v, want EffectDeny — an evaluation failure must deny, not be silently dropped", v.Effect)
+		}
+		if v.PolicyID != wantID {
+			t.Errorf("PolicyID = %q, want %q", v.PolicyID, wantID)
+		}
+		// The Reason must carry Cedar's own message, not a generic string —
+		// otherwise an operator cannot tell this apart from any other deny.
+		if !strings.Contains(v.Reason, "type error") || !strings.Contains(v.Reason, "expected comparable value") {
+			t.Errorf("Reason does not carry cedar's underlying error message: %q", v.Reason)
+		}
+	})
+
+	t.Run("missing attribute denies and names the policy", func(t *testing.T) {
+		const wantID = "missing-attr-policy"
+		set := prepare(t, []policy.StoredPolicy{{ID: wantID, Name: "bad-attribute", Text: missingAttrText}})
+
+		verdicts, err := set.Evaluate(context.Background(), anyInput)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		if len(verdicts) != 1 {
+			t.Fatalf("got %d verdicts, want exactly 1 (a deny): %+v", len(verdicts), verdicts)
+		}
+		v := verdicts[0]
+		if v.Effect != authz.EffectDeny {
+			t.Errorf("Effect = %v, want EffectDeny — an evaluation failure must deny, not be silently dropped", v.Effect)
+		}
+		if v.PolicyID != wantID {
+			t.Errorf("PolicyID = %q, want %q", v.PolicyID, wantID)
+		}
+		if !strings.Contains(v.Reason, "record does not have the attribute") || !strings.Contains(v.Reason, "nope") {
+			t.Errorf("Reason does not carry cedar's underlying error message: %q", v.Reason)
+		}
+	})
+
+	// One broken policy must not suppress a healthy neighbor's verdict —
+	// the same "does not blame/silence the neighbor" property this
+	// package's own malformed-policy tests already require of Prepare,
+	// checked here for Evaluate instead.
+	t.Run("a healthy policy alongside the broken one still produces its own verdict", func(t *testing.T) {
+		const brokenID, healthyID = "broken-neighbor", "healthy-neighbor"
+		set := prepare(t, []policy.StoredPolicy{
+			{ID: brokenID, Name: "bad-attribute", Text: missingAttrText},
+			{ID: healthyID, Name: "always-permit", Text: "permit(principal, action, resource);"},
+		})
+
+		verdicts, err := set.Evaluate(context.Background(), anyInput)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		if len(verdicts) != 2 {
+			t.Fatalf("got %d verdicts, want 2 (one deny for the broken policy, one allow for the healthy one): %+v", len(verdicts), verdicts)
+		}
+
+		byID := make(map[string]authz.PolicyVerdict, len(verdicts))
+		for _, v := range verdicts {
+			byID[v.PolicyID] = v
+		}
+		if v, ok := byID[brokenID]; !ok || v.Effect != authz.EffectDeny {
+			t.Errorf("broken policy verdict = %+v, ok=%v, want a present EffectDeny verdict", v, ok)
+		}
+		if v, ok := byID[healthyID]; !ok || v.Effect != authz.EffectAllow {
+			t.Errorf("healthy policy verdict = %+v, ok=%v, want a present EffectAllow verdict — the broken policy must not have suppressed it", v, ok)
+		}
+	})
+}

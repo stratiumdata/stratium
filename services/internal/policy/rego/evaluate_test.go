@@ -3,6 +3,7 @@ package rego
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"stratium/internal/authz"
@@ -297,4 +298,125 @@ deny := true`},
 	if verdicts[0].Effect != authz.EffectDeny {
 		t.Fatalf("Effect = %v, want EffectDeny (a policy asserting both allow and deny must resolve to deny)", verdicts[0].Effect)
 	}
+}
+
+// conflictingDenyText defines `deny` twice: true if derived_tier is above
+// the tier-2 line, false if the agent is CERTIFIED. Both bodies can hold at
+// once — a tenant authoring bug, not a syntax error — and OPA can only
+// detect that a specific request triggers it once the real values are
+// known, at Eval time (confirmed against this exact OPA release before
+// writing this test: the module compiles cleanly via PrepareForEval; only
+// Eval, given a request where both conditions hold, returns a non-nil
+// *topdown.Error, "eval_conflict_error: complete rules must not produce
+// multiple outputs").
+const conflictingDenyText = `package stratium.policy
+
+deny := true if { input.derived_tier > 2 }
+deny := false if { input.agent.trust_tier == "CERTIFIED" }`
+
+// TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy covers the review-
+// found Critical: a policy that fails to evaluate for a given request (a
+// genuine Eval error, not merely "no rule fired") must produce a deny
+// verdict naming that policy, not be silently discarded via `continue` the
+// way this method used to treat every Eval error, indistinguishably from a
+// true non-match.
+func TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy(t *testing.T) {
+	// Both deny bodies hold: derived_tier (4, Destructive) is above 2, and
+	// the agent is CERTIFIED — the conflict conflictingDenyText documents.
+	conflicting := policy.EvaluationInput{
+		DerivedTier: models.ActionTierDestructive,
+		Agent:       authz.AgentInfo{TrustTier: models.TrustTierCertified},
+	}
+
+	t.Run("conflicting rule bodies deny and name the policy", func(t *testing.T) {
+		const wantID = "conflict-policy"
+		set := prepare(t, []policy.StoredPolicy{{ID: wantID, Name: "self-conflicting", Text: conflictingDenyText}})
+
+		verdicts, err := set.Evaluate(context.Background(), conflicting)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		if len(verdicts) != 1 {
+			t.Fatalf("got %d verdicts, want exactly 1 (a deny): %+v", len(verdicts), verdicts)
+		}
+		v := verdicts[0]
+		if v.Effect != authz.EffectDeny {
+			t.Errorf("Effect = %v, want EffectDeny — an evaluation failure must deny, not be silently dropped", v.Effect)
+		}
+		if v.PolicyID != wantID {
+			t.Errorf("PolicyID = %q, want %q", v.PolicyID, wantID)
+		}
+		// The Reason must carry OPA's own message, not a generic string —
+		// otherwise an operator cannot tell this apart from any other deny.
+		if !strings.Contains(v.Reason, "eval_conflict_error") || !strings.Contains(v.Reason, "complete rules must not produce multiple outputs") {
+			t.Errorf("Reason does not carry rego's underlying error message: %q", v.Reason)
+		}
+	})
+
+	// Positive control: the identical policy text, given a request that
+	// triggers only ONE of the two deny bodies, evaluates cleanly — proving
+	// the case above is a real, request-dependent conflict and not this
+	// policy simply always erroring.
+	t.Run("the same policy evaluates cleanly when only one body's condition holds", func(t *testing.T) {
+		set := prepare(t, []policy.StoredPolicy{{ID: "p1", Name: "self-conflicting", Text: conflictingDenyText}})
+
+		t.Run("only the tier condition holds: denies, no error", func(t *testing.T) {
+			verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
+				DerivedTier: models.ActionTierDestructive,
+				Agent:       authz.AgentInfo{TrustTier: models.TrustTierUnverified},
+			})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectDeny {
+				t.Fatalf("got %+v, want exactly one EffectDeny verdict", verdicts)
+			}
+		})
+
+		t.Run("only the trust-tier condition holds: no verdict, no error", func(t *testing.T) {
+			verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
+				DerivedTier: models.ActionTierReadOnly,
+				Agent:       authz.AgentInfo{TrustTier: models.TrustTierCertified},
+			})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if len(verdicts) != 0 {
+				t.Fatalf("got %+v, want zero verdicts (deny resolves to false, which is not a match)", verdicts)
+			}
+		})
+	})
+
+	// One broken policy must not suppress a healthy neighbor's verdict —
+	// the same "does not blame/silence the neighbor" property this
+	// package's own malformed-policy tests already require of Prepare,
+	// checked here for Evaluate instead.
+	t.Run("a healthy policy alongside the broken one still produces its own verdict", func(t *testing.T) {
+		const brokenID, healthyID = "broken-neighbor", "healthy-neighbor"
+		set := prepare(t, []policy.StoredPolicy{
+			{ID: brokenID, Name: "self-conflicting", Text: conflictingDenyText},
+			{ID: healthyID, Name: "allow-all", Text: `package stratium.policy
+
+allow := true`},
+		})
+
+		verdicts, err := set.Evaluate(context.Background(), conflicting)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		if len(verdicts) != 2 {
+			t.Fatalf("got %d verdicts, want 2 (one deny for the broken policy, one allow for the healthy one): %+v", len(verdicts), verdicts)
+		}
+
+		byID := make(map[string]authz.PolicyVerdict, len(verdicts))
+		for _, v := range verdicts {
+			byID[v.PolicyID] = v
+		}
+		if v, ok := byID[brokenID]; !ok || v.Effect != authz.EffectDeny {
+			t.Errorf("broken policy verdict = %+v, ok=%v, want a present EffectDeny verdict", v, ok)
+		}
+		if v, ok := byID[healthyID]; !ok || v.Effect != authz.EffectAllow {
+			t.Errorf("healthy policy verdict = %+v, ok=%v, want a present EffectAllow verdict — the broken policy must not have suppressed it", v, ok)
+		}
+	})
 }

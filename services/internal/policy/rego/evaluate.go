@@ -24,14 +24,14 @@ type compiledSet struct {
 var _ policy.CompiledPolicySet = compiledSet{}
 
 // Evaluate maps in onto the OPA input document (see input.go) and returns
-// one authz.PolicyVerdict per policy that matched — every policy that
-// matched, not just whichever one a combining rule would pick. The returned
-// slice is built fresh on every call (appended into a nil local, never a
-// field on compiledSet): a compiled set is shared across every concurrent
-// decision for a tenant, so a verdict slice reused or precomputed across
-// calls would let two goroutines race over the same backing array the
-// instant a caller (multiSet.Evaluate, see policy/multi.go) appended to or
-// sorted its own copy of what it got back.
+// one authz.PolicyVerdict per policy that matched or failed to evaluate —
+// every policy with something to say, not just whichever one a combining
+// rule would pick. The returned slice is built fresh on every call
+// (appended into a nil local, never a field on compiledSet): a compiled set
+// is shared across every concurrent decision for a tenant, so a verdict
+// slice reused or precomputed across calls would let two goroutines race
+// over the same backing array the instant a caller (multiSet.Evaluate, see
+// policy/multi.go) appended to or sorted its own copy of what it got back.
 func (c compiledSet) Evaluate(ctx context.Context, in policy.EvaluationInput) ([]authz.PolicyVerdict, error) {
 	input := buildInput(in)
 
@@ -39,15 +39,34 @@ func (c compiledSet) Evaluate(ctx context.Context, in policy.EvaluationInput) ([
 	for id, cp := range c.policies {
 		rs, err := cp.query.Eval(ctx, regolib.EvalInput(input))
 		if err != nil {
-			// A per-policy runtime error — e.g. a type mismatch a tenant's
-			// own rule body triggers only against this particular input —
-			// is not a match, the same way Cedar treats a per-policy
-			// evaluation error as equivalent to a non-match rather than
-			// aborting the whole set (see cedar/evaluate.go's own doc
-			// comment). One broken policy contributing nothing must not
-			// cost this tenant's other Rego policies their verdicts too;
-			// see multiSet.Evaluate's own doc comment for why the same
-			// principle applies one level up, across languages.
+			// A per-policy runtime error — e.g. two bodies of the same
+			// complete rule (deny := ... / deny := ...) that both hold for
+			// this particular request, an eval_conflict_error OPA can only
+			// detect once the real values are known, not at Prepare time —
+			// denies and names the policy, rather than being discarded as
+			// if the policy had simply not matched. This is the fix for a
+			// review-found Critical: this method used to treat any Eval
+			// error identically to "did not match" (continue), silently
+			// dropping both the denial XACML's own Indeterminate branch
+			// (xacml/evaluate.go) would have produced for the equivalent
+			// case and OPA's own error message explaining why. The
+			// project's recurring shape is a fail-closed guard placed one
+			// layer above the code that actually routes every case:
+			// multi.go's own deny-on-failure (multiSet.Evaluate,
+			// policy/multi.go) already guards a *language* erroring
+			// outright, one layer above this engine, but that guard was
+			// never reachable here because Evaluate never returned an
+			// error for a per-policy failure to trigger it. This closes
+			// the hole at the layer that does. One broken policy must
+			// still not cost this tenant's other Rego policies their
+			// verdicts, so the loop continues rather than returning early.
+			verdicts = append(verdicts, authz.PolicyVerdict{
+				Effect:   authz.EffectDeny,
+				Reason:   fmt.Sprintf("rego: policy %s (%s) failed to evaluate: %s", id, cp.name, err),
+				Source:   "rego",
+				PolicyID: id,
+				Priority: cp.priority,
+			})
 			continue
 		}
 
