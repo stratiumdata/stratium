@@ -10,9 +10,10 @@ import (
 	"stratium/internal/authz"
 )
 
-// fakeAllSource is an AllPolicySource test double, the Multi-focused sibling
-// of stubSource (configured_test.go). gotCalls counts LoadAllPolicies
-// invocations so a test can pin "one load per PrepareAll call."
+// fakeAllSource is an AllPolicySource test double — the load-everything-at-
+// once interface Multi's own source needs (see AllPolicySource's own doc
+// comment in multi.go). gotCalls counts LoadAllPolicies invocations so a
+// test can pin "one load per PrepareAll call."
 type fakeAllSource struct {
 	policies []StoredPolicy
 	err      error
@@ -27,6 +28,40 @@ func (f fakeAllSource) LoadAllPolicies(context.Context) ([]StoredPolicy, error) 
 		return nil, f.err
 	}
 	return f.policies, nil
+}
+
+// stubEngine is a PolicyEngine test double, and stubSet its CompiledPolicySet
+// — Multi's own tests need a Registry entry that returns caller-controlled
+// verdicts or errors without depending on any real engine's grammar. Both
+// used to live in configured_test.go, shared with Configured's own tests;
+// Phase 4a Task 4 deleted Configured and that file with it, but this file's
+// ~20 call sites still need the same two doubles, so they moved here rather
+// than being duplicated or left to break.
+type stubEngine struct {
+	language   string
+	prepareErr error
+	set        CompiledPolicySet
+}
+
+func (s stubEngine) Language() string { return s.language }
+
+func (s stubEngine) Prepare(_ context.Context, _ []StoredPolicy) (CompiledPolicySet, error) {
+	if s.prepareErr != nil {
+		return nil, s.prepareErr
+	}
+	return s.set, nil
+}
+
+func (stubEngine) Validate(context.Context, string) error { return nil }
+
+// stubSet is a CompiledPolicySet test double.
+type stubSet struct {
+	verdicts []authz.PolicyVerdict
+	err      error
+}
+
+func (s stubSet) Evaluate(context.Context, EvaluationInput) ([]authz.PolicyVerdict, error) {
+	return s.verdicts, s.err
 }
 
 // verdictIDs returns the PolicyIDs of vs, in order — the compact form most

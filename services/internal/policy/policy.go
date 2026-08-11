@@ -1,12 +1,20 @@
 // Package policy is the seam the policy engines plug into.
 //
-// Two implementations live here. Unconfigured always denies — the only one
-// that existed before a real engine did, still correct for a deployment with
-// no policy engine wired at all. Configured (configured.go) delegates to a
-// real PolicyEngine and can legitimately allow. There is deliberately no
-// unconditional allow-all variant, not even behind a flag: the predecessor
-// carried a development-only auth fallback into production, where any OIDC
-// blip silently accepted forged tokens. A bypass outlives the reason it was
+// PrincipalPolicy is declared here; Multi (multi.go) is the only production
+// implementation — it evaluates a tenant's policies across every registered
+// language engine (cedar, rego, json, xacml). Two earlier implementations
+// used to live in this file and in configured.go: Unconfigured, which always
+// denied, for a deployment with no policy engine wired at all; and
+// Configured, which delegated to exactly one PolicyEngine. Phase 4a Task 4
+// deleted both once Multi's Registry subsumed them — a Registry with one
+// entry behaves identically to what Configured did, and an empty Registry
+// denies exactly as Unconfigured did — and because Configured was worse than
+// merely redundant: it silently evaluated only one tenant-authored language
+// and ignored the rest, no error, no verdict, no audit trace (defect D10,
+// the reason this phase exists). There is deliberately no unconditional
+// allow-all variant, not even behind a flag: a predecessor carried a
+// development-only auth fallback into production, where any OIDC blip
+// silently accepted forged tokens. A bypass outlives the reason it was
 // added. TestNoExportedConstructorAllows (policy_test.go) is the guard
 // against one being added here later.
 package policy
@@ -30,22 +38,4 @@ import (
 // into the response and the audit row.
 type PrincipalPolicy interface {
 	Evaluate(ctx context.Context, in EvaluationInput) []authz.PolicyVerdict
-}
-
-type unconfigured struct{}
-
-// Unconfigured denies every request with a legible reason. It is the only
-// implementation in Phase 1c.
-func Unconfigured() PrincipalPolicy { return unconfigured{} }
-
-func (unconfigured) Evaluate(context.Context, EvaluationInput) []authz.PolicyVerdict {
-	// Exactly one verdict, not zero. FoldVerdicts folds a nil/empty slice to
-	// deny too, but with its own generic "default deny: no policy verdict
-	// allowed" text — only a real verdict carries this specific reason
-	// through to the response and the audit row.
-	return []authz.PolicyVerdict{{
-		Effect: authz.EffectDeny,
-		Source: "none",
-		Reason: "principal: no policy engine configured (Phase 2)",
-	}}
 }

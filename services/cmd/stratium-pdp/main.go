@@ -131,12 +131,21 @@ func run(logger *slog.Logger) error {
 	// would need an explicitly empty Multi (NewMulti(repo, policy.Registry{}))
 	// instead — not reachable through STRATIUM_POLICY_LANGUAGES today, since
 	// an empty configured value is treated as unset (see config.Load's own
-	// envOr-style default), only by code choosing to build one. Unconfigured,
-	// policy.Configured, policy.PolicySource, and store.LoadPolicies all
-	// remain in the tree — nothing here calls them — left for a future task
-	// to decide whether they still earn their keep now that Multi covers the
-	// single-engine case too (a Registry with one entry behaves identically
-	// to Configured with that entry's engine).
+	// envOr-style default), only by code choosing to build one.
+	//
+	// Unconfigured, policy.Configured, policy.PolicySource, and
+	// store.LoadPolicies used to remain in the tree at this point, unused,
+	// with the decision of whether they still earned their keep left to a
+	// future task. Phase 4a Task 4 is that task, and it took the decision:
+	// all four are deleted. A Registry with one entry behaves identically to
+	// Configured with that entry's engine, so Configured was redundant with
+	// Multi even before considering that it was also worse than merely
+	// unused — Configured(source, cedar.New()) loaded exactly one language
+	// and silently ignored every policy a tenant wrote in any other, no
+	// error, no verdict, no audit trace, which is defect D10 itself, the
+	// defect this whole phase exists to eliminate. Keeping a redundant path
+	// shaped exactly like the bug around, on the theory that it might still
+	// "earn its keep," kept that bug wireable.
 	//
 	// repo satisfies both Store (pdpgrpc's own dependency interface) and
 	// policy.AllPolicySource structurally, so it needs no adapter to serve

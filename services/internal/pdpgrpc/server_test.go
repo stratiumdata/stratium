@@ -140,15 +140,16 @@ func wantCode(t *testing.T, err error, want codes.Code) {
 // reporting no policies at all — every test in this file that only exercises
 // Decide and does not care which specific deny reason comes back uses this.
 // It is the policy.Multi-shaped equivalent of the old policy.Unconfigured()
-// fixture: NewServer now needs PrepareAll (CreateDelegation's grant probes
-// need it, see server.go's own doc comment on the policy field), which a
-// bare policy.PrincipalPolicy like Unconfigured() does not expose, so a
-// Server can no longer be built directly from Unconfigured(). Unconfigured()
-// itself is unaffected and still independently tested by
-// TestUnconfigured_Denies in internal/policy — this package never asserted
-// anything about Unconfigured() that a zero-policy Multi does not equally
-// prove about Server.Decide's plumbing (deny, attributed to principal, with
-// a non-empty reason and a "none" source, exercised at
+// fixture, from back when NewServer took a bare policy.PrincipalPolicy:
+// NewServer needs PrepareAll (CreateDelegation's grant probes need it, see
+// server.go's own doc comment on the policy field), which PrincipalPolicy
+// does not expose, so a Server has been built from a concrete policy.Multi
+// ever since — and Phase 4a Task 4 deleted Unconfigured itself as
+// production-dead once Multi's empty-registry case covered the same "no
+// policy engine wired at all" ground. This package never asserted anything
+// about Unconfigured() that a zero-policy Multi does not equally prove about
+// Server.Decide's plumbing (deny, attributed to principal, with a non-empty
+// reason and a "none" source, exercised at
 // TestDecide_ProvenanceReflectsZeroPoliciesVerdict below).
 func denyAllPolicy() policy.Multi {
 	return policy.NewMulti(fakeAllPolicySource{}, policy.Registry{})
