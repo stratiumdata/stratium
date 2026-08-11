@@ -13,7 +13,12 @@ import (
 // must pass. It does not reimplement any of these checks itself — that is
 // exactly the drift policytest.EngineContract exists to prevent.
 func TestEngine_Contract(t *testing.T) {
-	policytest.EngineContract(t, New())
+	policytest.EngineContract(t, New(), policytest.Fixtures{
+		Malformed:  "permit(principal, action, resource) when { unbalanced ][",
+		WellFormed: "permit(principal, action, resource);",
+		AllowAll:   "permit(principal, action, resource);",
+		DenyAll:    "forbid(principal, action, resource);",
+	})
 }
 
 func TestPrepare_MalformedPolicyNamesTheOffender(t *testing.T) {

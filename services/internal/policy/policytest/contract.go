@@ -22,20 +22,70 @@ import (
 	"stratium/internal/policy"
 )
 
+// Fixtures supplies the language-specific policy text EngineContract needs.
+// Every field is required; a zero value is a programming error, not a skip.
+type Fixtures struct {
+	// Malformed must fail Validate and Prepare.
+	Malformed string
+	// WellFormed must pass Validate. It is the positive control without which
+	// an always-erroring Validate would satisfy Malformed too.
+	WellFormed string
+	// AllowAll and DenyAll must each match every input and carry their
+	// respective effects. The concurrency check needs two policies that both
+	// always match, so that a set of two always yields exactly two verdicts.
+	AllowAll string
+	DenyAll  string
+}
+
 // EngineContract is the reusable conformance suite every PolicyEngine
-// implementation must pass. It exercises the three properties a later engine
-// will be judged against:
+// implementation must pass. Cedar (internal/policy/cedar) and every engine
+// after it call this same function against their own PolicyEngine and their
+// own Fixtures, rather than each inventing its own version of these checks —
+// spec defect D9 was this suite's fixtures being hardcoded Cedar syntax, so
+// no other language could ever have passed it. A contract only one
+// implementation can satisfy has never been tested as a contract.
+//
+// It exercises:
 //
 //  1. Prepare on a nil or empty policy list succeeds and evaluates to zero
 //     verdicts — no policies is not an error.
-//  2. A prepared CompiledPolicySet is safe for concurrent Evaluate calls (run
+//  2. Validate rejects Fixtures.Malformed and accepts Fixtures.WellFormed.
+//  3. A prepared CompiledPolicySet is safe for concurrent Evaluate calls (run
 //     this package under -race; that is what actually checks it).
-//  3. Validate rejects malformed policy text.
-//
-// Task 4's Cedar engine, and the further engines after it, call this same
-// function against their own PolicyEngine rather than each inventing their
-// own version of these checks.
-func EngineContract(t *testing.T, engine policy.PolicyEngine) {
+func EngineContract(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+	requireFixtures(t, f)
+
+	testPrepareWithNoPolicies(t, engine)
+	testValidate(t, engine, f)
+	testConcurrentEvaluate(t, engine, f)
+}
+
+// requireFixtures fails fast on an incomplete Fixtures value. Every field
+// backs a distinct property below; leaving one blank would silently
+// exercise an engine with the empty string as policy text instead of
+// failing loudly at the call site that forgot to set it — a wrong-for-the-
+// wrong-reason pass (or failure) either way.
+func requireFixtures(t *testing.T, f Fixtures) {
+	t.Helper()
+	for _, field := range []struct{ name, value string }{
+		{"Malformed", f.Malformed},
+		{"WellFormed", f.WellFormed},
+		{"AllowAll", f.AllowAll},
+		{"DenyAll", f.DenyAll},
+	} {
+		if field.value == "" {
+			t.Fatalf("policytest.Fixtures.%s is empty — every field is required (see Fixtures' doc comment), not optional", field.name)
+		}
+	}
+}
+
+// testPrepareWithNoPolicies checks that a nil or empty policy list is a
+// valid, zero-verdict input rather than an error — a tenant who has not
+// authored any policies yet must not be indistinguishable from a broken
+// engine.
+func testPrepareWithNoPolicies(t *testing.T, engine policy.PolicyEngine) {
+	t.Helper()
 	ctx := context.Background()
 
 	t.Run("prepare with no policies evaluates to zero verdicts, not an error", func(t *testing.T) {
@@ -65,6 +115,14 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine) {
 			})
 		}
 	})
+}
+
+// testValidate checks Validate's two-sided contract using Fixtures.Malformed
+// and Fixtures.WellFormed: reject text that cannot be prepared, accept text
+// that can.
+func testValidate(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+	ctx := context.Background()
 
 	t.Run("validate", func(t *testing.T) {
 		// Validate takes only text — no StoredPolicy, no store handle — so
@@ -72,8 +130,7 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine) {
 		// beyond the signature needs asserting for the "without persisting"
 		// half of the contract.
 		t.Run("rejects malformed text", func(t *testing.T) {
-			const malformed = "permit(principal, action, resource) when { unbalanced ]["
-			if err := engine.Validate(ctx, malformed); err == nil {
+			if err := engine.Validate(ctx, f.Malformed); err == nil {
 				t.Fatal("Validate accepted malformed text, want an error")
 			}
 		})
@@ -81,17 +138,27 @@ func EngineContract(t *testing.T, engine policy.PolicyEngine) {
 		t.Run("accepts well-formed text", func(t *testing.T) {
 			// A positive control: without this, a Validate that always errors
 			// would also pass the "rejects malformed text" case above.
-			const wellFormed = "permit(principal, action, resource);"
-			if err := engine.Validate(ctx, wellFormed); err != nil {
+			if err := engine.Validate(ctx, f.WellFormed); err != nil {
 				t.Fatalf("Validate rejected well-formed text: %v", err)
 			}
 		})
 	})
+}
+
+// testConcurrentEvaluate proves a prepared set is safe under concurrent
+// Evaluate calls — the property policy.CompiledPolicySet's doc comment
+// requires, because one prepared set serves every concurrent decision for a
+// tenant. AllowAll and DenyAll are combined so a correct engine always
+// returns exactly two verdicts per call; this property only means something
+// run under -race (see the Makefile's `test` target).
+func testConcurrentEvaluate(t *testing.T, engine policy.PolicyEngine, f Fixtures) {
+	t.Helper()
+	ctx := context.Background()
 
 	t.Run("a prepared set is safe for concurrent evaluate", func(t *testing.T) {
 		policies := []policy.StoredPolicy{
-			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: "permit(principal, action, resource);", Effect: "allow", Priority: 1, Version: 1},
-			{ID: "p2", Name: "deny-all", Language: engine.Language(), Text: "forbid(principal, action, resource);", Effect: "deny", Priority: 2, Version: 1},
+			{ID: "p1", Name: "allow-all", Language: engine.Language(), Text: f.AllowAll, Effect: "allow", Priority: 1, Version: 1},
+			{ID: "p2", Name: "deny-all", Language: engine.Language(), Text: f.DenyAll, Effect: "deny", Priority: 2, Version: 1},
 		}
 		set, err := engine.Prepare(ctx, policies)
 		if err != nil {

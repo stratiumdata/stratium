@@ -96,5 +96,10 @@ func (f fakeCompiledSet) Evaluate(_ context.Context, _ policy.EvaluationInput) (
 }
 
 func TestFakeEngine_Contract(t *testing.T) {
-	policytest.EngineContract(t, fakeEngine{})
+	policytest.EngineContract(t, fakeEngine{}, policytest.Fixtures{
+		Malformed:  "fake: (unbalanced",
+		WellFormed: "fake: well-formed",
+		AllowAll:   "fake: allow-all",
+		DenyAll:    "fake: deny-all",
+	})
 }
