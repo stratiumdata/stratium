@@ -22,7 +22,6 @@ func TestEvaluationInput_CarriesEveryDimension(t *testing.T) {
 		Action:      authz.Action{Tool: "Bash", Verb: "read"},
 		DerivedTier: models.ActionTierReadOnly,
 		Resource:    map[string]string{"path": "/tmp/x"},
-		Environment: map[string]string{"ip": "10.0.0.1"},
 		Agent:       authz.AgentInfo{ID: agentID, TrustTier: models.TrustTierCertified},
 		Delegation: DelegationContext{
 			Depth:              2,
@@ -43,9 +42,6 @@ func TestEvaluationInput_CarriesEveryDimension(t *testing.T) {
 	}
 	if got := in.Resource["path"]; got != "/tmp/x" {
 		t.Errorf("Resource not carried: got %v", in.Resource)
-	}
-	if got := in.Environment["ip"]; got != "10.0.0.1" {
-		t.Errorf("Environment not carried: got %v", in.Environment)
 	}
 	if got := in.Agent.ID; got != agentID {
 		t.Errorf("Agent not carried: got %v", got)

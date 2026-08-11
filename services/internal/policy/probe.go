@@ -16,10 +16,9 @@ import (
 // runtime principal leg, which has the concrete resource and evaluates every
 // action anyway.
 type GrantProbe struct {
-	Principal   authz.Principal
-	Tool        string // empty when probing the tier ceiling
-	Tier        models.ActionTier
-	Environment map[string]string
+	Principal authz.Principal
+	Tool      string // empty when probing the tier ceiling
+	Tier      models.ActionTier
 }
 
 // Probe asks set whether p's principal may hold what p describes, and
@@ -39,7 +38,6 @@ func Probe(ctx context.Context, set CompiledPolicySet, p GrantProbe) (bool, erro
 		Principal:   p.Principal,
 		Action:      authz.Action{Tool: p.Tool},
 		DerivedTier: p.Tier,
-		Environment: p.Environment,
 		// Resource and Agent are deliberately left at their zero values: a
 		// probe asks what the principal may hold before any concrete
 		// resource or acting agent exists. Do not populate Resource here —

@@ -152,16 +152,13 @@
 // an open, colon-prefixed name is how "any principal attribute" /"any
 // resource attribute" (the brief's own words) becomes expressible at all.
 //
-// Two deliberate narrowings versus Cedar's and Rego's full context, both
-// for the reason jsonpolicy's own agentAttrValue/delegationAttrValue give:
-//
-//   - Only agent-trust-tier and delegation-purpose/-max-tier are wired up.
-//     Agent.Enabled, Agent.Suspended, Agent.AllowedTools, Agent.ID,
-//     Delegation.Depth, and Delegation.ClassificationCaps are not exposed.
-//     Extend resolveAttr and attributeIDKnown together (schema.go) when a
-//     concrete rule needs one of them, rather than guessing now.
-//   - EvaluationInput.Environment is not mapped, for the same reason Cedar
-//     and Rego leave it unmapped: no rule in scope needs it.
+// One deliberate narrowing versus Cedar's and Rego's full context, for the
+// reason jsonpolicy's own agentAttrValue/delegationAttrValue give: only
+// agent-trust-tier and delegation-purpose/-max-tier are wired up.
+// Agent.Enabled, Agent.Suspended, Agent.AllowedTools, Agent.ID,
+// Delegation.Depth, and Delegation.ClassificationCaps are not exposed.
+// Extend resolveAttr and attributeIDKnown together (schema.go) when a
+// concrete rule needs one of them, rather than guessing now.
 //
 // Every AttributeDesignator also carries a Category, checked against
 // categoryFor(AttributeId) (schema.go) — the access-subject category for

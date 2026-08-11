@@ -197,8 +197,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		Action:      action,
 		DerivedTier: derivedTier,
 		Resource:    resource,
-		// Environment: no wire source yet — DecideRequest carries none.
-		Agent: agent,
+		Agent:       agent,
 		Delegation: policy.DelegationContext{
 			Depth:              acting.Depth,
 			MaxActionTier:      acting.MaxActionTier,

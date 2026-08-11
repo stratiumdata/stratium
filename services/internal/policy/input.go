@@ -19,7 +19,6 @@ type EvaluationInput struct {
 	Action      authz.Action
 	DerivedTier models.ActionTier
 	Resource    map[string]string
-	Environment map[string]string
 
 	Agent      authz.AgentInfo
 	Delegation DelegationContext

@@ -99,11 +99,6 @@
 //     Cedar's own choice there: nothing in scope needs an ordinal comparison
 //     against the ceiling itself, only against derived_tier.
 //
-// EvaluationInput.Environment is not mapped, for the same reason Cedar
-// leaves it unmapped: no rule in scope needs it. Extend buildInput
-// (input.go) when a rule actually needs it, rather than guessing its shape
-// now.
-//
 // # The narrowing invariant
 //
 // Same as Cedar: a policy verdict can never widen anything.

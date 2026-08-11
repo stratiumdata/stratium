@@ -45,10 +45,6 @@
 //     walk-down probes one tier at a time and has nothing to walk against
 //     if a policy cannot tell which tier is being asked about.
 //
-// EvaluationInput.Environment is not yet mapped into the request: no rule in
-// scope needs it. Extend buildRequest (request.go) when a rule actually
-// needs it, rather than guessing its shape now.
-//
 // # The narrowing invariant
 //
 // A policy verdict can never widen anything. authz.PolicyVerdict carries
