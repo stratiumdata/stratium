@@ -287,7 +287,10 @@ func probeInputs() []probeInput {
 			Resource:    map[string]string{"id": "res-1", "classification": "restricted"},
 			Environment: map[string]string{"region": "us-east-1"},
 			Agent: authz.AgentInfo{
-				ID:           uuid.New(),
+				// A fixed UUID, not uuid.New(): every other value in this probe is
+				// a stable literal, and a fixture that differs run to run makes a
+				// failure harder to reproduce than it needs to be.
+				ID:           uuid.MustParse("a5f1c2d3-0000-4000-8000-000000000001"),
 				TrustTier:    models.TrustTierCertified,
 				Enabled:      true,
 				Suspended:    true,
