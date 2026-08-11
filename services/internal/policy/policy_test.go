@@ -58,49 +58,62 @@ var constructors = map[string]func() PrincipalPolicy{
 }
 
 // engineBackedConstructors is the guard's one deliberate, narrow exemption,
-// for exported constructors the AST scan finds that take a PolicySource
-// argument. Configured is the first: it cannot be called with zero
-// arguments — Go's own type checker enforces that a source and an engine are
-// supplied — so it cannot be a hardcoded, zero-configuration bypass the way
-// an "AllowAll()" could be. That is a structural fact TestNoExportedConstructorAllows
-// re-derives from the source itself (requiresPolicySource), not something
-// this map is trusted to claim on its own: a constructor that takes
-// arguments but none of them is a PolicySource does NOT get exempted (see
-// the test's default case) — only the specific, narrow shape "requires a
-// PolicySource" does.
+// for exported constructors the AST scan finds that take a data-loading
+// argument (see policySourceParamTypes). Configured is the first: it cannot
+// be called with zero arguments — Go's own type checker enforces that a
+// source and an engine are supplied — so it cannot be a hardcoded,
+// zero-configuration bypass the way an "AllowAll()" could be. That is a
+// structural fact TestNoExportedConstructorAllows re-derives from the source
+// itself (requiresPolicySource), not something this map is trusted to claim
+// on its own: a constructor that takes arguments but none of them is a
+// recognized data-loading type does NOT get exempted (see the test's default
+// case) — only the specific, narrow shape "requires one of those types" does.
+//
+// NewMulti is the second entry, added alongside Multi (multi.go): it takes
+// an AllPolicySource rather than a PolicySource — a different interface for
+// a different need (load every language at once, not one at a time) — so
+// recognizing it required widening requiresPolicySource's accepted type set,
+// not just adding a map entry (see policySourceParamTypes).
 //
 // Each entry here still gets the same behavioral check every zero-argument
 // constructor gets (assertNoAllow), just built from a minimal, explicitly
-// empty PolicySource rather than a genuinely zero-argument call — proving
-// that even in the most permissive-looking wiring this guard can construct,
-// the result still cannot allow without policies actually flowing through
-// it. (What a *non-empty* PolicySource can produce is the whole point of
-// Configured, exercised by configured_test.go and the Task 5 integration
-// suite instead — this guard is not the place that proves an engine's real
-// evaluation logic, only that nothing here can allow for free.)
+// empty source rather than a genuinely zero-argument call — proving that
+// even in the most permissive-looking wiring this guard can construct, the
+// result still cannot allow without policies actually flowing through it.
+// (What a *non-empty* source can produce is the whole point of Configured
+// and Multi, exercised by configured_test.go/multi_test.go and the Task 5
+// integration suite instead — this guard is not the place that proves an
+// engine's real evaluation logic, only that nothing here can allow for
+// free.)
 var engineBackedConstructors = map[string]func() PrincipalPolicy{
 	"Configured": func() PrincipalPolicy {
 		return Configured(stubSource{}, stubEngine{language: "guard-empty-policy-check"})
+	},
+	"NewMulti": func() PrincipalPolicy {
+		return NewMulti(fakeAllSource{}, Registry{})
 	},
 }
 
 // TestNoExportedConstructorAllows is the guard against a bypass being added
 // later. It does not trust the constructors/engineBackedConstructors maps
 // above as ground truth — it parses this package's own source with go/ast to
-// find every exported, top-level function that returns PrincipalPolicy, then
-// classifies each by its own declared signature:
+// find every exported, top-level function whose return type is one
+// guardedReturnTypes recognizes (PrincipalPolicy itself, or Multi — see that
+// map's own doc comment), then classifies each by its own declared
+// signature:
 //
 //   - zero parameters: must be wired into constructors, called with no
 //     arguments, and its result checked for EffectAllow. This is the strict
 //     path — the shape a hardcoded bypass would use.
-//   - takes a PolicySource parameter: must be wired into
-//     engineBackedConstructors instead. This is the guard's only exemption,
-//     and it is narrow by construction: arity alone would let a decoy
-//     parameter ("Bypass(x int)") dodge the strict path, so the exemption
-//     requires the specific type, not merely that some argument exists.
-//   - anything else (takes arguments, but none is a PolicySource): fails
-//     loudly. The guard refuses to guess at a new shape rather than silently
-//     passing it through.
+//   - takes a parameter whose type is in policySourceParamTypes (PolicySource
+//     or AllPolicySource): must be wired into engineBackedConstructors
+//     instead. This is the guard's only exemption, and it is narrow by
+//     construction: arity alone would let a decoy parameter ("Bypass(x int)")
+//     dodge the strict path, so the exemption requires one of those specific
+//     types, not merely that some argument exists.
+//   - anything else (takes arguments, but none matches
+//     policySourceParamTypes): fails loudly. The guard refuses to guess at a
+//     new shape rather than silently passing it through.
 //
 // Every verdict in a checked result is inspected, not just the first, so a
 // constructor that buries an allow behind a leading deny is caught too.
@@ -179,16 +192,34 @@ func assertNoAllow(t *testing.T, name string, verdicts []authz.PolicyVerdict) {
 	}
 }
 
-// returnsPrincipalPolicy reports whether fn's declared return type is
-// exactly PrincipalPolicy. This is the documented convention: constructors
-// in this package are written to return the interface, never a concrete
-// type, so the guard above can find them by source inspection alone.
+// guardedReturnTypes are the return types this filter recognizes as "worth
+// checking for a free allow": PrincipalPolicy itself (Configured,
+// Unconfigured — the documented convention, return the interface, never a
+// concrete type), and Multi (NewMulti), the one deliberate exception. Multi
+// returns its own concrete type instead of PrincipalPolicy specifically so
+// pdpgrpc's NewServer can reach its PrepareAll method without a type
+// assertion (see Multi's own doc comment in multi.go) — a caller holding a
+// bare PrincipalPolicy interface value cannot call a method the interface
+// doesn't declare, even when the underlying value has one. That is a real
+// need, not a precedent to generalize from: this set stays a short, explicit
+// list rather than "anything found in this package," so an unrelated
+// exported function returning some other type cannot silently slip past a
+// guard whose name promises no exported constructor allows for free. A third
+// constructor needing the same treatment extends this set the same
+// deliberate way.
+var guardedReturnTypes = map[string]bool{
+	"PrincipalPolicy": true,
+	"Multi":           true,
+}
+
+// returnsPrincipalPolicy reports whether fn's declared return type is one
+// guardedReturnTypes recognizes.
 func returnsPrincipalPolicy(fn *ast.FuncDecl) bool {
 	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
 		return false
 	}
 	ident, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
-	return ok && ident.Name == "PrincipalPolicy"
+	return ok && guardedReturnTypes[ident.Name]
 }
 
 // paramCount returns fn's declared parameter count, counting each name in a
@@ -208,20 +239,36 @@ func paramCount(fn *ast.FuncDecl) int {
 	return n
 }
 
-// requiresPolicySource reports whether fn declares a parameter of type
-// PolicySource. This is the guard's one exemption criterion (see
-// engineBackedConstructors above): a constructor that cannot compile without
-// a caller supplying something that loads real policy data cannot itself be
-// a hardcoded bypass — Go's own type checker enforces that the argument is
-// present, which this test does not need to re-verify, only rely on. A
-// parameter of any other type does not count, deliberately: an arity-only
-// check would let a decoy parameter exempt a real bypass.
+// policySourceParamTypes are the parameter types this guard accepts as proof
+// a constructor cannot be a hardcoded, zero-configuration bypass: each is an
+// interface a caller must satisfy with something that actually loads policy
+// data before the constructor will even compile. PolicySource is
+// Configured's (one language at a time); AllPolicySource is Multi's (every
+// language in one call) — a different, narrower interface because Multi's
+// need is different from Configured's, not because this exemption's own
+// logic changed. A third constructor with a third such interface extends
+// this set the same deliberate way — this does not accept "any parameter
+// with any interface type," which would let a decoy interface exempt a real
+// bypass the same way an arity-only check would.
+var policySourceParamTypes = map[string]bool{
+	"PolicySource":    true,
+	"AllPolicySource": true,
+}
+
+// requiresPolicySource reports whether fn declares a parameter whose type is
+// in policySourceParamTypes. This is the guard's one exemption criterion
+// (see engineBackedConstructors above): a constructor that cannot compile
+// without a caller supplying something that loads real policy data cannot
+// itself be a hardcoded bypass — Go's own type checker enforces that the
+// argument is present, which this test does not need to re-verify, only
+// rely on. A parameter of any other type does not count, deliberately: an
+// arity-only check would let a decoy parameter exempt a real bypass.
 func requiresPolicySource(fn *ast.FuncDecl) bool {
 	if fn.Type.Params == nil {
 		return false
 	}
 	for _, field := range fn.Type.Params.List {
-		if ident, ok := field.Type.(*ast.Ident); ok && ident.Name == "PolicySource" {
+		if ident, ok := field.Type.(*ast.Ident); ok && policySourceParamTypes[ident.Name] {
 			return true
 		}
 	}
