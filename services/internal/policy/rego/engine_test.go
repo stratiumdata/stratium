@@ -36,6 +36,23 @@ allow := true`,
 		DenyAll: `package stratium.policy
 
 deny := true`,
+		DeadForms: []policytest.DeadForm{
+			{
+				// Same fixture TestPrepare_RejectsWrongPackage and
+				// TestValidate_RejectsWrongPackage already exercise directly
+				// below — reused here, not retranscribed, so the contract-level
+				// property and this package's own regression tests can never
+				// drift out of sync with each other.
+				Name: "wrong package declaration",
+				Dead: `package stratium.oops
+
+allow := true`,
+				Live: `package stratium.policy
+
+allow := true`,
+				LiveInput: policy.EvaluationInput{},
+			},
+		},
 	})
 }
 
