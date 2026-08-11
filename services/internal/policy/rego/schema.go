@@ -25,20 +25,25 @@ import (
 // rego.Schemas()/ast.NewSchemaSet() — attached below as inputSchemaSet, wired
 // into both Prepare and Validate in engine.go. That alone is NOT sufficient:
 // confirmed empirically against this exact OPA release (github.com/open-
-// policy-agent/opa v1.19.0) that OPA's `>`, `>=`, `<`, and `<=` builtins
-// (ast.GreaterThan et al.) declare both operands as types.A ("any"),
-// independently of each other, with no unification between them — that is
-// the language deliberately implementing the total order the package doc
-// above describes, not a checker gap. A schema-typed `input.agent.trust_tier`
-// compared against a numeric literal via `>` compiles cleanly with the
-// schema attached and without it, identically. Only `=` and `==` go through a
-// different, unification-based check (ast.checkExprEq, keyed off the
-// operator name "eq") that DOES catch a schema-typed field compared against
-// the wrong literal type — so inputSchemaSet alone already closes that half
-// of the gap, verified the same way. checkComparisonTypes below is the
-// supplement for the half the schema mechanism cannot reach: a direct walk
-// for gt/gte/lt/lte calls whose two operands are both statically known, and
-// disagree.
+// policy-agent/opa v1.19.0) that OPA's `>`, `>=`, `<`, `<=`, and `!=`
+// builtins (ast.GreaterThan, ast.LessThanEq, ast.NotEqual, et al.) declare
+// both operands as types.A ("any"), independently of each other, with no
+// unification between them — that is the language deliberately implementing
+// the total order (and, for !=, the plain cross-type inequality) the package
+// doc above describes, not a checker gap. A schema-typed
+// `input.agent.trust_tier` compared against a numeric literal via `>` or
+// `!=` compiles cleanly with the schema attached and without it,
+// identically. Only `=` and `==` go through a different, unification-based
+// check (ast.checkExprEq, keyed off the operator name "eq") that DOES catch
+// a schema-typed field compared against the wrong literal type — so
+// inputSchemaSet alone already closes that half of the gap, verified the
+// same way (both = and ==, not inferred from one covering the other).
+// checkComparisonTypes below is the supplement for the half the schema
+// mechanism cannot reach: a direct walk for gt/gte/lt/lte/neq calls whose
+// two operands are both statically known, and disagree. neq was added in a
+// follow-up pass after the first cut of this file shipped without it —
+// see comparisonOperators' own doc comment for why leaving it out was
+// itself a gap, not a deliberate scope line.
 //
 // # One description, not two
 //
@@ -176,35 +181,52 @@ func newInputSchemaSet(doc map[string]any) *ast.SchemaSet {
 	return ss
 }
 
-// orderingOperators maps each ordering builtin's canonical name — what
+// comparisonOperators maps each comparison builtin's canonical name — what
 // Expr.Operator().String() returns — to the infix symbol an author actually
 // wrote, for error text a policy author recognizes. Rego compiles >, >=, <,
-// and <= to gt, gte, lt, and lte respectively; Expr.String() itself renders
+// <=, and != to gt, gte, lt, lte, and neq respectively (ast.GreaterThan et
+// al. and ast.NotEqual all declare both operands as types.A, independently
+// of each other — confirmed by reading ast/builtins.go — so all five share
+// the identical gap this file exists to close). Expr.String() itself renders
 // a parsed comparison back as "gt(input.agent.trust_tier, 2)", not infix
 // (confirmed empirically), which is why this map exists rather than reusing
 // it.
 //
-// Deliberately excludes eq/equal (=, ==): those already go through OPA's own
-// unification-based type check (see the package comment above) and adding
-// them here would just duplicate a check that already exists. Also excludes
-// neq (!=): a schema-typed field compared for inequality against the wrong
-// literal type has the identical latent gap (confirmed empirically the same
-// way) and is the same shape of bug, but it is not one of the two forms this
-// task's brief names, and unlike >/>=/</<=, != is common in legitimately
-// well-typed policies, so adding it needs its own review of what a false
-// positive would look like rather than piggybacking on this task — recorded
-// here so it is not lost, the same way the task brief itself records the
-// batched-compile question as out of scope rather than silently dropping it.
-var orderingOperators = map[string]string{
+// Deliberately excludes eq/equal (=, ==): confirmed empirically against the
+// real Prepare/Validate entry points, not inferred from one covering the
+// other — this task already found gt/lte behaving differently from ==
+// despite looking like siblings, so neq's own coverage was checked the same
+// way before it was added below, not assumed from ==. Both = and == already
+// fail PrepareForEval on a schema-typed field compared against the wrong
+// literal type (OPA's unification-based check, ast.checkExprEq, keyed off
+// the operator name "eq" — which is what "=" compiles to, and what "=="
+// compiles to as well before type checking runs); adding either name here
+// would just duplicate a check that already exists.
+//
+// neq (!=) is included, unlike an earlier, narrower cut of this map: the
+// reasoning that kept it out ("!= is common in legitimately well-typed
+// policies") is true of != in general but does not describe what
+// checkComparisonExpr below actually does. It only ever rejects a pair it
+// can PROVE disagree — both operands statically known, one from a literal,
+// one from schemaDoc, and of different JSON kinds — and leaves every
+// operand it cannot classify alone. A provably type-mismatched != is never
+// a legitimate policy: a string can never structurally equal a number, so
+// != between them is unconditionally true, the same fail-open shape as the
+// four operators above, reached through a different builtin. That
+// narrowing, not a claim that != itself is suspicious, is what makes it
+// safe to add here.
+var comparisonOperators = map[string]string{
 	"gt":  ">",
 	"gte": ">=",
 	"lt":  "<",
 	"lte": "<=",
+	"neq": "!=",
 }
 
-// checkComparisonTypes parses text and rejects the first gt/gte/lt/lte call
-// whose two operands are both statically known — one side from a literal,
-// one side from schemaDoc — to be different JSON kinds. It runs after
+// checkComparisonTypes parses text and rejects the first gt/gte/lt/lte/neq
+// call whose two operands are both statically known — one side from a
+// literal, one side from schemaDoc — to be different JSON kinds. It runs
+// after
 // checkPackage succeeds (see engine.go's Prepare and Validate): a module
 // that fails to parse, or declares the wrong package, has nothing here worth
 // checking.
@@ -239,8 +261,8 @@ func checkComparisonExpr(expr *ast.Expr) error {
 	if !expr.IsCall() {
 		return nil
 	}
-	symbol, isOrdering := orderingOperators[expr.Operator().String()]
-	if !isOrdering {
+	symbol, isComparison := comparisonOperators[expr.Operator().String()]
+	if !isComparison {
 		return nil
 	}
 	operands := expr.Operands()
@@ -254,10 +276,10 @@ func checkComparisonExpr(expr *ast.Expr) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"%s %s %s compares a %s with a %s — Rego orders values across types by a fixed rule instead of raising an error here, "+
-			"so this condition is not the type-safe comparison it looks like; mismatched-type %s/%s/%s/%s comparisons against input "+
-			"fields are rejected at authoring time",
-		operands[0], symbol, operands[1], kindA, kindB, ">", ">=", "<", "<=",
+		"%s %s %s compares a %s with a %s — Rego does not require matching types here (values of different types are ordered by a "+
+			"fixed rule for >/>=/</<=, or simply unequal for !=, never a type error), so this condition is not the type-safe comparison "+
+			"it looks like; mismatched-type >/>=/</<=/!= comparisons against input fields are rejected at authoring time",
+		operands[0], symbol, operands[1], kindA, kindB,
 	)
 }
 
