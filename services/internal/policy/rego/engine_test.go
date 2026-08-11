@@ -107,6 +107,35 @@ allow if {
 					DerivedTier: models.ActionTierInternalModify,
 				},
 			},
+			{
+				// Found in review after the first two entries above shipped:
+				// != has the identical gap (see comparisonOperators' own doc
+				// comment in schema.go) — a string can never structurally
+				// equal a number, so != between them is unconditionally true,
+				// the same unconditional-allow shape as "string field
+				// compared as an ordinal" above, reached through a different
+				// builtin. Same fixture
+				// TestPrepare_RejectsMismatchedTypeComparison and
+				// TestValidate_RejectsMismatchedTypeComparison exercise
+				// directly below. Live restates the same field with the real
+				// string vocabulary: "allow anyone whose agent is not
+				// UNVERIFIED" is a real, useful policy; the dead form's "!= 2"
+				// never was.
+				Name: "string field compared for inequality against a number",
+				Dead: `package stratium.policy
+
+allow if {
+	input.agent.trust_tier != 2
+}`,
+				Live: `package stratium.policy
+
+allow if {
+	input.agent.trust_tier != "UNVERIFIED"
+}`,
+				LiveInput: policy.EvaluationInput{
+					Agent: authz.AgentInfo{TrustTier: models.TrustTierCertified},
+				},
+			},
 		},
 	})
 }
@@ -180,13 +209,13 @@ allow := true`)
 	})
 }
 
-// mismatchedComparisonText and mismatchedOrdinalText are the same two Dead
-// fixtures policytest.EngineContract's DeadForms exercises indirectly
-// (engine_test.go's TestEngine_Contract) — reused verbatim here, not
-// retranscribed, for the identical reason TestPrepare_RejectsWrongPackage's
-// own comment gives for its wrong-package fixture: this package's own
-// regression tests and the contract-level property must never be able to
-// drift out of sync with each other.
+// mismatchedComparisonText, mismatchedOrdinalText, and mismatchedNeqText are
+// the same three Dead fixtures policytest.EngineContract's DeadForms
+// exercises indirectly (engine_test.go's TestEngine_Contract) — reused
+// verbatim here, not retranscribed, for the identical reason
+// TestPrepare_RejectsWrongPackage's own comment gives for its wrong-package
+// fixture: this package's own regression tests and the contract-level
+// property must never be able to drift out of sync with each other.
 const (
 	mismatchedComparisonText = `package stratium.policy
 
@@ -198,11 +227,20 @@ allow if {
 allow if {
 	input.derived_tier <= "2"
 }`
+	// mismatchedNeqText is comparisonOperators' follow-up entry (see
+	// schema.go): a string field compared for inequality against a number is
+	// unconditionally true, the same unconditional-allow shape as
+	// mismatchedComparisonText, reached through neq instead of gt.
+	mismatchedNeqText = `package stratium.policy
+
+allow if {
+	input.agent.trust_tier != 2
+}`
 	// mismatchedEqualityText exercises inputSchemaSet's own contribution in
 	// isolation from checkComparisonTypes: == compiles to Rego's "equal"
 	// builtin, which OPA's schema-driven type check DOES catch on its own
 	// (confirmed empirically — see schema.go's package comment), unlike
-	// gt/gte/lt/lte. Without a fixture that only the schema, and not
+	// gt/gte/lt/lte/neq. Without a fixture that only the schema, and not
 	// checkComparisonTypes, can reject, removing regolib.Schemas(...)
 	// entirely would pass every other test in this file — see
 	// TestPrepare_SchemaAloneRejectsMismatchedEquality's own comment.
@@ -249,9 +287,29 @@ func TestPrepare_RejectsMismatchedTypeComparison(t *testing.T) {
 		}
 	})
 
+	// comparisonOperators' follow-up entry (see schema.go): a string field
+	// compared for inequality against a number is unconditionally true the
+	// same way > against the wrong field is — reached through neq instead of
+	// gt. Mutation target for this follow-up round: removing "neq" from
+	// comparisonOperators fails this subtest and its Validate counterpart
+	// without touching the gt/lte subtests above, or either "still prepare/
+	// validate normally" control below.
+	t.Run("string field compared for inequality against a number (agent.trust_tier != 2) is rejected, naming the policy", func(t *testing.T) {
+		const wantID = "mismatched-neq-under-test"
+		_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
+			{ID: wantID, Name: "not-equal-ordinal", Text: mismatchedNeqText},
+		})
+		if err == nil {
+			t.Fatal("Prepare accepted input.agent.trust_tier != 2, want an error (trust_tier is a string; this compiles to an unconditional allow)")
+		}
+		if !strings.Contains(err.Error(), wantID) {
+			t.Errorf("error does not name the offending policy's ID %q: %v", wantID, err)
+		}
+	})
+
 	// Positive control: correctly-typed ordinal comparisons — same operators,
 	// same fields, agreeing types — must keep preparing normally. Without
-	// this, the two checks above would not be distinguishable from Prepare
+	// this, the checks above would not be distinguishable from Prepare
 	// rejecting every gt/gte/lt/lte comparison outright.
 	t.Run("correctly-typed comparisons still prepare normally", func(t *testing.T) {
 		_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
@@ -265,6 +323,62 @@ allow if {
 		if err != nil {
 			t.Fatalf("Prepare rejected a correctly-typed numeric comparison: %v", err)
 		}
+	})
+
+	// The over-rejection control the coordinator asked to weigh heavier than
+	// the rejection itself: != is common in legitimately well-typed
+	// policies (unlike >/>=/</<=, which rarely appear against a string
+	// field at all), so a same-kind != on the identical field the rejection
+	// subtest above uses must keep working. Without this, "reject != when
+	// the schema says string vs. number" would be indistinguishable from
+	// "reject every use of !=."
+	t.Run("correctly-typed inequality still prepares normally", func(t *testing.T) {
+		_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
+			{ID: "same-kind-neq-under-test", Name: "correct", Text: `package stratium.policy
+
+deny if {
+	input.agent.trust_tier != "CERTIFIED"
+}`},
+		})
+		if err != nil {
+			t.Fatalf("Prepare rejected a correctly-typed inequality comparison: %v", err)
+		}
+	})
+
+	// checkComparisonExpr only ever rejects a pair it can prove disagree;
+	// neither of these operands is provable — a tenant-open map key
+	// (resource has no fixed key set, see schema.go's package comment) and a
+	// local variable (checkComparisonExpr does no data-flow analysis, so a
+	// var bound from input.derived_tier is exactly as "unknown" to it as one
+	// bound from anywhere else) — so both must still prepare normally, not
+	// be treated as an unprovable kind of mismatch.
+	t.Run("inequality against an unknown operand still prepares normally", func(t *testing.T) {
+		t.Run("open tenant map key", func(t *testing.T) {
+			_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
+				{ID: "unknown-neq-resource-under-test", Name: "correct", Text: `package stratium.policy
+
+deny if {
+	input.resource.classification != "restricted"
+}`},
+			})
+			if err != nil {
+				t.Fatalf("Prepare rejected != against an open tenant-map key: %v", err)
+			}
+		})
+
+		t.Run("variable", func(t *testing.T) {
+			_, err := New().Prepare(context.Background(), []policy.StoredPolicy{
+				{ID: "unknown-neq-var-under-test", Name: "correct", Text: `package stratium.policy
+
+deny if {
+	tier := input.derived_tier
+	tier != 2
+}`},
+			})
+			if err != nil {
+				t.Fatalf("Prepare rejected != against a local variable: %v", err)
+			}
+		})
 	})
 }
 
@@ -293,6 +407,17 @@ func TestValidate_RejectsMismatchedTypeComparison(t *testing.T) {
 		}
 	})
 
+	// Mutation target for this follow-up round, the Validate-side sibling of
+	// the identically-named Prepare subtest: removing "neq" from
+	// comparisonOperators fails both without touching the gt/lte subtests
+	// above.
+	t.Run("string field compared for inequality against a number is rejected", func(t *testing.T) {
+		err := New().Validate(context.Background(), mismatchedNeqText)
+		if err == nil {
+			t.Fatal("Validate accepted input.agent.trust_tier != 2, want an error")
+		}
+	})
+
 	t.Run("correctly-typed comparisons still validate normally", func(t *testing.T) {
 		err := New().Validate(context.Background(), `package stratium.policy
 
@@ -303,6 +428,44 @@ allow if {
 		if err != nil {
 			t.Fatalf("Validate rejected a correctly-typed numeric comparison: %v", err)
 		}
+	})
+
+	// Validate-side over-rejection control — see the Prepare-side subtest's
+	// own comment for why this matters more than the rejection above.
+	t.Run("correctly-typed inequality still validates normally", func(t *testing.T) {
+		err := New().Validate(context.Background(), `package stratium.policy
+
+deny if {
+	input.agent.trust_tier != "CERTIFIED"
+}`)
+		if err != nil {
+			t.Fatalf("Validate rejected a correctly-typed inequality comparison: %v", err)
+		}
+	})
+
+	t.Run("inequality against an unknown operand still validates normally", func(t *testing.T) {
+		t.Run("open tenant map key", func(t *testing.T) {
+			err := New().Validate(context.Background(), `package stratium.policy
+
+deny if {
+	input.resource.classification != "restricted"
+}`)
+			if err != nil {
+				t.Fatalf("Validate rejected != against an open tenant-map key: %v", err)
+			}
+		})
+
+		t.Run("variable", func(t *testing.T) {
+			err := New().Validate(context.Background(), `package stratium.policy
+
+deny if {
+	tier := input.derived_tier
+	tier != 2
+}`)
+			if err != nil {
+				t.Fatalf("Validate rejected != against a local variable: %v", err)
+			}
+		})
 	})
 }
 
