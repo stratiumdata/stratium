@@ -65,7 +65,7 @@ func (c compiledSet) Evaluate(_ context.Context, in policy.EvaluationInput) ([]a
 			verdicts = append(verdicts, authz.PolicyVerdict{
 				Effect:   authz.EffectDeny,
 				Reason:   fmt.Sprintf("cedar: policy %s (%s) failed to evaluate: %s", id, m.name, joinDiagnosticErrors(diag.Errors)),
-				Source:   "cedar",
+				Source:   language,
 				PolicyID: string(id),
 				Priority: m.priority,
 			})
@@ -83,7 +83,7 @@ func (c compiledSet) Evaluate(_ context.Context, in policy.EvaluationInput) ([]a
 		verdicts = append(verdicts, authz.PolicyVerdict{
 			Effect:   effect,
 			Reason:   fmt.Sprintf("cedar: policy %s (%s) matched", id, m.name),
-			Source:   "cedar",
+			Source:   language,
 			PolicyID: string(id),
 			Priority: m.priority,
 		})

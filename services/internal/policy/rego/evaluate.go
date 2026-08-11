@@ -63,7 +63,7 @@ func (c compiledSet) Evaluate(ctx context.Context, in policy.EvaluationInput) ([
 			verdicts = append(verdicts, authz.PolicyVerdict{
 				Effect:   authz.EffectDeny,
 				Reason:   fmt.Sprintf("rego: policy %s (%s) failed to evaluate: %s", id, cp.name, err),
-				Source:   "rego",
+				Source:   language,
 				PolicyID: id,
 				Priority: cp.priority,
 			})
@@ -86,7 +86,7 @@ func (c compiledSet) Evaluate(ctx context.Context, in policy.EvaluationInput) ([
 		verdicts = append(verdicts, authz.PolicyVerdict{
 			Effect:   effect,
 			Reason:   fmt.Sprintf("rego: policy %s (%s) matched", id, cp.name),
-			Source:   "rego",
+			Source:   language,
 			PolicyID: id,
 			Priority: cp.priority,
 		})

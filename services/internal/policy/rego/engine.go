@@ -124,6 +124,14 @@ import (
 // targets the whole package document rather than the two rules separately.
 const queryPath = "data.stratium.policy"
 
+// language is the value stored in policies.language for this engine, and
+// evaluate.go's own Source for every verdict it produces — one package-level
+// const referenced by both, the same shape jsonpolicy and xacml already use,
+// so the two can never drift apart the way two separately hardcoded "rego"
+// literals could (see cedar/engine.go's own const of the same name and doc
+// comment for the full reasoning, which applies identically here).
+const language = "rego"
+
 // Engine implements policy.PolicyEngine for Rego. It holds no state: the
 // per-policy rego.PreparedEvalQuery values a Prepare call produces are
 // everything a decision needs, and they live in the returned compiledSet.
@@ -135,7 +143,7 @@ var _ policy.PolicyEngine = Engine{}
 func New() Engine { return Engine{} }
 
 // Language is the value stored in policies.language for Rego policies.
-func (Engine) Language() string { return "rego" }
+func (Engine) Language() string { return language }
 
 // Prepare compiles every policy's text into its own isolated
 // rego.PreparedEvalQuery, keyed by StoredPolicy.ID so a compile failure —
@@ -219,7 +227,7 @@ func (Engine) Validate(ctx context.Context, text string) error {
 // verdict distinguishing it from a rule that correctly never fires, ever.
 // That is spec defect D10's failure mode — a policy that cannot be
 // evaluated must deny, never be silently ignored — reappearing one layer
-// below where D10 itself was closed, and multi.go's orphanVerdict cannot
+// below where D10 itself was closed, and multi.go's orphanVerdicts cannot
 // help here: the rego engine *is* registered and Prepare *does* succeed.
 //
 // A runtime probe (compiling the text and evaluating it once against a

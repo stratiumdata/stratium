@@ -66,6 +66,19 @@ import (
 	"stratium/internal/policy"
 )
 
+// language is the value stored in policies.language for this engine, and
+// evaluate.go's own Source for every verdict it produces — one package-level
+// const referenced by both, not two separately maintained literals, so the
+// two can never drift apart. jsonpolicy and xacml already share this shape;
+// Cedar and Rego used to each hardcode "cedar"/"rego" a second time in their
+// own evaluate.go, harmless only because nothing had yet made the two
+// disagree — policytest.EngineContract's own provenance property (Source
+// must equal engine.Language()) would catch a divergence the moment one
+// literal changed without the other, but would not stop the two from being
+// wrong the same way, which one shared const removes as a possibility
+// entirely rather than merely detecting after the fact.
+const language = "cedar"
+
 // Engine implements policy.PolicyEngine for Cedar. It holds no state: the
 // cedar.PolicySet a Prepare call produces is everything a decision needs.
 type Engine struct{}
@@ -76,7 +89,7 @@ var _ policy.PolicyEngine = Engine{}
 func New() Engine { return Engine{} }
 
 // Language is the value stored in policies.language for Cedar policies.
-func (Engine) Language() string { return "cedar" }
+func (Engine) Language() string { return language }
 
 // Prepare parses every policy's text into one cedar.PolicySet, keyed by
 // StoredPolicy.ID so a parse failure — and later, every verdict Evaluate
