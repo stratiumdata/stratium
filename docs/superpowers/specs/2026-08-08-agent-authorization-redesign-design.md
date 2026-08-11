@@ -397,6 +397,47 @@ and belongs in Go. If the worst they can do is lock themselves out, it is policy
 The same monotonicity appears three times: raise-only tier overrides, child ⊆ parent on delegation,
 and policy-narrows-only.
 
+### 4.4.1 Input evidence outranks every name-keyed lookup (2026-08-10)
+
+§4.4 resolves an action's tier by tenant override, then tool catalog, then the
+built-in classifier. Phase 3b added a rule inside the built-in classifier: a
+positive destructive-or-external pattern match on **raw** input is evidence and
+is never lowered, which is what stops a lying or buggy PEP from hiding
+`rm -rf /` behind a bad extraction.
+
+Phase 3c then wired the tool catalog, which sits **above** the built-in
+classifier — and the rule silently stopped applying to every catalogued name.
+Measured after that phase:
+
+```
+Read  {"command":"rm -rf /"}   -> READ_ONLY         catalog masked the evidence
+Write {"command":"rm -rf /"}   -> INTERNAL_MODIFY   same
+Bash  {"command":"rm -rf /"}   -> DESTRUCTIVE       correct (no catalog entry)
+```
+
+Overrides, sitting above the catalog, had the same gap. Both lookups are keyed
+on a tool **name**, so a PEP could pick a benign name for a hostile call and
+in effect choose its own tier — defect **D1** by another route, in the one
+place the design says D1 cannot reach.
+
+**Ruling: the evidence rule binds `DeriveTier`, not `BuiltinTier`.** It is
+applied once at the boundary every caller routes through, above all three
+lookups, so a fourth lookup layer cannot repeat the regression. Evidence only
+ever raises: an override or catalog entry higher than the evidence stands, and
+the raise-only override rule is unaffected.
+
+Evidence reads raw input only, never `normalized_input`. A PEP willing to
+mislabel a call is equally willing to extract wrongly; raw is the field it
+cannot launder, which is the whole basis of Phase 3b's argument.
+
+**The general lesson, third instance in this project.** A security property
+enforced at one level rather than at the boundary everything routes through
+survives exactly until someone adds a level. C12's fold moved into `authz` for
+this reason; `ScopeNarrows` is called rather than reimplemented for this
+reason; this is the same failure with a lookup table instead of a function.
+
+---
+
 ### 4.3.1 A child may narrow only dimensions the parent constrains (2026-08-10)
 
 `ScopeNarrows` treated two dimensions inconsistently: a child capping a

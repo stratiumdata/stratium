@@ -1567,12 +1567,18 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      delegationGateAgentID.String(),
 			Subject:      "frank@example.com",
 			Tool:         "Read",
-			Verb:         "update", // -> ActionTierInternalModify: exactly the granted ceiling.
+			// Read is catalogued READ_ONLY (Phase 3c), so this sits UNDER the
+			// INTERNAL_MODIFY ceiling rather than exactly at it. Verb no longer
+			// reaches derivation for a catalogued tool. What this call
+			// establishes is unchanged and is all the proof below needs: the
+			// tool itself is permitted, so the denial that follows is
+			// attributable to the tier and not to the tool check.
+			Verb: "update",
 		})
 		if err != nil {
 			t.Fatalf("Decide() at the granted ceiling: error = %v, want a decision", err)
 		}
-		t.Logf("Decide() AT the granted ceiling (INTERNAL_MODIFY) -> effect=%s", atCeiling.GetEffect())
+		t.Logf("Decide() UNDER the granted ceiling (Read -> READ_ONLY) -> effect=%s", atCeiling.GetEffect())
 		if atCeiling.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
 			t.Fatalf("Decide() at the granted ceiling: effect = %v, want EFFECT_ALLOW "+
 				"(otherwise a denial above it would not prove where the boundary actually sits)", atCeiling.GetEffect())
@@ -1582,8 +1588,17 @@ func TestEndToEnd(t *testing.T) {
 			DelegationId: delegationGateResp.GetDelegationId(),
 			AgentId:      delegationGateAgentID.String(),
 			Subject:      "frank@example.com",
-			Tool:         "Read",
-			Verb:         "delete", // -> ActionTierDestructive: above the granted ceiling.
+			Tool: "Read",
+			Verb: "delete",
+			// The tier has to come from the input, not the verb: Read's catalog
+			// entry pins a catalogued tool's tier, and a verb cannot raise it.
+			// A destructive raw input can — that is the evidence rule in
+			// DeriveTier, and routing this proof through it means the same call
+			// also demonstrates that a benign tool name cannot mask a hostile
+			// payload. Read stays the tool because it is the only one proof10's
+			// clamp granted; anything else would deny at the tool check and
+			// prove nothing about the ceiling.
+			RawInput: `{"command":"rm -rf /var/data"}`,
 		})
 		if err != nil {
 			t.Fatalf("Decide() above the granted ceiling: error = %v, want a decision", err)

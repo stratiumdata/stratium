@@ -404,3 +404,88 @@ func TestCheckDeclaredTier_NoDeclarationAllowed(t *testing.T) {
 		t.Fatalf("absent declaration must be allowed, got %v", got.Effect)
 	}
 }
+
+// A catalog entry is keyed on a tool NAME; a destructive pattern match is
+// evidence about the actual input. Phase 3b ruled that raw's positive matches
+// are never lowered — "a positive pattern match is evidence; a default is not"
+// — but implemented it inside BuiltinTier, and Phase 3c then added the catalog
+// lookup ABOVE BuiltinTier in DeriveTier. The rule silently stopped applying:
+// any PEP labelling its call "Read" got READ_ONLY no matter what it sent,
+// which is exactly the lying-PEP hole Phase 3b's design argument said could
+// not exist. Overrides sit above the catalog and had the same gap.
+func TestDeriveTier_EvidenceOutranksNameKeyedLookups(t *testing.T) {
+	const rmrf = `{"command":"rm -rf /"}`
+	for _, tc := range []struct {
+		name  string
+		table TierTable
+		act   Action
+		want  models.ActionTier
+	}{
+		{
+			name:  "catalog_read_cannot_mask_destructive_raw",
+			table: TierTable{Catalog: DefaultCatalog()},
+			act:   Action{Tool: "Read", Verb: "read", RawInput: rmrf},
+			want:  models.ActionTierDestructive,
+		},
+		{
+			name:  "catalog_write_cannot_mask_destructive_raw",
+			table: TierTable{Catalog: DefaultCatalog()},
+			act:   Action{Tool: "Write", Verb: "update", RawInput: rmrf},
+			want:  models.ActionTierDestructive,
+		},
+		{
+			name:  "override_cannot_mask_destructive_raw",
+			table: TierTable{Overrides: map[string]models.ActionTier{"Read": models.ActionTierReadOnly}},
+			act:   Action{Tool: "Read", Verb: "read", RawInput: rmrf},
+			want:  models.ActionTierDestructive,
+		},
+		{
+			// The lying PEP in full: a benign tool name, a benign extraction,
+			// and a hostile raw input. Both fields the PEP controls say
+			// "harmless"; the one it cannot launder says otherwise, and wins.
+			name:  "benign_name_and_benign_extraction_cannot_hide_destructive_raw",
+			table: TierTable{Catalog: DefaultCatalog()},
+			act:   Action{Tool: "Read", Verb: "read", RawInput: rmrf, NormalizedInput: "ls"},
+			want:  models.ActionTierDestructive,
+		},
+		{
+			name:  "uncatalogued_tool_still_classified_by_input",
+			table: TierTable{Catalog: DefaultCatalog()},
+			act:   Action{Tool: "Bash", Verb: "execute", RawInput: rmrf},
+			want:  models.ActionTierDestructive,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DeriveTier(tc.table, tc.act)
+			if err != nil {
+				t.Fatalf("DeriveTier() error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("DeriveTier() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The converse, so the rule above cannot be satisfied by ignoring the catalog
+// entirely: with no destructive evidence in the input, the catalog still
+// decides, and a raise-only override still outranks it.
+func TestDeriveTier_CatalogStillDecidesWithoutEvidence(t *testing.T) {
+	tbl := TierTable{Catalog: DefaultCatalog()}
+	got, err := DeriveTier(tbl, Action{Tool: "Read", Verb: "read", RawInput: `{"file_path":"/tmp/x"}`})
+	if err != nil {
+		t.Fatalf("DeriveTier() error = %v", err)
+	}
+	if got != models.ActionTierReadOnly {
+		t.Errorf("DeriveTier() = %v, want READ_ONLY — the catalog must still decide benign input", got)
+	}
+
+	tbl.Overrides = map[string]models.ActionTier{"Read": models.ActionTierInternalModify}
+	got, err = DeriveTier(tbl, Action{Tool: "Read", Verb: "read", RawInput: `{"file_path":"/tmp/x"}`})
+	if err != nil {
+		t.Fatalf("DeriveTier() error = %v", err)
+	}
+	if got != models.ActionTierInternalModify {
+		t.Errorf("DeriveTier() = %v, want INTERNAL_MODIFY — a raise-only override still outranks the catalog", got)
+	}
+}

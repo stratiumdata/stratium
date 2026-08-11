@@ -148,15 +148,17 @@ var verbTiers = map[string]models.ActionTier{
 // and docs/superpowers/plans/2026-08-10-phase-3b-normalized-input.md.
 func BuiltinTier(a Action) (models.ActionTier, bool) {
 	var rawTier models.ActionTier
-	var rawMatched, haveRaw bool
+	var haveRaw bool
 	if a.RawInput != "" {
-		rawTier, rawMatched = classifyInput(a.RawInput)
+		rawTier, _ = classifyInput(a.RawInput)
 		haveRaw = true
 	}
 
 	// Step 1: a positive destructive-or-external match on raw is final.
-	if rawMatched && (rawTier == models.ActionTierDestructive || rawTier == models.ActionTierExternalComms) {
-		return rawTier, true
+	// DeriveTier applies this same rule above every name-keyed lookup; it is
+	// kept here too because BuiltinTier is exported and callable directly.
+	if evidence, ok := destructiveEvidence(a); ok {
+		return evidence, true
 	}
 
 	// Step 2: a normalized input that positively classifies wins.
@@ -217,7 +219,61 @@ func classifyInput(s string) (tier models.ActionTier, matched bool) {
 //  1. tenant override  2. catalog entry  3. built-in  4. floor, or deny
 //
 // The caller's declared tier is never consulted here.
+// destructiveEvidence reports a positive destructive-or-external pattern match
+// on a's raw input. It is the one signal in this package derived from what the
+// caller actually sent rather than from what it named the call, which is why
+// no name-keyed lookup may lower it.
+//
+// Raw only, never NormalizedInput: normalization is the PEP's extraction, and
+// a PEP willing to mislabel a call is equally willing to extract wrongly. Raw
+// is the field a bad PEP cannot launder, which is the entire basis of Phase
+// 3b's design argument.
+func destructiveEvidence(a Action) (models.ActionTier, bool) {
+	if a.RawInput == "" {
+		return models.ActionTierReasoning, false
+	}
+	tier, matched := classifyInput(a.RawInput)
+	if !matched {
+		return models.ActionTierReasoning, false
+	}
+	if tier != models.ActionTierDestructive && tier != models.ActionTierExternalComms {
+		return models.ActionTierReasoning, false
+	}
+	return tier, true
+}
+
+// DeriveTier resolves an action's sensitivity tier server-side (spec §4.4):
+// tenant overrides, then the tool catalog, then the built-in classifier.
+//
+// Above all three sits one rule: a positive destructive-or-external match on
+// raw input is evidence and is never lowered. Overrides and catalog entries
+// are keyed on a tool NAME, so without this a PEP could pick a benign name for
+// a hostile call and choose its own tier — spec defect D1 by another route.
+// Phase 3b established the rule but implemented it inside BuiltinTier; Phase
+// 3c then added the catalog lookup above BuiltinTier and the rule silently
+// stopped applying to every catalogued name. It lives here now, at the single
+// boundary every caller routes through, so a fourth lookup layer cannot repeat
+// that.
+//
+// Evidence only ever raises. A tenant override or catalog entry HIGHER than
+// the evidence stands unchanged, which keeps the raise-only override rule
+// (ValidateOverride) intact.
 func DeriveTier(t TierTable, a Action) (models.ActionTier, error) {
+	tier, err := deriveTierByName(t, a)
+	if err != nil {
+		// DenyUnknown already denies; evidence cannot make that safer.
+		return tier, err
+	}
+	if evidence, ok := destructiveEvidence(a); ok && evidence > tier {
+		return evidence, nil
+	}
+	return tier, nil
+}
+
+// deriveTierByName is DeriveTier's name-keyed resolution, without the evidence
+// rule. It exists only so DeriveTier can apply that rule to every branch at
+// once instead of at each return.
+func deriveTierByName(t TierTable, a Action) (models.ActionTier, error) {
 	keys := lookupKeys(a)
 	for _, k := range keys {
 		if tier, ok := t.Overrides[k]; ok {
