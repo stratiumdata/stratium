@@ -451,6 +451,36 @@ func TestMulti_EvaluateFailureDeniesNamingLanguageWithoutSuppressingOthers(t *te
 	}
 }
 
+// TestMultiSet_NilSetWithNoCachedVerdictsDeniesRatherThanPanics defends
+// languageEntry's own documented invariant ("exactly one of set/verdicts is
+// populated") as a runtime guard, not just an assumption PrepareAll happens
+// to keep: languageEntry is a plain struct, not a compile-time-enforced
+// tagged union, so nothing stops both fields being left unpopulated.
+// PrepareAll never produces that shape — every entry it builds comes from a
+// language with at least one policy, given either a set or a verdict — so
+// this test builds a multiSet directly, bypassing PrepareAll entirely, the
+// same way a future refactor bug could reach this state by accident.
+// Evaluate must deny, naming the language, rather than panicking on
+// e.set.Evaluate with a nil CompiledPolicySet interface value.
+func TestMultiSet_NilSetWithNoCachedVerdictsDeniesRatherThanPanics(t *testing.T) {
+	set := multiSet{entries: []languageEntry{{language: "cedar"}}}
+
+	verdicts, err := set.Evaluate(context.Background(), EvaluationInput{})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v, want nil (the failure is folded into a verdict, not returned — see multiSet.Evaluate's own doc comment)", err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("Evaluate() = %d verdicts, want exactly 1: %+v", len(verdicts), verdicts)
+	}
+	v := verdicts[0]
+	if v.Effect != authz.EffectDeny {
+		t.Errorf("Effect = %v, want EffectDeny (fail closed on an invariant violation, the same posture every other failure path in this method takes)", v.Effect)
+	}
+	if v.Source != "cedar" {
+		t.Errorf("Source = %q, want %q (the verdict must name which language's entry was malformed)", v.Source, "cedar")
+	}
+}
+
 // TestMulti_PrepareAllTotalLoadFailureReturnsNilSetAndError is the one case
 // where PrepareAll's returned set is unusable: the tenant's policies could
 // not even be loaded, so nothing is known about what languages exist.

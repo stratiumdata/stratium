@@ -211,7 +211,11 @@ func (m Multi) Evaluate(ctx context.Context, in EvaluationInput) []authz.PolicyV
 // decision input can determine what it says; verdicts for a language whose
 // contribution is already fully known before any EvaluationInput exists (no
 // registered engine, or Prepare itself failed) and would not change by
-// recomputing it per call.
+// recomputing it per call. This is PrepareAll's invariant to keep, not a
+// compile-time guarantee — nothing about this struct stops both fields
+// being left unpopulated — so multiSet.Evaluate checks for a nil set rather
+// than trusting it, the same defensive posture Multi.Evaluate already takes
+// on multiSet.Evaluate's own (otherwise-always-nil) error return.
 //
 // verdicts holds exactly one element for an orphaned or prepare-failed
 // language, never one per unevaluated policy — that per-policy split was
@@ -296,6 +300,29 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 	for _, e := range s.entries {
 		if len(e.verdicts) > 0 {
 			verdicts = append(verdicts, e.verdicts...)
+			continue
+		}
+
+		if e.set == nil {
+			// Unreachable through PrepareAll today: languageEntry's own doc
+			// comment documents "exactly one of set/verdicts is populated" as
+			// an invariant PrepareAll always holds, and every entry in
+			// s.entries came from a language with at least one policy (see
+			// PrepareAll's own byLanguage grouping). But languageEntry is a
+			// plain struct with two independently-settable fields, not a
+			// compile-time-enforced tagged union — nothing stops a future
+			// caller (a PrepareAll refactor, a test building a multiSet
+			// directly, as this guard's own test does) from constructing one
+			// with neither populated. e.set.Evaluate on a nil
+			// CompiledPolicySet interface value would panic; failing closed
+			// here instead is the same posture every other failure path in
+			// this method already takes, deny-overrides and default-deny
+			// downstream to a caller regardless.
+			verdicts = append(verdicts, authz.PolicyVerdict{
+				Effect: authz.EffectDeny,
+				Source: e.language,
+				Reason: fmt.Sprintf("principal: %s has neither a compiled policy set nor a cached verdict — internal invariant violation, not a request-dependent failure", e.language),
+			})
 			continue
 		}
 
