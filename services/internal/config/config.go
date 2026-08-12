@@ -24,6 +24,16 @@ type Config struct {
 	MaxDepth             int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
 	DBTimeout            time.Duration // STRATIUM_DB_TIMEOUT, default 5s
 
+	// ApprovalTTL is how long a freshly created pending approval remains
+	// valid before Approval.Verify's expiry check rejects it — the value
+	// CreateApproval's expires_at is computed from. Configurable, default
+	// 24h, the same "operational tunable with a sensible default" treatment
+	// MaxDepth/DBTimeout already get above: how long an organization can
+	// reasonably expect a human to respond to an escalation varies by
+	// deployment, unlike DatabaseURL/TenantID, where guessing is unsafe at
+	// any value.
+	ApprovalTTL time.Duration // STRATIUM_APPROVAL_TTL, default 24h
+
 	// PolicyLanguages is the deployment's enabled set of policy engines —
 	// STRATIUM_POLICY_LANGUAGES, a comma-separated list, default every
 	// language this build ships (defaultPolicyLanguages below). Unlike
@@ -56,6 +66,7 @@ func Load() (Config, error) {
 		ListenAddr:      envOr("STRATIUM_LISTEN_ADDR", ":50051"),
 		MaxDepth:        5,
 		DBTimeout:       5 * time.Second,
+		ApprovalTTL:     24 * time.Hour,
 		PolicyLanguages: defaultPolicyLanguages,
 	}
 	var err error
@@ -84,6 +95,19 @@ func Load() (Config, error) {
 		if c.DBTimeout, err = time.ParseDuration(v); err != nil {
 			return c, fmt.Errorf("STRATIUM_DB_TIMEOUT: %w", err)
 		}
+	}
+	if v := os.Getenv("STRATIUM_APPROVAL_TTL"); v != "" {
+		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil {
+			return c, fmt.Errorf("STRATIUM_APPROVAL_TTL: %w", err)
+		}
+	}
+	if c.ApprovalTTL <= 0 {
+		// Fail fast rather than mint an approval that is already expired the
+		// instant it is created (Approval.Verify's expiry check is strict:
+		// now must be BEFORE expires_at) — a misconfiguration an operator
+		// would otherwise only discover as every single escalation retry
+		// mysteriously denying "expired."
+		return c, fmt.Errorf("STRATIUM_APPROVAL_TTL must be positive, got %s", c.ApprovalTTL)
 	}
 	if v := os.Getenv("STRATIUM_POLICY_LANGUAGES"); v != "" {
 		if c.PolicyLanguages, err = splitPolicyLanguages(v); err != nil {

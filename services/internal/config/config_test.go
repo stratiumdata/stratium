@@ -18,6 +18,7 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("STRATIUM_LISTEN_ADDR", "")
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "")
+	t.Setenv("STRATIUM_APPROVAL_TTL", "")
 	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "")
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "")
 }
@@ -32,6 +33,7 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_LISTEN_ADDR", ":9090")
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "8")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "30s")
+	t.Setenv("STRATIUM_APPROVAL_TTL", "48h")
 	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "postgres://migrate:pass@localhost:5432/stratium")
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "xacml,cedar")
 
@@ -56,6 +58,9 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	}
 	if got.DBTimeout != 30*time.Second {
 		t.Errorf("DBTimeout = %v", got.DBTimeout)
+	}
+	if got.ApprovalTTL != 48*time.Hour {
+		t.Errorf("ApprovalTTL = %v", got.ApprovalTTL)
 	}
 	if want := []string{"xacml", "cedar"}; !slices.Equal(got.PolicyLanguages, want) {
 		t.Errorf("PolicyLanguages = %v, want %v", got.PolicyLanguages, want)
@@ -107,6 +112,9 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if got.DBTimeout != 5*time.Second {
 		t.Errorf("DBTimeout = %v, want %v", got.DBTimeout, 5*time.Second)
+	}
+	if got.ApprovalTTL != 24*time.Hour {
+		t.Errorf("ApprovalTTL = %v, want %v", got.ApprovalTTL, 24*time.Hour)
 	}
 }
 
@@ -193,6 +201,42 @@ func TestLoad_DBTimeoutUnparseable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "STRATIUM_DB_TIMEOUT") {
 		t.Fatalf("error %q does not name the offending variable", err.Error())
+	}
+}
+
+func TestLoad_ApprovalTTLUnparseable(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_APPROVAL_TTL", "not-a-duration")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with unparseable STRATIUM_APPROVAL_TTL: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "STRATIUM_APPROVAL_TTL") {
+		t.Fatalf("error %q does not name the offending variable", err.Error())
+	}
+}
+
+// A zero or negative TTL would mint an approval that is already expired at
+// the instant CreateApproval creates it (Verify's expiry check is strict:
+// now must be BEFORE expires_at, never equal) — every escalation would then
+// deny "expired" no matter how fast the control plane responded. This must
+// fail at startup, not surface later as a mystifying, silent 100% denial
+// rate on every retry.
+func TestLoad_ApprovalTTLNotPositive(t *testing.T) {
+	for _, v := range []string{"0s", "-1h"} {
+		t.Run(v, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("STRATIUM_APPROVAL_TTL", v)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with STRATIUM_APPROVAL_TTL=%s: want error, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "STRATIUM_APPROVAL_TTL") {
+				t.Fatalf("error %q does not name the offending variable", err.Error())
+			}
+		})
 	}
 }
 
