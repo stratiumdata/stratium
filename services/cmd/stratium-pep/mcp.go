@@ -110,10 +110,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc"
@@ -153,16 +155,51 @@ type mcpConfig struct {
 // no arguments at all, so an empty list is a legitimate configuration, not a missing one;
 // splitAndTrim (session_start.go) already treats an unset or blank variable as an empty (nil)
 // slice, so there is nothing mcp-specific to add for that case.
+//
+// A command that is present but blank after trimming -- all whitespace -- passes requiredEnv's
+// v == "" check (a single space is not the empty string) but is exactly as useless as a missing
+// one: exec.Command in runMCPCmd would still hand it to LookPath, which still fails, but only once
+// cmd.Start() runs -- after this function has already reported success and runMCPCmd has already
+// dialed the PDP. Rejecting it HERE keeps "malformed configuration" (this function's job) and "a
+// real subprocess failed to launch" (cmd.Start()'s own, distinct failure path in runMCPCmd) as the
+// two separate failure modes their own error messages already claim to be, rather than letting a
+// whitespace typo masquerade as the second one.
 func loadMCPConfigFromEnv() (mcpConfig, error) {
 	var missing []string
 	cfg := mcpConfig{
 		UpstreamCommand: requiredEnv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", &missing),
+	}
+	if cfg.UpstreamCommand != "" && strings.TrimSpace(cfg.UpstreamCommand) == "" {
+		return mcpConfig{}, errors.New("STRATIUM_PEP_MCP_UPSTREAM_COMMAND must not be blank")
 	}
 	if len(missing) > 0 {
 		return mcpConfig{}, missingConfigError(missing)
 	}
 	cfg.UpstreamArgs = splitAndTrim(os.Getenv("STRATIUM_PEP_MCP_UPSTREAM_ARGS"))
 	return cfg, nil
+}
+
+// combineConfigErrors reports every non-nil error from loading this mode's two independently
+// sourced configs -- mcpConfig (the upstream process, above) and hookConfig (everything
+// authorizing a tools/call needs, loaded via loadHookConfigFromEnv in hook.go) -- in one message,
+// rather than whichever loader runMCPCmd happened to call first. Without this, an operator missing
+// required values in BOTH groups would discover the second group's gaps only after fixing the
+// first and rerunning: requiredEnv's own doc comment (config.go) rejects exactly that experience
+// for the fields within one loader's own struct ("a developer... should not have to run the binary
+// repeatedly to discover each missing value in turn"); this is the same rule, applied across the
+// two loaders that only "mcp" composes -- "hook" and "session-start" each load exactly one config,
+// so neither has ever needed this.
+func combineConfigErrors(errs ...error) error {
+	var msgs []string
+	for _, err := range errs {
+		if err != nil {
+			msgs = append(msgs, err.Error())
+		}
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(msgs, "; "))
 }
 
 // runMCPCmd wires the real upstream process from environment configuration, relays against its
@@ -175,22 +212,21 @@ func loadMCPConfigFromEnv() (mcpConfig, error) {
 // Loads TWO configs, not one -- mcpConfig for the upstream process, hookConfig (loadHookConfigFromEnv,
 // hook.go) for everything authorizing a tools/call needs -- and dials the PDP client the same way
 // runHookCmd does, with the same client passed to both the first Decide call and any escalation
-// retry. Either config failing to load denies closed here, before any subprocess is even started:
-// a proxy that started relaying with no way to reach the PDP would forward every tools/call
-// unauthorized by construction, which is a worse failure mode than simply refusing to start.
+// retry. Both loaders always run, even if the first one fails: combineConfigErrors above folds
+// whichever errors come back into one message, so an operator missing values in BOTH groups sees
+// every gap in a single run instead of fixing one, rerunning, and only then discovering the other.
+// Either config failing to load denies closed here, before any subprocess is even started: a proxy
+// that started relaying with no way to reach the PDP would forward every tools/call unauthorized
+// by construction, which is a worse failure mode than simply refusing to start.
 //
 // Every error path here writes to stderr, never stdout: stdout is the live JSON-RPC channel the
 // agent is parsing frame by frame, and a diagnostic string written there would corrupt that
 // stream rather than report a problem -- unlike hook's contract, mcp has no "structured deny on
 // stdout" channel to (mis)use for this instead.
 func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
-	cfg, err := loadMCPConfigFromEnv()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
-		return 1
-	}
-	hookCfg, err := loadHookConfigFromEnv()
-	if err != nil {
+	cfg, cfgErr := loadMCPConfigFromEnv()
+	hookCfg, hookErr := loadHookConfigFromEnv()
+	if err := combineConfigErrors(cfgErr, hookErr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
 		return 1
 	}

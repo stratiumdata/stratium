@@ -66,6 +66,23 @@ func TestLoadMCPConfigFromEnv(t *testing.T) {
 			t.Errorf("error = %q, want it to name STRATIUM_PEP_MCP_UPSTREAM_COMMAND", err.Error())
 		}
 	})
+
+	// Anchors the mutation "drop the blank-after-trim check": a command of pure whitespace is
+	// != "" (requiredEnv's own missing check would let it through) but is exactly as unusable as
+	// no command at all -- see loadMCPConfigFromEnv's own doc comment for why this is rejected
+	// HERE rather than left for cmd.Start()'s own, later, less specific failure.
+	t.Run("blank command (whitespace only) is rejected", func(t *testing.T) {
+		clearMCPEnv(t)
+		t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "   ")
+
+		_, err := loadMCPConfigFromEnv()
+		if err == nil {
+			t.Fatal("loadMCPConfigFromEnv() error = nil, want an error rejecting a blank command")
+		}
+		if !strings.Contains(err.Error(), "STRATIUM_PEP_MCP_UPSTREAM_COMMAND") {
+			t.Errorf("error = %q, want it to name STRATIUM_PEP_MCP_UPSTREAM_COMMAND", err.Error())
+		}
+	})
 }
 
 // --- runMCPCmd: config and process-wiring failures ----------------------
@@ -113,6 +130,70 @@ func TestRunMCPCmd_MissingHookConfig_ExitsOneStdoutUntouched(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "STRATIUM_PEP_PDP_ADDR") {
 		t.Errorf("stderr = %q, want it to name a missing hook-config variable (e.g. STRATIUM_PEP_PDP_ADDR)", stderr.String())
+	}
+}
+
+// Task 3's fix: before this task, loadMCPConfigFromEnv and loadHookConfigFromEnv failed fast in
+// sequence, so an operator missing values in BOTH groups learned about the second group's gaps
+// only after fixing the first and rerunning -- the two tests directly above each prove one group's
+// half of that in isolation (a valid hook config alongside a missing mcp one, and vice versa), but
+// neither, on its own, could tell "reports only the first loader's gaps" apart from "reports
+// every gap" when BOTH loaders are broken at once. This is the anchor for that specific gap: every
+// required variable is unset in both groups, and the combined message must name a representative
+// from each -- not just whichever loader runMCPCmd happened to call first. Reverting runMCPCmd to
+// its pre-Task-3 fail-fast shape (return immediately after loadMCPConfigFromEnv fails, never
+// reaching loadHookConfigFromEnv) makes the hook-variable assertions below fail, because that
+// loader is then never even called.
+func TestRunMCPCmd_BothConfigsMissing_NamesEveryMissingKeyFromBoth(t *testing.T) {
+	clearMCPEnv(t)
+	clearHookEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runMCPCmd(strings.NewReader(""), &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("runMCPCmd() = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty -- an infra error must never land on the JSON-RPC stream", stdout.String())
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "STRATIUM_PEP_MCP_UPSTREAM_COMMAND") {
+		t.Errorf("stderr = %q, want it to name the missing mcp-only variable", msg)
+	}
+	for _, hookVar := range requiredHookEnvVars {
+		if !strings.Contains(msg, hookVar) {
+			t.Errorf("stderr = %q, want it to also name the missing hook-shared variable %s -- an "+
+				"operator missing values in both groups must see every gap in one run, not just the "+
+				"first loader's", msg, hookVar)
+		}
+	}
+}
+
+// Distinguishes "config rejected at load time" from "cmd.Start failed" (the next test below): a
+// blank command must never reach exec.Command at all, so this must fail BEFORE dialing the PDP
+// too -- mustReturnWithin guards against a mutation that let this fall through to a hang rather
+// than a prompt, clean exit.
+func TestRunMCPCmd_BlankUpstreamCommand_ExitsOneWithoutStartingSubprocess(t *testing.T) {
+	clearMCPEnv(t)
+	clearHookEnv(t)
+	setAllHookEnv(t, nil)
+	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "   ")
+
+	var stdout, stderr bytes.Buffer
+	var code int
+	mustReturnWithin(t, 2*time.Second, func() {
+		code = runMCPCmd(strings.NewReader(""), &stdout, &stderr)
+	})
+
+	if code != 1 {
+		t.Fatalf("runMCPCmd() = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "STRATIUM_PEP_MCP_UPSTREAM_COMMAND") {
+		t.Errorf("stderr = %q, want it to name the blank upstream command", stderr.String())
 	}
 }
 

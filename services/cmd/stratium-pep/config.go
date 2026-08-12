@@ -1,12 +1,16 @@
-// config.go holds the small pieces hookConfig (hook.go) and
-// sessionStartConfig (session_start.go) load identically: both require
-// STRATIUM_PEP_PDP_ADDR, STRATIUM_PEP_AGENT_ID, STRATIUM_PEP_SUBJECT,
-// STRATIUM_PEP_SESSION_FILE, and STRATIUM_PEP_CONNECT_TIMEOUT, with no
-// default for any of them -- the same rule internal/config.Load uses for the
-// PDP itself: a PEP that starts against a guessed PDP address, or that waits
-// forever (or not at all) for a reply, is worse than one that refuses to
-// start, because it fails at the first tool call in a way that looks like a
-// policy denial rather than a misconfiguration.
+// config.go holds the small pieces hookConfig (hook.go), sessionStartConfig
+// (session_start.go), and mcpConfig (mcp.go) load identically: hookConfig and
+// sessionStartConfig both require STRATIUM_PEP_PDP_ADDR,
+// STRATIUM_PEP_AGENT_ID, STRATIUM_PEP_SUBJECT, STRATIUM_PEP_SESSION_FILE, and
+// STRATIUM_PEP_CONNECT_TIMEOUT; mcpConfig requires its own
+// STRATIUM_PEP_MCP_UPSTREAM_COMMAND the same way and, via a second,
+// independently loaded hookConfig value (runMCPCmd, mcp.go), the same seven
+// fields hookConfig itself requires. No default for any required value --
+// the same rule internal/config.Load uses for the PDP itself: a PEP that
+// starts against a guessed PDP address, or that waits forever (or not at
+// all) for a reply, is worse than one that refuses to start, because it
+// fails at the first tool call in a way that looks like a policy denial
+// rather than a misconfiguration.
 package main
 
 import (
