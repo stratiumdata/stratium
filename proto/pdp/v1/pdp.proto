@@ -7,6 +7,8 @@ syntax = "proto3";
 
 package stratium.pdp.v1;
 
+import "google/protobuf/timestamp.proto";
+
 option go_package = "stratium/internal/pdpgrpc;pdpgrpc";
 
 // Effect mirrors internal/authz.Effect. EFFECT_DENY is deliberately the zero
@@ -255,7 +257,47 @@ message CreateDelegationResponse {
   GrantedScope granted_scope = 2;
 }
 
+// GetApprovalRequest asks for one approval's current disposition by id.
+message GetApprovalRequest {
+  // approval_id is the id DecideResponse.approval_id returned on the
+  // original escalation. A UUID string, always required and never
+  // legitimately empty -- the same convention parent_delegation_id
+  // (CreateDelegationRequest, above) uses for a required id, rather than
+  // declared_tier/approval_id-on-DecideRequest's optional treatment: there
+  // is no "ask fresh" case here for presence-tracking to distinguish from.
+  string approval_id = 1;
+}
+
+// GetApprovalResponse is read-only by construction: calling GetApproval never
+// changes the row it names. Under E7 the PDP's serving role holds no UPDATE
+// grant on approvals at all (migrations/000012_approvals' own GRANT
+// comment), so this is enforced twice over -- once by this RPC simply never
+// issuing a write, and once by the database refusing one if it ever did.
+//
+// It carries only what a poller needs to decide whether to keep waiting:
+// status, and expires_at so a poller can recognize a row that can no longer
+// resolve. Everything else on the row (which agent, which tool, the
+// input_digest) is already known to whichever caller is polling -- it is the
+// same caller the original escalating Decide call answered -- and repeating
+// it back here would answer a question nobody asked.
+message GetApprovalResponse {
+  // status is the row's raw status column: "pending", "approved", or
+  // "denied" -- the same closed, plain-string vocabulary
+  // models.Approval.Status documents and deliberately does not promote to a
+  // typed enum (that type's own doc comment explains why: it matches this
+  // codebase's existing convention for other CHECK-constrained columns,
+  // audit_chain.decision and audit_chain.denied_leg among them).
+  string status = 1;
+
+  google.protobuf.Timestamp expires_at = 2;
+}
+
 service PDPService {
   rpc Decide(DecideRequest) returns (DecideResponse);
   rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
+
+  // GetApproval reports one approval's current status and expiry, for a PEP
+  // polling after an ESCALATE response. See GetApprovalResponse's own doc
+  // comment for why this RPC has no path to write anything.
+  rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
 }

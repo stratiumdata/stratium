@@ -27,6 +27,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	PDPService_Decide_FullMethodName           = "/stratium.pdp.v1.PDPService/Decide"
 	PDPService_CreateDelegation_FullMethodName = "/stratium.pdp.v1.PDPService/CreateDelegation"
+	PDPService_GetApproval_FullMethodName      = "/stratium.pdp.v1.PDPService/GetApproval"
 )
 
 // PDPServiceClient is the client API for PDPService service.
@@ -35,6 +36,10 @@ const (
 type PDPServiceClient interface {
 	Decide(ctx context.Context, in *DecideRequest, opts ...grpc.CallOption) (*DecideResponse, error)
 	CreateDelegation(ctx context.Context, in *CreateDelegationRequest, opts ...grpc.CallOption) (*CreateDelegationResponse, error)
+	// GetApproval reports one approval's current status and expiry, for a PEP
+	// polling after an ESCALATE response. See GetApprovalResponse's own doc
+	// comment for why this RPC has no path to write anything.
+	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 }
 
 type pDPServiceClient struct {
@@ -65,12 +70,26 @@ func (c *pDPServiceClient) CreateDelegation(ctx context.Context, in *CreateDeleg
 	return out, nil
 }
 
+func (c *pDPServiceClient) GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetApprovalResponse)
+	err := c.cc.Invoke(ctx, PDPService_GetApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PDPServiceServer is the server API for PDPService service.
 // All implementations must embed UnimplementedPDPServiceServer
 // for forward compatibility.
 type PDPServiceServer interface {
 	Decide(context.Context, *DecideRequest) (*DecideResponse, error)
 	CreateDelegation(context.Context, *CreateDelegationRequest) (*CreateDelegationResponse, error)
+	// GetApproval reports one approval's current status and expiry, for a PEP
+	// polling after an ESCALATE response. See GetApprovalResponse's own doc
+	// comment for why this RPC has no path to write anything.
+	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	mustEmbedUnimplementedPDPServiceServer()
 }
 
@@ -86,6 +105,9 @@ func (UnimplementedPDPServiceServer) Decide(context.Context, *DecideRequest) (*D
 }
 func (UnimplementedPDPServiceServer) CreateDelegation(context.Context, *CreateDelegationRequest) (*CreateDelegationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateDelegation not implemented")
+}
+func (UnimplementedPDPServiceServer) GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetApproval not implemented")
 }
 func (UnimplementedPDPServiceServer) mustEmbedUnimplementedPDPServiceServer() {}
 func (UnimplementedPDPServiceServer) testEmbeddedByValue()                    {}
@@ -144,6 +166,24 @@ func _PDPService_CreateDelegation_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PDPService_GetApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDPServiceServer).GetApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PDPService_GetApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDPServiceServer).GetApproval(ctx, req.(*GetApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PDPService_ServiceDesc is the grpc.ServiceDesc for PDPService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -158,6 +198,10 @@ var PDPService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateDelegation",
 			Handler:    _PDPService_CreateDelegation_Handler,
+		},
+		{
+			MethodName: "GetApproval",
+			Handler:    _PDPService_GetApproval_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
