@@ -168,6 +168,54 @@
 // three) for the four Stratium-specific designators, none of which
 // describe the subject, the resource, or the action itself.
 //
+// # Expressiveness limits: no negation, no ordinal comparison
+//
+// This subset has no negation and no ordinal comparison, at all — not "not
+// yet wired up," but a permanent property of the two building blocks it is
+// built from: Match is exactly one string-equal test between an
+// AttributeValue and an AttributeDesignator (see "the supported subset"
+// above), and Target/AnyOf/AllOf combine Matches only with AND (Target,
+// AllOf) and OR (AnyOf). AND and OR alone can never express NOT of a single
+// Match — negation is a non-monotone operation, and a circuit built only
+// from AND/OR gates is monotone by construction, whatever depth of
+// AnyOf/AllOf nesting it uses — so this is not a gap this subset's grammar
+// merely happens not to close, it is a limit the grammar cannot close
+// without a fourth operator this package deliberately excludes (<Condition>
+// is exactly where XACML's real function library, negation included, would
+// have entered — see "the supported subset" above for why it is out of
+// scope entirely).
+//
+// Two ordinary policy shapes fall straight out of this, both inexpressible
+// here even though every other engine in this tree writes them plainly:
+//
+//   - "deny unless purpose is X": string-equal has no negated form, so
+//     "purpose is not X" cannot be one Match, and there is no <Condition>
+//     to build one out of comparison functions either. Cedar spells this
+//     `unless { context.delegation.purpose == "X" }` in a single clause;
+//     Rego spells it `not input.delegation.purpose == "X"`; XACML has no
+//     equivalent construct at all.
+//   - A tier ceiling ("deny above tier N"): derived-tier's text is compared
+//     only with string-equal, never an ordinal function — confirmed against
+//     the real engine: an integer-greater-than document is rejected
+//     outright, by name, at Validate, the same loud rejection every other
+//     unsupported construct gets. The same gap jsonpolicy's own package doc
+//     documents for its at_most operator, and the same underlying reason: a
+//     ceiling needs an ordinal comparison, and this subset only ever
+//     compares for exact string equality. Unlike jsonpolicy's at_most,
+//     though, there is no near-miss spelling here that validates and
+//     silently means something else — an author reaching for ">" gets a
+//     named Validate rejection, not a working-looking policy that is
+//     quietly wrong. The workaround is the enumeration jsonpolicy's own doc
+//     describes for this engine: one string-equal Match per tier strictly
+//     above N (at most four — see models.ActionTier), OR'd together under a
+//     single <AnyOf>.
+//
+// Both are deliberate consequences of "string equality only" (see this
+// package's own opening paragraph), not gaps to close later: adding
+// negation or an ordinal function would mean implementing, and keeping
+// correct, a second comparison semantics beyond string-equal — exactly the
+// scope this package exists to stay small enough to fully validate.
+//
 // # Indeterminate: an unresolvable designator denies
 //
 // subject:<key> and resource:<key> (including resource-id, which is
