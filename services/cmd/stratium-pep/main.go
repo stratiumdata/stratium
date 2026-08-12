@@ -4,14 +4,19 @@
 // whatever it says.
 //
 // It is organized as subcommands, one per enforcement surface, because it
-// will grow more than one: "hook" (hook.go) today, wired to Claude Code's
-// PreToolUse hook; "mcp", "proxy", and "extauthz" are later surfaces over
-// the same PDP call. Structuring the dispatch this way now means adding one
-// of those later is a new case in dispatch, not a restructuring of this
-// binary. "session-start" (session_start.go) is not itself an enforcement
-// surface — it provisions the delegation an enforcement surface later
-// enforces, by calling CreateDelegation once at session setup and caching
-// what it returns for hook (and later mcp/proxy/extauthz) to read.
+// will grow more than one: "hook" (hook.go), wired to Claude Code's
+// PreToolUse hook, and "mcp" (mcp.go), an MCP proxy over stdio, exist today;
+// "proxy" and "extauthz" are later surfaces over the same PDP call.
+// Structuring the dispatch this way now means adding one of those later is a
+// new case in dispatch, not a restructuring of this binary. "session-start"
+// (session_start.go) is not itself an enforcement surface — it provisions
+// the delegation an enforcement surface later enforces, by calling
+// CreateDelegation once at session setup and caching what it returns for
+// hook (and mcp, and later proxy/extauthz) to read.
+//
+// "mcp" does not yet call the PDP at all — see mcp.go's package doc. It is
+// listed here as an enforcement surface because that is what it is for, not
+// because it enforces anything today.
 //
 // The property every enforcement subcommand here shares, and the only one
 // that makes this binary worth having: it classifies nothing itself. A
@@ -42,7 +47,7 @@ func main() {
 // stdin/stdout/stderr swapped for buffers.
 func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start> ...")
+		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start|mcp> ...")
 		return 1
 	}
 
@@ -51,6 +56,8 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runHookCmd(stdin, stdout)
 	case "session-start":
 		return runSessionStartCmd(stderr)
+	case "mcp":
+		return runMCPCmd(stdin, stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: unknown subcommand %q\n", args[0])
 		return 1
