@@ -397,6 +397,38 @@ and belongs in Go. If the worst they can do is lock themselves out, it is policy
 The same monotonicity appears three times: raise-only tier overrides, child ⊆ parent on delegation,
 and policy-narrows-only.
 
+### 4.1.1 The four surfaces split by trust model (2026-08-12)
+
+**A10.** A2 lists four enforcement surfaces as equally first-class, and A1 says
+each is a network client of one PDP. That is true of the decision path and
+obscures a difference in the *identity* path that determines what each surface
+can be built on.
+
+**`hook` and `mcp` are locally invoked.** The harness launches them alongside
+the agent, so they read a delegation reference out-of-band — today a session
+file written by `stratium-pep session-start`, which the agent never writes and
+does not control. The reference never crosses a boundary the policed party can
+influence.
+
+**`proxy` and `extauthz` are network intermediaries.** The request arrives *from
+the agent being policed*, so a delegation reference can only ride in a header
+that same agent sets. An agent choosing its own delegation id is an agent
+choosing its own authority — spec defect **D1** relocated, and worse than the
+original: D1 was a client asserting a tier the server re-derived anyway, whereas
+a delegation id is a bearer reference to a scope someone else was granted.
+
+**Consequence: sender-constrained tokens (A4, C24, C25) are a prerequisite for
+`proxy` and `extauthz`, not an independent later concern.** Building either on a
+bare header would ship the defect the compound decision exists to prevent. `mcp`
+has no such prerequisite and can be built on the trust model `hook` already
+uses.
+
+This does not weaken A1 or A2. All four remain first-class and all four are
+network clients of one PDP; they differ in how the *caller* is identified to the
+PEP, which A1 never addressed.
+
+---
+
 ### 4.6.1 Escalation mechanics (2026-08-12)
 
 §4.6 fixes the semantics — the root principal approves, blocking surfaces wait,
