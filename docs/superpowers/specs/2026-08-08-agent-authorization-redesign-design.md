@@ -397,6 +397,49 @@ and belongs in Go. If the worst they can do is lock themselves out, it is policy
 The same monotonicity appears three times: raise-only tier overrides, child ⊆ parent on delegation,
 and policy-narrows-only.
 
+### 4.6.1 Escalation mechanics (2026-08-12)
+
+§4.6 fixes the semantics — the root principal approves, blocking surfaces wait,
+timeout denies, extauthz degrades to deny plus a pending record, escalation
+outcomes are never cached. Four mechanics were left open and are settled here.
+
+**E6 — the PEP blocks, not the PDP.** `Decide` returns `ESCALATE` with an
+approval id immediately; the PEP polls `GetApproval` until resolved or its own
+timeout, and the agent blocks there. The PDP keeps its per-call shape: no
+goroutine or connection parked for the minutes a human takes, and a PDP restart
+cannot drop a pending escalation, because the state is a Postgres row rather
+than an in-flight RPC. The cost is a second RPC and polling traffic.
+
+**E7 — the PDP never grants an approval, it only reads one.** There is no
+`Approve` RPC. Approvals are written to the `approvals` table by the control
+plane, which already owns operator identity; the PDP loads the record and
+enforces that its approver is the chain's **root** principal (C21). This is a
+consequence of A1: the PDP authenticates no callers today, since the tenant
+comes from configuration, so an approval endpoint on it could not verify who
+was calling. An unauthenticated approve is a privilege-escalation path, not a
+feature.
+
+**E8 — pending records only; no notification transport.** The open item in §9
+stays open deliberately. Anything that wants to notify reads the table. This
+phase ships the enforcement semantics C21 and C22 test and does not commit the
+PDP to outbound messaging, which would be its first egress surface.
+
+**E9 — escalation keys off the derived tier, and the threshold lives on the
+delegation.** §4.4 already says escalation keys off the same derived tier as
+everything else. The threshold sits on the delegation beside `max_action_tier`:
+at or above it and within the ceiling, the decision escalates; above the
+ceiling it still denies, because deny-overrides.
+
+It is deliberately **not** a policy verdict. Cedar and XACML have exactly two
+effects and could never express one, so a policy-driven escalation would be
+available in Rego and JSON only — reintroducing precisely the per-engine
+capability gap Phase 4a existed to remove. Keying off the tier is
+language-independent, and it inherits `ScopeNarrows`: a child may lower the
+threshold (escalating sooner is narrower) and never raise it, under the same
+rule §4.3.1 states for every other dimension.
+
+---
+
 ### 4.4.1 Input evidence outranks every name-keyed lookup (2026-08-10)
 
 §4.4 resolves an action's tier by tenant override, then tool catalog, then the
