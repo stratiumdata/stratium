@@ -153,6 +153,21 @@ var (
 	// reach live at all, rather than a second tenant on pdpClient's PDP.
 	narrowPdpClient pdpgrpc.PDPServiceClient
 	narrowTenant    string
+
+	// resourcePdpClient and resourceTenant back
+	// TestIntegration_Live_ResourceIdentityEnforcement (Phase 7 Task 4): a
+	// third, independently configured PDP (deploy/docker/docker-compose.yml's
+	// pdp-resource service) with its own fixed tenant, touched by nothing
+	// else in this file. Neither pdpClient's tenant (TestEndToEnd's proof2
+	// needs zero cedar policies at one specific point, and its own last
+	// subtest permanently revokes audit_chain INSERT for the rest of the
+	// process) nor narrowPdpClient's (already carries a permanent
+	// unconditional cedar forbid from its one existing live test) can serve
+	// a live proof that needs a principal policy which legitimately
+	// allows — see the compose file's own comment on pdp-resource for the
+	// full reasoning.
+	resourcePdpClient pdpgrpc.PDPServiceClient
+	resourceTenant    string
 )
 
 func TestMain(m *testing.M) {
@@ -168,16 +183,22 @@ func runTestMain(m *testing.M) int {
 	configuredTenant = os.Getenv("STRATIUM_IT_TENANT_ID")
 	narrowPdpAddr := os.Getenv("STRATIUM_IT_PDP_NARROW_ADDR")
 	narrowTenant = os.Getenv("STRATIUM_IT_NARROW_TENANT_ID")
-	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" {
+	resourcePdpAddr := os.Getenv("STRATIUM_IT_PDP_RESOURCE_ADDR")
+	resourceTenant = os.Getenv("STRATIUM_IT_RESOURCE_TENANT_ID")
+	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
+		resourcePdpAddr == "" || resourceTenant == "" {
 		fmt.Fprintln(os.Stderr,
 			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
-				"STRATIUM_IT_PDP_NARROW_ADDR, and STRATIUM_IT_NARROW_TENANT_ID must all be set — "+
-				"run via `make integration`, not `go test` directly")
+				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, and "+
+				"STRATIUM_IT_RESOURCE_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
-	if configuredTenant == secondTenantID || narrowTenant == secondTenantID || narrowTenant == configuredTenant {
-		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID and STRATIUM_IT_NARROW_TENANT_ID must be distinct from "+
-			"each other and from the test's hardcoded second tenant")
+	tenants := map[string]bool{
+		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true,
+	}
+	if len(tenants) != 4 {
+		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
+			"and the test's hardcoded second tenant must all be distinct from one another")
 		return 1
 	}
 
@@ -223,6 +244,14 @@ func runTestMain(m *testing.M) int {
 	}
 	defer closeNarrowConn()
 	narrowPdpClient = narrowClient
+
+	resourceClient, closeResourceConn, err := dialAndWaitForServing(ctx, resourcePdpAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-resource: %v\n", err)
+		return 1
+	}
+	defer closeResourceConn()
+	resourcePdpClient = resourceClient
 
 	return m.Run()
 }
@@ -1334,6 +1363,250 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 		t.Errorf("audit_chain.unevaluated_policy_ids = %v, want %v — both orphaned rego policies must reach "+
 			"this column even though the decision itself is attributed to cedar", gotIDs, wantIDs)
 	}
+}
+
+// TestIntegration_Live_ResourceIdentityEnforcement is Phase 7 Task 4's Part
+// 1: the four integration proofs the task brief asks for, each a real
+// Decide() call over real gRPC against pdp-resource
+// (deploy/docker/docker-compose.yml) and its own dedicated tenant
+// (resourceTenant) — see that service's own doc comment, and the
+// resourcePdpClient/resourceTenant package vars above, for why neither
+// pdpClient's tenant nor narrowPdpClient's can serve these safely.
+//
+// One agent and one unconditional cedar permit policy
+// (`permit(principal, action, resource);`), shared by every subtest below:
+// this tenant is touched by nothing else in this file, so there is no
+// cross-subtest scoping concern an unconditional permit would create the
+// way TestEndToEnd's own subtests each scope a cedar policy to one named
+// principal. Every subtest still checks PrincipalEffect/AgentEffect
+// alongside the outcome it cares about — the same discipline
+// proof9_cedar_permit_cannot_exceed_delegation_ceiling and
+// proof12_decide_with_clamped_delegation_denies_above_granted_tier use — so
+// a DENY is attributable to the delegation leg's resource/cap check
+// specifically, never to some other leg that happened to deny first, and an
+// ALLOW is a genuine three-leg allow, not a side effect of a leg's zero
+// value.
+//
+// Tool is "Read" throughout: catalogued READ_ONLY (authz.DefaultCatalog),
+// so the derived tier never depends on parsing RawInput and
+// TrustTierUnverified is sufficient on the agent leg
+// (authz.DefaultTrustTable) — the same reasoning proof12 documents for its
+// own use of Read.
+func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
+	const subject = "resource-identity-proof@example.com"
+
+	agentID := uuid.New()
+	seedAgent(t, resourceTenant, agentID, "integration-agent-resource-identity", models.TrustTierUnverified)
+	seedPolicy(t, resourceTenant, "permit-resource-identity-proof",
+		`permit(principal, action, resource);`, "allow")
+
+	// newDelegation builds and seeds one well-formed root delegation (the
+	// same shape singleHopDelegation, above, builds — reproduced rather than
+	// reused because this test needs ClassificationCaps/ResourceConstraints
+	// as per-call parameters, which singleHopDelegation's own signature does
+	// not expose to its ~15 existing callers).
+	newDelegation := func(purpose string, caps, constraints map[string]string) *models.Delegation {
+		id := uuid.New()
+		return seedDelegation(t, &models.Delegation{
+			ID: id, TenantID: resourceTenant, UserID: "integration-test-user", AgentID: agentID,
+			ApprovedTools: []string{}, MaxActionTier: models.ActionTierInternalModify,
+			ClassificationCaps: caps, ResourceConstraints: constraints,
+			Purpose: purpose, ExpiresAt: time.Now().Add(time.Hour),
+			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+		})
+	}
+
+	decide := func(t *testing.T, delegationID uuid.UUID, resource map[string]string) *pdpgrpc.DecideResponse {
+		t.Helper()
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: delegationID.String(),
+			AgentId:      agentID.String(),
+			Subject:      subject,
+			Tool:         "Read",
+			Verb:         "read",
+			Resource:     resource,
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		return resp
+	}
+
+	// proof1Delegation is shared with proof2, below, by design: the brief
+	// asks for "the same delegation" to both permit a matching request and
+	// deny one that omits the constrained key entirely — proof2 depends on
+	// this subtest having run first, the same ordered-subtest-state idiom
+	// TestEndToEnd's own delegationGateResp uses.
+	var proof1Delegation *models.Delegation
+
+	// proof1: {project: alpha} in the request matches the delegation's own
+	// constraint and permits; {project: beta} carries the same key with a
+	// different value and denies — the exact-match rule
+	// TestDelegationLeg_AllowsResourceConstraintExactMatch and
+	// TestDelegationLeg_ResourceConstraintComparisonIsExactNotPrefix already
+	// pin at the unit level (internal/authz/delegation_test.go), proven here
+	// over real gRPC against a real running PDP.
+	t.Run("proof1_resource_constraint_matching_value_permits_mismatched_denies", func(t *testing.T) {
+		proof1Delegation = newDelegation("proof1/2: resource constraint project=alpha", nil, map[string]string{"project": "alpha"})
+
+		matching := decide(t, proof1Delegation.ID, map[string]string{"project": "alpha"})
+		t.Logf("Decide() with a matching resource constraint -> effect=%s principal=%s agent=%s delegation=%s",
+			matching.GetEffect(), matching.GetPrincipalEffect(), matching.GetAgentEffect(), matching.GetDelegationEffect())
+		if matching.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW (project=alpha matches the delegation's own constraint)", matching.GetEffect())
+		}
+		if matching.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW", matching.GetDelegationEffect())
+		}
+
+		mismatched := decide(t, proof1Delegation.ID, map[string]string{"project": "beta"})
+		t.Logf("Decide() with a mismatched resource constraint -> effect=%s denied_leg=%q reason=%q",
+			mismatched.GetEffect(), mismatched.GetDeniedLeg(), mismatched.GetReason())
+		if mismatched.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (project=beta does not match the delegation's project=alpha)",
+				mismatched.GetEffect())
+		}
+		if mismatched.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", mismatched.GetDeniedLeg(), "delegation")
+		}
+		if mismatched.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW || mismatched.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect/AgentEffect = %v/%v, want ALLOW/ALLOW (isolating the delegation leg)",
+				mismatched.GetPrincipalEffect(), mismatched.GetAgentEffect())
+		}
+		if !strings.Contains(mismatched.GetReason(), `does not match request value "beta"`) {
+			t.Errorf("Reason = %q, want it to name the mismatched value", mismatched.GetReason())
+		}
+	})
+
+	// proof2: Task 2's load-bearing rule, over the wire rather than in a
+	// unit test (TestDelegationLeg_DeniesResourceConstraintAbsentFromRequest
+	// pins it at the unit level already) — the same delegation proof1 just
+	// permitted denies a request that never mentions "project" at all, even
+	// though the request still carries some other resource identity ("id").
+	// Silently passing here would recreate, for identity, exactly the
+	// CheckCap defect this whole phase exists to fix for classification.
+	t.Run("proof2_resource_constraint_absent_key_denies", func(t *testing.T) {
+		if proof1Delegation == nil {
+			t.Fatal("proof1Delegation is nil: proof1_resource_constraint_matching_value_permits_mismatched_denies must run before this subtest")
+		}
+
+		resp := decide(t, proof1Delegation.ID, map[string]string{"id": "doc-1"}) // carries identity, but never "project"
+		t.Logf("Decide() with the constrained key entirely absent from the request -> effect=%s denied_leg=%q reason=%q",
+			resp.GetEffect(), resp.GetDeniedLeg(), resp.GetReason())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf(`Effect = %v, want EFFECT_DENY (the delegation requires "project", and this request never names it)`,
+				resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if resp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW || resp.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect/AgentEffect = %v/%v, want ALLOW/ALLOW (isolating the delegation leg)",
+				resp.GetPrincipalEffect(), resp.GetAgentEffect())
+		}
+		if !strings.Contains(resp.GetReason(), `resource constraint "project" is required but absent from the request`) {
+			t.Errorf("Reason = %q, want it to name the load-bearing rule (Task 2's own wording)", resp.GetReason())
+		}
+	})
+
+	// proof3: a classification cap denies a resource that declares none at
+	// all (R2, Task 3) — distinctly from an ordinary cap violation, in both
+	// the wire response AND the persisted audit row. Mirrors
+	// pkg/classification's own TestCheckCap_UncheckableReasonDiffersFromExceedsCapReason
+	// and internal/authz's TestDelegationLeg_DeniesConfiguredCapWhenResourceHasNoClassification,
+	// at the live-stack layer instead of the unit layer, with the audit row
+	// read back from Postgres rather than only the RPC response.
+	t.Run("proof3_classification_cap_distinguishes_uncheckable_from_exceeded", func(t *testing.T) {
+		d := newDelegation("proof3: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"}, nil)
+		before := fetchAuditChain(t, resourceTenant)
+
+		uncheckable := decide(t, d.ID, map[string]string{"id": "doc-uncheckable"}) // identity, but no classification at all
+		t.Logf("Decide() with a classification cap against an unlabelled resource -> effect=%s reason=%q",
+			uncheckable.GetEffect(), uncheckable.GetReason())
+		if uncheckable.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (an uncheckable cap must deny, not pass uncontested)", uncheckable.GetEffect())
+		}
+		if uncheckable.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", uncheckable.GetDeniedLeg(), "delegation")
+		}
+		if !strings.Contains(uncheckable.GetReason(), "cannot be evaluated") {
+			t.Errorf("Reason = %q, want it to contain %q (pkg/classification.CheckCap's uncheckable wording)",
+				uncheckable.GetReason(), "cannot be evaluated")
+		}
+
+		exceeds := decide(t, d.ID, map[string]string{"classification": "TOP-SECRET", "hierarchy": "nato"})
+		t.Logf("Decide() with a classification cap against a resource that exceeds it -> effect=%s reason=%q",
+			exceeds.GetEffect(), exceeds.GetReason())
+		if exceeds.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (TOP-SECRET exceeds a CONFIDENTIAL cap)", exceeds.GetEffect())
+		}
+		if !strings.Contains(exceeds.GetReason(), "exceeds delegation cap") {
+			t.Errorf("Reason = %q, want it to contain %q (the exceeds-cap wording)", exceeds.GetReason(), "exceeds delegation cap")
+		}
+
+		if uncheckable.GetReason() == exceeds.GetReason() {
+			t.Fatalf("the uncheckable-cap and exceeds-cap reasons must differ over the wire, both were %q", uncheckable.GetReason())
+		}
+
+		// The property this proof exists for, one layer deeper than the wire
+		// response: the persisted audit row's own Reason column must carry
+		// the same distinction, not just DecideResponse's in-memory copy of
+		// it.
+		after := fetchAuditChain(t, resourceTenant)
+		newRows := after[len(before):]
+		if len(newRows) != 2 {
+			t.Fatalf("this subtest made 2 Decide() calls, want 2 new audit rows, got %d", len(newRows))
+		}
+		uncheckableRow, exceedsRow := newRows[0], newRows[1]
+		t.Logf("audit rows: uncheckable reason=%q exceeds reason=%q", uncheckableRow.Reason, exceedsRow.Reason)
+
+		if uncheckableRow.Decision != "DENY" || exceedsRow.Decision != "DENY" {
+			t.Fatalf("audit rows Decision = %q/%q, want DENY/DENY", uncheckableRow.Decision, exceedsRow.Decision)
+		}
+		if uncheckableRow.Reason != uncheckable.GetReason() {
+			t.Errorf("audit row reason = %q, want %q (the response's own reason)", uncheckableRow.Reason, uncheckable.GetReason())
+		}
+		if exceedsRow.Reason != exceeds.GetReason() {
+			t.Errorf("audit row reason = %q, want %q (the response's own reason)", exceedsRow.Reason, exceeds.GetReason())
+		}
+		if !strings.Contains(uncheckableRow.Reason, "cannot be evaluated") {
+			t.Errorf("audit row reason = %q, want it to contain %q", uncheckableRow.Reason, "cannot be evaluated")
+		}
+		if !strings.Contains(exceedsRow.Reason, "exceeds delegation cap") {
+			t.Errorf("audit row reason = %q, want it to contain %q", exceedsRow.Reason, "exceeds delegation cap")
+		}
+		if uncheckableRow.Reason == exceedsRow.Reason {
+			t.Fatalf("the audit row's reason must distinguish the two denials, both were %q", uncheckableRow.Reason)
+		}
+	})
+
+	// proof4: the regression guard. A delegation with no classification caps
+	// and no resource constraints configured is unaffected by this phase —
+	// the property that proves the change is targeted rather than a blanket
+	// tightening: a version of this phase that denied every request with a
+	// resource attached would still pass proofs 1-3 above, but not this one.
+	// The request deliberately carries a "project" value the delegation
+	// never constrained AND a classification that would exceed a cap if one
+	// were configured, so this proof cannot pass by accident of an empty
+	// resource map — it must be the empty configuration, not an empty
+	// request, that makes this an allow.
+	t.Run("proof4_no_caps_no_constraints_unaffected_regression_guard", func(t *testing.T) {
+		d := newDelegation("proof4: no caps, no constraints (regression guard)", nil, nil)
+
+		resp := decide(t, d.ID, map[string]string{
+			"project": "whatever-the-agent-happens-to-send", "classification": "TOP-SECRET", "hierarchy": "nato",
+		})
+		t.Logf("Decide() against a delegation with no caps and no constraints -> effect=%s", resp.GetEffect())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW — a delegation with no caps and no constraints must be "+
+				"unaffected by this phase, even against a resource that would exceed a cap or fail a constraint "+
+				"if either were configured; this is the regression guard proving the change is targeted, not a "+
+				"blanket tightening", resp.GetEffect())
+		}
+		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW", resp.GetDelegationEffect())
+		}
+	})
 }
 
 // TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother is

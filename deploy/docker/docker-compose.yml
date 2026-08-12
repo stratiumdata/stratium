@@ -95,5 +95,47 @@ services:
     ports:
       - "50051"
 
+  # Third PDP instance, wired for one purpose: internal/store/
+  # store_integration_test.go's resource-identity live proofs (Phase 7 Task
+  # 4) need a real Decide() call, over real gRPC, against a delegation
+  # carrying ResourceConstraints/ClassificationCaps and a principal policy
+  # that legitimately allows -- but neither `pdp` nor `pdp-narrow` above can
+  # serve that safely. `pdp`'s tenant (tenant-one) already carries
+  # TestEndToEnd's own cedar policies (its proof2 depends on exactly zero
+  # existing at one specific point in that sequence -- see
+  # TestIntegration_LoadAllPolicies_RoundTripsPriority's own comment on the
+  # earlier task that broke four proofs this way) and TestEndToEnd's own
+  # last subtest permanently revokes the serving role's INSERT on
+  # audit_chain for the rest of that postgres instance's life, which would
+  # turn every later Decide() call -- on ANY tenant, `pdp-narrow` included,
+  # since the revoke is role-level, not tenant-scoped -- into an audit-write
+  # failure instead of a real decision. `pdp-narrow`'s own tenant is no
+  # safer a second time over: its one existing live test seeds an
+  # unconditional cedar forbid there, which would blanket-deny every
+  # principal forever after. A third, independently configured service --
+  # its own tenant, touched by nothing else in that file -- is what makes
+  # these proofs reachable without an ordering dependency on any other test.
+  #
+  # Shares the same postgres instance as `pdp`/`pdp-narrow` (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart). Full default policy-language
+  # registry (STRATIUM_POLICY_LANGUAGES left unset), matching `pdp` --
+  # these proofs only ever need cedar, but there is no reason to narrow the
+  # registry the way pdp-narrow deliberately does for its own, different
+  # purpose.
+  pdp-resource:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-resource-identity-integration
+      STRATIUM_LISTEN_ADDR: :50051
+    ports:
+      - "50051"
+
 volumes:
   pgdata:
