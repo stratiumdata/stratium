@@ -69,6 +69,7 @@ package store_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -129,6 +130,20 @@ var (
 	pdpClient        pdpgrpc.PDPServiceClient
 	configuredTenant string
 
+	// servingDB connects as the real serving identity (STRATIUM_IT_SERVING_
+	// DATABASE_URL — the same "stratium" login role, member of stratium_app
+	// only, that STRATIUM_DATABASE_URL gives the pdp container itself in
+	// docker-compose.yml). testDB, above, is deliberately the wrong
+	// connection for proving what the serving role can and cannot do: it
+	// authenticates as stratium_migrate, which OWNS every table these
+	// migrations create (CREATE DATABASE stratium OWNER stratium_migrate —
+	// deploy/docker/init-db.sql) and so holds every privilege on it
+	// regardless of what any GRANT statement says. Only a connection that is
+	// genuinely the stratium_app role can make
+	// TestIntegration_Approvals_ServingRoleCannotUpdate a real proof instead
+	// of a tautology.
+	servingDB *sql.DB
+
 	// narrowPdpClient and narrowTenant back
 	// TestIntegration_Live_OrphanLanguageDeniesNamingIt: a second,
 	// independently configured PDP (deploy/docker/docker-compose.yml's
@@ -148,14 +163,16 @@ func TestMain(m *testing.M) {
 // TestMain itself would skip any defer in that function.
 func runTestMain(m *testing.M) int {
 	dbURL := os.Getenv("STRATIUM_IT_DATABASE_URL")
+	servingDBURL := os.Getenv("STRATIUM_IT_SERVING_DATABASE_URL")
 	pdpAddr := os.Getenv("STRATIUM_IT_PDP_ADDR")
 	configuredTenant = os.Getenv("STRATIUM_IT_TENANT_ID")
 	narrowPdpAddr := os.Getenv("STRATIUM_IT_PDP_NARROW_ADDR")
 	narrowTenant = os.Getenv("STRATIUM_IT_NARROW_TENANT_ID")
-	if dbURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" {
+	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" {
 		fmt.Fprintln(os.Stderr,
-			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, STRATIUM_IT_PDP_NARROW_ADDR, "+
-				"and STRATIUM_IT_NARROW_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
+			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
+				"STRATIUM_IT_PDP_NARROW_ADDR, and STRATIUM_IT_NARROW_TENANT_ID must all be set — "+
+				"run via `make integration`, not `go test` directly")
 		return 1
 	}
 	if configuredTenant == secondTenantID || narrowTenant == secondTenantID || narrowTenant == configuredTenant {
@@ -178,6 +195,18 @@ func runTestMain(m *testing.M) int {
 		return 1
 	}
 	testDB = db
+
+	sdb, err := sql.Open("postgres", servingDBURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open serving-role database: %v\n", err)
+		return 1
+	}
+	defer func() { _ = sdb.Close() }()
+	if err := waitForDB(ctx, sdb); err != nil {
+		fmt.Fprintf(os.Stderr, "serving-role database connection never became reachable: %v\n", err)
+		return 1
+	}
+	servingDB = sdb
 
 	client, closeConn, err := dialAndWaitForServing(ctx, pdpAddr)
 	if err != nil {
@@ -500,6 +529,155 @@ func TestIntegration_LoadAllPolicies_RoundTripsPriority(t *testing.T) {
 	}
 	if found.Text != text {
 		t.Errorf("Text = %q, want %q — adjacent scan targets are transposed", found.Text, text)
+	}
+}
+
+// sqlStatePermissionDenied and sqlStateCheckViolation are the two Postgres
+// SQLSTATEs Task 2's approvals proofs below distinguish from "any error at
+// all" — the same discipline store.sqlStateUniqueViolation applies in
+// audit.go, reproduced here rather than imported (both are unexported, and
+// this is a deliberately external test package — see this file's own doc
+// comment on why).
+const (
+	sqlStatePermissionDenied = "42501" // insufficient_privilege
+	sqlStateCheckViolation   = "23514" // check_violation
+)
+
+// insertApprovalRawQuery is store's own (unexported) insertApprovalQuery
+// reproduced here with one difference: status is an explicit, caller-chosen
+// column rather than left to the schema's DEFAULT 'pending'.
+// internal/store.CreateApproval deliberately never accepts a caller-supplied
+// status at all (see that function's own doc comment) — precisely because
+// E7 gives it no legitimate reason to write anything but 'pending' — so
+// there is no Go-side call this test could make to reach an invalid status
+// value. Only a raw INSERT naming one directly, bypassing CreateApproval
+// entirely, can put the CHECK constraint (migrations/000012_approvals) to
+// the test.
+const insertApprovalRawQuery = `INSERT INTO approvals (
+	id, tenant_id, agent_id, delegation_id, root_delegation_id,
+	subject, root_principal, tool_name, action, derived_tier,
+	input_digest, status, expires_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
+
+// TestIntegration_Approvals_StatusCheckConstraintRejectsInvalidValue proves
+// approvals.status is a closed vocabulary enforced by the database, not by
+// Go — the property migrations/000012_approvals' own comment states and
+// this project's house style requires backing with a real assertion rather
+// than a claim. Its own tenant, for the reason
+// TestIntegration_LoadAllPolicies_RoundTripsPriority's own comment gives.
+//
+// Uses testDB (not servingDB): a CHECK constraint applies to every role
+// alike, ownership included, unlike a GRANT — this test is not about who is
+// permitted to write, only about what value is accepted once they do. The
+// transaction is deliberately never committed, only ever rolled back
+// (unconditionally, via defer): the INSERT is expected to fail, and
+// Postgres aborts the whole transaction on a constraint violation, so
+// attempting a COMMIT afterward would only add an unrelated, undefined
+// second failure mode to reason about.
+func TestIntegration_Approvals_StatusCheckConstraintRejectsInvalidValue(t *testing.T) {
+	const tenant = "tenant-approvals-status-check-integration"
+
+	agentID := uuid.New()
+	seedAgent(t, tenant, agentID, "status-check-agent", models.TrustTierUnverified)
+	delegation := singleHopDelegation(t, tenant, agentID, models.ActionTierExternalComms, "status check proof")
+	digest := sha256.Sum256([]byte("status check proof"))
+
+	tx, err := testDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(t.Context(), `SELECT set_config('app.tenant_id', $1, true)`, tenant); err != nil {
+		t.Fatalf("set_config app.tenant_id: %v", err)
+	}
+
+	_, insertErr := tx.ExecContext(t.Context(), insertApprovalRawQuery,
+		uuid.New().String(), tenant, agentID.String(), delegation.ID.String(), delegation.ID.String(),
+		"subject", "root-principal", "Bash", "execute", int64(models.ActionTierExternalComms),
+		digest[:], "not-a-real-status", time.Now().Add(time.Hour),
+	)
+	if insertErr == nil {
+		t.Fatal("INSERT with status = 'not-a-real-status' succeeded, want a check_violation — " +
+			"the CHECK constraint in migrations/000012_approvals must reject it")
+	}
+	var pqErr *pq.Error
+	if !errors.As(insertErr, &pqErr) || pqErr.Code != sqlStateCheckViolation {
+		t.Fatalf("INSERT error = %v, want SQLSTATE %s (check_violation)", insertErr, sqlStateCheckViolation)
+	}
+	t.Logf("INSERT with an invalid status correctly rejected: %v", insertErr)
+}
+
+// TestIntegration_Approvals_ServingRoleCannotUpdate is Task 2's E7 proof:
+// the serving role can create and read approvals rows (SELECT, INSERT —
+// migrations/000012_approvals) but genuinely cannot UPDATE one. sqlmock has
+// no grants to violate (internal/store/approval_test.go proves the Go
+// call shape, nothing about privilege), so only a real Postgres, connected
+// as the real serving identity, can prove this — see servingDB's own doc
+// comment for why testDB specifically cannot stand in for it here.
+//
+// Its own tenant, for the reason TestIntegration_LoadAllPolicies_
+// RoundTripsPriority's own comment gives.
+func TestIntegration_Approvals_ServingRoleCannotUpdate(t *testing.T) {
+	const tenant = "tenant-approvals-grant-integration"
+
+	agentID := uuid.New()
+	seedAgent(t, tenant, agentID, "approvals-grant-agent", models.TrustTierUnverified)
+	delegation := singleHopDelegation(t, tenant, agentID, models.ActionTierExternalComms, "approvals grant proof")
+
+	approval := &store.Approval{
+		ID: uuid.New(), AgentID: agentID, DelegationID: delegation.ID, RootDelegationID: delegation.ID,
+		Subject: "integration-test-subject", RootPrincipal: "integration-test-root-principal",
+		ToolName: "Bash", Action: "execute", DerivedTier: models.ActionTierExternalComms,
+		InputDigest: sha256.Sum256([]byte("approvals grant proof")),
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	// Created through servingDB, not testDB: this doubles as proof the
+	// serving role's own SELECT/INSERT grants are sufficient for
+	// CreateApproval to work at all. Without this, a role that could not
+	// even create the row would make the UPDATE probe below meaningless —
+	// its failure indistinguishable from "nothing works for this role."
+	if err := store.New(servingDB, tenant).CreateApproval(t.Context(), approval); err != nil {
+		t.Fatalf("CreateApproval() via the serving role error = %v, want nil — "+
+			"SELECT/INSERT must work before UPDATE's absence means anything", err)
+	}
+
+	// The UPDATE probe itself: same serving connection, same tenant, raw SQL
+	// rather than a Go store method — there is no CreateApproval-style
+	// wrapper for UPDATE because E7 says none should ever exist. Scoped by
+	// RLS via app.tenant_id, not a WHERE tenant_id clause, matching every
+	// other query in this file. Never committed, only ever rolled back: the
+	// UPDATE is expected to fail outright (a permission error, not merely a
+	// zero-row match), so there is nothing this transaction should persist.
+	tx, err := servingDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin tx on serving connection: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(t.Context(), `SELECT set_config('app.tenant_id', $1, true)`, tenant); err != nil {
+		t.Fatalf("set_config app.tenant_id on serving connection: %v", err)
+	}
+
+	_, updateErr := tx.ExecContext(t.Context(),
+		`UPDATE approvals SET status = 'approved', approved_by = $1, approved_at = NOW() WHERE id = $2`,
+		"integration-test-root-principal", approval.ID.String())
+	if updateErr == nil {
+		t.Fatal("UPDATE approvals as the serving role succeeded, want a permission error — " +
+			"E7 requires this grant to be absent (migrations/000012_approvals)")
+	}
+	var pqErr *pq.Error
+	if !errors.As(updateErr, &pqErr) || pqErr.Code != sqlStatePermissionDenied {
+		t.Fatalf("UPDATE error = %v, want SQLSTATE %s (insufficient_privilege)", updateErr, sqlStatePermissionDenied)
+	}
+	t.Logf("UPDATE approvals as the serving role correctly failed: %v", updateErr)
+
+	// Belt-and-suspenders on top of the permission error itself: confirm via
+	// testDB (unaffected by the grant) that the row genuinely never changed.
+	got, err := store.New(testDB, tenant).LoadApproval(t.Context(), approval.ID)
+	if err != nil {
+		t.Fatalf("LoadApproval() after the failed UPDATE error = %v", err)
+	}
+	if got.Status != "pending" || got.ApprovedBy != nil {
+		t.Errorf("approval after a rejected UPDATE = %+v, want unchanged (status=pending, approved_by=nil)", got)
 	}
 }
 

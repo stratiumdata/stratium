@@ -64,6 +64,7 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	pdp_narrow_port=$$($(COMPOSE) port pdp-narrow 50051 | sed -E 's/.*://'); \
 	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
+	STRATIUM_IT_SERVING_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PDP_ADDR="localhost:$$pdp_port" \
 	STRATIUM_IT_TENANT_ID="tenant-one" \
 	STRATIUM_IT_PDP_NARROW_ADDR="localhost:$$pdp_narrow_port" \
