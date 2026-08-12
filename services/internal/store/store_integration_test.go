@@ -339,8 +339,8 @@ func seedAgent(t *testing.T, tenant string, id uuid.UUID, name string, trustTier
 const insertDelegationQuery = `INSERT INTO delegations (
 		id, tenant_id, user_id, agent_id, approved_tools, max_action_tier,
 		classification_caps, resource_constraints, purpose, expires_at,
-		revoked, parent_delegation_id, root_delegation_id, depth, chain_agent_ids
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
+		revoked, parent_delegation_id, root_delegation_id, depth, chain_agent_ids, escalate_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
 
 // seedDelegation inserts d as one delegations row and returns d unchanged,
 // so callers can seed and keep the same *models.Delegation for later
@@ -348,6 +348,21 @@ const insertDelegationQuery = `INSERT INTO delegations (
 // authz.ValidateChain — no read-back required, since a successful INSERT
 // under RLS's WITH CHECK already proves the row persisted exactly as this
 // struct describes it).
+//
+// escalate_at is appended at the end, mirroring internal/store/delegation.go's
+// own insertDelegationQuery (production's CreateDelegation) both in
+// position and in passing d.EscalateAt — a *models.ActionTier — directly:
+// database/sql's default parameter converter maps a nil pointer to SQL
+// NULL and a non-nil one to its pointee's value, so every pre-Phase-5-Task-5
+// caller of this function (which never sets EscalateAt) round-trips exactly
+// the NULL it always got before this column existed in this INSERT list —
+// this is a behavior-preserving addition, not a new requirement on any
+// existing fixture. Phase 5 Task 5's own escalation proofs
+// (escalation_integration_test.go) are the first callers that need this
+// column to actually persist: found live, the column was silently absent
+// from this test-only raw INSERT (unlike production's own, which has always
+// included it since Task 1) because nothing before Task 5 needed a seeded
+// delegation to carry a real threshold.
 func seedDelegation(t *testing.T, d *models.Delegation) *models.Delegation {
 	t.Helper()
 	approvedTools, err := json.Marshal(d.ApprovedTools)
@@ -376,7 +391,7 @@ func seedDelegation(t *testing.T, d *models.Delegation) *models.Delegation {
 		if _, err := tx.ExecContext(t.Context(), insertDelegationQuery,
 			d.ID.String(), d.TenantID, d.UserID, d.AgentID.String(), approvedTools, int64(d.MaxActionTier),
 			caps, constraints, d.Purpose, d.ExpiresAt,
-			d.Revoked, parent, d.RootDelegationID.String(), int64(d.Depth), chainAgentIDs,
+			d.Revoked, parent, d.RootDelegationID.String(), int64(d.Depth), chainAgentIDs, d.EscalateAt,
 		); err != nil {
 			t.Fatalf("seed delegation %s: %v", d.ID, err)
 		}
