@@ -66,12 +66,21 @@
 //
 // A tenant who needs an actual ceiling has to match tiers STRICTLY ABOVE N
 // and deny those — an operator this schema does not have — so today that
-// policy has to be written in Cedar, Rego, or XACML instead, each of which
-// exposes a real ordinal comparison (>, >=) on derived_tier. This is a
-// deliberate expressiveness limit, not an oversight (see the package doc's
-// opening paragraph on auditability over expressiveness); the trap is that
-// its two nearest-looking workarounds fail silently rather than refusing to
-// validate, which is why it is documented here rather than left for a
+// policy has to be written in Cedar or Rego instead, both of which expose a
+// real ordinal comparison (>, >=) on derived_tier. XACML (internal/policy/
+// xacml) has no ordinal comparison at all — verified against the real
+// engine: it accepts exactly one MatchId, string-equal, and Validate rejects
+// an integer-greater-than document outright, by name, the same loud
+// rejection every other unsupported XACML construct gets (see xacml/
+// engine.go's own package doc) — so the same ceiling has to be spelled
+// there as an explicit enumeration instead: one string-equal Match per tier
+// strictly above N (at most four — see models.ActionTier), OR'd together
+// under a single <AnyOf>, XACML's own disjunction of AllOf conjunctions.
+// This is a deliberate expressiveness limit, not an oversight (see the
+// package doc's opening paragraph on auditability over expressiveness); the
+// trap is that this schema's own two nearest-looking workarounds fail
+// silently rather than refusing to validate, which is why it is documented
+// here rather than left for a
 // tenant to discover the hard way.
 //
 // Two operator shapes are rejected even though they are structurally
