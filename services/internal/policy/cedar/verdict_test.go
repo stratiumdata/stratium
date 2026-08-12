@@ -14,6 +14,13 @@ import (
 // has no field through which such a thing could travel. Effect itself caps
 // at allow/deny/escalate for exactly one leg's opinion; Priority is
 // provenance-only (spec Y7) and this package never reads it back.
+// UnevaluatedPolicyIDs was reviewed under this same guard when it was
+// added: it is diagnostic-only, listing ids a language could not evaluate,
+// never granting anything — Effect is still the only field any fold or
+// ceiling check ever consults — and this package's own Evaluate never
+// populates it (that is exclusively internal/policy.orphanVerdicts and
+// prepareFailureVerdicts' job, for a language with no engine at all or one
+// whose Prepare failed; a live, running Cedar evaluation is neither).
 //
 // This is pinned by field name and type, not just by count, so a future
 // PolicyVerdict field named e.g. "GrantedTier" or "AddedTools" fails here by
@@ -21,11 +28,12 @@ import (
 // silently becoming something a Cedar (or any) engine could populate.
 func TestPolicyVerdict_CannotWiden(t *testing.T) {
 	want := map[string]reflect.Kind{
-		"Effect":   reflect.Int, // authz.Effect
-		"Reason":   reflect.String,
-		"Source":   reflect.String,
-		"PolicyID": reflect.String,
-		"Priority": reflect.Int,
+		"Effect":               reflect.Int, // authz.Effect
+		"Reason":               reflect.String,
+		"Source":               reflect.String,
+		"PolicyID":             reflect.String,
+		"Priority":             reflect.Int,
+		"UnevaluatedPolicyIDs": reflect.Slice,
 	}
 
 	typ := reflect.TypeOf(authz.PolicyVerdict{})

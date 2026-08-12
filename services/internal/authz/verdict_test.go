@@ -2,6 +2,7 @@ package authz
 
 import (
 	"math/rand"
+	"reflect"
 	"testing"
 )
 
@@ -95,7 +96,9 @@ func TestFoldVerdicts_BareEscalateEscalates(t *testing.T) {
 	if leg.Reason != escalate.Reason {
 		t.Fatalf("reason = %q, want the escalate verdict's reason %q (not default-deny text)", leg.Reason, escalate.Reason)
 	}
-	if got == nil || *got != escalate {
+	// reflect.DeepEqual, not !=: PolicyVerdict's []string field
+	// (UnevaluatedPolicyIDs) makes it non-comparable with ==.
+	if got == nil || !reflect.DeepEqual(*got, escalate) {
 		t.Fatalf("decided = %+v, want %+v", got, escalate)
 	}
 }
@@ -108,9 +111,11 @@ func TestFoldVerdicts_ReturnsDecidingVerdict(t *testing.T) {
 	allow := PolicyVerdict{Effect: EffectAllow, Source: "rego", PolicyID: "p2", Reason: "rego allows"}
 	escalate := PolicyVerdict{Effect: EffectEscalate, Source: "xacml", PolicyID: "p3", Reason: "needs approval"}
 
+	// reflect.DeepEqual throughout this test, not !=: PolicyVerdict's
+	// []string field (UnevaluatedPolicyIDs) makes it non-comparable with ==.
 	t.Run("deny is attributed", func(t *testing.T) {
 		leg, got := FoldVerdicts([]PolicyVerdict{allow, deny})
-		if got == nil || *got != deny {
+		if got == nil || !reflect.DeepEqual(*got, deny) {
 			t.Fatalf("decided = %+v, want %+v", got, deny)
 		}
 		if leg.Reason != deny.Reason {
@@ -120,7 +125,7 @@ func TestFoldVerdicts_ReturnsDecidingVerdict(t *testing.T) {
 
 	t.Run("allow is attributed", func(t *testing.T) {
 		leg, got := FoldVerdicts([]PolicyVerdict{allow})
-		if got == nil || *got != allow {
+		if got == nil || !reflect.DeepEqual(*got, allow) {
 			t.Fatalf("decided = %+v, want %+v", got, allow)
 		}
 		if leg.Reason != allow.Reason {
@@ -130,7 +135,7 @@ func TestFoldVerdicts_ReturnsDecidingVerdict(t *testing.T) {
 
 	t.Run("escalate is attributed", func(t *testing.T) {
 		leg, got := FoldVerdicts([]PolicyVerdict{allow, escalate})
-		if got == nil || *got != escalate {
+		if got == nil || !reflect.DeepEqual(*got, escalate) {
 			t.Fatalf("decided = %+v, want %+v", got, escalate)
 		}
 		if leg.Reason != escalate.Reason {
@@ -170,7 +175,9 @@ func TestFoldVerdicts_DenyAttributionIsOrderIndependent(t *testing.T) {
 		if leg.Reason != want.Reason {
 			t.Fatalf("shuffle %d: reason = %q, want %q", i, leg.Reason, want.Reason)
 		}
-		if decided == nil || *decided != want {
+		// reflect.DeepEqual, not !=: PolicyVerdict's []string field
+		// (UnevaluatedPolicyIDs) makes it non-comparable with ==.
+		if decided == nil || !reflect.DeepEqual(*decided, want) {
 			t.Fatalf("shuffle %d: decided = %+v, want %+v", i, decided, want)
 		}
 	}

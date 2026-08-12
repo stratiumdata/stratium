@@ -1,5 +1,10 @@
 package authz
 
+import (
+	"slices"
+	"sort"
+)
+
 // Config is the tenant's resolved decision configuration, loaded by the caller.
 type Config struct {
 	Tiers    TierTable
@@ -49,7 +54,13 @@ func Decide(req Request, cfg Config) Result {
 	// A nil or empty PrincipalVerdicts folds to deny (FoldVerdicts's
 	// default-deny step), so a caller that forgets to evaluate the principal
 	// leg denies rather than silently permitting (C11, C13).
-	res.PrincipalVerdicts = req.PrincipalVerdicts
+	//
+	// UnevaluatedPolicyIDs is aggregated from the WHOLE slice, deliberately
+	// before FoldVerdicts narrows it to one attributed verdict below: an
+	// orphaned language's ids must survive even when some other verdict
+	// wins the fold and decides the outcome instead (see
+	// aggregateUnevaluatedPolicyIDs' own doc comment).
+	res.UnevaluatedPolicyIDs = aggregateUnevaluatedPolicyIDs(req.PrincipalVerdicts)
 	res.Principal, res.Deciding = FoldVerdicts(req.PrincipalVerdicts)
 	res.Agent = AgentLeg(req.Agent, req.Action, derived, cfg.Trust)
 	delegationLeg, deniedDepth := DelegationLeg(
@@ -113,4 +124,29 @@ func DeriveTierDenial(err error) Result {
 		Reason:        err.Error(),
 		Delegation:    LegResult{Effect: EffectDeny, Reason: err.Error()},
 	}
+}
+
+// aggregateUnevaluatedPolicyIDs collects PolicyVerdict.UnevaluatedPolicyIDs
+// across every verdict in vs — every verdict Decide saw, not merely the one
+// FoldVerdicts happens to pick — because that is the only way the fact
+// survives regardless of which verdict wins the fold. A verdict that loses
+// the fold is not a verdict that never happened: an orphaned "rego" verdict
+// sitting alongside a deciding "cedar" deny is still true information about
+// what this decision could not check, and reading it off Deciding alone
+// would silently drop it the instant any other verdict outranks it.
+//
+// Sorted and deduplicated (via slices.Compact, which requires sorted input
+// to remove every duplicate rather than only adjacent-by-luck ones) so the
+// result is deterministic across calls with the same underlying facts,
+// regardless of what order vs arrived in or how many verdicts happened to
+// name the same id — required because pkg/audit.Entry.Hash commits to this
+// value, and a value that could reorder itself between two runs over
+// identical data would make two honest audit chains diverge.
+func aggregateUnevaluatedPolicyIDs(vs []PolicyVerdict) []string {
+	var ids []string
+	for _, v := range vs {
+		ids = append(ids, v.UnevaluatedPolicyIDs...)
+	}
+	sort.Strings(ids)
+	return slices.Compact(ids)
 }

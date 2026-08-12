@@ -75,6 +75,24 @@ type PolicyVerdict struct {
 	// fold. Deny-overrides makes priority security-irrelevant (spec §3.3 Y7);
 	// ordering by it here would reinstate the bug class Y7 removed.
 	Priority int
+
+	// UnevaluatedPolicyIDs carries the policy ids a language could not
+	// evaluate — no registered engine for it, or its engine's own Prepare
+	// call failed for the whole batch. Populated only on that kind of
+	// verdict (internal/policy's orphanVerdicts/prepareFailureVerdicts);
+	// empty on every ordinary, engine-produced verdict.
+	//
+	// This is a health fact about the deployment ("this language could not
+	// run"), not a decision — it must not be mistaken for one by inflating
+	// it into extra deny verdicts (that was tried and reverted: PolicyID is
+	// singular, so N ids could only ever produce one queryable PolicyID
+	// per verdict no matter how the N were split, and FoldVerdicts' own
+	// tie-break on (Source, PolicyID) means an orphaned language's verdict
+	// routinely loses to any other verdict present anyway — see Decide's own
+	// aggregation of this field for why the fact still needs to survive that
+	// loss). Carried on the verdict so Decide can aggregate it across the
+	// whole slice regardless of which single verdict FoldVerdicts picks.
+	UnevaluatedPolicyIDs []string
 }
 
 // Action describes what the agent is attempting.
@@ -144,14 +162,23 @@ type Result struct {
 	Agent      LegResult
 	Delegation LegResult
 
-	// PrincipalVerdicts is every verdict consulted, in the order supplied.
-	PrincipalVerdicts []PolicyVerdict
 	// Deciding names the verdict Principal.Reason was attributed to, or nil
 	// when the decision was default-deny with no verdict at all. That case
 	// is real (an empty PrincipalVerdicts slice folds to deny) and must not
 	// be papered over with a zero-value verdict: "no policy spoke" and "a
 	// policy denied" are different facts an auditor needs told apart.
 	Deciding *PolicyVerdict
+
+	// UnevaluatedPolicyIDs is every PolicyVerdict.UnevaluatedPolicyIDs
+	// value across req.PrincipalVerdicts, aggregated, sorted, and
+	// deduplicated — not just Deciding's own, so an orphaned or
+	// unprepared language's ids are reported even when some other verdict
+	// (a Cedar deny, say) wins FoldVerdicts' tie-break and decides the
+	// outcome instead. Sorted so it is deterministic across calls — the
+	// audit hash chain commits to this value (pkg/audit.Entry.Hash), and a
+	// value that reordered itself between two runs over the same facts
+	// would make two honest chains diverge.
+	UnevaluatedPolicyIDs []string
 
 	// DeniedAtDepth is the chain depth at which a denial occurred, or -1.
 	DeniedAtDepth int

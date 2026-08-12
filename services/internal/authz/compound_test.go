@@ -2,6 +2,8 @@ package authz
 
 import (
 	"errors"
+	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -66,10 +68,17 @@ func TestDecide_UnevaluatedPrincipalDenies(t *testing.T) {
 	}
 }
 
-// Result surfaces every verdict consulted, in order, and names the one the
-// reason was attributed to — not just the folded LegResult — so an auditor
-// can trace a decision to a specific policy. (Phase 2b Task 2)
-func TestDecide_ReportsPrincipalVerdictsAndDeciding(t *testing.T) {
+// Result names the verdict the reason was attributed to — not just the
+// folded LegResult — so an auditor can trace a decision to a specific
+// policy. (Phase 2b Task 2)
+//
+// Result.PrincipalVerdicts (every verdict consulted, in order) used to be
+// asserted here too. It was deleted: nothing in production ever read it —
+// pdpgrpc's appendAudit/toResponse both read Deciding alone — and the one
+// thing it might have been for (recovering a verdict that lost the fold) is
+// now served by the purpose-built UnevaluatedPolicyIDs aggregate below, not
+// by re-deriving it from the raw slice.
+func TestDecide_ReportsDeciding(t *testing.T) {
 	req := request()
 	allow := PolicyVerdict{Effect: EffectAllow, Reason: "granted", Source: "rego", PolicyID: "p-2"}
 	deny := PolicyVerdict{Effect: EffectDeny, Reason: "blocked", Source: "cedar", PolicyID: "p-1"}
@@ -77,11 +86,72 @@ func TestDecide_ReportsPrincipalVerdictsAndDeciding(t *testing.T) {
 
 	got := Decide(req, config())
 
-	if len(got.PrincipalVerdicts) != 2 || got.PrincipalVerdicts[0] != allow || got.PrincipalVerdicts[1] != deny {
-		t.Fatalf("PrincipalVerdicts must be every verdict consulted, in the order supplied, got %+v", got.PrincipalVerdicts)
-	}
-	if got.Deciding == nil || *got.Deciding != deny {
+	// reflect.DeepEqual, not !=: PolicyVerdict gained a []string field
+	// (UnevaluatedPolicyIDs), which makes it non-comparable with ==.
+	if got.Deciding == nil || !reflect.DeepEqual(*got.Deciding, deny) {
 		t.Fatalf("Deciding must name the verdict the reason was attributed to, got %+v", got.Deciding)
+	}
+}
+
+// The property this whole change exists for: UnevaluatedPolicyIDs must
+// survive even when the verdict that carries it LOSES FoldVerdicts' own
+// tie-break. Source is the language name and cedar sorts before rego, so an
+// orphaned "rego" verdict alongside any Cedar verdict never becomes
+// Deciding — reading this field off Deciding alone (rather than aggregating
+// the whole slice) would silently lose it in exactly this shape, which is
+// also why it is the one TestIntegration_Live_OrphanLanguageDeniesNamingIt
+// (internal/store, live over gRPC) exists to prove end to end.
+func TestDecide_UnevaluatedPolicyIDsSurviveLosingTheFold(t *testing.T) {
+	req := request()
+	cedarDeny := PolicyVerdict{Effect: EffectDeny, Reason: "forbidden", Source: "cedar", PolicyID: "cedar-1"}
+	regoOrphan := PolicyVerdict{
+		Effect:               EffectDeny,
+		Source:               "rego",
+		Reason:               "principal: no rego engine registered; cannot evaluate 2 rego policies for this tenant",
+		UnevaluatedPolicyIDs: []string{"rego-2", "rego-1"},
+	}
+	req.PrincipalVerdicts = []PolicyVerdict{cedarDeny, regoOrphan}
+
+	got := Decide(req, config())
+
+	if got.Deciding == nil || got.Deciding.Source != "cedar" {
+		t.Fatalf("Deciding = %+v, want the cedar verdict (cedar sorts before rego, so it wins the tie-break)", got.Deciding)
+	}
+	want := []string{"rego-1", "rego-2"}
+	if !slices.Equal(got.UnevaluatedPolicyIDs, want) {
+		t.Errorf("UnevaluatedPolicyIDs = %v, want %v — the orphaned rego ids must survive even though cedar decided",
+			got.UnevaluatedPolicyIDs, want)
+	}
+}
+
+// UnevaluatedPolicyIDs must come back sorted and deduplicated regardless of
+// the order verdicts arrived in or whether more than one verdict names the
+// same id — required determinism, not a cosmetic nicety: pkg/audit.Entry.
+// Hash commits to this exact value, so a run that reordered it between two
+// otherwise-identical decisions would fork the audit hash chain.
+func TestDecide_UnevaluatedPolicyIDsSortedAndDeduplicated(t *testing.T) {
+	req := request()
+	req.PrincipalVerdicts = []PolicyVerdict{
+		{Effect: EffectDeny, Source: "rego", UnevaluatedPolicyIDs: []string{"z-policy", "a-policy"}},
+		{Effect: EffectDeny, Source: "xacml", UnevaluatedPolicyIDs: []string{"a-policy", "m-policy"}},
+	}
+
+	got := Decide(req, config())
+
+	want := []string{"a-policy", "m-policy", "z-policy"}
+	if !slices.Equal(got.UnevaluatedPolicyIDs, want) {
+		t.Fatalf("UnevaluatedPolicyIDs = %v, want %v (sorted, deduplicated)", got.UnevaluatedPolicyIDs, want)
+	}
+}
+
+// An ordinary decision — no orphaned or unprepared language involved —
+// must leave UnevaluatedPolicyIDs empty, not populated with zero-valued
+// noise, so its presence in an audit row is a genuine signal.
+func TestDecide_UnevaluatedPolicyIDsEmptyWhenNothingOrphaned(t *testing.T) {
+	got := Decide(request(), config())
+	if len(got.UnevaluatedPolicyIDs) != 0 {
+		t.Fatalf("UnevaluatedPolicyIDs = %v, want empty: request()'s fixture has no orphaned or unprepared language",
+			got.UnevaluatedPolicyIDs)
 	}
 }
 
