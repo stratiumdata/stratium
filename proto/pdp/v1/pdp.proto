@@ -91,6 +91,19 @@ message DecideRequest {
   // unlike declared_tier above, there is no absent-vs-empty distinction to
   // preserve here, because an empty extraction changes nothing.
   string normalized_input = 9;
+
+  // approval_id, when set, names a pending approval this call should
+  // consume rather than create: the retry sent after a prior call returned
+  // EFFECT_ESCALATE with one. Optional for the same reason declared_tier
+  // above is — "the caller is retrying with an approval to offer" must stay
+  // distinguishable from "the caller is asking fresh," and a UUID-shaped
+  // field cannot borrow parent_delegation_id's plain-string convention
+  // (CreateDelegationRequest, below) to make that distinction, because an
+  // explicitly-sent empty string here is a caller bug (meant to retry,
+  // forgot to attach the id) worth its own InvalidArgument rather than
+  // silent reinterpretation as "no approval, evaluate fresh" — which would
+  // hide that bug behind a second, unwanted pending approval instead.
+  optional string approval_id = 10;
 }
 
 // DecideResponse is the compound decision and each leg's individual
@@ -134,6 +147,16 @@ message DecideResponse {
   // latter.
   optional string decided_source = 12;
   optional string decided_policy_id = 13;
+
+  // approval_id is the id of the pending approval row created for this
+  // decision. Populated only when effect is EFFECT_ESCALATE; empty for
+  // every other effect — the same convention denied_leg above uses (empty
+  // unless one specific effect applies), not decided_source/
+  // decided_policy_id's optional treatment: unlike those two fields, a
+  // created approval id is never itself legitimately the empty string, so
+  // there is no "populated but blank" case here for presence-tracking to
+  // distinguish from "not applicable."
+  string approval_id = 14;
 }
 
 // RequestedScope is what a caller asks a new delegation to hold: an action-

@@ -42,6 +42,15 @@ type Store interface {
 	// enforcement and why root_delegation_id/depth are computed server-side
 	// rather than trusted from the caller's struct.
 	CreateDelegation(ctx context.Context, d *models.Delegation) error
+
+	// CreateApproval and LoadApproval back escalation.go's resolveEscalation
+	// — the only two operations the PDP ever performs against approvals
+	// (E7: it creates pending records and reads them, never grants one).
+	// models.Approval, not a pdpgrpc-local type: see that type's own doc
+	// comment for why Task 3 moved it out of package store once this
+	// interface needed to name it.
+	CreateApproval(ctx context.Context, a *models.Approval) error
+	LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approval, error)
 }
 
 // eventTypeDecision is the audit_chain event_type recorded for every Decide
@@ -102,10 +111,13 @@ func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config) *Se
 // Order: parse and validate the request -> load the acting agent -> load the
 // delegation chain -> evaluate (tenant from cfg, principal decision from
 // policy, clock from time.Now — the one boundary where the ambient clock is
-// allowed, so internal/authz itself stays pure) -> append the audit entry ->
-// respond. A failed audit append returns an error and no response: spec D3
-// says a failed audit write denies the action, and the only way that holds
-// for an ALLOW is for this method to never hand one back once the append has
+// allowed, so internal/authz itself stays pure) -> resolve an escalation, if
+// any (escalation.go: create a pending approval, or verify one offered on a
+// retry — the one place approval verification happens, since it needs the
+// store and internal/authz must not) -> append the audit entry -> respond. A
+// failed audit append returns an error and no response: spec D3 says a
+// failed audit write denies the action, and the only way that holds for an
+// ALLOW is for this method to never hand one back once the append has
 // failed.
 func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideResponse, error) {
 	delegationID, err := parseNonNilUUID(req.GetDelegationId())
@@ -126,6 +138,20 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 			return nil, status.Errorf(codes.InvalidArgument, "declared_tier: %s", err)
 		}
 		declaredTier = &tier
+	}
+	// approvalID is present only on a retry after a prior call returned
+	// EFFECT_ESCALATE (DecideRequest.approval_id's own doc comment).
+	// Malformed shape is rejected here, alongside every other caller-
+	// supplied UUID, because it is a request-shape defect (InvalidArgument,
+	// no store call, no decision) — not a verification failure, which fails
+	// closed to a named, audited DENY instead (resolveEscalation, below).
+	var approvalID *uuid.UUID
+	if req.ApprovalId != nil {
+		id, err := parseNonNilUUID(req.GetApprovalId())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "approval_id: %s", err)
+		}
+		approvalID = &id
 	}
 
 	agent, err := s.store.LoadAgent(ctx, agentID)
@@ -220,11 +246,41 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		MaxDepth: s.cfg.MaxDepth,
 	})
 
+	// Escalation only ever reaches here through the compound decision every
+	// other outcome does too — authz.Decide has already run all three legs
+	// fresh, on this exact call, and its own deny-check loop runs before its
+	// escalate-check loop (compound.go), so a leg that denies (a revoked
+	// delegation, a policy that now forbids) has already won by the time
+	// Effect could read EFFECT_ESCALATE. An approval is therefore never
+	// consulted for a request the three legs would have denied anyway —
+	// see resolveEscalation's own doc comment (escalation.go) for why that
+	// holds by construction rather than by a check repeated here, and why
+	// this is also what keeps a decision above max_action_tier from ever
+	// creating an approval row: that case denies before it ever escalates.
+	var newApprovalID string
+	if result.Effect == authz.EffectEscalate {
+		result, newApprovalID, err = s.resolveEscalation(
+			ctx, approvalID, req.GetSubject(), agentID, delegationID, chain, action, result, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := s.appendAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), result, now); err != nil {
 		return nil, err
 	}
 
-	return toResponse(result), nil
+	// ApprovalId is not part of authz.Result — it is a wire-only fact
+	// (which row, if any, this call just created), not a decision fact — so
+	// it is attached here rather than threaded through toResponse. It is
+	// only ever non-empty on the fresh-escalation branch above: a verified
+	// retry converts result.Effect to ALLOW or DENY, never leaves it
+	// ESCALATE, so newApprovalID stays "" on every other path, matching
+	// approval_id's own doc comment in the proto (populated only when
+	// effect is EFFECT_ESCALATE).
+	resp := toResponse(result)
+	resp.ApprovalId = newApprovalID
+	return resp, nil
 }
 
 // appendAudit builds the audit entry for one decision and appends it.

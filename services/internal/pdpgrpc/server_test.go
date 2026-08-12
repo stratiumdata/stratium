@@ -43,6 +43,21 @@ type fakeStore struct {
 	createErr error
 	created   []*models.Delegation
 
+	// createApprovalErr/createdApprovals back resolveEscalation's
+	// fresh-escalation branch (escalation_test.go), the same
+	// grows-only-on-success discipline created above uses: a test asserting
+	// "deny overrides escalate, no approval row created" checks
+	// len(createdApprovals) == 0 rather than trusting the response alone.
+	createApprovalErr error
+	createdApprovals  []*models.Approval
+
+	// loadApproval/loadApprovalErr back resolveEscalation's verify branch. A
+	// single fixed value, not a map keyed by id, matching every other
+	// single-value stub in this fake (agent, chain): no test in this package
+	// needs two distinct approvals loaded within one call.
+	loadApproval    *models.Approval
+	loadApprovalErr error
+
 	calls int
 }
 
@@ -80,8 +95,31 @@ func (f *fakeStore) CreateDelegation(_ context.Context, d *models.Delegation) er
 	return nil
 }
 
+func (f *fakeStore) CreateApproval(_ context.Context, a *models.Approval) error {
+	f.calls++
+	if f.createApprovalErr != nil {
+		return f.createApprovalErr
+	}
+	f.createdApprovals = append(f.createdApprovals, a)
+	return nil
+}
+
+func (f *fakeStore) LoadApproval(context.Context, uuid.UUID) (*models.Approval, error) {
+	f.calls++
+	if f.loadApprovalErr != nil {
+		return nil, f.loadApprovalErr
+	}
+	return f.loadApproval, nil
+}
+
+// testConfig's ApprovalTTL is a real, positive duration — matching every
+// deployed Config, which config.Load() guarantees the same way (a
+// non-positive value fails to load at all, config_test.go's
+// TestLoad_ApprovalTTLNotPositive) — so a fresh escalation's computed
+// expires_at is genuinely in the future rather than the zero-value
+// coincidence of now.Add(0) landing exactly on now.
 func testConfig() config.Config {
-	return config.Config{TenantID: testTenant, MaxDepth: 5}
+	return config.Config{TenantID: testTenant, MaxDepth: 5, ApprovalTTL: time.Hour}
 }
 
 // wellFormedFixture returns a fake store and request that, evaluated
@@ -242,6 +280,26 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	}
 	if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
 		t.Errorf("DerivedTier = %d, want %d (READ_ONLY)", resp.GetDerivedTier(), models.ActionTierReadOnly)
+	}
+}
+
+// approval_id must stay empty on every effect but ESCALATE (the proto's own
+// doc comment) — toResponse leaves it at the Go zero value for a plain,
+// non-optional string rather than needing an explicit clear, so this is a
+// genuine check that nothing sets it by mistake, not merely an unexercised
+// field. wellFormedFixture's own scenario denies at the principal leg,
+// nowhere near the escalation band (internal/pdpgrpc/escalation_test.go
+// covers the ESCALATE-populates-it side).
+func TestDecide_ApprovalIDEmptyWhenNotEscalating(t *testing.T) {
+	fs, req := wellFormedFixture()
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetApprovalId() != "" {
+		t.Errorf("ApprovalId = %q, want empty for a non-ESCALATE effect", resp.GetApprovalId())
 	}
 }
 
@@ -459,6 +517,8 @@ func TestDecide_UnknownDelegation_NotFound(t *testing.T) {
 // back InvalidArgument.
 func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 	outOfRange := int32(99)
+	malformedID := "not-a-uuid"
+	zeroID := uuid.Nil.String()
 	cases := map[string]func(*DecideRequest){
 		"malformed delegation_id": func(r *DecideRequest) { r.DelegationId = "not-a-uuid" },
 		"malformed agent_id":      func(r *DecideRequest) { r.AgentId = "not-a-uuid" },
@@ -468,6 +528,13 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 		"declared_tier out of range": func(r *DecideRequest) {
 			r.DeclaredTier = &outOfRange
 		},
+		// approval_id gets the same malformed/zero treatment as
+		// delegation_id/agent_id above — a request-shape defect, rejected
+		// before any store call, distinct from a verification failure
+		// (escalation_test.go), which fails closed to a DENY decision
+		// instead of an error.
+		"malformed approval_id": func(r *DecideRequest) { r.ApprovalId = &malformedID },
+		"zero approval_id":      func(r *DecideRequest) { r.ApprovalId = &zeroID },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
