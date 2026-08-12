@@ -314,6 +314,93 @@ const conflictingDenyText = `package stratium.policy
 deny := true if { input.derived_tier > 2 }
 deny := false if { input.agent.trust_tier == "CERTIFIED" }`
 
+// TestEvaluate_NotEqualsOnAbsentAttributeFailsOpen pins the exact trap
+// engine.go's package doc ("Absence is undefined, not false") documents,
+// against the real engine: input.principal.attributes.mfa is a key OPA
+// leaves undefined when Principal.Attributes carries no "mfa" entry at all
+// (stringMapOrEmpty makes the map itself present and empty, never null, but
+// an empty map still has no "mfa" key), and Rego's != builtin — unlike
+// `not X == Y` — requires both operands defined to produce a value, so the
+// whole rule body goes undefined and the rule contributes no verdict at
+// all: indistinguishable, to this package's own Evaluate, from a deny rule
+// that legitimately never applies. A sibling allow-all policy (every real
+// tenant's principal leg groups more than one policy — see policy.Multi)
+// is what turns "this one policy stayed silent" into an observable
+// fail-open outcome once authz.FoldVerdicts (outside this package) folds
+// the two verdicts together.
+func TestEvaluate_NotEqualsOnAbsentAttributeFailsOpen(t *testing.T) {
+	absentMFA := policy.EvaluationInput{Principal: authz.Principal{Subject: "alice"}}
+	presentButFalseMFA := policy.EvaluationInput{
+		Principal: authz.Principal{Subject: "alice", Attributes: map[string]string{"mfa": "false"}},
+	}
+	denyUnlessMFA := func(body string) string {
+		return fmt.Sprintf("package stratium.policy\n\ndeny if {\n\t%s\n}", body)
+	}
+	const notEqualsBody = `input.principal.attributes.mfa != "true"`
+	const notEqualBody = `not input.principal.attributes.mfa == "true"`
+
+	t.Run("!= silently does not fire when the attribute is absent (fails OPEN)", func(t *testing.T) {
+		set := prepare(t, []policy.StoredPolicy{
+			{ID: "deny-leg", Name: "deny-unless-mfa", Text: denyUnlessMFA(notEqualsBody)},
+			{ID: "allow-leg", Name: "allow-all", Text: "package stratium.policy\n\nallow := true"},
+		})
+		verdicts, err := set.Evaluate(context.Background(), absentMFA)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		// Only the allow-all sibling may show up: the != deny rule must
+		// produce no verdict at all (undefined, not true) when mfa is
+		// absent. A fold over this slice would land on ALLOW.
+		if len(verdicts) != 1 || verdicts[0].PolicyID != "allow-leg" || verdicts[0].Effect != authz.EffectAllow {
+			t.Fatalf("got %+v, want exactly the allow-all verdict (the != deny rule must stay silent when mfa is absent)", verdicts)
+		}
+	})
+
+	t.Run("not X == Y correctly denies when the attribute is absent (fails CLOSED)", func(t *testing.T) {
+		set := prepare(t, []policy.StoredPolicy{
+			{ID: "deny-leg", Name: "deny-unless-mfa", Text: denyUnlessMFA(notEqualBody)},
+			{ID: "allow-leg", Name: "allow-all", Text: "package stratium.policy\n\nallow := true"},
+		})
+		verdicts, err := set.Evaluate(context.Background(), absentMFA)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		byID := make(map[string]authz.Effect, len(verdicts))
+		for _, v := range verdicts {
+			byID[v.PolicyID] = v.Effect
+		}
+		if byID["deny-leg"] != authz.EffectDeny {
+			t.Fatalf("got %+v, want deny-leg to fire EffectDeny (not X == Y must treat an absent attribute as not-equal)", verdicts)
+		}
+	})
+
+	// Control: with mfa actually present, but "false" rather than "true",
+	// both spellings must deny — proving the divergence above is specific
+	// to absence, not a general difference in what the two spellings mean.
+	t.Run("control: both spellings deny when mfa is present but false", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body string
+		}{
+			{"!=", notEqualsBody},
+			{"not ... ==", notEqualBody},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				set := prepare(t, []policy.StoredPolicy{
+					{ID: "deny-leg", Name: "deny-unless-mfa", Text: denyUnlessMFA(tc.body)},
+				})
+				verdicts, err := set.Evaluate(context.Background(), presentButFalseMFA)
+				if err != nil {
+					t.Fatalf("Evaluate: %v", err)
+				}
+				if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectDeny {
+					t.Fatalf("got %+v, want exactly one EffectDeny verdict", verdicts)
+				}
+			})
+		}
+	})
+}
+
 // TestEvaluate_EvaluationFailureDeniesAndNamesThePolicy covers the review-
 // found Critical: a policy that fails to evaluate for a given request (a
 // genuine Eval error, not merely "no rule fired") must produce a deny

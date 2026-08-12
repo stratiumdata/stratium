@@ -99,6 +99,63 @@
 //     Cedar's own choice there: nothing in scope needs an ordinal comparison
 //     against the ceiling itself, only against derived_tier.
 //
+// # Absence is undefined, not false — and != silently inherits that
+//
+// Every OPA comparison builtin (==, !=, <, <=, >, >=) needs BOTH operands
+// defined to produce a value at all. stringMapOrEmpty and stringsOrEmpty
+// (input.go) already guarantee the three tenant-open fields —
+// principal.attributes, resource, delegation.classification_caps — are
+// never Rego/JSON null, but neither can guarantee any particular KEY inside
+// one of them is present, because those maps are free-form and
+// tenant-supplied with no fixed key set to enumerate (see schema.go's "why
+// the three tenant-supplied maps stay undeclared"). Indexing a missing key
+// is itself undefined, and a comparison built on an undefined operand is
+// undefined too — not false, not an error, simply no value. A rule body is
+// an implicit AND of every expression in it, and one undefined expression
+// makes the whole body undefined: the rule produces no value for this
+// input, exactly as if none of its conditions had ever been written.
+// decision (evaluate.go) cannot tell that apart from "this policy
+// legitimately did not match," and neither can Eval itself — a missing key
+// is not an OPA error (the same "empty result proves nothing" trap
+// checkPackage's own doc comment describes for a different cause).
+//
+// This bites hardest on deny rules built around !=, because the author's
+// intent is almost always "anything other than the expected value should be
+// denied — including no value at all":
+//
+//	INTENT: deny unless principal.mfa is exactly "true". No mfa attribute present.
+//
+//	deny if { input.principal.attributes.mfa != "true" }         undefined -> rule does not fire
+//	deny if { not input.principal.attributes.mfa == "true" }     not(undefined) is true -> denies
+//
+// The second spelling works because Rego's `not` treats an undefined inner
+// expression as a hit: `not X` holds whenever X is false OR undefined, and
+// fails only when X is true — exactly the "absence counts as not-equal"
+// semantics a deny-unless rule needs, and != does not have: it is an
+// ordinary two-argument builtin, and an ordinary builtin given an undefined
+// argument simply does not run. With mfa actually present but wrong
+// ("false" rather than "true"), both spellings deny identically — the
+// divergence above is specifically about absence, not a general difference
+// in what the two spellings mean (see
+// TestEvaluate_NotEqualsOnAbsentAttributeFailsOpen, evaluate_test.go, which
+// pins both the failure and the fix, plus that control, against the real
+// engine).
+//
+// One Rego policy failing to fire is not, on its own, a fail-open PDP:
+// authz.FoldVerdicts is deny-overrides, so this only matters when nothing
+// else in the tenant's principal leg denies the same request — but a
+// deny-unless rule is usually written precisely because nothing else does,
+// which makes this exactly the shape of policy most likely to be the only
+// thing standing between a request and an unconditional allow.
+//
+// No static check catches this: it was investigated and rejected, not
+// merely left undone — see schema.go's "why there is no absence check" for
+// the reasoning. Prefer `not X == Y` (or `not X in [...]` for membership)
+// over `X != Y` in any deny rule that touches principal.attributes,
+// resource, or delegation.classification_caps — the three paths where a key
+// can be legitimately absent at all; every other input path is exhaustively
+// populated by buildInput (input.go) and never has this problem.
+//
 // # The narrowing invariant
 //
 // Same as Cedar: a policy verdict can never widen anything.

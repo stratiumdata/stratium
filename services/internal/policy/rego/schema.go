@@ -83,6 +83,65 @@ import (
 // action, agent, or delegation was already silently dead (never any such
 // key) before this task; closing those objects converts that silent
 // dead-on-arrival reference into a loud compile error, which only narrows.
+//
+// # Why there is no absence check
+//
+// A different defect from anything above: != (and <, <=, >, >=) against a
+// path that descends into one of the three open tenant maps is silently
+// FAIL-OPEN — not merely miscompared — when the key it names is absent from
+// a given request, because a comparison with an undefined operand is itself
+// undefined rather than false (see engine.go's package doc, "Absence is
+// undefined, not false," for the mechanism and a worked example). This was
+// investigated as a candidate fifth check, alongside checkPackage and
+// checkComparisonTypes, and rejected — not merely deferred — because the
+// reasons hold regardless of how narrowly the check is scoped:
+//
+//  1. Whether a given key is safe to compare with != is not a fact about the
+//     policy TEXT at all. principal.attributes, resource, and delegation.
+//     classification_caps are free-form per-tenant data by this engine's own
+//     design (see "why the three tenant-supplied maps stay undeclared"
+//     above); nothing in a StoredPolicy's text, this package's schema, or
+//     anywhere else this engine can see says whether a given tenant's
+//     upstream systems always populate a given key before a request ever
+//     reaches this PDP. A check that rejected every != against one of these
+//     three paths would reject exactly the legitimate policy the task that
+//     added this comment was warned about — one written by a tenant whose
+//     principal always carries "mfa" — with no way to tell it apart from
+//     the dangerous one from the text alone. Narrowing which OPERATORS
+//     trigger the check (say, only != and not the four ordering ones)
+//     narrows how much gets flagged, not the false-positive RATE among what
+//     does: the missing information is identical either way.
+//  2. Proving a != is "guarded" — that a preceding conjunct in the same rule
+//     body forces the key to exist before the != runs — would need real
+//     data-flow analysis over Rego rule bodies, and would still be unsound:
+//     the guarantee just as often lives outside the policy text entirely (a
+//     gateway that always sets mfa upstream, a per-tenant contract this
+//     engine never sees) or in a different rule or policy this checker has
+//     no visibility into at Prepare time (one policy compiled at a time —
+//     see "compile once, evaluate many" in engine.go). A check that cannot
+//     see the guarantee cannot safely assume its absence either.
+//  3. A runtime probe — compile the policy, evaluate it once against a
+//     synthetic input with the key deleted, flag a rule whose outcome
+//     changes — was considered and rejected for the identical reason
+//     checkPackage's own doc comment already rejects a probe for a
+//     different question: the result cannot distinguish "this key's absence
+//     silently defeats an intended guard" from "this rule legitimately does
+//     not care about this key at all," and the second case is the
+//     overwhelmingly common one. Flagging every rule whose result is
+//     sensitive to one open-map key's presence would flag nearly every deny
+//     rule that reads one.
+//
+// What IS true and checkable would be a narrower claim — "this specific !=
+// can never be reached with an undefined operand" — but proving that needs
+// exactly the tenant-side guarantee point 1 says this engine cannot see.
+// There is no version of this check both narrow enough to avoid
+// over-rejecting a tenant who legitimately always populates a key, and wide
+// enough to catch a tenant who does not — the same tension cedar/deadform.go
+// worked all the way through for cedar-go's x/exp schema validator before
+// rejecting it for the equivalent Cedar question, not merely assumed.
+// Documentation is what closes this gap instead: engine.go shows the trap
+// and names the fail-closed spelling once, clearly, because an author
+// cannot be protected from writing != here, only told it has this hole.
 const inputSchemaJSON = `{
   "type": "object",
   "properties": {
