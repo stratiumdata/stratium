@@ -322,14 +322,74 @@ func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 	t.Skip("Phase 3: requires the PEP decision cache")
 }
 
+// C21 reads "escalation routes to the root principal, not an intermediate
+// agent." Its reason used to say "Phase 2: requires the approval
+// subsystem" — stale as of Phase 5: the approval subsystem now exists
+// (this phase's Tasks 1-4), and the property it names is genuinely
+// proven — internal/pdpgrpc/escalation_test.go's TestDecide_Escalation_
+// CreatesApprovalWithRootPrincipalAsApprover and, more pointedly,
+// TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate (a
+// depth-2 chain, the only shape that can tell "the root" apart from "the
+// last hop" — a depth-0 chain's root IS its only hop) both assert
+// resolveEscalation routes a fresh approval's RootPrincipal to
+// chain[0].UserID, never an intermediate delegate's identity — exactly
+// what the spec cites C21 for (§4.6.1 E7: "the PDP loads the record and
+// enforces that its approver is the chain's root principal (C21)").
+//
+// It cannot become a pass HERE, and that is not a gap: routing approval to
+// a root principal is not a concept internal/authz has any way to express.
+// authz.Result carries no approver, no RootPrincipal, no Approval at all —
+// resolveEscalation and models.Approval, where that concept actually
+// lives, sit one layer up in internal/pdpgrpc and pkg/models, which this
+// package's own global constraint forbids it from importing
+// ("internal/authz stays pure ... may never import internal/policy or
+// internal/store" — and pdpgrpc itself imports authz, so the reverse
+// would also be circular). Same shape as C16 and C18 above: the property
+// is real and proven, just never provable at this package's level — see
+// their own skip reasons for the precedent this follows.
 func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 	markRan(21)
-	t.Skip("Phase 2: requires the approval subsystem")
+	t.Skip("Proven at internal/pdpgrpc/escalation_test.go: TestDecide_Escalation_" +
+		"CreatesApprovalWithRootPrincipalAsApprover and TestDecide_Escalation_" +
+		"RootPrincipalRoutesAroundIntermediateDelegate (the depth-2 case that actually " +
+		"distinguishes root from an intermediate delegate). Cannot pass HERE: internal/authz " +
+		"has no Approval type and no notion of an approver at all — that concept lives in " +
+		"internal/pdpgrpc/escalation.go and pkg/models/approval.go, one layer above what this " +
+		"package may import (same shape as C16/C18's own skip reasons).")
 }
 
+// C22 reads "escalation timeout denies." Its reason used to say "Phase 2:
+// requires the approval subsystem" — stale as of Phase 5: the PEP poll
+// loop now exists (this phase's Task 4, cmd/stratium-pep/escalation.go),
+// and the property is genuinely proven there —
+// TestRunHook_Escalate_TimeoutStillPendingDenies asserts a still-pending
+// approval at ApprovalTimeout denies (exit 2), wrapped in a
+// goroutine-and-select helper so a "retry forever" regression fails the
+// test in under a second rather than hanging until go test's own default
+// timeout; TestPollApproval_ContextCancelledMidPoll_
+// ReturnsPromptlyAndDenies proves the underlying poll primitive is
+// actually interruptible rather than merely slow to notice; and
+// TestRunHook_Escalate_PollRespectsInterval_DoesNotBusyWait proves the
+// wait between checks is a real wait, not a spin loop that happens to
+// also check a deadline.
+//
+// It cannot become a pass HERE: C22 is a property of blocking and time —
+// "the agent blocks there" until the PEP's own timeout (spec §4.6.1 E6) —
+// and internal/authz.Decide is a single, synchronous, non-blocking pure
+// function with no poll loop, no clock of its own (Now is a parameter,
+// per this package's own purity rule), and no PEP to time out in the
+// first place. There is no version of this property internal/authz could
+// exercise even in principle, unlike C6's Clamp, which IS a function this
+// package owns and can call directly. Same shape as C16/C18/C21 above:
+// real, proven, at a layer this file cannot reach.
 func TestC22_EscalationTimeoutDenies(t *testing.T) {
 	markRan(22)
-	t.Skip("Phase 2: requires the approval subsystem")
+	t.Skip("Proven at cmd/stratium-pep/hook_test.go: TestRunHook_Escalate_TimeoutStillPendingDenies " +
+		"(a still-pending approval denies at ApprovalTimeout, provably rather than by hanging) and " +
+		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies. Cannot pass HERE: C22 is " +
+		"about blocking and a clock the PEP owns (cmd/stratium-pep/escalation.go); internal/authz.Decide " +
+		"is a single synchronous pure call with no poll loop and nothing to time out " +
+		"(same shape as C16/C18/C21's own skip reasons).")
 }
 
 func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
