@@ -173,6 +173,7 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 		{"C22", "cmd/stratium-pep", []string{
 			"TestRunHook_Escalate_TimeoutStillPendingDenies",
 			"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
+			"TestDecideAndRelay_EscalationTimeout_Denies",
 		}},
 	}
 	for _, tt := range tests {

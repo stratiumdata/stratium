@@ -426,6 +426,22 @@ func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 // wait between checks is a real wait, not a spin loop that happens to
 // also check a deadline.
 //
+// Extended in Phase 6 Task 3: the pointer named only hook's own tests, which
+// was incomplete rather than wrong — the property was already true of a
+// second surface the pointer just did not yet name.
+// TestDecideAndRelay_EscalationTimeout_Denies (mcp_authorize_test.go) proves
+// the identical property for "mcp" — a still-pending approval at
+// ApprovalTimeout denies there too, as a correlated JSON-RPC error rather
+// than a PreToolUse exit code. It is not a second, independent proof of the
+// same fact by coincidence: "mcp" reaches this outcome through the exact
+// same resolveApproval/pollApproval (escalation.go) that hook's own tests
+// above already exercise, reused unmodified — see this task's report for
+// the seam analysis. Naming it here is what makes that true by construction, not
+// merely by the two surfaces happening to agree today: a regression in
+// resolveApproval's timeout handling now fails a test under BOTH
+// hook_test.go and mcp_authorize_test.go, and this pointer is stale again if
+// either one is ever renamed without the other being checked.
+//
 // It cannot become a pass HERE: C22 is a property of blocking and time —
 // "the agent blocks there" until the PEP's own timeout (spec §4.6.1 E6) —
 // and internal/authz.Decide is a single, synchronous, non-blocking pure
@@ -439,7 +455,8 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 	markRan(22)
 	provenElsewhere(t, 22, "cmd/stratium-pep",
 		"TestRunHook_Escalate_TimeoutStillPendingDenies",
-		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies")
+		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
+		"TestDecideAndRelay_EscalationTimeout_Denies")
 }
 
 // C23 reads "on a non-blocking surface, escalate returns deny plus a
