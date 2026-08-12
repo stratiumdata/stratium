@@ -21,17 +21,31 @@ import (
 // tenant_id binds to the Store's own tenantID (see CreateDelegation), not a
 // column read from d — matching the package doc's "never a per-call
 // argument."
+//
+// escalate_at is appended at the end rather than grouped next to
+// max_action_tier, matching loadDelegationQuery's own column order in
+// store.go and for the same reason: appending is the one place to add a
+// column that shifts no existing positional arg below.
 const insertDelegationQuery = `INSERT INTO delegations (
 	id, tenant_id, user_id, agent_id, approved_tools, max_action_tier,
 	classification_caps, resource_constraints, purpose, expires_at,
-	parent_delegation_id, root_delegation_id, depth, chain_agent_ids
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`
+	parent_delegation_id, root_delegation_id, depth, chain_agent_ids, escalate_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
 
 // ErrScopeWidens indicates a child delegation would not narrow its parent:
 // models.ScopeNarrows found at least one dimension that is equal-or-wider.
 // The reason string ScopeNarrows returned is wrapped in below, not
 // discarded, so a caller can log or surface exactly which dimension failed.
 var ErrScopeWidens = errors.New("store: child delegation does not narrow its parent")
+
+// ErrEscalateAtUnreachable indicates d.EscalateAt is set above d.MaxActionTier.
+// DelegationLeg denies once the tier exceeds MaxActionTier before it ever
+// checks EscalateAt (deny overrides escalate — see that function's own doc
+// comment), so a threshold above the ceiling could never fire. Rejected here
+// at write time rather than persisted as a rule with no effect: the same
+// semantically-dead class Phase 4a swept out of every policy engine, one
+// layer up.
+var ErrEscalateAtUnreachable = errors.New("store: escalate_at exceeds max_action_tier and could never fire")
 
 // jsonMarshal is package-level so a test can force a marshal failure on
 // demand. None of Delegation's JSONB-backed fields ([]string,
@@ -63,7 +77,27 @@ var jsonMarshal = json.Marshal
 // parent's root and depth+1. Both are structural consequences of chain
 // position, not a caller's choice, so d's own RootDelegationID/Depth fields
 // are never read.
+//
+// This is also the one place that rejects an EscalateAt set above
+// MaxActionTier (ErrEscalateAtUnreachable) — deliberately here and not in
+// pdpgrpc.CreateDelegation, even though that RPC handler does its own
+// pre-policy validation of the wire request. Its RequestedScope has no
+// escalate_at field at all today, so d.EscalateAt is always nil on that
+// path; a check placed there would itself be unreachable — exactly the
+// defect this rejection exists to prevent, one layer up. This function is
+// the one place every caller of CreateDelegation funnels through regardless
+// of transport, today's pdpgrpc handler and any future direct caller alike,
+// so it is the only place the check can actually be exercised by everyone
+// who can set the field.
 func (s *Store) CreateDelegation(ctx context.Context, d *models.Delegation) error {
+	// A self-contained property of d alone — no parent row, no database
+	// access needed — so it is checked before opening a transaction, unlike
+	// ScopeNarrows below, which needs the parent loaded first.
+	if d.EscalateAt != nil && *d.EscalateAt > d.MaxActionTier {
+		return fmt.Errorf("%w: escalate_at %s exceeds max_action_tier %s",
+			ErrEscalateAtUnreachable, d.EscalateAt.String(), d.MaxActionTier.String())
+	}
+
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
 		return err
@@ -102,10 +136,17 @@ func (s *Store) CreateDelegation(ctx context.Context, d *models.Delegation) erro
 		return fmt.Errorf("store: marshal chain_agent_ids: %w", err)
 	}
 
+	// d.EscalateAt (a *models.ActionTier) is passed directly, unconverted,
+	// the same way d.ParentDelegationID and d.RevokedAt already are
+	// elsewhere in this package: database/sql's default parameter
+	// converter maps a nil pointer to SQL NULL and a non-nil one to its
+	// pointee's value, so there is no separate nil-check-and-substitute
+	// step to keep in sync with EscalateAt's own nil-means-never-escalate
+	// contract.
 	_, err = tx.ExecContext(ctx, insertDelegationQuery,
 		d.ID.String(), s.tenantID, d.UserID, d.AgentID.String(), approvedTools, int64(d.MaxActionTier),
 		classificationCaps, resourceConstraints, d.Purpose, d.ExpiresAt,
-		d.ParentDelegationID, rootID.String(), int64(depth), chainAgentIDs,
+		d.ParentDelegationID, rootID.String(), int64(depth), chainAgentIDs, d.EscalateAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert delegation %s: %w", d.ID, err)

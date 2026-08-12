@@ -179,7 +179,7 @@ func delegationColumns() []string {
 		"id", "tenant_id", "user_id", "agent_id", "approved_tools", "max_action_tier",
 		"classification_caps", "resource_constraints", "purpose", "expires_at",
 		"created_at", "revoked", "revoked_at", "parent_delegation_id",
-		"root_delegation_id", "depth", "chain_agent_ids",
+		"root_delegation_id", "depth", "chain_agent_ids", "escalate_at",
 	}
 }
 
@@ -190,6 +190,7 @@ type delegationRow struct {
 	agentID      uuid.UUID
 	depth        int
 	purpose      *string
+	escalateAt   *models.ActionTier
 }
 
 func addDelegationRow(rows *sqlmock.Rows, r delegationRow) *sqlmock.Rows {
@@ -204,13 +205,21 @@ func addDelegationRow(rows *sqlmock.Rows, r delegationRow) *sqlmock.Rows {
 	if r.purpose != nil {
 		purposeVal = *r.purpose
 	}
+	// nil (the delegationRow zero value) means the fixture is a row with no
+	// escalate_at set — a NULL column, matching every pre-Phase-5 row and
+	// every existing caller of this helper that does not opt in by setting
+	// the field.
+	var escalateVal interface{}
+	if r.escalateAt != nil {
+		escalateVal = int64(*r.escalateAt)
+	}
 
 	return rows.AddRow(
 		r.id.String(), testTenant, "user-1", r.agentID.String(),
 		[]byte(`["Bash"]`), int64(1),
 		[]byte(`{}`), []byte(`{}`), purposeVal, expires,
 		now, false, nil, parentVal,
-		r.rootID.String(), int64(r.depth), []byte(`[]`),
+		r.rootID.String(), int64(r.depth), []byte(`[]`), escalateVal,
 	)
 }
 
@@ -222,6 +231,12 @@ func TestStore_LoadChain_RootFirstThreeHops(t *testing.T) {
 	leaf := uuid.New()
 	agent := uuid.New()
 	purpose := "test purpose"
+	// Set on mid only — a different hop than purpose (root) — so a mixup
+	// between the two nullable columns, or between "the column this test
+	// sets" and "the columns it leaves NULL," would not go unnoticed: root
+	// and leaf must both decode EscalateAt as nil below, exercising the
+	// NULL path on two of the three rows while mid exercises the non-NULL one.
+	midEscalateAt := models.ActionTierReadOnly
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
@@ -233,7 +248,10 @@ func TestStore_LoadChain_RootFirstThreeHops(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(loadDelegationQuery)).
 		WithArgs(mid.String()).
 		WillReturnRows(addDelegationRow(sqlmock.NewRows(delegationColumns()),
-			delegationRow{id: mid, hasParent: true, parentID: root, rootID: root, agentID: agent, depth: 1}))
+			delegationRow{
+				id: mid, hasParent: true, parentID: root, rootID: root, agentID: agent, depth: 1,
+				escalateAt: &midEscalateAt,
+			}))
 	mock.ExpectQuery(regexp.QuoteMeta(loadDelegationQuery)).
 		WithArgs(root.String()).
 		WillReturnRows(addDelegationRow(sqlmock.NewRows(delegationColumns()),
@@ -265,6 +283,15 @@ func TestStore_LoadChain_RootFirstThreeHops(t *testing.T) {
 	}
 	if len(got[0].ApprovedTools) != 1 || got[0].ApprovedTools[0] != "Bash" {
 		t.Errorf("ApprovedTools = %v, want [Bash]", got[0].ApprovedTools)
+	}
+	if got[0].EscalateAt != nil {
+		t.Errorf("root EscalateAt = %v, want nil (NULL column)", got[0].EscalateAt)
+	}
+	if got[1].EscalateAt == nil || *got[1].EscalateAt != midEscalateAt {
+		t.Errorf("mid EscalateAt = %v, want %s", got[1].EscalateAt, midEscalateAt)
+	}
+	if got[2].EscalateAt != nil {
+		t.Errorf("leaf EscalateAt = %v, want nil (NULL column)", got[2].EscalateAt)
 	}
 
 	assertExpectationsMet(t, mock)
@@ -328,7 +355,7 @@ func TestStore_LoadChain_DecodeFailure(t *testing.T) {
 			[]byte(`not-json`), int64(1),
 			[]byte(`{}`), []byte(`{}`), nil, time.Now().Add(time.Hour),
 			time.Now(), false, nil, nil,
-			id.String(), int64(0), []byte(`[]`),
+			id.String(), int64(0), []byte(`[]`), nil,
 		))
 	mock.ExpectRollback()
 

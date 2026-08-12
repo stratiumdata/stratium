@@ -104,13 +104,122 @@ func TestStore_CreateDelegation_RootInsertsSelfReferencingRootAndZeroDepth(t *te
 		WithArgs(
 			id.String(), testTenant, "user-1", agentID.String(), wantTools, int64(models.ActionTierInternalModify),
 			wantCaps, wantConstraints, "root grant", pastExpiry,
-			nil, id.String(), int64(0), wantChainAgents,
+			nil, id.String(), int64(0), wantChainAgents, nil, // escalate_at: unset on this fixture
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	if err := s.CreateDelegation(context.Background(), d); err != nil {
 		t.Fatalf("CreateDelegation() error = %v", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A reachable escalate_at (at or below max_action_tier) persists as its
+// int64 tier value, the same way max_action_tier itself does — proven on a
+// root so ScopeNarrows (which has its own, separately tested, opinion about
+// a CHILD's escalate_at relative to its parent's) is not in play here at
+// all.
+func TestStore_CreateDelegation_PersistsEscalateAt(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID := uuid.New(), uuid.New()
+	threshold := models.ActionTierReadOnly
+	d := &models.Delegation{
+		ID: id, UserID: "user-1", AgentID: agentID,
+		ApprovedTools:       []string{"Bash"},
+		MaxActionTier:       models.ActionTierInternalModify,
+		EscalateAt:          &threshold,
+		ClassificationCaps:  map[string]string{},
+		ResourceConstraints: map[string]string{},
+		Purpose:             "root grant with a threshold",
+		ExpiresAt:           pastExpiry,
+		ChainAgentIDs:       []uuid.UUID{agentID},
+	}
+
+	wantTools := mustMarshal(t, d.ApprovedTools)
+	wantCaps := mustMarshal(t, d.ClassificationCaps)
+	wantConstraints := mustMarshal(t, d.ResourceConstraints)
+	wantChainAgents := mustMarshal(t, d.ChainAgentIDs)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectExec(regexp.QuoteMeta(insertDelegationQuery)).
+		WithArgs(
+			id.String(), testTenant, "user-1", agentID.String(), wantTools, int64(models.ActionTierInternalModify),
+			wantCaps, wantConstraints, "root grant with a threshold", pastExpiry,
+			nil, id.String(), int64(0), wantChainAgents, int64(models.ActionTierReadOnly),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.CreateDelegation(context.Background(), d); err != nil {
+		t.Fatalf("CreateDelegation() error = %v", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A threshold above the delegation's own ceiling can never fire — the
+// ceiling denies before DelegationLeg would ever check it (deny overrides
+// escalate) — so CreateDelegation rejects it before an INSERT is even
+// attempted. Proven with no mock.ExpectBegin/ExpectRollback at all: unlike
+// ScopeNarrows' rejection (which needs the parent loaded, so it runs inside
+// the transaction and rolls back), this is a self-contained property of d
+// alone, checked before any transaction opens — if the implementation ever
+// started opening one first, sqlmock would fail this test for an unexpected
+// call rather than this assertion merely checking the returned error.
+func TestStore_CreateDelegation_EscalateAtAboveCeilingRejected(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID := uuid.New(), uuid.New()
+	unreachable := models.ActionTierExternalComms // 3, above the ceiling below
+	d := &models.Delegation{
+		ID: id, UserID: "user-1", AgentID: agentID,
+		ApprovedTools:       []string{"Bash"},
+		MaxActionTier:       models.ActionTierReadOnly, // 1
+		EscalateAt:          &unreachable,
+		ClassificationCaps:  map[string]string{},
+		ResourceConstraints: map[string]string{},
+		ExpiresAt:           pastExpiry,
+		ChainAgentIDs:       []uuid.UUID{agentID},
+	}
+
+	err := s.CreateDelegation(context.Background(), d)
+	if !errors.Is(err, ErrEscalateAtUnreachable) {
+		t.Fatalf("CreateDelegation() error = %v, want errors.Is(_, ErrEscalateAtUnreachable)", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// The boundary: escalate_at exactly AT the ceiling is one-point reachable
+// (tier == max_action_tier == escalate_at) and must be accepted, not
+// rejected as "above." Without this, a >= mutation on the rejection's own
+// comparison would pass every other test in this file — none of them puts
+// escalate_at exactly at max_action_tier — while quietly turning a legal
+// one-point band into a write-time error.
+func TestStore_CreateDelegation_EscalateAtAtCeilingAccepted(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID := uuid.New(), uuid.New()
+	atCeiling := models.ActionTierReadOnly
+	d := &models.Delegation{
+		ID: id, UserID: "user-1", AgentID: agentID,
+		ApprovedTools:       []string{"Bash"},
+		MaxActionTier:       models.ActionTierReadOnly, // equal to EscalateAt below
+		EscalateAt:          &atCeiling,
+		ClassificationCaps:  map[string]string{},
+		ResourceConstraints: map[string]string{},
+		ExpiresAt:           pastExpiry,
+		ChainAgentIDs:       []uuid.UUID{agentID},
+	}
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectExec(regexp.QuoteMeta(insertDelegationQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.CreateDelegation(context.Background(), d); err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want escalate_at == max_action_tier to be accepted", err)
 	}
 
 	assertExpectationsMet(t, mock)
@@ -138,7 +247,7 @@ func TestStore_CreateDelegation_ChildInheritsParentRootAndDepthPlusOne(t *testin
 		WithArgs(
 			childID.String(), testTenant, "user-1", agentID.String(), wantTools, int64(models.ActionTierReadOnly),
 			wantCaps, wantConstraints, "narrower re-delegation", pastExpiry,
-			parentID.String(), parentID.String(), int64(1), wantChainAgents,
+			parentID.String(), parentID.String(), int64(1), wantChainAgents, nil, // escalate_at: unset on this fixture
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

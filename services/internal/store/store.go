@@ -54,10 +54,15 @@ const setTenantQuery = `SELECT set_config('app.tenant_id', $1, true)`
 
 const loadAgentQuery = `SELECT id, trust_tier, enabled, suspended, allowed_tools FROM agents WHERE id = $1`
 
+// escalate_at is appended at the end, after chain_agent_ids, rather than
+// grouped next to max_action_tier: every positional Scan in scanDelegation
+// and every sqlmock fixture in this package's tests lines args up by
+// position, and appending is the one place to add a column that cannot
+// shift any of those positions for the fourteen columns that already exist.
 const loadDelegationQuery = `SELECT id, tenant_id, user_id, agent_id, approved_tools, max_action_tier, ` +
 	`classification_caps, resource_constraints, purpose, expires_at, ` +
 	`created_at, revoked, revoked_at, parent_delegation_id, ` +
-	`root_delegation_id, depth, chain_agent_ids FROM delegations WHERE id = $1`
+	`root_delegation_id, depth, chain_agent_ids, escalate_at FROM delegations WHERE id = $1`
 
 // Store is a tenant-scoped repository. The tenant is fixed at construction;
 // see the package doc.
@@ -190,9 +195,17 @@ func (s *Store) LoadChain(ctx context.Context, actingDelegationID uuid.UUID) ([]
 // already models them as pointers (*uuid.UUID, *time.Time), and
 // database/sql's generic Scan handles a NULL column that way natively —
 // unlike a plain string field, which errors on Scanning a NULL.
+//
+// escalate_at scans through sql.NullInt64, like maxActionTier's own local
+// below, rather than straight into *models.ActionTier: EscalateAt is a
+// pointer, but its pointee is a validated enum, not a bare int, so a NULL
+// must decode to nil (never escalate) while a non-NULL value must still run
+// through ParseActionTier — the same validation maxActionTier gets — before
+// it is trusted as an ActionTier at all.
 func scanDelegation(row *sql.Row) (*models.Delegation, error) {
 	var d models.Delegation
 	var maxActionTier int64
+	var escalateAt sql.NullInt64
 	var purpose sql.NullString
 	var approvedTools, classificationCaps, resourceConstraints, chainAgentIDs []byte
 
@@ -200,7 +213,7 @@ func scanDelegation(row *sql.Row) (*models.Delegation, error) {
 		&d.ID, &d.TenantID, &d.UserID, &d.AgentID,
 		&approvedTools, &maxActionTier, &classificationCaps, &resourceConstraints,
 		&purpose, &d.ExpiresAt, &d.CreatedAt, &d.Revoked, &d.RevokedAt,
-		&d.ParentDelegationID, &d.RootDelegationID, &d.Depth, &chainAgentIDs,
+		&d.ParentDelegationID, &d.RootDelegationID, &d.Depth, &chainAgentIDs, &escalateAt,
 	)
 	if err != nil {
 		return nil, err // includes sql.ErrNoRows; callers distinguish with errors.Is
@@ -211,6 +224,14 @@ func scanDelegation(row *sql.Row) (*models.Delegation, error) {
 		return nil, fmt.Errorf("store: delegation %s max_action_tier: %w", d.ID, err)
 	}
 	d.MaxActionTier = tier
+
+	if escalateAt.Valid {
+		escalate, err := models.ParseActionTier(int(escalateAt.Int64))
+		if err != nil {
+			return nil, fmt.Errorf("store: delegation %s escalate_at: %w", d.ID, err)
+		}
+		d.EscalateAt = &escalate
+	}
 
 	if purpose.Valid {
 		d.Purpose = purpose.String
