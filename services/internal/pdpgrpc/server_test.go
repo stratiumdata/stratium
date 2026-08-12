@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -375,6 +376,55 @@ func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
 	}
 	if got := fs.appended[0].PolicyID; got != "" {
 		t.Errorf("audit entry PolicyID = %q, want empty string: no verdict decided this", got)
+	}
+}
+
+// orphanVerdictSet is a policy.CompiledPolicySet that always evaluates to
+// one deny verdict carrying UnevaluatedPolicyIDs — standing in for
+// policy.Multi's own orphanVerdicts (internal/policy/multi.go) without
+// depending on a real Registry gap, the same "cheap test double for a
+// specific production shape" reasoning nilVerdictSet above uses.
+type orphanVerdictSet struct{ ids []string }
+
+func (s orphanVerdictSet) Evaluate(context.Context, policy.EvaluationInput) ([]authz.PolicyVerdict, error) {
+	return []authz.PolicyVerdict{{
+		Effect:               authz.EffectDeny,
+		Source:               fakeLanguage,
+		Reason:               "principal: no fake engine registered; cannot evaluate 2 fake policies for this tenant",
+		UnevaluatedPolicyIDs: s.ids,
+	}}, nil
+}
+
+// UnevaluatedPolicyIDs must reach the audit row: appendAudit copies it from
+// result.UnevaluatedPolicyIDs unconditionally, not gated on result.Deciding
+// (see appendAudit's own doc comment on why gating it would reintroduce the
+// loses-the-fold defect the aggregate exists to avoid — the fold-survival
+// mechanics themselves are proven at the authz layer, in
+// internal/authz/compound_test.go's TestDecide_
+// UnevaluatedPolicyIDsSurviveLosingTheFold and live, over gRPC, in
+// internal/store's TestIntegration_Live_OrphanLanguageDeniesNamingIt; this
+// test only needs to prove appendAudit's own plumbing copies the field).
+func TestDecide_UnevaluatedPolicyIDsReachAuditEntry(t *testing.T) {
+	fs, req := wellFormedFixture()
+	ids := []string{"orphan-a", "orphan-b"}
+	srv := NewServer(fs, policy.NewMulti(
+		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "fake-policy-1", Language: fakeLanguage}}},
+		policy.Registry{fakeLanguage: fakePolicyEngine{set: orphanVerdictSet{ids: ids}}},
+	), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+	}
+
+	if len(fs.appended) != 1 {
+		t.Fatalf("AppendAudit called %d times, want 1", len(fs.appended))
+	}
+	if got := fs.appended[0].UnevaluatedPolicyIDs; !slices.Equal(got, ids) {
+		t.Errorf("audit entry UnevaluatedPolicyIDs = %v, want %v", got, ids)
 	}
 }
 

@@ -25,25 +25,26 @@ func fullAuditEntry(tenantID string, seed byte) audit.Entry {
 	delegation := uuid.New()
 	root := uuid.New()
 	return audit.Entry{
-		TenantID:         tenantID,
-		OccurredAt:       time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC).Add(time.Duration(seed) * time.Minute),
-		EventType:        "decision",
-		Actor:            "agent:svc-a",
-		AgentID:          &agent,
-		DelegationID:     &delegation,
-		RootDelegationID: &root,
-		ChainDepth:       2,
-		ToolName:         "Bash",
-		Action:           "run",
-		DeclaredTier:     1,
-		DerivedTier:      2,
-		Decision:         "ALLOW",
-		DeniedLeg:        "",
-		DeniedAtDepth:    0,
-		Reason:           "ok",
-		PolicySource:     "cedar",
-		PolicyID:         "policy-42",
-		InputDigest:      [32]byte{seed, seed + 1, seed + 2},
+		TenantID:             tenantID,
+		OccurredAt:           time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC).Add(time.Duration(seed) * time.Minute),
+		EventType:            "decision",
+		Actor:                "agent:svc-a",
+		AgentID:              &agent,
+		DelegationID:         &delegation,
+		RootDelegationID:     &root,
+		ChainDepth:           2,
+		ToolName:             "Bash",
+		Action:               "run",
+		DeclaredTier:         1,
+		DerivedTier:          2,
+		Decision:             "ALLOW",
+		DeniedLeg:            "",
+		DeniedAtDepth:        0,
+		Reason:               "ok",
+		PolicySource:         "cedar",
+		PolicyID:             "policy-42",
+		UnevaluatedPolicyIDs: []string{"orphan-1", "orphan-2"},
+		InputDigest:          [32]byte{seed, seed + 1, seed + 2},
 	}
 }
 
@@ -53,8 +54,29 @@ func auditTailColumns() []string {
 		"agent_id", "delegation_id", "root_delegation_id", "chain_depth",
 		"tool_name", "action", "declared_tier", "derived_tier",
 		"decision", "denied_leg", "denied_at_depth", "reason",
-		"policy_source", "policy_id", "input_digest",
+		"policy_source", "policy_id", "unevaluated_policy_ids", "input_digest",
 	}
+}
+
+// pqArrayValue renders ids the way a real driver hands a TEXT[] column back
+// from a Scan (lib/pq's own Postgres array text format), for sqlmock rows
+// that must be scanned through pq.Array — mirrors uuidArg's role for the
+// nullable UUID columns above. A nil slice renders as SQL NULL (pq.
+// StringArray.Value's own documented behavior), which is what
+// addAuditTailRow needs to exercise a genuinely-NULL column rather than an
+// empty array — the two are the same Go zero value but different wire
+// values, exactly the distinction TestStore_AppendAudit_
+// TailReadDecodesNullUnevaluatedPolicyIDsAsNil below depends on.
+func pqArrayValue(ids []string) interface{} {
+	v, err := pq.StringArray(ids).Value()
+	if err != nil {
+		// StringArray.Value never actually returns an error; a panic here
+		// would only ever fire if that stopped being true, which is a test
+		// bug worth surfacing loudly rather than silently mis-building a
+		// fixture.
+		panic(err)
+	}
+	return v
 }
 
 // uuidArg renders a nullable UUID field the way a real driver hands it back
@@ -75,8 +97,25 @@ func addAuditTailRow(rows *sqlmock.Rows, e audit.Entry) *sqlmock.Rows {
 		uuidArg(e.AgentID), uuidArg(e.DelegationID), uuidArg(e.RootDelegationID), int64(e.ChainDepth),
 		e.ToolName, e.Action, int64(e.DeclaredTier), int64(e.DerivedTier),
 		e.Decision, e.DeniedLeg, int64(e.DeniedAtDepth), e.Reason,
-		e.PolicySource, e.PolicyID, e.InputDigest[:],
+		e.PolicySource, e.PolicyID, pqArrayValue(e.UnevaluatedPolicyIDs), e.InputDigest[:],
 	)
+}
+
+// nonNilStrings mirrors AppendAudit's own nil-to-empty-array coercion for
+// unevaluated_policy_ids (see that function's own comment on why: pq.Array
+// binds a nil slice as SQL NULL, and AppendAudit's discipline is that every
+// column it writes for a row it is actually writing gets a concrete value).
+// insertArgsFor needs the identical coercion so its expected argument
+// matches what AppendAudit really sends — see expectations_go18.go's
+// argsMatches, which converts both sides through driver.Valuer before
+// comparing, so this must produce the same []string AppendAudit's own local
+// variable would, not merely something that also renders to the same
+// Postgres text form by coincidence.
+func nonNilStrings(ss []string) []string {
+	if ss == nil {
+		return []string{}
+	}
+	return ss
 }
 
 // insertArgsFor returns the exact positional argument list AppendAudit must
@@ -93,7 +132,7 @@ func insertArgsFor(linked audit.Entry, entryHash [32]byte) []driver.Value {
 		linked.AgentID, linked.DelegationID, linked.RootDelegationID, linked.ChainDepth,
 		linked.ToolName, linked.Action, linked.DeclaredTier, linked.DerivedTier,
 		linked.Decision, linked.DeniedLeg, linked.DeniedAtDepth, linked.Reason,
-		linked.PolicySource, linked.PolicyID, linked.InputDigest[:],
+		linked.PolicySource, linked.PolicyID, pq.Array(nonNilStrings(linked.UnevaluatedPolicyIDs)), linked.InputDigest[:],
 	}
 }
 
@@ -207,13 +246,67 @@ func TestStore_AppendAudit_TailReadDecodesNullPolicyColumnsAsEmptyString(t *test
 	// nil, not "", in these two positions: this is what a real driver hands
 	// back for SQL NULL, which is what addAuditTailRow(predecessor) would NOT
 	// exercise (it would send the Go "" string as a driver value, not NULL).
+	// unevaluated_policy_ids is left at predecessor's own (non-empty) value
+	// here — this test is specifically about the two plain-string columns;
+	// TestStore_AppendAudit_TailReadDecodesNullUnevaluatedPolicyIDsAsNil below
+	// is its dedicated counterpart for the array column.
 	row := sqlmock.NewRows(auditTailColumns()).AddRow(
 		predecessor.PrevHash[:], predecessor.TenantID, predecessor.OccurredAt, predecessor.EventType, predecessor.Actor,
 		uuidArg(predecessor.AgentID), uuidArg(predecessor.DelegationID), uuidArg(predecessor.RootDelegationID),
 		int64(predecessor.ChainDepth), predecessor.ToolName, predecessor.Action,
 		int64(predecessor.DeclaredTier), int64(predecessor.DerivedTier),
 		predecessor.Decision, predecessor.DeniedLeg, int64(predecessor.DeniedAtDepth), predecessor.Reason,
-		nil, nil, predecessor.InputDigest[:],
+		nil, nil, pqArrayValue(predecessor.UnevaluatedPolicyIDs), predecessor.InputDigest[:],
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnRows(row)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(insertArgsFor(wantLinked, wantHash)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.AppendAudit(context.Background(), e); err != nil {
+		t.Fatalf("AppendAudit() error = %v", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// unevaluated_policy_ids is nullable with no default (migrations/
+// 000010_audit_unevaluated_policy_ids), so a predecessor row written before
+// that migration — or by any writer that never set it — comes back from the
+// tail query as SQL NULL, not an empty array. scanAuditTail must decode
+// that NULL to a nil []string, the same value a fresh Entry{} already has
+// (pq.StringArray's own Scan already does this — see scanAuditTail's own
+// doc comment), or the recomputed PrevHash for the new entry will not match
+// what a chain reader gets by reconstructing the same predecessor from its
+// own zero-valued fields. The live, migration-crossing counterpart of this
+// property is store_integration_test.go's "chain_verifies_across_the_
+// migration_boundary" subtest of TestEndToEnd (build-tagged integration),
+// which proves it against a real Postgres migrated live rather than a mock.
+func TestStore_AppendAudit_TailReadDecodesNullUnevaluatedPolicyIDsAsNil(t *testing.T) {
+	s, mock := newMockStore(t)
+	predecessor := fullAuditEntry(testTenant, 9)
+	predecessor.UnevaluatedPolicyIDs = nil // what a genuinely pre-migration row (or one never populated) looks like
+	e := fullAuditEntry(testTenant, 1)
+
+	wantLinked := audit.Link(&predecessor, e)
+	wantHash := wantLinked.Hash()
+	if wantLinked.PrevHash != predecessor.Hash() {
+		t.Fatal("test setup bug: audit.Link(&predecessor, e).PrevHash must equal predecessor.Hash()")
+	}
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	expectAdvisoryLock(mock)
+	// nil in this one position (not pqArrayValue(nil), though those render
+	// identically): this is what a real driver hands back for SQL NULL.
+	row := sqlmock.NewRows(auditTailColumns()).AddRow(
+		predecessor.PrevHash[:], predecessor.TenantID, predecessor.OccurredAt, predecessor.EventType, predecessor.Actor,
+		uuidArg(predecessor.AgentID), uuidArg(predecessor.DelegationID), uuidArg(predecessor.RootDelegationID),
+		int64(predecessor.ChainDepth), predecessor.ToolName, predecessor.Action,
+		int64(predecessor.DeclaredTier), int64(predecessor.DerivedTier),
+		predecessor.Decision, predecessor.DeniedLeg, int64(predecessor.DeniedAtDepth), predecessor.Reason,
+		predecessor.PolicySource, predecessor.PolicyID, nil, predecessor.InputDigest[:],
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnRows(row)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).

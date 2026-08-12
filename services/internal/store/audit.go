@@ -28,7 +28,7 @@ import (
 const auditTailQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, actor, ` +
 	`agent_id, delegation_id, root_delegation_id, chain_depth, ` +
 	`tool_name, action, declared_tier, derived_tier, ` +
-	`decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, input_digest ` +
+	`decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, unevaluated_policy_ids, input_digest ` +
 	`FROM audit_chain ORDER BY seq DESC LIMIT 1`
 
 // insertAuditQuery writes every column audit.Entry.Hash covers, plus
@@ -56,27 +56,32 @@ const auditTailQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, ac
 //	Reason            ->  reason
 //	PolicySource      ->  policy_source
 //	PolicyID          ->  policy_id
+//	UnevaluatedPolicyIDs -> unevaluated_policy_ids
 //	InputDigest       ->  input_digest
 //
-// All 20 Entry fields are listed (Entry has exactly 20 — see
+// All 21 Entry fields are listed (Entry has exactly 21 — see
 // TestHash_CoversEveryField in pkg/audit). Every one is written explicitly,
 // even where the Go zero value is what's being written: several columns
 // have schema defaults that do not match that zero (occurred_at DEFAULT
 // NOW(), tool_name/action/reason DEFAULT to an empty string), and a column
 // an INSERT omitted would silently take that default instead of the value
-// Hash actually consumed, failing verification later. policy_source and
-// policy_id have no default at all (migrations/000006), so an omitted
-// column would fail loudly (NULL is fine; a missing column entirely is
-// not) rather than silently diverge — but they are still written
-// explicitly, for the same reason as every other column here. seq is the
-// only audit_chain column absent here — it is the table's own generated
+// Hash actually consumed, failing verification later. policy_source,
+// policy_id, and unevaluated_policy_ids have no default at all (migrations/
+// 000006, 000010), so an omitted column would fail loudly (NULL is fine; a
+// missing column entirely is not) rather than silently diverge — but they
+// are still written explicitly, for the same reason as every other column
+// here (see the nil-to-empty-array coercion in AppendAudit below for
+// unevaluated_policy_ids specifically: pq.StringArray's own Value() method
+// binds a nil slice as SQL NULL, so a caller that wants a genuinely-empty
+// array written, not NULL, must hand it a non-nil one). seq is the only
+// audit_chain column absent here — it is the table's own generated
 // identity, not part of Entry, and Hash never covers it.
 const insertAuditQuery = `INSERT INTO audit_chain (` +
 	`tenant_id, prev_hash, entry_hash, occurred_at, event_type, actor, ` +
 	`agent_id, delegation_id, root_delegation_id, chain_depth, ` +
 	`tool_name, action, declared_tier, derived_tier, ` +
-	`decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, input_digest` +
-	`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`
+	`decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, unevaluated_policy_ids, input_digest` +
+	`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`
 
 // sqlStateUniqueViolation is PostgreSQL's SQLSTATE class for
 // unique_violation. audit_chain_tenant_prev_hash_unique raises exactly this
@@ -134,12 +139,26 @@ func (s *Store) AppendAudit(ctx context.Context, e audit.Entry) error {
 	linked := audit.Link(prev, e)
 	entryHash := linked.Hash()
 
+	// unevaluatedPolicyIDs is coerced to a non-nil, empty slice when linked
+	// carries none: pq.StringArray.Value() (what pq.Array's binding calls)
+	// writes SQL NULL for a nil slice, but AppendAudit's own discipline
+	// (see insertAuditQuery's doc comment) is that every column it writes
+	// gets a concrete value, never NULL, for a row it is actually writing —
+	// the same "write the zero value explicitly" rule already applied to
+	// policy_source/policy_id above. That is what keeps NULL meaning
+	// exactly one thing in this column: a row written before migrations/
+	// 000010, never one AppendAudit wrote itself.
+	unevaluatedPolicyIDs := linked.UnevaluatedPolicyIDs
+	if unevaluatedPolicyIDs == nil {
+		unevaluatedPolicyIDs = []string{}
+	}
+
 	_, err = tx.ExecContext(ctx, insertAuditQuery,
 		linked.TenantID, linked.PrevHash[:], entryHash[:], linked.OccurredAt, linked.EventType, linked.Actor,
 		linked.AgentID, linked.DelegationID, linked.RootDelegationID, linked.ChainDepth,
 		linked.ToolName, linked.Action, linked.DeclaredTier, linked.DerivedTier,
 		linked.Decision, linked.DeniedLeg, linked.DeniedAtDepth, linked.Reason,
-		linked.PolicySource, linked.PolicyID, linked.InputDigest[:],
+		linked.PolicySource, linked.PolicyID, pq.Array(unevaluatedPolicyIDs), linked.InputDigest[:],
 	)
 	if err != nil {
 		var pqErr *pq.Error
@@ -170,6 +189,16 @@ func (s *Store) AppendAudit(ctx context.Context, e audit.Entry) error {
 // for the same reason scanDelegation uses it for the nullable purpose
 // column: Entry models them as plain strings, not pointers, and
 // database/sql errors scanning a NULL directly into a string.
+//
+// unevaluated_policy_ids scans straight into pq.Array(&e.UnevaluatedPolicyIDs)
+// — no sql.NullString-style intermediate needed, because pq.StringArray's
+// own Scan already treats a SQL NULL source as "set the slice to nil"
+// (lib/pq's array.go), which is exactly Go's own zero value for []string.
+// That is what makes a row written before migrations/000010 (where this
+// column does not exist and reads back NULL) decode identically to a row
+// this package wrote with genuinely nothing unevaluated (an explicit empty
+// array — see AppendAudit's own nil-to-empty-array coercion): pkg/audit.
+// Entry.Hash's list encoding writes a count, and both cases count zero.
 func scanAuditTail(row *sql.Row) (*audit.Entry, error) {
 	var e audit.Entry
 	var prevHash, inputDigest []byte
@@ -180,7 +209,7 @@ func scanAuditTail(row *sql.Row) (*audit.Entry, error) {
 		&e.AgentID, &e.DelegationID, &e.RootDelegationID, &e.ChainDepth,
 		&e.ToolName, &e.Action, &e.DeclaredTier, &e.DerivedTier,
 		&e.Decision, &e.DeniedLeg, &e.DeniedAtDepth, &e.Reason,
-		&policySource, &policyID, &inputDigest,
+		&policySource, &policyID, pq.Array(&e.UnevaluatedPolicyIDs), &inputDigest,
 	)
 	if err != nil {
 		return nil, err

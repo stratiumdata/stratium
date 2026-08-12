@@ -1,0 +1,47 @@
+-- Purpose-built home for the policy ids a language could not evaluate
+-- (authz.Result.UnevaluatedPolicyIDs, aggregated across every verdict
+-- authz.Decide saw — see internal/authz/compound.go). Mirrors migrations/
+-- 000006_audit_policy_provenance's own discipline, extended to the same
+-- Entry field added to Hash()'s serialization in the same change — see
+-- TestHash_CoversEveryField in pkg/audit/chain_test.go.
+--
+-- This column exists because PolicySource/PolicyID (000006) cannot: PolicyID
+-- is singular, so it can only ever name the one verdict authz.FoldVerdicts
+-- attributed the decision to. An orphaned or unprepared language's own
+-- verdict routinely LOSES that attribution — FoldVerdicts picks the
+-- lexicographically smallest (Source, PolicyID), Source is the language
+-- name, and "cedar" sorts before "json", "rego", and "xacml" — so a tenant
+-- with any Cedar policy at all would never see an orphaned rego policy's id
+-- anywhere in policy_source/policy_id, no matter how that fact was shaped.
+-- A prior change tried shaping it as one deny verdict per orphaned policy
+-- specifically to make PolicyID carry it (commit 7522731) and reverted:
+-- besides never actually reaching audit_chain.policy_id for exactly the
+-- tenant shape above, it was a category error regardless — "this language
+-- could not be evaluated" is one health fact about the deployment, not N
+-- separate authorization decisions. This column is the fix that does not
+-- have either problem: it is populated independently of which verdict wins
+-- FoldVerdicts' tie-break (Decide aggregates it from the whole verdict
+-- slice), and it holds every affected id as data, not as N synthetic
+-- verdicts.
+--
+-- TEXT[], not a delimited string: WHERE 'some-id' = ANY(unevaluated_policy_ids)
+-- is the entire reason this column exists rather than folding the ids into
+-- reason's free text (which they always could have been) — a delimited
+-- string bought nothing over that and would still not be queryable.
+--
+-- Nullable, no default, for the same reason and with the same consequence
+-- as policy_source/policy_id: AppendAudit still always writes a concrete
+-- value (an empty array when nothing went unevaluated, never NULL for a row
+-- it actually writes), so NULL means exactly one thing — a row written
+-- before this migration, or by any future writer that genuinely omits the
+-- column. scanAuditTail decodes NULL the same way lib/pq decodes NULL into
+-- a nil []string, which pkg/audit.Entry.Hash treats identically to an
+-- explicit empty array (both have zero elements — see Hash's own list
+-- encoding), so the chain still verifies across this migration's boundary
+-- exactly as it does across 000006's.
+--
+-- No new grant migration: 000004_audit_ownership already granted the
+-- serving role (stratium_app) INSERT, SELECT on audit_chain at the table
+-- level, and 000009's own comment establishes the precedent this repo
+-- follows — a table-level grant covers columns added to that table later.
+ALTER TABLE audit_chain ADD COLUMN unevaluated_policy_ids TEXT[];

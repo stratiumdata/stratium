@@ -234,6 +234,14 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 // nil exactly as toResponse guards it: left at their zero value ("") for the
 // default-deny-with-no-verdict case, which audit.Entry's own doc comment
 // already documents as the meaning of "empty" there.
+//
+// UnevaluatedPolicyIDs is copied unconditionally, not guarded by
+// result.Deciding: it is authz.Decide's own aggregate across every verdict
+// it saw (internal/authz/compound.go), independent of which single verdict
+// Deciding names — that independence is the entire point (see
+// authz.Result.UnevaluatedPolicyIDs' own doc comment), so gating it on
+// Deciding here would reintroduce exactly the loses-the-fold defect the
+// aggregate exists to avoid.
 func (s *Server) appendAudit(
 	ctx context.Context,
 	agentID, delegationID uuid.UUID,
@@ -256,23 +264,24 @@ func (s *Server) appendAudit(
 	digest := sha256.Sum256([]byte(action.RawInput))
 
 	entry := audit.Entry{
-		TenantID:         s.cfg.TenantID,
-		OccurredAt:       now,
-		EventType:        eventTypeDecision,
-		Actor:            actor,
-		AgentID:          &agentID,
-		DelegationID:     &delegationID,
-		RootDelegationID: &root.ID,
-		ChainDepth:       int16(acting.Depth), //nolint:gosec // G115: store.maxChainWalk bounds any chain walk to 64 hops, far under int16's range
-		ToolName:         action.Tool,
-		Action:           action.Verb,
-		DeclaredTier:     declaredTier,
-		DerivedTier:      int16(result.DerivedTier), //nolint:gosec // G115: models.ActionTier is a 0-4 enum
-		Decision:         result.Effect.String(),
-		DeniedLeg:        result.DeniedLeg,
-		DeniedAtDepth:    int16(result.DeniedAtDepth), //nolint:gosec // G115: -1 sentinel or a chain depth bounded well under int16's range (see ChainDepth above)
-		Reason:           result.Reason,
-		InputDigest:      digest,
+		TenantID:             s.cfg.TenantID,
+		OccurredAt:           now,
+		EventType:            eventTypeDecision,
+		Actor:                actor,
+		AgentID:              &agentID,
+		DelegationID:         &delegationID,
+		RootDelegationID:     &root.ID,
+		ChainDepth:           int16(acting.Depth), //nolint:gosec // G115: store.maxChainWalk bounds any chain walk to 64 hops, far under int16's range
+		ToolName:             action.Tool,
+		Action:               action.Verb,
+		DeclaredTier:         declaredTier,
+		DerivedTier:          int16(result.DerivedTier), //nolint:gosec // G115: models.ActionTier is a 0-4 enum
+		Decision:             result.Effect.String(),
+		DeniedLeg:            result.DeniedLeg,
+		DeniedAtDepth:        int16(result.DeniedAtDepth), //nolint:gosec // G115: -1 sentinel or a chain depth bounded well under int16's range (see ChainDepth above)
+		Reason:               result.Reason,
+		UnevaluatedPolicyIDs: result.UnevaluatedPolicyIDs,
+		InputDigest:          digest,
 	}
 	if d := result.Deciding; d != nil {
 		entry.PolicySource = d.Source
