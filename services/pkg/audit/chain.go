@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,21 @@ type Entry struct {
 	PolicySource string
 	PolicyID     string
 
+	// UnevaluatedPolicyIDs lists every policy id that went unevaluated
+	// because its language had no registered engine, or that engine's own
+	// Prepare call failed for the whole batch (authz.Result.
+	// UnevaluatedPolicyIDs — aggregated across every verdict authz.Decide
+	// saw, not just the one PolicySource/PolicyID names). That aggregation
+	// is why this needs to be its own column rather than something
+	// PolicySource/PolicyID could already tell an auditor: PolicyID is
+	// singular, and FoldVerdicts picks exactly one verdict to attribute a
+	// decision to, so an orphaned or unprepared language's own ids would be
+	// lost the moment some other verdict wins that tie-break — a Cedar deny,
+	// say, always beats an orphaned "rego" verdict, because "cedar" sorts
+	// first. This column is where those ids survive regardless of which
+	// verdict decided the outcome. Empty on every ordinary decision.
+	UnevaluatedPolicyIDs []string
+
 	InputDigest [32]byte
 }
 
@@ -90,6 +106,28 @@ func (e Entry) Hash() [32]byte {
 		}
 		writeBytes(u[:])
 	}
+	// writeStrList encodes a variable-length list deterministically: a count
+	// (so the list's own end is unambiguous — without it, the boundary
+	// between the last element and whatever this method writes next could
+	// shift, the same field-boundary hazard writeBytes' own length prefix
+	// guards against for a single value) followed by each element written
+	// through writeStr, so no element's own boundary is ambiguous either.
+	// Sorts a copy first — never ss itself, which the caller may still hold
+	// a live reference to (see the immutability rule this codebase follows
+	// throughout) — so two entries carrying the same set of ids in different
+	// slice order still hash identically. Consumers of this list (the
+	// aggregation in authz.Decide, and the audit_chain column it is written
+	// to) are already expected to hand it over sorted; this is the
+	// independent guarantee that Hash's own output does not depend on that
+	// discipline holding upstream.
+	writeStrList := func(ss []string) {
+		sorted := append([]string(nil), ss...)
+		sort.Strings(sorted)
+		writeInt(int64(len(sorted)))
+		for _, s := range sorted {
+			writeStr(s)
+		}
+	}
 
 	writeBytes(e.PrevHash[:])
 	writeStr(e.TenantID)
@@ -110,6 +148,7 @@ func (e Entry) Hash() [32]byte {
 	writeStr(e.Reason)
 	writeStr(e.PolicySource)
 	writeStr(e.PolicyID)
+	writeStrList(e.UnevaluatedPolicyIDs)
 	writeBytes(e.InputDigest[:])
 
 	var out [32]byte

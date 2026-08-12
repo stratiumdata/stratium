@@ -79,26 +79,27 @@ func TestHash_CoversEveryField(t *testing.T) {
 	// chain link, and without it in the digest the structure stops being a chain.
 	someUUID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
 	mutations := map[string]func(*Entry){
-		"PrevHash":         func(e *Entry) { e.PrevHash = [32]byte{7} },
-		"TenantID":         func(e *Entry) { e.TenantID = "other" },
-		"OccurredAt":       func(e *Entry) { e.OccurredAt = e.OccurredAt.Add(time.Second) },
-		"EventType":        func(e *Entry) { e.EventType = "other" },
-		"Actor":            func(e *Entry) { e.Actor = "mallory@example.com" },
-		"AgentID":          func(e *Entry) { e.AgentID = &someUUID },
-		"DelegationID":     func(e *Entry) { e.DelegationID = &someUUID },
-		"RootDelegationID": func(e *Entry) { e.RootDelegationID = &someUUID },
-		"ChainDepth":       func(e *Entry) { e.ChainDepth = 2 },
-		"ToolName":         func(e *Entry) { e.ToolName = "Bash" },
-		"Action":           func(e *Entry) { e.Action = "delete" },
-		"DeclaredTier":     func(e *Entry) { e.DeclaredTier = 1 },
-		"DerivedTier":      func(e *Entry) { e.DerivedTier = 4 },
-		"Decision":         func(e *Entry) { e.Decision = "DENY" },
-		"DeniedLeg":        func(e *Entry) { e.DeniedLeg = "agent" },
-		"DeniedAtDepth":    func(e *Entry) { e.DeniedAtDepth = 3 },
-		"Reason":           func(e *Entry) { e.Reason = "other" },
-		"PolicySource":     func(e *Entry) { e.PolicySource = "cedar" },
-		"PolicyID":         func(e *Entry) { e.PolicyID = "policy-123" },
-		"InputDigest":      func(e *Entry) { e.InputDigest = [32]byte{9} },
+		"PrevHash":             func(e *Entry) { e.PrevHash = [32]byte{7} },
+		"TenantID":             func(e *Entry) { e.TenantID = "other" },
+		"OccurredAt":           func(e *Entry) { e.OccurredAt = e.OccurredAt.Add(time.Second) },
+		"EventType":            func(e *Entry) { e.EventType = "other" },
+		"Actor":                func(e *Entry) { e.Actor = "mallory@example.com" },
+		"AgentID":              func(e *Entry) { e.AgentID = &someUUID },
+		"DelegationID":         func(e *Entry) { e.DelegationID = &someUUID },
+		"RootDelegationID":     func(e *Entry) { e.RootDelegationID = &someUUID },
+		"ChainDepth":           func(e *Entry) { e.ChainDepth = 2 },
+		"ToolName":             func(e *Entry) { e.ToolName = "Bash" },
+		"Action":               func(e *Entry) { e.Action = "delete" },
+		"DeclaredTier":         func(e *Entry) { e.DeclaredTier = 1 },
+		"DerivedTier":          func(e *Entry) { e.DerivedTier = 4 },
+		"Decision":             func(e *Entry) { e.Decision = "DENY" },
+		"DeniedLeg":            func(e *Entry) { e.DeniedLeg = "agent" },
+		"DeniedAtDepth":        func(e *Entry) { e.DeniedAtDepth = 3 },
+		"Reason":               func(e *Entry) { e.Reason = "other" },
+		"PolicySource":         func(e *Entry) { e.PolicySource = "cedar" },
+		"PolicyID":             func(e *Entry) { e.PolicyID = "policy-123" },
+		"UnevaluatedPolicyIDs": func(e *Entry) { e.UnevaluatedPolicyIDs = []string{"orphan-1", "orphan-2"} },
+		"InputDigest":          func(e *Entry) { e.InputDigest = [32]byte{9} },
 	}
 
 	// Guard against the table silently falling behind the struct.
@@ -131,6 +132,43 @@ func TestHash_FieldBoundariesUnambiguous(t *testing.T) {
 	b.EventType, b.Actor = "decision", "XY"
 	if a.Hash() == b.Hash() {
 		t.Fatal("adjacent field boundaries are ambiguous — serialization is not length-prefixed")
+	}
+}
+
+// UnevaluatedPolicyIDs is a list, not a single value like every other field
+// Hash covers — its own encoding needs two properties none of the other
+// fields need to prove: order does not matter (this test), and one
+// element's own boundary cannot bleed into its neighbor's (the next test).
+//
+// Two entries carrying the same SET of ids in different slice order must
+// hash identically. Without Hash sorting its own copy, a chain built from
+// the same underlying facts could fork its hash purely on which order a map
+// or a concurrent aggregation happened to produce them in — exactly the kind
+// of nondeterminism the audit hash chain cannot tolerate (see
+// authz.Decide's own aggregation, which sorts for the same reason — this is
+// the independent, defensive guarantee that Hash does not merely inherit
+// that discipline from its caller).
+func TestHash_UnevaluatedPolicyIDsOrderDoesNotAffectHash(t *testing.T) {
+	a := entry(ZeroHash, "same")
+	a.UnevaluatedPolicyIDs = []string{"orphan-a", "orphan-b", "orphan-c"}
+	b := entry(ZeroHash, "same")
+	b.UnevaluatedPolicyIDs = []string{"orphan-c", "orphan-a", "orphan-b"}
+	if a.Hash() != b.Hash() {
+		t.Fatal("the same set of ids in a different order must hash identically — Hash must sort its own copy")
+	}
+}
+
+// Without a length prefix on each element, ["ab","c"] and ["a","bc"] would
+// serialize to the same bytes ("ab" + "c" == "a" + "bc"), the same
+// field-boundary hazard TestHash_FieldBoundariesUnambiguous guards against
+// for Entry's own fields, one level down inside this one list field.
+func TestHash_UnevaluatedPolicyIDsElementBoundariesUnambiguous(t *testing.T) {
+	a := entry(ZeroHash, "same")
+	a.UnevaluatedPolicyIDs = []string{"ab", "c"}
+	b := entry(ZeroHash, "same")
+	b.UnevaluatedPolicyIDs = []string{"a", "bc"}
+	if a.Hash() == b.Hash() {
+		t.Fatal("adjacent element boundaries are ambiguous — each list element must be length-prefixed")
 	}
 }
 
