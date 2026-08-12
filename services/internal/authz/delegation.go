@@ -80,6 +80,19 @@ func DelegationLeg(
 				Reason: fmt.Sprintf("tool %q not in delegation approved_tools at depth %d",
 					a.Tool, d.Depth)}, d.Depth
 		}
+
+		// Checked before CheckCap, not merely beside it: this is the check the
+		// phase exists to add (ResourceConstraints has never been read at
+		// decision time before now), and CheckCap already reads as an allow
+		// whenever a resource carries no classification/hierarchy attributes --
+		// exactly the shape of the request this phase's own defect produced
+		// (Task 1). Ordering this one first means the denial an operator sees
+		// names the resource that was out of scope, rather than a permissive
+		// CheckCap pass that would have told them nothing.
+		if allowed, reason := checkResourceConstraints(d.ResourceConstraints, resource); !allowed {
+			return LegResult{Effect: EffectDeny,
+				Reason: fmt.Sprintf("%s (depth %d)", reason, d.Depth)}, d.Depth
+		}
 		if allowed, reason := classification.CheckCap(d.ClassificationCaps, resource); !allowed {
 			return LegResult{Effect: EffectDeny,
 				Reason: fmt.Sprintf("%s (depth %d)", reason, d.Depth)}, d.Depth
@@ -103,4 +116,53 @@ func DelegationLeg(
 		return *escalate, -1
 	}
 	return LegResult{Effect: EffectAllow}, -1
+}
+
+// checkResourceConstraints enforces a delegation's ResourceConstraints
+// against the request's resource attributes, returning the same (bool,
+// string) shape as classification.CheckCap so the two calls above read as
+// one register.
+//
+// ScopeNarrows (pkg/models/delegation.go) answers a different question --
+// what a child delegation may inherit from its parent -- and has done so
+// since Phase 0. Nothing has ever compared a constraint against a request;
+// these rules are new here:
+//
+//   - a key the constraints require but the request does not carry -> DENY.
+//     This is the load-bearing rule: the constraint exists to bound what the
+//     agent may reach, and a request that does not say what it is reaching
+//     cannot be shown to satisfy that bound. Passing here would recreate,
+//     for identity, exactly the defect this phase exists to fix for
+//     classification -- CheckCap reading an absent attribute as nothing to
+//     restrict.
+//   - a key both sides carry, with different values -> DENY.
+//   - a key both sides carry, with the same value -> that key is satisfied.
+//     Comparison is exact -- no prefixes, wildcards, or ranges. Same reason
+//     ScopeNarrows' own resource-constraint comment gives: every such
+//     interpretation is a place a widening can hide, and values here are
+//     opaque caller-defined strings with no ordering to narrow along.
+//   - a resource attribute the constraints do not mention -> ignored. A
+//     constraint set is a filter, not a schema; it only ever speaks to the
+//     keys it names.
+//   - constraints itself is empty -> unrestricted, matching
+//     Delegation.HasTool's treatment of an empty approved-tools list (both
+//     read as zero iterations below, with no special case needed). This is
+//     the one place that empty-means-unrestricted convention survives past
+//     spec section 4.3.1's tightening -- ScopeNarrows' own resource-constraint
+//     loops enforce the opposite direction for inheritance (a child may not
+//     add a key its parent left unconstrained, so "empty" only ever
+//     propagates forward through a lineage, never backward) -- called out
+//     because a reader who knows §4.3.1 will otherwise expect the strict
+//     reading here too.
+func checkResourceConstraints(constraints, resource map[string]string) (bool, string) {
+	for key, want := range constraints {
+		got, ok := resource[key]
+		if !ok {
+			return false, fmt.Sprintf("resource constraint %q is required but absent from the request", key)
+		}
+		if got != want {
+			return false, fmt.Sprintf("resource constraint %s=%q does not match request value %q", key, want, got)
+		}
+	}
+	return true, ""
 }

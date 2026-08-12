@@ -279,3 +279,208 @@ func TestDelegationLeg_NarrowestHopBinds(t *testing.T) {
 		t.Fatalf("the narrowest hop must bind, got %v at %d", got.Effect, depth)
 	}
 }
+
+// --- resource constraints ---
+//
+// Values throughout are distinguishable on sight -- "alpha-team" vs.
+// "zzz-other-team", never "value1" vs "value2" -- so a mixup (comparing the
+// wrong two strings, or asserting the wrong Effect) reads as obviously wrong
+// rather than accidentally passing.
+
+// The load-bearing rule: a constrained key the request never mentions must
+// deny, even though the request otherwise carries some resource identity.
+// Silently passing here would recreate, for identity, exactly the CheckCap
+// defect (an absent attribute read as "nothing to restrict") this phase
+// exists to fix. The resource map is non-empty on purpose -- it carries
+// "id" but not the constrained "project" key -- so this test cannot be
+// satisfied by a mutation that only special-cases a wholly empty resource
+// map; see TestDelegationLeg_DeniesWhenRequestResourceMapIsEmpty for that
+// distinct case.
+func TestDelegationLeg_DeniesResourceConstraintAbsentFromRequest(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	resource := map[string]string{"id": "doc-9000"} // carries identity, but never "project"
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("a constrained key absent from the request must deny, got %v", got.Effect)
+	}
+	if depth != 0 {
+		t.Fatalf("denial should be attributed to depth 0, got %d", depth)
+	}
+}
+
+// The load-bearing rule's most extreme form: skipping the check entirely
+// because the request's whole resource map is empty would be a fail-open,
+// not an edge case -- an agent that supplies no resource identity at all
+// must not thereby escape every constraint on it. Distinct from the test
+// above: that one proves per-key absence denies; this one proves the check
+// does not short-circuit on an empty map before ever reaching the loop.
+func TestDelegationLeg_DeniesWhenRequestResourceMapIsEmpty(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, nil, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("an empty request resource map under a constrained delegation must deny, got %v", got.Effect)
+	}
+	if depth != 0 {
+		t.Fatalf("denial should be attributed to depth 0, got %d", depth)
+	}
+}
+
+// A constrained key present with a different value denies.
+func TestDelegationLeg_DeniesResourceConstraintMismatch(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	resource := map[string]string{"project": "zzz-other-team"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("a mismatched resource constraint must deny, got %v", got.Effect)
+	}
+	if depth != 0 {
+		t.Fatalf("denial should be attributed to depth 0, got %d", depth)
+	}
+}
+
+// Comparison is exact, not a prefix match: a request value that merely
+// starts with the required value must still deny. A `strings.HasPrefix`
+// mutation of the equality check would pass this pair ("alpha-team" is a
+// prefix of "alpha-team-2") while every equality-based test above stays
+// green, so this is the only case that catches it.
+func TestDelegationLeg_ResourceConstraintComparisonIsExactNotPrefix(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	resource := map[string]string{"project": "alpha-team-2"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("a request value that only shares a prefix with the required value must deny, got %v", got.Effect)
+	}
+	if depth != 0 {
+		t.Fatalf("denial should be attributed to depth 0, got %d", depth)
+	}
+}
+
+// A constrained key present with the exact matching value passes.
+func TestDelegationLeg_AllowsResourceConstraintExactMatch(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	resource := map[string]string{"project": "alpha-team"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("an exact-matching resource constraint must allow, got %v: %s", got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
+// A delegation whose constraints are all satisfied still passes, across
+// more than one constrained key -- proving the loop does not stop early on
+// the first satisfied key and does not accidentally flip to deny once a
+// second key is added.
+func TestDelegationLeg_AllowsWhenAllResourceConstraintsSatisfied(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team", "environment": "staging-east"}
+	resource := map[string]string{"project": "alpha-team", "environment": "staging-east"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("fully satisfied resource constraints must allow, got %v: %s", got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
+// Extra request attributes the delegation does not constrain are ignored --
+// a constraint set is a filter, not a schema. "id" here is a realistic
+// attribute PEP extraction adds (cmd/stratium-pep/resource.go) that this
+// delegation never mentions.
+func TestDelegationLeg_IgnoresUnconstrainedResourceAttributes(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	resource := map[string]string{"project": "alpha-team", "id": "doc-9000", "type": "file"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("unconstrained extra resource attributes must not affect the decision, got %v: %s",
+			got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
+// Boundary proving the change is targeted, not a blanket tightening: a
+// delegation with an empty (nil) constraint map is unaffected by this check
+// regardless of what the request's resource map holds, matching
+// Delegation.HasTool's treatment of an empty approved-tools list. Every
+// pre-existing test in this file already relies on this implicitly (none
+// sets ResourceConstraints), but this is the one that names the property
+// and would fail on its own if a mutation flipped empty-map handling.
+func TestDelegationLeg_EmptyResourceConstraintsUnaffected(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	// d.ResourceConstraints left nil.
+	resource := map[string]string{"project": "whatever-the-agent-happens-to-send"}
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("an empty constraint map must be unrestricted, got %v: %s", got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
+// At depth: every hop is checked, not only the acting (last) one. A parent
+// hop's constraint that the request fails to satisfy denies even though the
+// acting child hop carries no resource constraint at all -- a shape
+// CreateDelegation's ScopeNarrows check would never let onto the write path
+// (a child may not drop a parent's resource constraint), but DelegationLeg
+// does not call ScopeNarrows and must not depend on it having run. This is
+// the concrete evidence for walking the whole chain rather than trusting
+// the acting hop alone: a mutation that checked only chain[len(chain)-1]
+// would pass every other resource-constraint test in this file (their acting
+// hop IS the constrained one) but fail exactly here.
+func TestDelegationLeg_AncestorResourceConstraintBindsEvenWhenActingHopIsUnconstrained(t *testing.T) {
+	root := delegation(0, models.ActionTierDestructive, nil)
+	root.ResourceConstraints = map[string]string{"project": "alpha-team"}
+	child := delegation(1, models.ActionTierDestructive, nil) // ResourceConstraints left nil
+
+	chain := []*models.Delegation{root, child}
+	resource := map[string]string{"project": "zzz-other-team"}
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("an unsatisfied ancestor resource constraint must deny even at depth, got %v", got.Effect)
+	}
+	if depth != 0 {
+		t.Fatalf("denial should be attributed to the ancestor at depth 0, got %d", depth)
+	}
+}
+
+// The realistic counterpart to the test above: a multi-hop chain shaped the
+// way CreateDelegation's ScopeNarrows actually requires (resource
+// constraints identical at every hop, since ScopeNarrows treats them as
+// neither droppable nor alterable, not merely narrowable) still allows when
+// the request satisfies them.
+func TestDelegationLeg_AllowsMultiHopChainWithMatchingResourceConstraints(t *testing.T) {
+	constraints := map[string]string{"project": "alpha-team"}
+	root := delegation(0, models.ActionTierDestructive, nil)
+	root.ResourceConstraints = constraints
+	child := delegation(1, models.ActionTierDestructive, nil)
+	child.ResourceConstraints = constraints
+
+	chain := []*models.Delegation{root, child}
+	resource := map[string]string{"project": "alpha-team"}
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("a satisfied constraint identical at every hop must allow, got %v: %s", got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
