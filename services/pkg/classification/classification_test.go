@@ -1,6 +1,9 @@
 package classification
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIndex_KnownLevels(t *testing.T) {
 	if Index("nato", "UNCLASSIFIED") != 0 {
@@ -48,12 +51,79 @@ func TestCheckCap_NoCapsAllows(t *testing.T) {
 	}
 }
 
-// A resource that declares no classification is unrestricted by caps.
-func TestCheckCap_NoResourceClassificationAllows(t *testing.T) {
+// The no-caps and no-classification short-circuits both see "nothing was
+// declared" but must stay independent: a delegation with NO caps at all is
+// unrestricted on this axis regardless of what the resource does or does not
+// say about itself. This is the entire boundary between "only a configured
+// cap becomes strict" (R2, this task) and a change that denies everything —
+// see TestCheckCap_ConfiguredCapDeniesWhenResourceHasNoClassification below
+// for the mirror case where a cap IS configured. A mutation that widened the
+// len(caps) == 0 branch to also require a resource classification would pass
+// TestCheckCap_NoCapsAllows above (its resource is fully labelled) but fail
+// exactly here.
+func TestCheckCap_NoCapsAllowsEvenWhenResourceHasNoClassification(t *testing.T) {
+	ok, reason := CheckCap(map[string]string{}, map[string]string{})
+	if !ok {
+		t.Fatalf("no configured caps must allow regardless of resource classification, got: %s", reason)
+	}
+}
+
+// A configured cap against a resource that declares no classification cannot
+// be evaluated, and R2 rules that unenforceable must not read as compliant:
+// this must deny, not allow. This test replaces
+// TestCheckCap_NoResourceClassificationAllows, which asserted the opposite
+// and was, before Phase 7 Task 3, pinning the exact silent fail-open this
+// task exists to close rather than a property worth preserving.
+func TestCheckCap_ConfiguredCapDeniesWhenResourceHasNoClassification(t *testing.T) {
 	caps := map[string]string{"nato": "CONFIDENTIAL"}
 	ok, reason := CheckCap(caps, map[string]string{})
-	if !ok {
-		t.Fatalf("undeclared resource classification must allow, got: %s", reason)
+	if ok {
+		t.Fatal("a configured cap against an unlabelled resource must deny, not pass uncontested")
+	}
+	if reason == "" {
+		t.Fatal("the denial must explain itself")
+	}
+}
+
+// The no-classification rule must fire on the classification alone, not on
+// "classification AND hierarchy both blank" — found as a real survivor while
+// mutation-testing this change beyond the three the brief requires, so it is
+// pinned rather than left to luck. A resource that names a hierarchy this
+// delegation never capped, while leaving its level unset, must still deny:
+// the level is genuinely unknown, and trusting the bare, caller-supplied
+// hierarchy claim well enough to skip straight to "no cap for this
+// hierarchy" would let an untrusted "hierarchy" attribute launder past a
+// classification cap the same way an untrusted "classification" attribute
+// would — precisely the gap-in-the-comparison the package doc warns against.
+// A guard narrowed to `resourceLevel == "" && resourceHierarchy == ""`
+// passes every other test in this file (none combines an unrelated,
+// non-empty hierarchy with a blank classification) yet returns ALLOW here.
+func TestCheckCap_UnknownLevelDeniesEvenWithAnUncappedHierarchyNamed(t *testing.T) {
+	caps := map[string]string{"nato": "CONFIDENTIAL"} // no cap on "commercial"
+	ok, reason := CheckCap(caps, map[string]string{"hierarchy": "commercial"})
+	if ok {
+		t.Fatal("an unknown classification level must deny regardless of which hierarchy the resource names")
+	}
+	if reason == "" {
+		t.Fatal("the denial must explain itself")
+	}
+}
+
+// The audit trail must be able to tell "we could not check" apart from "we
+// checked, and it exceeded the cap" — an operator acts on those differently
+// (spec §3.9, R2). This defends that the two reasons are distinguishable
+// text, not merely that both happen to be non-empty: a mutation that reused
+// the exceeds-cap wording for the uncheckable case would pass every other
+// test in this file but fail here.
+func TestCheckCap_UncheckableReasonDiffersFromExceedsCapReason(t *testing.T) {
+	caps := map[string]string{"nato": "CONFIDENTIAL"}
+	_, uncheckable := CheckCap(caps, map[string]string{})
+	_, exceeds := CheckCap(caps, map[string]string{"classification": "TOP-SECRET", "hierarchy": "nato"})
+	if uncheckable == exceeds {
+		t.Fatal("an uncheckable cap and an exceeded cap must produce different reasons")
+	}
+	if strings.Contains(uncheckable, "exceeds") {
+		t.Fatalf("the uncheckable-cap reason must not borrow the exceeds-cap wording, got: %q", uncheckable)
 	}
 }
 
@@ -80,11 +150,22 @@ func TestCheckCap_EmptyHierarchyTreatedAsAbsent(t *testing.T) {
 	}
 }
 
+// Empty-string classification must behave identically to an omitted key —
+// not merely "both deny," but the same decision and the same reason, since a
+// caller that always populates the map (blanks included) must not be able to
+// take a different path than one that omits the key entirely. Both now deny
+// (R2); before Phase 7 Task 3 both allowed, and this test defended the same
+// equivalence property then too — only the shared outcome changed.
 func TestCheckCap_EmptyClassificationTreatedAsAbsent(t *testing.T) {
 	caps := map[string]string{"nato": "CONFIDENTIAL"}
-	ok, reason := CheckCap(caps, map[string]string{"classification": "", "hierarchy": "nato"})
-	if !ok {
-		t.Fatalf("empty classification must be treated as undeclared, got: %s", reason)
+	emptyOK, emptyReason := CheckCap(caps, map[string]string{"classification": "", "hierarchy": "nato"})
+	omittedOK, omittedReason := CheckCap(caps, map[string]string{"hierarchy": "nato"})
+	if emptyOK != omittedOK || emptyReason != omittedReason {
+		t.Fatalf("empty classification must behave identically to an omitted key: empty=(%v,%q) omitted=(%v,%q)",
+			emptyOK, emptyReason, omittedOK, omittedReason)
+	}
+	if emptyOK {
+		t.Fatal("a cap configured against an unlabelled resource must deny, not allow")
 	}
 }
 

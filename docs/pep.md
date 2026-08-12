@@ -266,6 +266,61 @@ anything else about what it may or may not do under this system: a real,
 PDP-attributed denial reason, not a tool quietly missing from a list for
 reasons the agent was never told.
 
+## Classification caps have no labelling source
+
+A delegation can carry a classification cap — for example `nato:
+CONFIDENTIAL` — meant to refuse access to anything above that level. As of
+this release, a configured cap **denies** when the resource being accessed
+carries no classification, rather than treating an unlabelled resource as
+compliant (spec §3.9, R2). If your tenant has any classification cap
+configured, on any hierarchy, **you will start seeing denials you have not
+seen before.**
+
+**This is correct, not a regression.** A cap's semantics were always
+"resources above this level are refused." Nothing in this system today — not
+`stratium-pep`, not the PDP, not any policy engine — has a source for a
+resource's actual classification. `stratium-pep` sends resource *identity*
+only (a path or an id extracted from the tool call's own arguments — see
+`cmd/stratium-pep/resource.go`'s package doc), deliberately never a
+classification: a PEP that decided a resource's sensitivity would be making
+exactly the security decision this whole system exists to keep out of the
+untrusted client (spec §3.9, R1). So before this change, every resource a
+configured cap was ever compared against looked unlabelled, and the cap
+silently allowed everything through. It was never enforcing anything; it
+just never told you.
+
+The reason text this produces reads:
+
+    resource declares no classification; the delegation's classification
+    cap cannot be evaluated and therefore denies
+
+— distinct, deliberately, from an ordinary cap violation (`resource
+classification X exceeds delegation cap Y in hierarchy "H"`), so your audit
+log can tell "we could not check" apart from "we checked, and it was over
+the line." Both are denials, for different reasons an operator acts on
+differently.
+
+**A delegation with no classification cap configured at all is unaffected.**
+This tightens what a *configured* cap means; it does not start capping
+delegations that never had one.
+
+**What to do about it.** There is currently no source of resource
+classification for this system to check against, so the honest options are
+narrow:
+
+- **If this hierarchy's cap was not actually protecting anything** — the
+  common case, since it could never have fired before now — remove it from
+  the delegation. This makes today's real behavior (unrestricted on this
+  axis) a visible, deliberate choice instead of an accidental one.
+- **If classification enforcement is a real requirement, this system cannot
+  deliver it yet.** Do not work around the gap by standing up something
+  outside this system that reports "everything is UNCLASSIFIED" (or any
+  other fixed value) just to quiet the denials — that satisfies the cap
+  exactly as badly as the old silent allow did, only more deliberately.
+  Track the tenant-configured labelling source this needs (spec §8, "Resource
+  classification source") and hold off on configuring the cap until one
+  exists.
+
 ## Reading a denial
 
 Both `hook` and `mcp` reach a denial through the same PDP call and the same
@@ -306,6 +361,7 @@ could not ask" matters, because the fix is different:
 | `approval ... did not resolve within the escalation timeout` | The action required human approval, and nobody resolved it inside `STRATIUM_PEP_APPROVAL_TIMEOUT`. | Approve escalations faster, or raise the timeout — see "Grant discovery tools" above for the same "the grant is real but unusable" shape applied to timing instead of scope. |
 | `approval ... was denied` | The action required human approval, and a human explicitly denied it. | Not a bug — this is the intended outcome of a reviewed escalation. |
 | `approval ... is unknown to the PDP` | The PDP no longer recognizes the approval this session was waiting on. | Unusual; retry the tool call (a fresh escalation will be created) and check the PDP's own logs if it recurs. |
+| `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured, and nothing told the PDP what the resource's classification is — expected, since nothing in this system supplies one yet. | Not a bug, and not fixable by retrying. See "Classification caps have no labelling source" above. |
 | Anything else | An actual policy decision: a policy was evaluated and does not permit this tool for this principal. | Whoever manages policy for this tenant needs to grant it. |
 
 `proxy` and `extauthz` are later enforcement surfaces over the same PDP call;

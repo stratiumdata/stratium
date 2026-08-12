@@ -68,13 +68,27 @@ func Index(hierarchy, level string) int {
 //
 // Rules, each fail-closed:
 //   - no caps                                  → allow (no restriction declared)
-//   - no resource classification               → allow (nothing to restrict)
+//   - no resource classification               → DENY (a configured cap
+//     cannot be evaluated against a resource that says nothing about its
+//     classification; unenforceable must not read as compliant)
 //   - classification without a hierarchy       → DENY (ambiguous; the
 //     bypass-by-omission case)
 //   - no cap for the resource's hierarchy      → allow (this cap says nothing
 //     about that hierarchy)
 //   - unknown level or unknown cap             → DENY (never compare as equal)
 //   - otherwise                                → resource rank ≤ cap rank
+//
+// The first two rules look alike — both see "nothing was declared" — but
+// answer different questions and must stay independent. No caps means this
+// delegation restricts nothing on any hierarchy, so there is no rule to
+// enforce and allowing costs nothing. A configured cap against an unlabelled
+// resource means a restriction WAS declared and cannot be checked: reading
+// that as compliant would let the absence of information stand in for having
+// satisfied it — the same silent fail-open D10 ruled out for a policy that
+// cannot be evaluated, applied here to a cap instead (spec §3.9, R2). Until
+// Phase 7 Task 1, no PEP populated a request's resource at all, so this
+// branch was not a rare edge case: it fired on every classification-capped
+// decision ever made, always as an allow.
 func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, string) {
 	if len(caps) == 0 {
 		return true, ""
@@ -87,7 +101,15 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 	resourceHierarchy := resourceAttrs["hierarchy"]
 
 	if resourceLevel == "" {
-		return true, ""
+		// A cap IS configured here — len(caps) == 0 already returned above —
+		// and the resource says nothing about its classification. Nothing
+		// tells this function whether the resource even falls under the
+		// capped hierarchy, so "no violation found" would be a guess wearing
+		// an allow. The reason says "cannot be evaluated," deliberately not
+		// "satisfied" and not phrased like the exceeds-cap denial below: an
+		// operator's audit trail must be able to tell "we could not check"
+		// apart from "we checked, and it was over the line."
+		return false, "resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies"
 	}
 	if resourceHierarchy == "" {
 		return false, "resource classification declared without a hierarchy attribute (ambiguous)"

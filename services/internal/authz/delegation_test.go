@@ -150,6 +150,47 @@ func TestDelegationLeg_DeniesClassificationAboveCap(t *testing.T) {
 	}
 }
 
+// R2's behaviour change made concrete at the leg an operator actually calls
+// through: a delegation with a classification cap configured now denies a
+// resource that declares no classification at all, not only one that
+// exceeds the cap. Distinct from TestDelegationLeg_DeniesClassificationAboveCap
+// above -- that resource carries a classification and is rejected for being
+// too high; this one carries none and is rejected because the cap cannot be
+// evaluated, which pkg/classification's own tests establish is a different
+// reason string, not just a different fixture.
+func TestDelegationLeg_DeniesConfiguredCapWhenResourceHasNoClassification(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	d.ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
+	resource := map[string]string{"id": "doc-9000"} // identity, but no classification at all
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("a configured cap against an unlabelled resource must deny, got %v", got.Effect)
+	}
+	if depth != 0 {
+		t.Fatalf("denial should be attributed to depth 0, got %d", depth)
+	}
+}
+
+// Boundary proving R2 is targeted, not a blanket tightening -- the leg-level
+// mirror of TestDelegationLeg_EmptyResourceConstraintsUnaffected, which
+// defends the same shape of boundary for ResourceConstraints. A delegation
+// with no classification caps at all is unaffected by this phase regardless
+// of what the resource does or does not declare.
+func TestDelegationLeg_NoClassificationCapsUnaffectedByUnlabelledResource(t *testing.T) {
+	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
+	// d.ClassificationCaps left nil.
+	resource := map[string]string{"id": "doc-9000"} // no classification, no hierarchy
+	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
+		models.ActionTierReadOnly, resource, authzNow, 5)
+	if got.Effect != EffectAllow {
+		t.Fatalf("no configured caps must allow regardless of resource classification, got %v: %s", got.Effect, got.Reason)
+	}
+	if depth != -1 {
+		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
 // --- escalation band ---
 //
 // EscalateAt's pointer form is built with tierPtr (tier_test.go) throughout,

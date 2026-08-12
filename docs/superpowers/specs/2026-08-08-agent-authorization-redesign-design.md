@@ -296,6 +296,130 @@ assertion to accommodate the change.
 
 ---
 
+## 3.9 Phase 7 design decisions (2026-08-12)
+
+Phase 6's real-agent run found two of the delegation leg's controls inert in
+production, both downstream of one root cause: nothing ever populated
+`DecideRequest.resource`, so every leg that reasons about the concrete
+resource — the runtime principal leg (§3.8), `CheckCap`, and
+`ResourceConstraints` — evaluated against an empty map on every real decision
+ever made. Three rulings, recorded here in the register §3.8, §4.1.1, §4.3.1,
+§4.4.1, and §4.6.1 already use: what was believed, what was actually true, and
+why the ruling is what it is.
+
+### R1 — the PEP sends resource identity, never classification
+
+A PEP knows a tool call's arguments well enough to extract an identifier from
+them by field name — a file path, a command string — the same structural
+lookup `normalize`'s own extraction already performs and the PDP already
+trusts for `tool`. It cannot know whether the file that path names is
+CONFIDENTIAL. Deciding what a resource's classification *is* is classification
+itself, and belongs to the PDP exactly as much as deciding an action's tier
+does. A PEP that supplied a `classification` or `hierarchy` attribute would be
+spec defect **D1** relocated — a client asserting a security-relevant fact the
+server has no independent way to check, and would simply believe — and worse
+than the original, which was only a tier. Implemented in Task 1: `hook` and
+`mcp` both now populate `DecideRequest.resource` with an `id`, and a `type`
+where the field name makes one unambiguous; a structural allowlist test
+asserts `classification` and `hierarchy` are never among the keys either mode
+can produce.
+
+### R2 — a classification cap that cannot be checked denies
+
+`CheckCap` returned `true` immediately whenever the resource carried no
+`classification` attribute — which, before R1, was every classified decision,
+because nothing ever supplied one. A configured cap is a restriction an
+operator deliberately declared; a resource that says nothing about its
+classification cannot be shown to satisfy that restriction, and reading
+absence-of-information as compliance is a silent fail-open on the platform's
+core authorization primitive. Defect **D10** (ruled during Phase 4's
+policy-engine work, enforced throughout `internal/policy` — discovered after
+§1.1's defect table was written, so it does not appear there) already ruled
+that a policy which cannot be evaluated denies rather than being silently
+ignored. A cap that cannot be evaluated is the same fact about a different
+control: **it denies.**
+
+This is a deliberate behaviour change, not a bug fix that happens to alter
+output. Any tenant with a classification cap configured, on any hierarchy,
+will begin seeing denials on resources it was never actually restricting
+before — because it was never restricting them. That is correct: the cap's
+intended semantics were always "resources above this level are refused," and
+a deployment that saw only allows was not observing a working cap, it was
+observing one that had never once fired. Operators need to know this before
+they see it in production, not after — `docs/pep.md` says what to do about
+it, and "supply a classification" is deliberately not one of the options
+(R3).
+
+The change is deliberately narrow. `len(caps) == 0` still returns `true`
+immediately: a delegation with no classification cap configured at all places
+no restriction on this axis and never did, so nothing about R2 touches it.
+Only a *configured* cap becomes strict. `pkg/classification`'s
+`TestCheckCap_NoCapsAllowsEvenWhenResourceHasNoClassification` and
+`internal/authz`'s
+`TestDelegationLeg_NoClassificationCapsUnaffectedByUnlabelledResource` pin
+this boundary directly and separately from the denial tests, because it is
+the entire difference between this change and one that denies every action.
+
+The audit trail carries the distinction in `Entry.Reason` (`pkg/audit`) as
+different prose, not a different field. "The resource was CONFIDENTIAL and
+the cap allowed it" is `Decision = ALLOW`, `Reason = ""`. "We could not tell
+what the resource was" is `Decision = DENY`, `Reason` stating the cap could
+not be evaluated. An ordinary cap violation is also `Decision = DENY`, with a
+reason naming the level that exceeded the cap — deliberately different
+wording from the uncheckable case, pinned by
+`TestCheckCap_UncheckableReasonDiffersFromExceedsCapReason` so the two can
+never again read alike. No schema change was needed: `Entry.Hash` already
+covers `Reason` as one more opaque, order-sensitive string, the same
+mechanism every other denial reason in this system already relies on to stay
+distinguishable from its neighbors.
+
+### R3 — resource labelling is an unresolved design gap, recorded rather than papered over
+
+R2 makes a cap that cannot be checked loud. It does not make it checkable. No
+component in this system today has a source for a resource's classification:
+ZTDF was where labels lived, ZTDF was removed (§5.1), and nothing replaced
+it. R1 forecloses the PEP as a source on principle — a labelling PEP would be
+D1 relocated, and the worst-case instance of it, since a classification the
+server has no independent source for would simply be believed outright, with
+nothing to check it against. Neither §8 (Open items) nor §9 (Sequencing)
+named this gap before now, an omission this section corrects; §8 gains a row
+below.
+
+Closing it needs a tenant-configured labelling source — a resource registry,
+tags synced from wherever the underlying storage already classifies content,
+or an equivalent the tenant controls — and is out of scope for Phase 7. Until
+one exists, a tenant that needs a classification cap enforced has no path to
+enforcement through this system. Recording that honestly is what this ruling
+is for; R2 is what stops the limit from reading as a working control in the
+meantime.
+
+### Two claims elsewhere in this spec were untrue until this phase
+
+**§3.8** states the delegation-creation clamp may skip resource scope and
+classification because it is "left to the runtime principal leg, which has
+the concrete resource and evaluates on every action regardless." The wiring
+behind that claim is real: `pdp.proto:77` declares the field,
+`pdpgrpc/server.go` threads it into `EvaluationInput`, and all four policy
+engines map it. But "has the concrete resource" is a claim about what
+arrives at runtime, not what the plumbing can carry, and nothing arrived —
+no PEP populated `DecideRequest.resource` until Task 1. The sentence
+described the code's shape accurately and its behaviour not at all, for the
+entire span between being written and Task 1 landing.
+
+**§4.4**'s residual-risk paragraph names four controls as carrying weight
+because they are "structural and not string-dependent: the delegation
+ceiling (`max_action_tier`), the agent's tool allowlist, the classification
+caps, and escalation." Of the delegation leg's actual mechanisms, two did not
+carry weight. The classification caps are named in that list and are R2's
+subject above. `ResourceConstraints` is not named in that list at all — and
+was equally inert, from before this document existed until Task 2 closed it
+— which is itself part of what the paragraph overstated: it undercounted the
+delegation leg's own controls, not only mischaracterized one of them. The
+ceiling, the tool allowlist, and escalation were accurately described; two of
+the leg's real controls, one named and one not, were not.
+
+---
+
 ## 4. Architecture
 
 ### 4.1 Artifacts
@@ -924,6 +1048,7 @@ Decided during implementation unless raised sooner.
 | Default for unknown tools | Deny, or a configured floor tier (§4.4 step 4). Likely tenant-configurable. |
 | Per-tenant encryption key management | §4.9 depends on per-tenant keys for crypto-shredding, but where they live, how they rotate, and who can destroy them is unspecified. Destroying a key is irreversible data loss, so the authorization model around that operation matters. |
 | Trust-tier table overrides | §4.3 extends raise-only overrides to `actionTier → requiredTrustTier` by analogy with the action-tier table. Confirm or reverse. |
+| Resource classification source | §3.9 R2/R3. No component supplies a resource's classification today; ZTDF was the prior source and was removed (§5.1). `CheckCap` now denies rather than silently passing when one is absent (correct — see R2), but that only makes the gap loud. Closing it needs a tenant-configured labelling mechanism — a resource registry, tags synced from wherever the underlying storage already classifies content, or an equivalent the tenant controls — not built here. |
 
 ### 8.1 Known tensions
 

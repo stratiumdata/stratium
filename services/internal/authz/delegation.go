@@ -81,14 +81,23 @@ func DelegationLeg(
 					a.Tool, d.Depth)}, d.Depth
 		}
 
-		// Checked before CheckCap, not merely beside it: this is the check the
-		// phase exists to add (ResourceConstraints has never been read at
-		// decision time before now), and CheckCap already reads as an allow
-		// whenever a resource carries no classification/hierarchy attributes --
-		// exactly the shape of the request this phase's own defect produced
-		// (Task 1). Ordering this one first means the denial an operator sees
-		// names the resource that was out of scope, rather than a permissive
-		// CheckCap pass that would have told them nothing.
+		// Checked before CheckCap, not merely beside it: ResourceConstraints
+		// names the specific key the request omitted or got wrong, which is
+		// more actionable than CheckCap's own denial can be -- even now that
+		// CheckCap denies loudly on missing classification too (Task 3, R2),
+		// the most it can say is that the cap was uncheckable, never which
+		// resource attribute was the problem. Ordering the more specific
+		// reason first is what an operator most needs whenever both would
+		// independently deny.
+		//
+		// This ordering was chosen at Task 2, when the reason was stronger
+		// still: CheckCap read a resource with no classification as an
+		// unconditional allow -- exactly the shape Task 1's own defect
+		// produced -- so putting a silent pass behind a named denial was a
+		// correctness argument, not merely a style one. Task 3 closed that
+		// gap (CheckCap denies on its own now), leaving only the specificity
+		// argument above -- recorded so a future reader does not wonder why
+		// this comment changed but the order did not.
 		if allowed, reason := checkResourceConstraints(d.ResourceConstraints, resource); !allowed {
 			return LegResult{Effect: EffectDeny,
 				Reason: fmt.Sprintf("%s (depth %d)", reason, d.Depth)}, d.Depth
