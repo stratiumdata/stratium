@@ -150,6 +150,124 @@ func TestDelegationLeg_DeniesClassificationAboveCap(t *testing.T) {
 	}
 }
 
+// --- escalation band ---
+//
+// EscalateAt's pointer form is built with tierPtr (tier_test.go) throughout,
+// the same helper DeclaredTier's tests already use for the same reason: both
+// fields distinguish "unset" from a real zero-valued tier, and construction
+// via &t inline would need its own addressable local at every call site
+// instead.
+
+// Every boundary of the closed band [EscalateAt, MaxActionTier], each pinned
+// by its own case so a one-off comparison mutation (< for <=, or vice versa)
+// fails exactly the case that exercises it rather than being masked by a
+// neighboring one. One below the threshold falls outside the band on the low
+// side — this leg has no opinion, so nothing here raises it above ALLOW;
+// TestDelegationLeg_UnsetEscalateAtNeverEscalates below covers "no
+// threshold" as its own, separate property.
+func TestDelegationLeg_EscalationBandBoundaries(t *testing.T) {
+	threshold := models.ActionTierReadOnly    // 1
+	ceiling := models.ActionTierExternalComms // 3
+	tests := []struct {
+		name string
+		tier models.ActionTier
+		want Effect
+	}{
+		{"one below the threshold allows", models.ActionTierReasoning, EffectAllow},             // 0 < 1
+		{"exactly at the threshold escalates", models.ActionTierReadOnly, EffectEscalate},       // 1 == 1
+		{"strictly inside the band escalates", models.ActionTierInternalModify, EffectEscalate}, // 2
+		{"exactly at the ceiling escalates", models.ActionTierExternalComms, EffectEscalate},    // 3 == 3, still <= max
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := delegation(0, ceiling, nil)
+			d.EscalateAt = tierPtr(threshold)
+			got, depth := DelegationLeg([]*models.Delegation{d}, Action{}, tt.tier, nil, authzNow, 5)
+			if got.Effect != tt.want {
+				t.Fatalf("tier %s: effect = %v, want %v (%s)", tt.tier, got.Effect, tt.want, got.Reason)
+			}
+			if tt.want == EffectEscalate && depth != -1 {
+				t.Fatalf("escalate is not a denial: depth = %d, want -1", depth)
+			}
+		})
+	}
+}
+
+// One tier above the ceiling denies outright — the mirror image of
+// TestDelegationLeg_AllowsTierExactlyAtCeiling, and distinct from
+// TestDelegationLeg_DeniesTierAboveCeiling (which uses a tier several steps
+// above, not the exact boundary).
+func TestDelegationLeg_DeniesTierOneAboveCeiling(t *testing.T) {
+	ceiling := models.ActionTierExternalComms // 3
+	d := delegation(0, ceiling, nil)
+	got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, models.ActionTierDestructive, nil, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("tier one above the ceiling must deny, got %v", got.Effect)
+	}
+}
+
+// Deny overrides escalate even when the SAME hop's own threshold is also
+// met: a tier above the ceiling denies whether or not it also sits at or
+// above escalate_at (the brief's own worked example). Distinct from
+// TestDelegationLeg_DeniesTierOneAboveCeiling above, which sets no
+// EscalateAt at all and so cannot tell "the ceiling denies" apart from "the
+// ceiling denies AND overrides an active escalate condition" — only this
+// test can catch a mutation that lets escalate win once both conditions are
+// true on one hop.
+func TestDelegationLeg_DenyBeatsEscalateOnSameHop(t *testing.T) {
+	ceiling := models.ActionTierExternalComms // 3
+	d := delegation(0, ceiling, nil)
+	d.EscalateAt = tierPtr(models.ActionTierReadOnly) // 1: comfortably below the tier tested
+	got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, models.ActionTierDestructive, nil, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("deny must beat escalate even when both conditions are met on the same hop, got %v", got.Effect)
+	}
+}
+
+// Deny overrides escalate across hops, too: the root escalates on its own
+// terms, but a deeper hop denies for an unrelated reason (here, revocation),
+// and the deny must still win. This is what actually exercises
+// DelegationLeg's "record, don't return" design — a mutation that made the
+// escalate check return immediately instead of continuing the loop would
+// pass TestDelegationLeg_DenyBeatsEscalateOnSameHop (that case never reaches
+// the escalate line at all, since the same hop's own deny check returns
+// first) but fail here.
+func TestDelegationLeg_DenyAtDeeperHopOverridesEarlierEscalate(t *testing.T) {
+	root := delegation(0, models.ActionTierExternalComms, nil)
+	root.EscalateAt = tierPtr(models.ActionTierReadOnly)
+	child := delegation(1, models.ActionTierExternalComms, nil)
+	child.Revoked = true // denies for a reason with nothing to do with tier or threshold
+
+	chain := []*models.Delegation{root, child}
+	got, depth := DelegationLeg(chain, Action{}, models.ActionTierReadOnly, nil, authzNow, 5)
+	if got.Effect != EffectDeny {
+		t.Fatalf("a deny at a deeper hop must override an escalate recorded at an earlier hop, got %v", got.Effect)
+	}
+	if depth != 1 {
+		t.Fatalf("denial should be attributed to depth 1, got %d", depth)
+	}
+}
+
+// An unset threshold never escalates, at any tier — including tier 0, which
+// is the exact value a "treat nil as REASONING" mutation would substitute
+// for it. That mutation would make EVERY tier escalate (0 <= anything), so
+// any one of these tiers catches it, but all three are asserted so the
+// property reads as "never," not "not at this one arbitrary tier."
+func TestDelegationLeg_UnsetEscalateAtNeverEscalates(t *testing.T) {
+	ceiling := models.ActionTierExternalComms
+	for _, tier := range []models.ActionTier{
+		models.ActionTierReasoning, models.ActionTierInternalModify, ceiling,
+	} {
+		t.Run(tier.String(), func(t *testing.T) {
+			d := delegation(0, ceiling, nil) // EscalateAt left nil
+			got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, tier, nil, authzNow, 5)
+			if got.Effect == EffectEscalate {
+				t.Fatalf("an unset threshold must never escalate, got %v at tier %s", got.Effect, tier)
+			}
+		})
+	}
+}
+
 // The narrowest hop binds, even when it is not the last one.
 func TestDelegationLeg_NarrowestHopBinds(t *testing.T) {
 	chain := []*models.Delegation{

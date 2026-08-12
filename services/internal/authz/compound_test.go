@@ -267,6 +267,48 @@ func TestDecide_DenyBeatsEscalate(t *testing.T) {
 	}
 }
 
+// The two tests above prove Decide's own combining logic — the loop in
+// compound.go that surfaces escalate once nothing denies — using a
+// PolicyVerdict built by hand. That has been true, and tested, since before
+// this field existed: FoldVerdicts and Decide have always known what to do
+// with EffectEscalate once something hands them one. What has never existed
+// until this delegation field is a real, non-fabricated PRODUCER of one — a
+// domain object an operator actually persists, not a literal a test
+// constructs. This test is the first one in the suite that reaches
+// EFFECT_ESCALATE by driving genuine input (a models.Delegation with
+// EscalateAt set) through the real chain: DelegationLeg computes the leg,
+// Decide's existing escalate loop (unchanged by this phase) picks it up.
+// Both halves worked correctly the first time this was exercised end to
+// end — see the Phase 5 Task 1 report for the full account.
+func TestDecide_DelegationEscalateAtReachesResultThroughRealPath(t *testing.T) {
+	req := request()
+	// request()'s root delegation caps at DESTRUCTIVE (4); EXTERNAL_COMMS
+	// (3) sets a threshold strictly below that ceiling, so the band is
+	// [3,4] — a real (not degenerate) two-tier band, not just a single
+	// point equal to the ceiling.
+	req.Chain[0].EscalateAt = tierPtr(models.ActionTierExternalComms)
+	req.Action = Action{Tool: "Bash", Verb: "delete"} // derives DESTRUCTIVE (4); see TestDecide_ReportsDerivedTier
+
+	got := Decide(req, config())
+	if got.Effect != EffectEscalate {
+		t.Fatalf("expected ESCALATE from a real delegation threshold, got %v: %s", got.Effect, got.Reason)
+	}
+	if got.Delegation.Effect != EffectEscalate {
+		t.Fatalf("the delegation leg itself must report ESCALATE, got %v", got.Delegation.Effect)
+	}
+	if got.Reason == "" {
+		t.Fatal("an escalate must carry a reason, same as a denial does")
+	}
+	// Escalate is not a denial: a caller reading DeniedLeg/DeniedAtDepth
+	// instead of Effect must not mistake this for one.
+	if got.DeniedLeg != "" {
+		t.Fatalf("DeniedLeg = %q, want empty: escalate is not attributed as a denial", got.DeniedLeg)
+	}
+	if got.DeniedAtDepth != -1 {
+		t.Fatalf("DeniedAtDepth = %d, want -1: escalate is not a denial", got.DeniedAtDepth)
+	}
+}
+
 // A chain denial reports the depth; a non-chain denial leaves it at -1.
 func TestDecide_DeniedAtDepth(t *testing.T) {
 	req := request()
