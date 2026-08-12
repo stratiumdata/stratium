@@ -198,6 +198,66 @@ func TestScopeNarrows_RejectsUnrestrictedChildUnderRestrictedParent(t *testing.T
 	}
 }
 
+// --- escalate_at narrowing (spec §4.3.1) ---
+
+// Escalating sooner is narrower: a child threshold at or below its parent's
+// is a valid subset, symmetric with TestScopeNarrows_ValidChild for tier.
+func TestScopeNarrows_AcceptsLoweredEscalateAt(t *testing.T) {
+	p := parentDelegation()
+	parentThreshold := ActionTierReadOnly // parent ceiling is INTERNAL_MODIFY (2)
+	p.EscalateAt = &parentThreshold
+	c := validChild()
+	childThreshold := ActionTierReasoning // child ceiling is READ_ONLY (1)
+	c.EscalateAt = &childThreshold
+	if reason := ScopeNarrows(p, c); reason != "" {
+		t.Fatalf("a child lowering escalate_at must be accepted, got: %s", reason)
+	}
+}
+
+// The inverse of lowering: a child that escalates later than its parent has
+// widened the all-outright-allow band, exactly as a raised max_action_tier
+// would (TestScopeNarrows_RejectsWiderTier).
+func TestScopeNarrows_RejectsRaisedEscalateAt(t *testing.T) {
+	p := parentDelegation()
+	parentThreshold := ActionTierReasoning
+	p.EscalateAt = &parentThreshold
+	c := validChild()
+	childThreshold := ActionTierReadOnly // 1 > parent's 0
+	c.EscalateAt = &childThreshold
+	if ScopeNarrows(p, c) == "" {
+		t.Fatal("child escalate_at above parent's must be rejected")
+	}
+}
+
+// A parent that never escalates leaves the dimension open; a child may not
+// close it. Mirrors TestScopeNarrows_RejectsCapForHierarchyParentLacks — same
+// §4.3.1 rule, applied to the one dimension that is a single optional value
+// instead of a map.
+func TestScopeNarrows_RejectsIntroducedEscalateAt(t *testing.T) {
+	p := parentDelegation() // EscalateAt left nil: parent never escalates
+	c := validChild()
+	childThreshold := ActionTierReasoning
+	c.EscalateAt = &childThreshold
+	if ScopeNarrows(p, c) == "" {
+		t.Fatal("child introducing escalate_at where parent has none must be rejected")
+	}
+}
+
+// The corollary: a child cannot shed a threshold its parent imposed by
+// simply leaving the field nil. Mirrors
+// TestScopeNarrows_RejectsChildOmittingParentCap — omission is a widening,
+// not an inheritance, for escalate_at exactly as it is for classification
+// caps.
+func TestScopeNarrows_RejectsDroppedEscalateAt(t *testing.T) {
+	p := parentDelegation()
+	parentThreshold := ActionTierReadOnly
+	p.EscalateAt = &parentThreshold
+	c := validChild() // EscalateAt left nil
+	if ScopeNarrows(p, c) == "" {
+		t.Fatal("child dropping parent's escalate_at must be rejected")
+	}
+}
+
 // --- lifecycle ---
 
 func TestDelegation_IsActive(t *testing.T) {

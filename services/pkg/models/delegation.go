@@ -18,8 +18,24 @@ type Delegation struct {
 	UserID  string    `json:"user_id"  db:"user_id"`
 	AgentID uuid.UUID `json:"agent_id" db:"agent_id"`
 
-	ApprovedTools       []string          `json:"approved_tools"       db:"approved_tools"`
-	MaxActionTier       ActionTier        `json:"max_action_tier"      db:"max_action_tier"`
+	ApprovedTools []string   `json:"approved_tools"  db:"approved_tools"`
+	MaxActionTier ActionTier `json:"max_action_tier" db:"max_action_tier"`
+
+	// EscalateAt is the tier at or above which this delegation's leg
+	// escalates rather than allowing outright, up to and including
+	// MaxActionTier: the closed band [EscalateAt, MaxActionTier]
+	// (DelegationLeg, internal/authz). A tier above MaxActionTier still
+	// denies regardless — deny overrides escalate, so the ceiling is
+	// checked first. Nil means this delegation never escalates.
+	//
+	// A pointer, not a bare ActionTier: REASONING is tier 0 (see that
+	// type's own doc comment), so a bare zero value here would mean
+	// "escalate on every action" — the opposite of a safe default for
+	// every delegation that existed before this field did. Only nil, not
+	// zero, can mean "never" — the migration that adds this column leaves
+	// it NULL with no default for exactly that reason.
+	EscalateAt *ActionTier `json:"escalate_at,omitempty" db:"escalate_at"`
+
 	ClassificationCaps  map[string]string `json:"classification_caps"  db:"classification_caps"`
 	ResourceConstraints map[string]string `json:"resource_constraints" db:"resource_constraints"`
 	Purpose             string            `json:"purpose"              db:"purpose"`
@@ -63,9 +79,10 @@ func (d *Delegation) HasTool(tool string) bool {
 // of the first widening found.
 //
 // "Narrows" means no wider — an identical child is valid. Every dimension is
-// checked: action tier, tools, classification caps, resource constraints, and
-// expiry. Classification caps are compared by rank via classification.Index;
-// an unknown level on either side is a rejection, never an equal comparison.
+// checked: action tier, escalation threshold, tools, classification caps,
+// resource constraints, and expiry. Classification caps are compared by rank
+// via classification.Index; an unknown level on either side is a rejection,
+// never an equal comparison.
 //
 // A child may narrow a dimension its parent constrains; it may not introduce
 // one the parent leaves open (spec §4.3.1). That is stricter than narrowing
@@ -77,6 +94,27 @@ func ScopeNarrows(parent, child *Delegation) string {
 	if child.MaxActionTier > parent.MaxActionTier {
 		return "child max_action_tier " + child.MaxActionTier.String() +
 			" exceeds parent " + parent.MaxActionTier.String()
+	}
+
+	// EscalateAt narrows in the opposite direction from a first guess: a
+	// LOWER threshold escalates sooner, so lowering it narrows and raising
+	// it widens. Introducing or dropping the threshold is rejected outright
+	// rather than judged by whether it happens to narrow — the same §4.3.1
+	// rule the caps and resource-constraint loops below enforce, and for the
+	// same reason: a child's shape must be derivable from its parent's fixed
+	// set of dimensions, not from which hop first introduced one. Every
+	// branch is guarded on both pointers explicitly, rather than relying on
+	// the preceding cases having already excluded one being nil, so this
+	// still reads (and stays) safe if the cases are ever reordered.
+	switch {
+	case parent.EscalateAt == nil && child.EscalateAt != nil:
+		return "child introduces escalate_at " + child.EscalateAt.String() +
+			" which parent leaves unset"
+	case parent.EscalateAt != nil && child.EscalateAt == nil:
+		return "child drops parent escalate_at " + parent.EscalateAt.String()
+	case parent.EscalateAt != nil && child.EscalateAt != nil && *child.EscalateAt > *parent.EscalateAt:
+		return "child escalate_at " + child.EscalateAt.String() +
+			" exceeds parent " + parent.EscalateAt.String()
 	}
 
 	// An empty parent list is unrestricted; an empty child list under a
