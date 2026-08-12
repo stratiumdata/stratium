@@ -3,16 +3,31 @@
 // real upstream server this wraps as a child process, and JSON-RPC frames flow agent -> proxy ->
 // upstream and back, in both directions, for as long as either side has something to send. See
 // main.go's package doc for why stdio rather than HTTP is what makes this mode's trust model hold
-// at all: the harness starts this process, not the agent, so a session file a later change reads
-// from here is not something the agent supplied.
+// at all: the harness starts this process, not the agent, so the session file mcp_authorize.go
+// reads (via the same loadSessionFile hook.go uses) is not something the agent supplied.
 //
-// THIS FILE DOES NOT CALL THE PDP. It classifies nothing and decides nothing -- every method,
-// including tools/call, is relayed unconditionally, exactly like every other method this proxy
-// does not recognise. That is deliberate, not a placeholder: gating tools/call needs a delegation
-// reference, a PDP client, and an escalation wait, none of which belong in a file whose job is
-// proving the relay itself is correct first. interceptAgentFrame below is the one function a
-// later change edits to add that gate -- everything upstream of it (framing, malformed-frame
-// handling, shutdown) does not change shape when it does.
+// THIS FILE CALLS THE PDP FOR EXACTLY ONE METHOD: tools/call. Every other method, including
+// tools/list, is relayed unconditionally, exactly like Task 1 relayed everything. interceptAgentFrame
+// (Task 1's placeholder) is now (*mcpAuthorizer).intercept (mcp_authorize.go) -- the actual decision
+// logic (building a DecideRequest, calling Decide, resolving an ESCALATE, constructing a JSON-RPC
+// error) lives there, not here, so this file stays what it always was: the relay's framing,
+// concurrency, and shutdown mechanics. See mcp_authorize.go's own package doc for the classification
+// boundary that logic draws, identical to hook.go's for the other enforcement surface.
+//
+// TOOLS/LIST IS DELIBERATELY NOT FILTERED. Only tools/call is gated -- the advertised tool listing
+// passes through unchanged, even when some listed tool would be denied if actually called. This is
+// a considered choice, not an oversight, and the omission cuts both ways: filtering tools/list would
+// require either (a) this proxy deciding locally which tools are "permitted enough" to advertise,
+// which is D1 in a UX-motivated coat of paint -- the PEP would be classifying again, just earlier in
+// the conversation -- or (b) issuing one Decide call per listed tool on every tools/list, which
+// trades a UX nicety for a PDP round trip multiplied by however many tools the upstream advertises,
+// on a method that is not even the one this system enforces. Enforcement happens at call time,
+// where a real DecideRequest with real arguments exists to evaluate; tools/list has no arguments to
+// evaluate at all, only a name, which is not enough to derive a tier from safely (BuiltinTier needs
+// raw_input, not a tool name in isolation -- see internal/authz's own tier derivation). An agent
+// that lists a tool it cannot call finds out at call time, via a real, PDP-attributed denial reason
+// -- the same place and the same way it always finds out anything about what it may or may not do
+// under this system.
 //
 // RELAY FAITHFULLY, ENFORCE NARROWLY. A proxy that drops a method it has never heard of breaks
 // the server it wraps for no security benefit; a proxy that inspects a method's params to decide
@@ -25,6 +40,10 @@
 // byte-for-byte for every input (large integers lose precision; formatting can change), and no
 // amount of care in a hand-written re-encoder closes that gap for every input; only not
 // re-encoding does. frameMethod's own doc comment says the same thing from the parsing side.
+// mcp_authorize.go's synthesized JSON-RPC error frame is the one exception -- a frame this proxy
+// AUTHORS rather than relays, for which it uses a typed struct with a json.RawMessage id field
+// specifically because that still emits the original id's bytes verbatim (RawMessage's MarshalJSON
+// returns itself unchanged); see that file's jsonrpcErrorFrame doc comment.
 //
 // LIBRARY VS STDLIB. This proxy is built on encoding/json, bufio, and os/exec alone, not an MCP
 // client/server library. The two Go options investigated -- github.com/mark3labs/mcp-go
@@ -38,13 +57,29 @@
 // get right by never constructing the typed message a library would hand back in the first place.
 // Full investigation notes are in this task's report, not repeated here.
 //
-// CONCURRENCY. MCP permits multiple in-flight requests, and an authorization call a later change
-// adds will take real time (a PDP round trip, occasionally an escalation wait). Nothing in this
-// file serializes the stream behind one pending frame: agent->upstream and upstream->agent are two
-// independent goroutines (runMCP), and within a direction, relayDirection forwards each frame as
-// it arrives rather than waiting for anything about a previous one to resolve. A slow write on one
-// direction cannot block a read on the other. This is a property to preserve, not just a current
-// fact -- see the note in interceptAgentFrame's doc comment for what that implies there.
+// CONCURRENCY. MCP permits multiple in-flight requests, and the authorization call tools/call now
+// triggers takes real time (a PDP round trip, occasionally an escalation wait measured in the
+// configured ApprovalTimeout, not milliseconds). Nothing in this file serializes the stream behind
+// one pending frame: agent->upstream and upstream->agent are two independent goroutines (runMCP),
+// relayDirection forwards each frame as it arrives rather than waiting on a previous one, and
+// (*mcpAuthorizer).intercept extends this same property to tools/call specifically by never
+// deciding inline -- it hands the frame to its own goroutine (decideAndRelay, mcp_authorize.go) and
+// returns immediately, so relayDirection's loop is free to read the NEXT frame while that decision
+// is still in flight. A slow write on one direction cannot block a read on the other, and a slow
+// decision on one tools/call cannot block any other frame, tools/call or not, queued behind it.
+// TestDecideAndRelay_ConcurrentToolsCalls_DoNotSerialize (mcp_authorize_test.go) is what proves the
+// second half of that claim; TestRunMCP_PipelinedRequests_NotSerializedBehindEachOther (mcp_test.go)
+// proves the first half, for methods this file never gates at all.
+//
+// Because a decision can now outlive the frame that started it, two things had to change alongside
+// it, both in runMCP: syncWriter below wraps upstreamIn and agentOut so a decision goroutine's
+// eventual write (forward on ALLOW, an error frame on deny) cannot interleave with relayDirection's
+// own loop-driven writes to the same destination -- a plain io.Writer gives no such guarantee, and a
+// JSON-RPC line long enough to cross a pipe's atomic-write boundary could otherwise corrupt both
+// writers' output. And runMCP now waits for every decision goroutine it started (mcpAuthorizer.wg)
+// before returning, not just its own two relay goroutines -- otherwise a caller that observes
+// runMCP has returned could still see a write land afterward, which is exactly the kind of
+// ordering runMCPCmd's own Wait()-timing argument (below) depends on not happening.
 //
 // FAIL CLOSED ON TRANSPORT FAULTS. A malformed frame (not valid JSON, or valid JSON that is not a
 // JSON object) is dropped, not forwarded -- see frameMethod. The child exiting, or its output
@@ -54,13 +89,21 @@
 // down, by closing its stdin in turn); upstream->agent keeps relaying until the upstream itself
 // ends, so a reply already in flight when the agent hangs up is still delivered rather than
 // dropped. See runMCP's own doc comment for why that asymmetry is deliberate, not an oversight.
+// FAIL CLOSED ON AUTHORIZATION FAULTS is mcp_authorize.go's own concern (an unreachable PDP, a
+// missing session file, an escalation timeout: all deny, never forward) -- a different axis from
+// this section, which is about the TRANSPORT surviving a fault, not about what a decision concludes.
 //
 // NEVER LOG FRAME CONTENTS. stderr in this file carries only this proxy's own fault diagnostics
-// ("dropped a malformed frame") -- never a frame's bytes, which may carry tool arguments, and
-// never anything from a session file a later change reads. The upstream server's OWN stderr is
-// passed through untouched (cmd.Stderr = stderr in runMCPCmd) because that is the upstream's
-// diagnostic output, not this proxy's to interpret or copy from -- the same rule hook.go's package
-// doc states for raw_input, applied here to a different channel.
+// ("dropped a malformed frame") -- never a frame's bytes, which may carry tool arguments, and never
+// anything from the session file mcp_authorize.go reads. mcp_authorize.go holds to the same rule for
+// its own two possible diagnostic channels (an agentOut error frame, a dropped id-less frame): the
+// PDP's own reason text is the one thing that DOES cross into an error frame's message, deliberately
+// -- it is not raw_input, not the session file's contents, and not an approval id, and the agent
+// needs it to tell a policy "no" apart from a transport failure (see mcp_authorize.go's package
+// doc). The upstream server's OWN stderr is passed through untouched (cmd.Stderr = stderr in
+// runMCPCmd) because that is the upstream's diagnostic output, not this proxy's to interpret or copy
+// from -- the same rule hook.go's package doc states for raw_input, applied here to a different
+// channel.
 package main
 
 import (
@@ -72,6 +115,11 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"stratium/internal/pdpgrpc"
 )
 
 // maxFrameBytes bounds how large a single JSON-RPC line this proxy will read in either direction.
@@ -82,12 +130,16 @@ import (
 const maxFrameBytes = 32 * 1024 * 1024 // 32 MiB
 
 // mcpConfig is what runMCPCmd needs to launch the upstream MCP server this mode wraps: the
-// command and its arguments. This is deliberately a small subset of what the "mcp" mode will
-// eventually read from the environment -- the PDP address, agent identity, subject, session file
-// path, and escalation timing that hookConfig and sessionStartConfig already load (config.go)
-// belong to authorizing a tools/call, which this skeleton does not yet do. Adding them here now
-// would be configuration this file cannot use, for a shape a later change owns; that change is
-// deferred, not forgotten.
+// command and its arguments. It deliberately does NOT also hold the PDP address, agent identity,
+// subject, session file path, or escalation timing that authorizing a tools/call needs --
+// runMCPCmd loads those via loadHookConfigFromEnv (hook.go), unmodified, as a SEPARATE hookConfig
+// value alongside this one, rather than folding hook's seven fields into this struct or duplicating
+// their loading here. The two configs stay separate structs for the same reason "mcp" and "hook"
+// stay separate subcommands: UpstreamCommand/UpstreamArgs are meaningless to hook, and
+// PDPAddr/AgentID/Subject/SessionFilePath/ConnectTimeout/ApprovalPollInterval/ApprovalTimeout mean
+// exactly the same thing to both surfaces -- reusing hookConfig unchanged for that shared half, as
+// the task report notes, is itself evidence it was never a hook-only shape to begin with, only a
+// hook-first one.
 type mcpConfig struct {
 	UpstreamCommand string
 	UpstreamArgs    []string
@@ -116,9 +168,16 @@ func loadMCPConfigFromEnv() (mcpConfig, error) {
 // runMCPCmd wires the real upstream process from environment configuration, relays against its
 // stdin/stdout, and reports an exit status. Like runHookCmd and runSessionStartCmd, it is the
 // only function in this file main's dispatch calls; the relay itself (runMCP) is exercised
-// directly by mcp_test.go against in-memory pipes, and this function's own process-lifecycle
-// wiring is exercised separately against a real subprocess (see
+// directly by mcp_test.go and mcp_authorize_test.go against in-memory pipes, and this function's
+// own process-lifecycle wiring is exercised separately against a real subprocess (see
 // TestRunMCPCmd_RealUpstreamProcess_RelaysAndExitsCleanly).
+//
+// Loads TWO configs, not one -- mcpConfig for the upstream process, hookConfig (loadHookConfigFromEnv,
+// hook.go) for everything authorizing a tools/call needs -- and dials the PDP client the same way
+// runHookCmd does, with the same client passed to both the first Decide call and any escalation
+// retry. Either config failing to load denies closed here, before any subprocess is even started:
+// a proxy that started relaying with no way to reach the PDP would forward every tools/call
+// unauthorized by construction, which is a worse failure mode than simply refusing to start.
 //
 // Every error path here writes to stderr, never stdout: stdout is the live JSON-RPC channel the
 // agent is parsing frame by frame, and a diagnostic string written there would corrupt that
@@ -130,6 +189,22 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
 		return 1
 	}
+	hookCfg, err := loadHookConfigFromEnv()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
+		return 1
+	}
+
+	// grpc.NewClient dials lazily -- this succeeds for any syntactically valid target even if
+	// nothing is listening yet, exactly like runHookCmd's identical call. An actually-unreachable
+	// PDP is a per-Decide-call failure (decideAndRelay's describeRPCError path), not a startup one.
+	conn, err := grpc.NewClient(hookCfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
+		return 1
+	}
+	defer func() { _ = conn.Close() }()
+	pdpClient := pdpgrpc.NewPDPServiceClient(conn)
 
 	cmd := exec.Command(cfg.UpstreamCommand, cfg.UpstreamArgs...) //nolint:gosec // G204: cfg.UpstreamCommand/Args come from operator configuration (STRATIUM_PEP_MCP_UPSTREAM_COMMAND/_ARGS), not attacker-supplied request data -- the same trust boundary loadSessionFile's identical nolint documents for STRATIUM_PEP_SESSION_FILE.
 	cmd.Stderr = stderr                                           // the upstream's OWN diagnostics, passed through untouched -- never this proxy's frame logging. See the package doc.
@@ -149,7 +224,7 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	relayErr := runMCP(stdin, stdout, upstreamIn, upstreamOut, stderr)
+	relayErr := runMCP(stdin, stdout, upstreamIn, upstreamOut, stderr, pdpClient, hookCfg)
 
 	// Wait only after runMCP has returned, and so has fully stopped reading upstreamOut, by
 	// construction: relayDirection's loop is what reads it, and runMCP does not return until both
@@ -157,7 +232,7 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 	// races Wait's own pipe-close cleanup against a still-in-progress Read on the same pipe.
 	//
 	// This assumes the child actually exits once its stdin closes (which the agent-side goroutine
-	// does as soon as the agent's own input ends -- see interceptAgentFrame's caller in runMCP).
+	// does as soon as the agent's own input ends -- see runMCP's agent->upstream goroutine below).
 	// That is the standard shutdown contract for a stdio subprocess, and every MCP server this
 	// proxy is expected to wrap follows it; a child that ignores a closed stdin and never exits
 	// would block here. Forcibly killing such a child after a grace period is a real production
@@ -198,13 +273,29 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 //
 // This does mean runMCP can, in principle, keep running after the agent has gone if the upstream
 // never exits and never answers again -- the same "a child that ignores a closed stdin never
-// exits" limitation runMCPCmd's own doc comment already names for cmd.Wait, not a new one.
-func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, upstreamOut io.Reader, stderr io.Writer) error {
+// exits" limitation runMCPCmd's own doc comment already names for cmd.Wait, not a new one. A
+// tools/call decision still in flight when the agent disconnects is the same category of "process
+// outlives a departed peer" limitation, extended to a new code path rather than a new problem: its
+// own Decide/GetApproval calls derive from context.Background() with only their configured
+// deadlines (ConnectTimeout, ApprovalTimeout -- see mcp_authorize.go and escalation.go), never from
+// this function's own ctx, so it resolves in bounded time regardless of what either peer does
+// meanwhile -- deliberately NOT wired to cancel early on ctx, which would have made hook.go's
+// describeRPCError need a codes.Canceled case it does not have and should not need to grow just for
+// this caller (see that function's own doc comment).
+func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, upstreamOut io.Reader, stderr io.Writer, client pdpgrpc.PDPServiceClient, cfg hookConfig) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	fromAgent := newFrameSource(agentIn)
 	fromUpstream := newFrameSource(upstreamOut)
+
+	// Both destinations can now be written from more than one goroutine -- relayDirection's own
+	// loop-driven writes below, and an mcpAuthorizer decision goroutine forwarding an ALLOWed
+	// tools/call or replying with a denial (mcp_authorize.go). syncWriter is what keeps two such
+	// writers from interleaving mid-frame; see the package doc's CONCURRENCY note.
+	syncUpstreamIn := &syncWriter{w: upstreamIn}
+	syncAgentOut := &syncWriter{w: agentOut}
+	authz := &mcpAuthorizer{client: client, cfg: cfg, upstreamIn: syncUpstreamIn, agentOut: syncAgentOut}
 
 	var wg sync.WaitGroup
 	var agentToUpstreamErr, upstreamToAgentErr error
@@ -215,19 +306,49 @@ func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, up
 		// Tells the child to shut down, regardless of why this direction ended -- see the
 		// package doc. Deliberately not paired with cancel() here; see the doc comment above.
 		defer func() { _ = upstreamIn.Close() }()
-		agentToUpstreamErr = relayDirection(ctx, fromAgent, upstreamIn, stderr, "agent->upstream", interceptAgentFrame)
+		agentToUpstreamErr = relayDirection(ctx, fromAgent, syncUpstreamIn, stderr, "agent->upstream", authz.intercept)
 	}()
 	go func() {
 		defer wg.Done()
 		defer cancel() // the only trigger that stops the other direction early -- see the doc comment above
-		upstreamToAgentErr = relayDirection(ctx, fromUpstream, agentOut, stderr, "upstream->agent", passthroughUpstreamFrame)
+		upstreamToAgentErr = relayDirection(ctx, fromUpstream, syncAgentOut, stderr, "upstream->agent", passthroughUpstreamFrame)
 	}()
 	wg.Wait()
+
+	// Every tools/call decision authz started must finish -- and, on ALLOW, either land its
+	// forwarded write before upstreamIn is closed above or fail harmlessly trying to (see
+	// mcp_authorize.go's forward doc comment) -- before this function itself reports done. Without
+	// this wait, runMCPCmd's own Wait()-ordering argument (its doc comment) would no longer hold: a
+	// decision goroutine could still be running, and still writing, after a caller believes the
+	// relay has fully stopped. Every such decision is bounded by its own configured timeout (see
+	// this function's doc comment above), so this cannot hang.
+	authz.wg.Wait()
 
 	if agentToUpstreamErr != nil {
 		return agentToUpstreamErr
 	}
 	return upstreamToAgentErr
+}
+
+// syncWriter serializes concurrent Write calls to an underlying io.Writer. A plain io.Writer gives
+// no such guarantee, and once an mcpAuthorizer decision goroutine can write to the same destination
+// relayDirection's own loop writes to (see runMCP), two goroutines calling Write on one pipe at once
+// is a real possibility, not a hypothetical one: a JSON-RPC line long enough to cross a pipe's
+// atomic-write boundary (PIPE_BUF, ordinarily a few KiB, and maxFrameBytes permits lines far larger
+// than that) can interleave with another goroutine's write and corrupt both frames on the wire,
+// silently -- there is no framing-level way for a reader to detect that this happened after the
+// fact. Wrapping the two writers that can now have multiple callers (never upstreamOut/agentIn,
+// which only ever have one reader each) is cheaper and more obviously correct than auditing every
+// write call site for whether it might race a future one.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // relayDirection copies frames from src to dst, applying intercept to each well-formed one, until
@@ -251,7 +372,10 @@ func relayDirection(ctx context.Context, src *frameSource, dst io.Writer, stderr
 			}
 			out := intercept(method, line)
 			if out == nil {
-				continue // nothing to relay for this frame -- see interceptAgentFrame's doc comment
+				// nothing to relay FROM THIS CALL -- today this means (*mcpAuthorizer).intercept
+				// handed a tools/call off to its own decision goroutine (mcp_authorize.go); every
+				// other method's intercept returns line, never nil.
+				continue
 			}
 			if _, err := dst.Write(append(out, '\n')); err != nil {
 				return fmt.Errorf("%s: %w", label, err)
@@ -323,26 +447,11 @@ func frameMethod(line []byte) (method string, malformed bool) {
 	return env.Method, false
 }
 
-// interceptAgentFrame is the one place a frame from the agent, bound for the upstream server, is
-// looked at before being relayed -- and today it is a no-op for every method, including
-// tools/call: this file wires the relay, authorization is a later change. Keeping this as a
-// single named function, rather than inlining the passthrough at relayDirection's call site in
-// runMCP, is what makes "gate tools/call" a change to this function's body alone, not a
-// restructuring of the relay loop -- and it must stay one that can say no to an individual frame
-// without blocking any other: relayDirection calls this once per frame, synchronously, on the
-// agent->upstream goroutine, so a future version of this function that blocks on a slow decision
-// blocks every frame behind it in this direction. Returning nil drops the frame (a malformed one
-// takes this same path today, one level up in relayDirection, before intercept is even called);
-// returning line, as this does unconditionally, relays it unchanged.
-func interceptAgentFrame(method string, line []byte) []byte {
-	_ = method // not yet used for anything -- every method relays unchanged, see the package doc
-	return line
-}
-
 // passthroughUpstreamFrame relays every frame from the upstream server to the agent unchanged.
 // There is no authorization step in this direction -- the PDP gates what the agent may ask the
-// upstream to do, never what the upstream may reply -- so, unlike interceptAgentFrame, this one
-// has no future gate to grow into.
+// upstream to do, never what the upstream may reply -- so, unlike (*mcpAuthorizer).intercept
+// (mcp_authorize.go), which plays the equivalent role for the agent->upstream direction, this one
+// has no gate to grow into and stays a plain function rather than a method with state.
 func passthroughUpstreamFrame(_ string, line []byte) []byte {
 	return line
 }

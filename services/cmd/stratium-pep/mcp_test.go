@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"stratium/internal/pdpgrpc"
 )
 
 // --- mcpConfig ---------------------------------------------------------
@@ -89,12 +91,43 @@ func TestRunMCPCmd_MissingConfig_ExitsOneStdoutUntouched(t *testing.T) {
 	}
 }
 
+// The second config runMCPCmd now loads (Task 2's addition): mcpConfig loads fine here (a valid
+// upstream command is set), but none of hookConfig's seven variables are -- the ones decideAndRelay
+// needs to reach the PDP at all. A proxy that started relaying anyway, with no PDP address to call,
+// would forward every tools/call unauthorized by construction; this proves runMCPCmd refuses to
+// start instead, the same fail-closed rule TestRunMCPCmd_MissingConfig_ExitsOneStdoutUntouched
+// already proves for the upstream-command half of startup.
+func TestRunMCPCmd_MissingHookConfig_ExitsOneStdoutUntouched(t *testing.T) {
+	clearMCPEnv(t)
+	clearHookEnv(t)
+	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "some-upstream-server")
+
+	var stdout, stderr bytes.Buffer
+	code := runMCPCmd(strings.NewReader(""), &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("runMCPCmd() = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty -- an infra error must never land on the JSON-RPC stream", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "STRATIUM_PEP_PDP_ADDR") {
+		t.Errorf("stderr = %q, want it to name a missing hook-config variable (e.g. STRATIUM_PEP_PDP_ADDR)", stderr.String())
+	}
+}
+
 // A command that does not exist fails at cmd.Start, before any relay goroutine is even started --
 // proving that failure path itself reports and returns instead of blocking is what this test
 // defends; the more elaborate "child exits after relaying" property is
-// TestRunMCPCmd_RealUpstreamProcess_RelaysAndExitsCleanly's job.
+// TestRunMCPCmd_RealUpstreamProcess_RelaysAndExitsCleanly's job. Hook env vars are set to a valid
+// baseline (not cleared, like the mcp-only vars above) so this test actually reaches cmd.Start and
+// exercises the property its name claims -- runMCPCmd now loads hookConfig too (for the PDP client
+// decideAndRelay needs), and a missing HOOK var would deny earlier, at config loading, which would
+// still satisfy this test's code==1/stdout-empty assertions for the WRONG reason.
 func TestRunMCPCmd_UpstreamCommandNotFound_ExitsOneWithoutHanging(t *testing.T) {
 	clearMCPEnv(t)
+	clearHookEnv(t)
+	setAllHookEnv(t, nil)
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "stratium-pep-mcp-upstream-that-does-not-exist")
 
 	var stdout, stderr bytes.Buffer
@@ -152,6 +185,8 @@ func TestMCPHelperProcess(t *testing.T) {
 // at: a real process actually exiting, not a simulated EOF.
 func TestRunMCPCmd_RealUpstreamProcess_RelaysAndExitsCleanly(t *testing.T) {
 	clearMCPEnv(t)
+	clearHookEnv(t)
+	setAllHookEnv(t, nil) // this test never sends tools/call, so the PDP is dialed but never actually called
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", os.Args[0])
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_ARGS", "-test.run=TestMCPHelperProcess")
 	t.Setenv("STRATIUM_MCP_TEST_HELPER", "1")
@@ -189,7 +224,21 @@ type mcpHarness struct {
 	done             chan error
 }
 
-func newMCPHarness(t *testing.T) *mcpHarness {
+// unusedAuthzFixture returns a client+cfg pair for tests in this file that construct an mcpHarness
+// but never send a tools/call frame -- every test below except the ones in mcp_authorize_test.go.
+// runMCP now always needs a PDP client and a hookConfig (mcp_authorize.go's mcpAuthorizer holds
+// both), but a test proving a property of the relay itself (tools/list, an unknown method, a
+// malformed frame, id fidelity, concurrency, shutdown) has no reason to also script a real PDP
+// scenario -- nothing here is ever dialed by any of them. Tests that DO send tools/call and care
+// what the PDP says construct their own fakePDP directly instead, the same explicit-per-test style
+// hook_test.go's escalation tests already use -- see mcp_authorize_test.go.
+func unusedAuthzFixture(t *testing.T) (pdpgrpc.PDPServiceClient, hookConfig) {
+	t.Helper()
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	return startFakePDP(t, fake), testCfg(t)
+}
+
+func newMCPHarness(t *testing.T, client pdpgrpc.PDPServiceClient, cfg hookConfig) *mcpHarness {
 	t.Helper()
 	agentToProxyR, agentToProxyW := io.Pipe()
 	proxyToAgentR, proxyToAgentW := io.Pipe()
@@ -206,7 +255,7 @@ func newMCPHarness(t *testing.T) *mcpHarness {
 		done:             make(chan error, 1),
 	}
 	go func() {
-		h.done <- runMCP(agentToProxyR, proxyToAgentW, proxyToUpstreamW, upstreamToProxyR, &stderr)
+		h.done <- runMCP(agentToProxyR, proxyToAgentW, proxyToUpstreamW, upstreamToProxyR, &stderr, client, cfg)
 	}()
 	// Safety net, not the primary shutdown path any individual test relies on: closing both send
 	// sides guarantees the background runMCP goroutine (and this harness's own frameSource
@@ -285,7 +334,8 @@ func assertNoFrame(t *testing.T, src *frameSource, maxWait time.Duration) {
 }
 
 func TestRunMCP_ToolsListRoundTripsUnchanged(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 
 	const req = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
 	h.sendFromAgent(t, req)
@@ -305,7 +355,8 @@ func TestRunMCP_ToolsListRoundTripsUnchanged(t *testing.T) {
 // behavior does not depend on recognizing the method at all. See the package doc's RELAY
 // FAITHFULLY note.
 func TestRunMCP_UnknownMethodRoundTripsUnchanged(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 
 	const req = `{"jsonrpc":"2.0","id":"req-2","method":"x-vendor/frobnicate","params":{"widget":"a"}}`
 	h.sendFromAgent(t, req)
@@ -314,23 +365,11 @@ func TestRunMCP_UnknownMethodRoundTripsUnchanged(t *testing.T) {
 	}
 }
 
-// tools/call is the one method a later change will gate -- but not this one. This test exists
-// specifically to catch a premature or partial interception being added here by mistake: it must
-// fail the moment tools/call stops relaying byte-for-byte, for whatever reason.
-func TestRunMCP_ToolsCallPassesThroughUnauthorized(t *testing.T) {
-	h := newMCPHarness(t)
-
-	const req = `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"delete_file","arguments":{"path":"/etc/passwd"}}}`
-	h.sendFromAgent(t, req)
-	if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != req {
-		t.Errorf("upstream received %q, want %q unchanged -- tools/call is not authorized in this task", got, req)
-	}
-}
-
 // A notification (method, no id) is a structurally different frame shape from a request or a
 // response -- proves the relay does not assume every frame has an id.
 func TestRunMCP_NotificationRoundTripsUnchanged(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 
 	const notif = `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}`
 	h.sendFromAgent(t, notif)
@@ -361,7 +400,8 @@ func TestRunMCP_RequestIDTypes_RoundTripExactly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newMCPHarness(t)
+			client, cfg := unusedAuthzFixture(t)
+			h := newMCPHarness(t, client, cfg)
 			req := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"ping"}`, tt.id)
 			h.sendFromAgent(t, req)
 			if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != req {
@@ -382,7 +422,8 @@ func TestRunMCP_RequestIDTypes_RoundTripExactly(t *testing.T) {
 // relaying everything else. A relay that panics or wedges on the first garbled line would be
 // exactly as unsafe as one that forwards it.
 func TestRunMCP_MalformedFrame_DroppedNotForwardedAndStreamContinues(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 
 	// A marker embedded in the malformed line itself, checked absent from stderr below -- proof
 	// of the "never log frame contents" rule, not just a claim about it in a comment.
@@ -409,11 +450,24 @@ func TestRunMCP_MalformedFrame_DroppedNotForwardedAndStreamContinues(t *testing.
 // per-request correlation to this relay -- e.g. "hold request 2 until request 1's response is
 // seen" -- this test is what would catch it, by timing out waiting for request 2 to reach the
 // upstream.
+//
+// Deliberately NOT tools/call (Task 1's version of this test used it as an arbitrary payload, back
+// when nothing was gated): as of Task 2, two DIFFERENT tools/call frames each get their own
+// decision goroutine (mcp_authorize.go), so which one's forward() call wins the race to upstream is
+// no longer guaranteed to match arrival order at all -- asserting req1-then-req2 for tools/call
+// specifically would make THIS test flaky rather than proving anything, for a reason that has
+// nothing to do with the property it exists to defend. Two arbitrary, ungated method names still
+// prove exactly that property (relayDirection's own loop never serializes on a reply), without
+// depending on tools/call's now-genuinely-concurrent ordering.
+// TestDecideAndRelay_ConcurrentToolsCalls_DoNotSerialize (mcp_authorize_test.go) is tools/call's own
+// version of this property, phrased the way that path can actually promise: neither decision blocks
+// the other from STARTING, not that either finishes first.
 func TestRunMCP_PipelinedRequests_NotSerializedBehindEachOther(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 
-	const req1 = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow_tool"}}`
-	const req2 = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fast_tool"}}`
+	const req1 = `{"jsonrpc":"2.0","id":1,"method":"custom/slow_op"}`
+	const req2 = `{"jsonrpc":"2.0","id":2,"method":"custom/fast_op"}`
 	h.sendFromAgent(t, req1)
 	h.sendFromAgent(t, req2)
 
@@ -447,7 +501,8 @@ func TestRunMCP_PipelinedRequests_NotSerializedBehindEachOther(t *testing.T) {
 // make this return promptly; this is exactly the test mutation (d) in the task's report is
 // checked against.
 func TestRunMCP_UpstreamExit_TerminatesWithoutHangingEvenIfAgentStaysOpen(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 	// Deliberately do not close or write to h.agentSend -- the agent looks fully alive.
 
 	_ = h.upstreamSend.Close() // the child exiting closes its stdout, which looks like this to runMCP
@@ -472,7 +527,8 @@ func TestRunMCP_UpstreamExit_TerminatesWithoutHangingEvenIfAgentStaysOpen(t *tes
 // this one pins the fix down at the runMCP level so a regression is caught here too, in
 // milliseconds rather than by a subprocess test.
 func TestRunMCP_AgentExit_ClosesUpstreamInputThenTerminatesOnceUpstreamAlsoEnds(t *testing.T) {
-	h := newMCPHarness(t)
+	client, cfg := unusedAuthzFixture(t)
+	h := newMCPHarness(t, client, cfg)
 
 	_ = h.agentSend.Close() // the agent hanging up
 

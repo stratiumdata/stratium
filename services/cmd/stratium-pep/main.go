@@ -14,9 +14,11 @@
 // CreateDelegation once at session setup and caching what it returns for
 // hook (and mcp, and later proxy/extauthz) to read.
 //
-// "mcp" does not yet call the PDP at all — see mcp.go's package doc. It is
-// listed here as an enforcement surface because that is what it is for, not
-// because it enforces anything today.
+// "mcp" gates tools/call the same way hook gates a PreToolUse event — see
+// mcp.go's package doc, and mcp_authorize.go for the decision logic itself.
+// Every other MCP method, including tools/list, relays unconditionally; that
+// omission is deliberate, not partial coverage — see mcp.go's package doc for
+// why filtering tools/list would reintroduce D1 rather than avoid it.
 //
 // The property every enforcement subcommand here shares, and the only one
 // that makes this binary worth having: it classifies nothing itself. A
