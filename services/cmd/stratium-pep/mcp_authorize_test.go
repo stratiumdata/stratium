@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -318,6 +319,73 @@ func TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	if got.GetAgentId() != cfg.AgentID || got.GetSubject() != cfg.Subject || got.GetDelegationId() != wantDelegationID {
 		t.Errorf("request identity = (agent=%q subject=%q delegation=%q), want (%q, %q, %q)",
 			got.GetAgentId(), got.GetSubject(), got.GetDelegationId(), cfg.AgentID, cfg.Subject, wantDelegationID)
+	}
+}
+
+// End-to-end proof that decideAndRelay wires extractResourceAttrs's result onto the outgoing
+// request -- mirrors TestRunHook_RequestCarriesResourceAttrs (hook_test.go) for this surface.
+func TestDecideAndRelay_RequestCarriesResourceAttrs(t *testing.T) {
+	tests := []struct {
+		name      string
+		tool      string
+		arguments string
+		wantResc  map[string]string
+	}{
+		{"file_path argument becomes resource id and type", "Read", `{"file_path":"/tmp/notes.txt"}`,
+			map[string]string{"id": "/tmp/notes.txt", "type": "file"}},
+		{"command argument becomes resource id, no type", "Bash", `{"command":"ls -la"}`,
+			map[string]string{"id": "ls -la"}},
+		// Deliberately also carries "command" and "file_path" alongside the
+		// unrecognized tool name -- see hook_test.go's identical fixture
+		// (TestRunHook_RequestCarriesResourceAttrs) for why a benign
+		// non-overlapping fixture cannot tell "correctly empty" apart from
+		// "guessed and found nothing".
+		{"unrecognized tool yields empty resource map even with recognized field names present",
+			"some_mcp_tool", `{"url":"https://example.com","command":"ls","file_path":"/etc/shadow"}`,
+			map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			client := startFakePDP(t, fake)
+			h := newMCPHarness(t, client, testCfg(t))
+
+			req := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+				tt.tool, tt.arguments)
+			h.sendFromAgent(t, req)
+			readFrame(t, h.upstreamReceived, time.Second) // synchronize: lastRequest is set before this returns
+
+			got := fake.lastRequest()
+			if got == nil {
+				t.Fatal("PDP never received a request")
+			}
+			if gotResc := got.GetResource(); !maps.Equal(gotResc, tt.wantResc) {
+				t.Errorf("resource = %v, want %v", gotResc, tt.wantResc)
+			}
+		})
+	}
+}
+
+// The wire-level half of the D1 guarantee for this surface -- mirrors
+// TestRunHook_RequestNeverCarriesClassificationOrHierarchy exactly, since both surfaces build a
+// DecideRequest the same way and must make the same promise on the wire, not just in
+// resource_test.go's pure-function proof.
+func TestDecideAndRelay_RequestNeverCarriesClassificationOrHierarchy(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	client := startFakePDP(t, fake)
+	h := newMCPHarness(t, client, testCfg(t))
+
+	const arguments = `{"file_path":"/tmp/x","classification":"TOP-SECRET","hierarchy":"nato"}`
+	req := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"Read","arguments":%s}}`, arguments)
+	h.sendFromAgent(t, req)
+	readFrame(t, h.upstreamReceived, time.Second) // synchronize: lastRequest is set before this returns
+
+	resource := fake.lastRequest().GetResource()
+	if _, ok := resource["classification"]; ok {
+		t.Errorf("request resource = %v, must never carry \"classification\" -- CheckCap consumes exactly this key", resource)
+	}
+	if _, ok := resource["hierarchy"]; ok {
+		t.Errorf("request resource = %v, must never carry \"hierarchy\" -- CheckCap consumes exactly this key", resource)
 	}
 }
 

@@ -45,9 +45,23 @@ func extractNormalizedInput(toolName string, toolInput json.RawMessage) string {
 		return ""
 	}
 
-	for _, field := range fields {
-		raw, ok := obj[field]
-		if !ok {
+	_, value, _ := firstNamedField(obj, fields)
+	return value
+}
+
+// firstNamedField walks fields against obj, in order, and returns the name
+// and value of the first one present with a non-empty JSON string value.
+// Shared by extractNormalizedInput above and extractResourceAttrs
+// (resource.go): both ask the identical structural question -- "which of
+// these named fields holds this tool's one relevant argument" -- for two
+// different downstream purposes (what text to classify, vs. what resource
+// this call names), so sharing the walk costs nothing a second copy would
+// have bought, and a JSON-shape edge case (present-but-not-a-string, present
+// but empty) only needs handling once.
+func firstNamedField(obj map[string]json.RawMessage, fields []string) (name, value string, ok bool) {
+	for _, f := range fields {
+		raw, present := obj[f]
+		if !present {
 			continue
 		}
 		var s string
@@ -55,8 +69,8 @@ func extractNormalizedInput(toolName string, toolInput json.RawMessage) string {
 			continue // present but not a JSON string -- not this hook's to interpret
 		}
 		if s != "" {
-			return s
+			return f, s, true
 		}
 	}
-	return ""
+	return "", "", false
 }

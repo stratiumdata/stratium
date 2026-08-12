@@ -9,11 +9,14 @@
 // The boundary that matters: runHook reads tool_name and forwards
 // tool_input verbatim, as bytes, into DecideRequest.raw_input — always,
 // unconditionally. It also extracts DecideRequest.normalized_input
-// (normalize.go), but only by a field-name lookup keyed on tool_name: "the
-// shell tool's argument lives under .command," never "this text looks like
-// rm -rf." Nothing here — in this file or in normalize.go — parses what
-// tool_input's content *means*: no per-tool special-casing of what a
-// dangerous call looks like. That classification is the PDP's job,
+// (normalize.go) and DecideRequest.resource (resource.go), but only by
+// field-name lookups keyed on tool_name: "the shell tool's argument lives
+// under .command," never "this text looks like rm -rf." Nothing here — in
+// this file, normalize.go, or resource.go — parses what tool_input's
+// content *means*: no per-tool special-casing of what a dangerous call
+// looks like, and resource.go's extraction stops at an identifier, never a
+// classification (see its own package doc — that boundary is higher-stakes
+// than normalized_input's). That classification is the PDP's job,
 // server-side, from raw_input and normalized_input together
 // (internal/authz.BuiltinTier); doing any of it here would be exactly the
 // predecessor's local-classifier defect (spec D1) in a new coat of paint.
@@ -227,6 +230,7 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		Verb:            toolVerbs[in.ToolName],
 		RawInput:        string(in.ToolInput),
 		NormalizedInput: extractNormalizedInput(in.ToolName, in.ToolInput),
+		Resource:        extractResourceAttrs(in.ToolName, in.ToolInput),
 		// DeclaredTier: deliberately never set. See the package doc.
 	}
 

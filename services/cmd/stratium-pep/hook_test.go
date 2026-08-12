@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -831,6 +832,86 @@ func TestRunHook_RequestCarriesNormalizedInput(t *testing.T) {
 					req.GetRawInput(), tt.input)
 			}
 		})
+	}
+}
+
+// End-to-end proof that runHook wires extractResourceAttrs's result onto the
+// outgoing request -- resource_test.go covers extraction itself in
+// isolation, this covers that runHook actually calls it and sends what it
+// returns.
+func TestRunHook_RequestCarriesResourceAttrs(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		input    string
+		wantResc map[string]string
+	}{
+		{"Read file_path becomes resource id and type", "Read", `{"file_path":"/tmp/notes.txt"}`,
+			map[string]string{"id": "/tmp/notes.txt", "type": "file"}},
+		{"Bash command becomes resource id, no type", "Bash", `{"command":"ls -la"}`,
+			map[string]string{"id": "ls -la"}},
+		// The input deliberately also carries "command" and "file_path" --
+		// recognized field names, just attached to an unrecognized tool.
+		// TestExtractResourceAttrs_UnrecognizedToolSendsEmptyMapNotNilNotError's
+		// own doc comment explains why this matters: a benign fixture whose
+		// field names never overlap the recognized vocabulary (e.g. a bare
+		// {"url":...}) cannot tell "correctly recognized nothing" apart from
+		// "guessed and found nothing to guess" -- this fixture can.
+		{"unrecognized tool yields empty resource map even with recognized field names present",
+			"WebFetch", `{"url":"https://example.com","command":"ls","file_path":"/etc/shadow"}`,
+			map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			client := startFakePDP(t, fake)
+
+			var stdout bytes.Buffer
+			code := runHook(stdinBody(tt.tool, tt.input), &stdout, client, testCfg(t))
+			if code != 0 {
+				t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
+			}
+
+			req := fake.lastRequest()
+			if req == nil {
+				t.Fatal("PDP never received a request")
+			}
+			if got := req.GetResource(); !maps.Equal(got, tt.wantResc) {
+				t.Errorf("resource = %v, want %v", got, tt.wantResc)
+			}
+		})
+	}
+}
+
+// The wire-level half of the D1 guarantee, mirroring why
+// TestRunHook_RequestCarriesRawInputAndNoDeclaredTier insists on a real gRPC
+// round trip rather than a mock: resource_test.go proves extractResourceAttrs
+// itself never produces these keys, across every tool and an adversarial
+// input, but it cannot see a stray literal added directly to the
+// DecideRequest struct at the call site in hook.go. This proves that too, on
+// the actual wire message the fake PDP received -- not just a Go value this
+// process happened to construct.
+func TestRunHook_RequestNeverCarriesClassificationOrHierarchy(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	client := startFakePDP(t, fake)
+
+	// The input itself carries classification/hierarchy under their own
+	// names, exactly as TestExtractResourceAttrs_KeysAreLimitedToIDAndType's
+	// adversarialInput does -- proving the ban holds even when tempting data
+	// is sitting right there in tool_input.
+	const toolInput = `{"file_path":"/tmp/x","classification":"TOP-SECRET","hierarchy":"nato"}`
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Read", toolInput), &stdout, client, testCfg(t))
+	if code != 0 {
+		t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
+	}
+
+	resource := fake.lastRequest().GetResource()
+	if _, ok := resource["classification"]; ok {
+		t.Errorf("request resource = %v, must never carry \"classification\" -- CheckCap consumes exactly this key", resource)
+	}
+	if _, ok := resource["hierarchy"]; ok {
+		t.Errorf("request resource = %v, must never carry \"hierarchy\" -- CheckCap consumes exactly this key", resource)
 	}
 }
 

@@ -5,7 +5,7 @@
 // must not disturb (id fidelity, no serialization, fail-closed on transport faults), and hook.go's
 // package doc for the classification boundary this file draws identically: an MCP tool name is
 // never assumed to mean anything by itself, and nothing here inspects what a tool's arguments
-// contain beyond the field-name lookup normalize.go already does for hook.
+// contain beyond the field-name lookups normalize.go and resource.go already do for hook.
 //
 // EVERY REQUEST THIS FILE BUILDS OMITS declared_tier, THE SAME AS hook.go's. The PDP re-derives the
 // tier from tool/verb/raw_input/normalized_input regardless of what a caller claims, so a caller
@@ -163,6 +163,7 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		Verb:            toolVerbs[frame.Params.Name],
 		RawInput:        string(frame.Params.Arguments),
 		NormalizedInput: extractNormalizedInput(frame.Params.Name, frame.Params.Arguments),
+		Resource:        extractResourceAttrs(frame.Params.Name, frame.Params.Arguments),
 		// DeclaredTier: deliberately never set -- see this file's own package doc and hook.go's;
 		// the reasoning is identical for both surfaces.
 	}
