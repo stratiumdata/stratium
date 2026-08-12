@@ -94,8 +94,8 @@ var toolVerbs = map[string]string{
 
 // hookConfig is what runHook needs beyond stdin: the identity presented to
 // the PDP, where to reach it, where the session file session-start
-// (session_start.go) wrote lives, and how long to wait for a reply before
-// giving up.
+// (session_start.go) wrote lives, how long to wait for a reply before giving
+// up, and how to wait out an escalation.
 //
 // Every value here is required, with no default — the same rule
 // internal/config.Load uses for the PDP itself, for the same reason: a hook
@@ -109,13 +109,25 @@ type hookConfig struct {
 	Subject         string
 	SessionFilePath string
 	ConnectTimeout  time.Duration
+
+	// ApprovalPollInterval and ApprovalTimeout bound escalation.go's poll
+	// loop (E6: the PEP blocks, the PDP never parks a connection). Required,
+	// no default, for the same reason as every field above — and unlike
+	// ConnectTimeout, guessing wrong here has no safe direction: too short a
+	// timeout denies escalations no human could realistically clear in time,
+	// too long one leaves a tool call silently blocked well past what an
+	// operator would expect "no response" to mean. Neither is a value this
+	// binary should pick on an operator's behalf.
+	ApprovalPollInterval time.Duration
+	ApprovalTimeout      time.Duration
 }
 
 // loadHookConfigFromEnv reads hookConfig from the environment, or returns an
 // error naming every missing variable at once rather than stopping at the
 // first. Shares requiredEnv/requiredDuration/missingConfigError (config.go)
-// with loadSessionStartConfigFromEnv (session_start.go), which loads the
-// same five values the same way.
+// with loadSessionStartConfigFromEnv (session_start.go), which loads five of
+// these same values the same way (everything but the two escalation-only
+// fields below, which session-start has no use for: it never polls).
 func loadHookConfigFromEnv() (hookConfig, error) {
 	var missing []string
 	cfg := hookConfig{
@@ -125,6 +137,8 @@ func loadHookConfigFromEnv() (hookConfig, error) {
 		SessionFilePath: requiredEnv("STRATIUM_PEP_SESSION_FILE", &missing),
 	}
 	timeoutRaw := requiredEnv("STRATIUM_PEP_CONNECT_TIMEOUT", &missing)
+	pollRaw := requiredEnv("STRATIUM_PEP_APPROVAL_POLL_INTERVAL", &missing)
+	approvalTimeoutRaw := requiredEnv("STRATIUM_PEP_APPROVAL_TIMEOUT", &missing)
 	if len(missing) > 0 {
 		return hookConfig{}, missingConfigError(missing)
 	}
@@ -134,6 +148,19 @@ func loadHookConfigFromEnv() (hookConfig, error) {
 		return hookConfig{}, err
 	}
 	cfg.ConnectTimeout = timeout
+
+	pollInterval, err := requiredDuration("STRATIUM_PEP_APPROVAL_POLL_INTERVAL", pollRaw)
+	if err != nil {
+		return hookConfig{}, err
+	}
+	cfg.ApprovalPollInterval = pollInterval
+
+	approvalTimeout, err := requiredDuration("STRATIUM_PEP_APPROVAL_TIMEOUT", approvalTimeoutRaw)
+	if err != nil {
+		return hookConfig{}, err
+	}
+	cfg.ApprovalTimeout = approvalTimeout
+
 	return cfg, nil
 }
 
@@ -208,19 +235,19 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 
 	resp, err := client.Decide(ctx, req)
 	if err != nil {
-		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", describeDecideError(err)))
+		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", describeRPCError(err, agentOrDelegationUnknownMsg)))
 	}
 
 	switch resp.GetEffect() {
 	case pdpgrpc.Effect_EFFECT_ALLOW:
 		return 0
 	case pdpgrpc.Effect_EFFECT_ESCALATE:
-		// No local approval prompt — that subsystem does not exist yet. Say
-		// so honestly and deny; inventing one here would let this hook grant
-		// itself the authority the escalation design has not been given yet.
-		return writeDeny(stdout, fmt.Sprintf(
-			"stratium-pep: this action requires human approval, which is not yet implemented; denying (PDP reason: %s)",
-			resp.GetReason()))
+		// escalation.go's awaitApproval owns everything from here: it polls
+		// GetApproval and either retries Decide with the resolved approval id
+		// or denies. This hook still classifies nothing and decides nothing —
+		// it waits, it retries once, it reports (see escalation.go's own
+		// package doc for why that boundary still holds here).
+		return awaitApproval(stdout, client, cfg, req, resp)
 	default:
 		// EFFECT_DENY, and any value this build does not recognize (the
 		// proto documents EFFECT_DENY as the zero value for exactly this
@@ -229,25 +256,51 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 	}
 }
 
-// describeDecideError turns a failed Decide call into a reason that
+// agentOrDelegationUnknownMsg is describeRPCError's notFoundMsg for every
+// Decide call this hook makes (the first ask and, from escalation.go, the
+// approved retry): a NotFound from Decide always means LoadAgent or
+// LoadChain failed server-side (server.go), never anything about an
+// approval — resolveEscalation turns an approval-side NotFound into an
+// ordinary DENY response, not an RPC error (escalation.go's own doc
+// comment), so this message never needs to hedge between the two meanings.
+const agentOrDelegationUnknownMsg = "PDP says the delegation or agent this request names is unknown to it"
+
+// describeRPCError turns a failed call to the PDP into a reason that
 // distinguishes "we could not ask" from "we asked and were told something
 // specific" — the difference between a useful denial and a mysterious one.
-// Before this, every one of these cases produced the same flat "could not
-// reach PDP" text, which was simply wrong for three of the four: a
-// NotFound (a session file naming a delegation, or an agent, the PDP has
-// never heard of) or a DeadlineExceeded or any other application-level
-// error all mean the PDP *was* reached and *did* answer — conflating them
-// with an unreachable PDP would send a developer chasing a network problem
-// that does not exist. Every branch here still denies identically; only the
-// text differs.
-func describeDecideError(err error) string {
+// Without this, every one of these cases would produce the same flat "could
+// not reach PDP" text, which is simply wrong for three of the four: a
+// NotFound, a DeadlineExceeded, or any other application-level error all
+// mean the PDP *was* reached and *did* answer — conflating them with an
+// unreachable PDP would send a developer chasing a network problem that does
+// not exist. Every branch here still denies identically; only the text
+// differs.
+//
+// There is deliberately no codes.Canceled case: every context this hook
+// builds (runHook's ConnectTimeout budget, escalation.go's pollCtx and its
+// own per-retry ConnectTimeout budget) derives from context.Background()
+// with only a deadline, never a cancellable parent, so nothing in this
+// binary can produce a Canceled that is not also caught earlier by ctx.Err()
+// at its own call site (pollApproval's own doc comment explains why that
+// check exists and comes first). A Canceled this function ever did see would
+// fall through to the default case below, which is still an honest, if
+// less specific, fail-closed answer — not a silent gap.
+//
+// Shared by every PDP call this hook makes — the initial Decide, escalation.go's
+// GetApproval poll, and its post-approval retry Decide — so a developer sees
+// the same vocabulary for the same underlying failure no matter which call
+// hit it. notFoundMsg supplies the one piece that cannot be phrased
+// identically for every caller: "unknown to it" always begs the question
+// "which id" (agentOrDelegationUnknownMsg above for Decide; escalation.go's
+// own message for GetApproval's approval_id).
+func describeRPCError(err error, notFoundMsg string) string {
 	switch status.Code(err) {
 	case codes.Unavailable:
 		return fmt.Sprintf("could not reach PDP: %s", err)
 	case codes.DeadlineExceeded:
 		return fmt.Sprintf("PDP did not respond in time: %s", err)
 	case codes.NotFound:
-		return fmt.Sprintf("PDP says the delegation or agent this request names is unknown to it: %s", err)
+		return fmt.Sprintf("%s: %s", notFoundMsg, err)
 	default:
 		return fmt.Sprintf("PDP returned an error: %s", err)
 	}

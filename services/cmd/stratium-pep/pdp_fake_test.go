@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -21,10 +22,12 @@ import (
 // a Go struct field was left nil, where a real round trip proves the wire
 // message never carried it.
 //
-// Decide and CreateDelegation each get their own response/error/call-count
-// fields below rather than sharing one, because a single session_start_test
-// scenario can need Decide left at its zero-value UnimplementedPDPServiceServer
-// behavior while CreateDelegation is stubbed, and vice versa for hook_test.
+// Decide, CreateDelegation, and GetApproval each get their own
+// response/error/call-count fields below rather than sharing one, because a
+// single test scenario can need one RPC left at its zero-value
+// UnimplementedPDPServiceServer behavior while another is stubbed -- e.g.
+// every escalation test in hook_test.go stubs Decide and GetApproval
+// together but never touches CreateDelegation at all.
 type fakePDP struct {
 	pdpgrpc.UnimplementedPDPServiceServer
 
@@ -42,11 +45,24 @@ type fakePDP struct {
 	createResp *pdpgrpc.CreateDelegationResponse
 	createErr  error
 
-	mu            sync.Mutex
-	lastReq       *pdpgrpc.DecideRequest
-	calls         int
-	lastCreateReq *pdpgrpc.CreateDelegationRequest
-	createCalls   int
+	// getApprovalResponses is consumed in call order, one entry per
+	// GetApproval call; a call past the end of the slice repeats the last
+	// entry rather than panicking, so a test can script "pending, pending,
+	// approved" with exactly three entries without having to predict exactly
+	// how many polls a given PollInterval/ApprovalTimeout pair produces.
+	// getApprovalErr, when set, is returned on every call instead and takes
+	// priority over the slice -- it scripts "unreachable"/"unknown id",
+	// neither of which needs per-call sequencing.
+	getApprovalResponses []*pdpgrpc.GetApprovalResponse
+	getApprovalErr       error
+
+	mu                 sync.Mutex
+	lastReq            *pdpgrpc.DecideRequest
+	calls              int
+	lastCreateReq      *pdpgrpc.CreateDelegationRequest
+	createCalls        int
+	lastGetApprovalReq *pdpgrpc.GetApprovalRequest
+	getApprovalCalls   int
 }
 
 func (f *fakePDP) Decide(ctx context.Context, req *pdpgrpc.DecideRequest) (*pdpgrpc.DecideResponse, error) {
@@ -102,6 +118,36 @@ func (f *fakePDP) lastCreateRequest() *pdpgrpc.CreateDelegationRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastCreateReq
+}
+
+func (f *fakePDP) GetApproval(_ context.Context, req *pdpgrpc.GetApprovalRequest) (*pdpgrpc.GetApprovalResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastGetApprovalReq = req
+	f.getApprovalCalls++
+	if f.getApprovalErr != nil {
+		return nil, f.getApprovalErr
+	}
+	if len(f.getApprovalResponses) == 0 {
+		return nil, errors.New("fakePDP: GetApproval called with no scripted response")
+	}
+	idx := f.getApprovalCalls - 1
+	if idx >= len(f.getApprovalResponses) {
+		idx = len(f.getApprovalResponses) - 1
+	}
+	return f.getApprovalResponses[idx], nil
+}
+
+func (f *fakePDP) getApprovalCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getApprovalCalls
+}
+
+func (f *fakePDP) lastGetApprovalRequest() *pdpgrpc.GetApprovalRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastGetApprovalReq
 }
 
 // startFakePDP serves srv on an OS-assigned loopback port and returns a real
