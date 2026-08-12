@@ -2,20 +2,32 @@
 // until a human resolves the pending approval DecideResponse.approval_id
 // names, or the configured timeout passes -- then either retry Decide with
 // that id or deny. It never decides anything itself: it waits, it retries
-// once, it reports. See hook.go's package doc for the boundary every
-// enforcement path in this binary shares, and
+// once, it reports an (effect, reason) pair. See hook.go's package doc for
+// the boundary every enforcement path in this binary shares, and
 // internal/pdpgrpc/escalation.go for the PDP-side half of this same RPC
 // exchange (creating the pending row, verifying one offered on a retry).
 //
-// The approval id lives only in memory for the lifetime of one runHook call,
-// and travels only over the same gRPC connection Decide already uses --
-// never written to a file. It names a live authorization grant (whoever
-// presents it on a Decide retry gets whatever resolveEscalation would give
-// the original caller, for a matching request), so a second, on-disk copy
-// would be worse than none: the same reasoning that keeps raw_input out of
-// local logs (hook.go's package doc) applies to this id too. There is no
-// file I/O anywhere in this file, which is what actually makes that true --
-// not a comment promising it.
+// pollApproval and resolveApproval are transport-agnostic on purpose: neither
+// writes anything or picks an exit code, which is what let mcp.go's
+// mcpAuthorizer (Task 2) reuse both completely unmodified for a second
+// enforcement surface with a different reporting contract (a correlated
+// JSON-RPC error, not stdout JSON and a process exit code). awaitApproval is
+// the thin remainder that IS transport-specific — runHook's own stdout/exit-
+// code translation of resolveApproval's result — and exists only because
+// runHook (hook.go) still calls it directly; see resolveApproval's own doc
+// comment for why the split happened here rather than mcp.go reimplementing
+// the wait.
+//
+// The approval id lives only in memory for the lifetime of one decision —
+// one runHook invocation, or one tools/call frame under mcp — and travels
+// only over the same gRPC connection Decide already uses -- never written to
+// a file. It names a live authorization grant (whoever presents it on a
+// Decide retry gets whatever resolveEscalation would give the original
+// caller, for a matching request), so a second, on-disk copy would be worse
+// than none: the same reasoning that keeps raw_input out of local logs
+// (hook.go's package doc) applies to this id too, for both callers. There is
+// no file I/O anywhere in this file, which is what actually makes that true
+// -- not a comment promising it.
 package main
 
 import (
@@ -27,15 +39,11 @@ import (
 	"stratium/internal/pdpgrpc"
 )
 
-// awaitApproval is what runHook's EFFECT_ESCALATE case calls. Every return
-// from this function goes through writeDeny except one: a second,
-// independent Decide call actually answering EFFECT_ALLOW. A poll resolving
-// "approved" proves only that a human signed off on the escalation
-// condition, not that the principal, agent, and delegation legs still hold —
-// the retry re-evaluates all three fresh, exactly as resolveEscalation
-// (internal/pdpgrpc/escalation.go) documents for the server side of this
-// same exchange, so this function cannot itself turn a denial into an
-// allow no matter what GetApproval reports.
+// awaitApproval is what runHook's EFFECT_ESCALATE case calls: resolveApproval's
+// outcome, reported through this hook's own stdout/exit-code contract. All the
+// actual waiting, retrying, and effect logic lives in resolveApproval below —
+// this function's only remaining job is translating that outcome into what
+// runHook's caller (Claude Code's PreToolUse contract) understands.
 func awaitApproval(
 	stdout io.Writer,
 	client pdpgrpc.PDPServiceClient,
@@ -43,16 +51,54 @@ func awaitApproval(
 	req *pdpgrpc.DecideRequest,
 	resp *pdpgrpc.DecideResponse,
 ) int {
+	effect, reason := resolveApproval(client, cfg, req, resp)
+	if effect == pdpgrpc.Effect_EFFECT_ALLOW {
+		return 0
+	}
+	return writeDeny(stdout, reason)
+}
+
+// resolveApproval blocks until resp's escalation resolves — approved and
+// re-verified by a retry Decide, denied by the approver, or timed out — and
+// reports what happened as a plain (effect, reason) pair, independent of how
+// any caller reports it. This is the seam Task 2 (the "mcp" enforcement
+// surface) needed that the original single-caller awaitApproval did not
+// expose: awaitApproval wrote Claude Code's hookOutput JSON to stdout and
+// returned a PreToolUse exit code directly inline with its polling and retry
+// logic, which is exactly right for a hook and exactly wrong for a second
+// transport that has no stdout-JSON contract and no process-exit-per-call
+// model at all (mcp.go's mcpAuthorizer instead turns a DENY here into a
+// JSON-RPC error correlated to the original request's id, and an ALLOW into
+// forwarding the already-held frame — see mcp_authorize.go). Splitting the
+// transport-free decision from its reporting is the reshaping this file
+// needed for a second mode to reuse it at all; nothing about the escalation
+// logic itself — the timeout, the retry, the fail-closed defaults below —
+// changed in the split. pollApproval needed no such change: it already took
+// no writer and returned no exit code, which is exactly why both callers use
+// it completely unmodified.
+//
+// A poll resolving "approved" proves only that a human signed off on the
+// escalation condition, not that the principal, agent, and delegation legs
+// still hold — the retry re-evaluates all three fresh, exactly as
+// resolveEscalation (internal/pdpgrpc/escalation.go) documents for the server
+// side of this same exchange, so this function cannot itself turn a denial
+// into an allow no matter what GetApproval reports.
+func resolveApproval(
+	client pdpgrpc.PDPServiceClient,
+	cfg hookConfig,
+	req *pdpgrpc.DecideRequest,
+	resp *pdpgrpc.DecideResponse,
+) (effect pdpgrpc.Effect, reason string) {
 	approvalID := resp.GetApprovalId()
 	if approvalID == "" {
 		// DecideResponse.approval_id's own doc comment guarantees this is
 		// populated whenever effect is ESCALATE. A PDP build that violates its
-		// own contract has given this hook nothing to poll for -- deny rather
+		// own contract has given this caller nothing to poll for -- deny rather
 		// than guess at an id, the same fail-closed rule every other branch in
 		// this file follows for a response it cannot act on.
-		return writeDeny(stdout, fmt.Sprintf(
+		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf(
 			"stratium-pep: PDP returned ESCALATE with no approval_id to poll; denying (PDP reason: %s)",
-			resp.GetReason()))
+			resp.GetReason())
 	}
 
 	// pollCtx bounds the ENTIRE wait at cfg.ApprovalTimeout — independent of
@@ -63,9 +109,9 @@ func awaitApproval(
 	pollCtx, cancel := context.WithTimeout(context.Background(), cfg.ApprovalTimeout)
 	defer cancel()
 
-	ok, reason := pollApproval(pollCtx, client, cfg.ApprovalPollInterval, approvalID)
+	ok, pollReason := pollApproval(pollCtx, client, cfg.ApprovalPollInterval, approvalID)
 	if !ok {
-		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", reason))
+		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason)
 	}
 
 	// The retry: req, unchanged, plus the now-approved id. Reusing req rather
@@ -83,20 +129,24 @@ func awaitApproval(
 	req.ApprovalId = &approvalID
 	retryResp, err := client.Decide(retryCtx, req)
 	if err != nil {
-		return writeDeny(stdout, fmt.Sprintf("stratium-pep: retry after approval: %s",
-			describeRPCError(err, agentOrDelegationUnknownMsg)))
+		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: retry after approval: %s",
+			describeRPCError(err, agentOrDelegationUnknownMsg))
 	}
 
 	if retryResp.GetEffect() == pdpgrpc.Effect_EFFECT_ALLOW {
-		return 0
+		return pdpgrpc.Effect_EFFECT_ALLOW, ""
 	}
 	// EFFECT_DENY — a leg the approval does not cover started refusing
 	// between the escalation and this retry (a revoked delegation, a policy
 	// that now forbids) — or, defensively, EFFECT_ESCALATE again:
 	// resolveEscalation never leaves a verified retry at ESCALATE (see its
 	// own doc comment), so this should not happen, but this function polls
-	// and retries exactly once, never recursively. Either way this denies.
-	return writeDeny(stdout, retryResp.GetReason())
+	// and retries exactly once, never recursively. Either way this denies,
+	// with the retry's OWN reason passed through unprefixed — like runHook's
+	// top-level DENY case, this is the PDP's own verdict text, not a local
+	// diagnostic this process is synthesizing, and the two must stay visually
+	// distinguishable to a human reading the denial.
+	return pdpgrpc.Effect_EFFECT_DENY, retryResp.GetReason()
 }
 
 // pollApproval blocks until approvalID resolves to "approved" or "denied",
