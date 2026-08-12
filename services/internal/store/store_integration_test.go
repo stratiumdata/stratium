@@ -624,7 +624,7 @@ func TestIntegration_Approvals_ServingRoleCannotUpdate(t *testing.T) {
 	seedAgent(t, tenant, agentID, "approvals-grant-agent", models.TrustTierUnverified)
 	delegation := singleHopDelegation(t, tenant, agentID, models.ActionTierExternalComms, "approvals grant proof")
 
-	approval := &store.Approval{
+	approval := &models.Approval{
 		ID: uuid.New(), AgentID: agentID, DelegationID: delegation.ID, RootDelegationID: delegation.ID,
 		Subject: "integration-test-subject", RootPrincipal: "integration-test-root-principal",
 		ToolName: "Bash", Action: "execute", DerivedTier: models.ActionTierExternalComms,

@@ -5,64 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 
 	"stratium/pkg/models"
 )
 
-// Approval is one row of the approvals table (migrations/000012_approvals):
-// the record of a single escalated decision, from the moment CreateApproval
-// creates it pending through whatever disposition the control plane later
-// writes directly against the row (E7 — see that migration's own comment on
-// the grants that enforce it).
-type Approval struct {
-	ID       uuid.UUID
-	TenantID string
-
-	AgentID          uuid.UUID
-	DelegationID     uuid.UUID
-	RootDelegationID uuid.UUID
-
-	// Subject is the requesting principal on the escalated call itself
-	// (authz.Principal.Subject / DecideRequest.subject) — who asked, not
-	// who may approve. RootPrincipal, below, is the only identity C21
-	// permits to satisfy that.
-	Subject string
-
-	// RootPrincipal is the chain's root delegation's UserID — the only
-	// identity permitted to approve (spec C21). At chain depth > 0 the
-	// immediate delegator is an agent, and routing approval to an agent
-	// would let the chain approve itself.
-	RootPrincipal string
-
-	ToolName    string
-	Action      string
-	DerivedTier models.ActionTier
-
-	// InputDigest binds this approval to one specific request. Reused
-	// unchanged from the audit chain's own notion of request identity
-	// (a SHA-256 digest of the raw tool input) rather than inventing a
-	// second one — see migrations/000012's own comment.
-	InputDigest [32]byte
-
-	// Status is a closed vocabulary ('pending', 'approved', 'denied')
-	// enforced by a CHECK constraint in the migration, deliberately not
-	// re-validated here: this package never writes anything but 'pending'
-	// (see CreateApproval), and never writes this column at all on any
-	// other value, so there is no Go-side path that needs to reject a bad
-	// one. Left as a plain string, matching this codebase's existing
-	// pattern for other CHECK-constrained columns (audit_chain.decision,
-	// audit_chain.denied_leg) rather than a typed enum.
-	Status string
-
-	RequestedAt time.Time
-	ExpiresAt   time.Time
-
-	ApprovedBy *string
-	ApprovedAt *time.Time
-}
+// Approval is defined in pkg/models, not here: see that file's own doc
+// comment for why Task 3 moved it out of this package once internal/pdpgrpc
+// needed to construct and read the full row, not just persist it.
 
 // loadApprovalQuery reads every column of one approvals row by id.
 const loadApprovalQuery = `SELECT id, tenant_id, agent_id, delegation_id, root_delegation_id, ` +
@@ -104,7 +55,7 @@ const insertApprovalQuery = `INSERT INTO approvals (
 // defaults are simply correct, not merely convenient to omit — so a's own
 // Status/RequestedAt/ApprovedBy/ApprovedAt fields are never read by this
 // function, whatever a caller sets them to.
-func (s *Store) CreateApproval(ctx context.Context, a *Approval) error {
+func (s *Store) CreateApproval(ctx context.Context, a *models.Approval) error {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
 		return err
@@ -130,7 +81,7 @@ func (s *Store) CreateApproval(ctx context.Context, a *Approval) error {
 // fixed at New; a row for another tenant, or no row at all, is ErrNotFound
 // either way — the same indistinguishable-by-design guarantee LoadAgent and
 // LoadChain give (store.go's package doc).
-func (s *Store) LoadApproval(ctx context.Context, id uuid.UUID) (*Approval, error) {
+func (s *Store) LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approval, error) {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
 		return nil, err
@@ -165,8 +116,8 @@ func (s *Store) LoadApproval(ctx context.Context, id uuid.UUID) (*Approval, erro
 // must decode to nil, not the Go zero value for a bare string/time.Time,
 // the same nullable-pointer discipline scanDelegation already applies to
 // parent_delegation_id/revoked_at.
-func scanApproval(row *sql.Row) (*Approval, error) {
-	var a Approval
+func scanApproval(row *sql.Row) (*models.Approval, error) {
+	var a models.Approval
 	var derivedTier int64
 	var inputDigest []byte
 	var approvedBy sql.NullString

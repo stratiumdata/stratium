@@ -43,7 +43,7 @@ func TestStore_CreateApproval_InsertsRowIgnoringCallerSuppliedLifecycleFields(t 
 	expiresAt := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	digest := sha256.Sum256([]byte("create-approval fixture"))
 
-	a := &Approval{
+	a := &models.Approval{
 		ID:               id,
 		TenantID:         "wrong-tenant-must-be-ignored", // Store.tenantID is what's used; see below
 		AgentID:          agentID,
@@ -108,8 +108,8 @@ func TestStore_CreateApproval_InsertErrorRollsBack(t *testing.T) {
 // minimalApproval is a syntactically valid Approval for tests that do not
 // care about its field values, only that CreateApproval reaches (or does
 // not reach) the INSERT.
-func minimalApproval() *Approval {
-	return &Approval{
+func minimalApproval() *models.Approval {
+	return &models.Approval{
 		ID: uuid.New(), AgentID: uuid.New(), DelegationID: uuid.New(), RootDelegationID: uuid.New(),
 		Subject: "s", RootPrincipal: "r", ToolName: "Bash", Action: "read",
 		DerivedTier: models.ActionTierReadOnly,
@@ -252,7 +252,7 @@ func TestStore_LoadApproval_PendingRowHasNilApprovedFields(t *testing.T) {
 // with a real failure, and — the fail-closed requirement this package's doc
 // comment states for every Load method — never a zero-valued *Approval a
 // caller might mistake for a real, pending row (a mutation that returned
-// (&Approval{}, nil) here would leave got nil-checked below but err nil,
+// (&models.Approval{}, nil) here would leave got nil-checked below but err nil,
 // which this assertion catches: errors.Is(nil, ErrNotFound) is false).
 func TestStore_LoadApproval_NotFound(t *testing.T) {
 	s, mock := newMockStore(t)
