@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -86,21 +88,27 @@ func TestMulti_LanguageWithRegisteredEngineEvaluatesNormally(t *testing.T) {
 	engines := Registry{"cedar": stubEngine{language: "cedar", set: stubSet{verdicts: want}}}
 
 	got := NewMulti(source, engines).Evaluate(context.Background(), EvaluationInput{})
-	if len(got) != 1 || got[0] != want[0] {
+	// reflect.DeepEqual, not !=: PolicyVerdict's []string field
+	// (UnevaluatedPolicyIDs) makes it non-comparable with ==.
+	if len(got) != 1 || !reflect.DeepEqual(got[0], want[0]) {
 		t.Fatalf("Evaluate() = %+v, want %+v (verdicts must pass through unchanged)", got, want)
 	}
 }
 
-// TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy is D10 — the reason
-// this task exists — for the shape Task 5 moved it to: a language with
-// policies and no registered engine must never be silently skipped, and
-// must never be collapsed into one verdict either, because PolicyID is
-// singular and one verdict can carry only one of N orphaned ids —
-// audit_chain.policy_id stays unqueryable for the rest either way (see
-// orphanVerdicts' own doc comment). So: one deny verdict PER orphaned
-// policy, each carrying that policy's own PolicyID and a Reason naming both
-// the missing language and that one policy's id.
-func TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy(t *testing.T) {
+// TestMulti_OrphanLanguageEmitsOneDenyVerdictForTheLanguage is D10 — the
+// reason this task exists: a language with policies and no registered
+// engine must never be silently skipped. It denies once for the whole
+// language, not once per orphaned policy. A per-policy split was tried
+// (commit 7522731) and reverted (see orphanVerdicts' own doc comment in
+// multi.go): "no rego engine registered" is one fact about this deployment,
+// not N separate policy decisions, and splitting it into N verdicts never
+// even reached the queryability it was written for — FoldVerdicts'
+// (Source, PolicyID) tie-break means an orphan verdict loses to any Cedar
+// verdict a tenant also has, no matter how many pieces it is split into
+// (TestIntegration_Live_OrphanLanguageDeniesNamingIt, internal/store,
+// proves that exact case live). The affected ids live on the single
+// verdict's own UnevaluatedPolicyIDs field instead.
+func TestMulti_OrphanLanguageEmitsOneDenyVerdictForTheLanguage(t *testing.T) {
 	// Fed in reverse of sorted order: a passing test that only happened to
 	// see them already sorted would prove nothing about orphanVerdicts'
 	// own sort (see its doc comment on why it does not trust
@@ -113,41 +121,40 @@ func TestMulti_OrphanLanguageEmitsOneDenyVerdictPerPolicy(t *testing.T) {
 	// to prove the zero value isn't doing the work by accident.
 	got := NewMulti(source, Registry{}).Evaluate(context.Background(), EvaluationInput{})
 
-	if len(got) != 2 {
-		t.Fatalf("Evaluate() = %d verdicts, want exactly 2 (one per orphaned policy, never one verdict for the "+
-			"whole language): %+v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() = %d verdicts, want exactly 1 (one for the whole orphaned language, never one per "+
+			"orphaned policy): %+v", len(got), got)
 	}
-	want := []struct{ id, reason string }{
-		{"orphan-1", "principal: no rego engine registered; cannot evaluate policy ID orphan-1 (1 of 2 rego policies for this tenant)"},
-		{"orphan-2", "principal: no rego engine registered; cannot evaluate policy ID orphan-2 (2 of 2 rego policies for this tenant)"},
+	v := got[0]
+	if v.Effect != authz.EffectDeny {
+		t.Errorf("Effect = %v, want EffectDeny", v.Effect)
 	}
-	for i, w := range want {
-		v := got[i]
-		if v.Effect != authz.EffectDeny {
-			t.Errorf("verdict %d: Effect = %v, want EffectDeny", i, v.Effect)
-		}
-		if v.Source != "rego" {
-			t.Errorf("verdict %d: Source = %q, want %q", i, v.Source, "rego")
-		}
-		// The property this test exists for: a reverted fix leaves
-		// PolicyID at its zero value ("") here, which is exactly what
-		// made audit_chain.policy_id unqueryable for a D10 denial.
-		if v.PolicyID != w.id {
-			t.Errorf("verdict %d: PolicyID = %q, want %q (audit_chain.policy_id must be queryable for this "+
-				"verdict, not left empty)", i, v.PolicyID, w.id)
-		}
-		if v.Reason != w.reason {
-			t.Errorf("verdict %d: Reason = %q, want %q verbatim", i, v.Reason, w.reason)
-		}
+	if v.Source != "rego" {
+		t.Errorf("Source = %q, want %q", v.Source, "rego")
+	}
+	// The property this test exists for: PolicyID stays at its zero value
+	// ("") on a language-level verdict — it does not, and structurally
+	// cannot, name a single policy for a fact about the whole language.
+	if v.PolicyID != "" {
+		t.Errorf("PolicyID = %q, want empty: this verdict is about the whole language, not one policy", v.PolicyID)
+	}
+	wantIDs := []string{"orphan-1", "orphan-2"}
+	if !slices.Equal(v.UnevaluatedPolicyIDs, wantIDs) {
+		t.Errorf("UnevaluatedPolicyIDs = %v, want %v (sorted, both orphaned ids) — this is the queryable home "+
+			"the split used to try to give PolicyID", v.UnevaluatedPolicyIDs, wantIDs)
+	}
+	const wantReason = "principal: no rego engine registered; cannot evaluate 2 rego policies for this tenant"
+	if v.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q verbatim", v.Reason, wantReason)
 	}
 }
 
 // TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically pins the
-// deliberate choice for the one-policy edge case of countSuffix: "1 of 1
-// rego policy for this tenant" (singular "policy"), not the mechanically
-// pluralized "1 of 1 rego policies for this tenant" a naive %d-driven "s"
-// suffix would produce. Chosen, not incidental — see countSuffix's own doc
-// comment — and pinned here so a future change to that pluralization is a
+// deliberate choice for the one-policy edge case of countSuffix: "1 rego
+// policy for this tenant" (singular "policy"), not the mechanically
+// pluralized "1 rego policies for this tenant" a naive %d-driven "s" suffix
+// would produce. Chosen, not incidental — see countSuffix's own doc comment
+// — and pinned here so a future change to that pluralization is a
 // deliberate decision again, not a silent regression.
 func TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically(t *testing.T) {
 	source := fakeAllSource{policies: []StoredPolicy{{ID: "lonely-orphan", Language: "rego"}}}
@@ -156,33 +163,42 @@ func TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("Evaluate() = %d verdicts, want exactly 1", len(got))
 	}
-	const want = "principal: no rego engine registered; cannot evaluate policy ID lonely-orphan (1 of 1 rego policy for this tenant)"
+	const want = "principal: no rego engine registered; cannot evaluate 1 rego policy for this tenant"
 	if got[0].Reason != want {
 		t.Errorf("Reason = %q, want %q verbatim (singular \"policy\", not \"policies\")", got[0].Reason, want)
 	}
+	if wantIDs := []string{"lonely-orphan"}; !slices.Equal(got[0].UnevaluatedPolicyIDs, wantIDs) {
+		t.Errorf("UnevaluatedPolicyIDs = %v, want %v", got[0].UnevaluatedPolicyIDs, wantIDs)
+	}
 }
 
-// TestMulti_ManyOrphanedPoliciesFoldToOneReadableReason checks the
-// consequence of the N-verdicts-per-language shape above one layer up, at
-// authz.FoldVerdicts — the same fold pdpgrpc.Server.Decide calls to build
-// DecideResponse.PrincipalReason and the audit row's reason/policy_id
-// columns. N deny verdicts for N orphaned policies must still fold to
-// exactly one attributed reason naming exactly one policy id, chosen
-// deterministically (FoldVerdicts' own lexicographically-smallest
-// tie-break) — not a concatenation of all five, and not garbled by having
-// five candidates instead of one to choose from. This is what turns "the
-// response is still readable with five orphaned policies" (this task's own
-// brief) into a checked fact rather than an assumption.
-func TestMulti_ManyOrphanedPoliciesFoldToOneReadableReason(t *testing.T) {
+// TestMulti_ManyOrphanedPoliciesProduceOneVerdictNamingEveryID checks the
+// N-orphaned-policies case does not regress into per-policy verdicts at a
+// larger N: five orphaned rego policies still produce exactly one deny
+// verdict, and its UnevaluatedPolicyIDs names all five. This is what
+// "still readable with five orphaned policies" (the reason countSuffix
+// exists) means now that the split itself is gone: one sentence, one
+// verdict, one attributed decision — with the full id list a level below
+// Reason's own free text, not folded away by having five verdicts to choose
+// an attribution from (which is what the old, reverted shape needed
+// checked here instead — see git history for that version of this test).
+func TestMulti_ManyOrphanedPoliciesProduceOneVerdictNamingEveryID(t *testing.T) {
 	const n = 5
 	policies := make([]StoredPolicy, n)
+	wantIDs := make([]string, n)
 	for i := 0; i < n; i++ {
-		policies[i] = StoredPolicy{ID: fmt.Sprintf("orphan-%d", i), Language: "rego"}
+		id := fmt.Sprintf("orphan-%d", i)
+		policies[i] = StoredPolicy{ID: id, Language: "rego"}
+		wantIDs[i] = id
 	}
 
 	verdicts := NewMulti(fakeAllSource{policies: policies}, Registry{}).Evaluate(context.Background(), EvaluationInput{})
-	if len(verdicts) != n {
-		t.Fatalf("Evaluate() = %d verdicts, want %d (one per orphaned policy)", len(verdicts), n)
+	if len(verdicts) != 1 {
+		t.Fatalf("Evaluate() = %d verdicts, want exactly 1 regardless of how many policies are orphaned: %+v",
+			len(verdicts), verdicts)
+	}
+	if !slices.Equal(verdicts[0].UnevaluatedPolicyIDs, wantIDs) {
+		t.Errorf("UnevaluatedPolicyIDs = %v, want all %d ids: %v", verdicts[0].UnevaluatedPolicyIDs, n, wantIDs)
 	}
 
 	legResult, deciding := authz.FoldVerdicts(verdicts)
@@ -190,41 +206,11 @@ func TestMulti_ManyOrphanedPoliciesFoldToOneReadableReason(t *testing.T) {
 		t.Fatalf("FoldVerdicts() effect = %v, want EffectDeny", legResult.Effect)
 	}
 	if deciding == nil {
-		t.Fatal("FoldVerdicts() deciding verdict = nil, want the one it attributed the denial to")
+		t.Fatal("FoldVerdicts() deciding verdict = nil, want the one orphan verdict")
 	}
-	t.Logf("%d orphaned policies folded to one attributed reason: %q (policy id %q)", n, legResult.Reason, deciding.PolicyID)
-
-	// Grounds the "1 of 5" claim below in an independently-checked fact
-	// rather than assuming it: "orphan-0" is the lexicographically smallest
-	// of orphan-0..orphan-4, so it is the one FoldVerdicts' own tie-break
-	// (decisiveVerdict, verdict.go) must pick, and orphanVerdicts' own sort
-	// (multi.go) is what makes it rank 1 of the 5.
-	if deciding.PolicyID != "orphan-0" {
-		t.Fatalf("FoldVerdicts() attributed policy id = %q, want %q (the lexicographically smallest)", deciding.PolicyID, "orphan-0")
-	}
-
-	// Re-derived from `deciding` rather than hardcoded, so this is both a
-	// determinism check (the fold's own Reason field must match what its
-	// own attributed verdict says) and the readability check itself: this
-	// is what "still readable" means operationally — one sentence, one id,
-	// AND the "how many" signal (countSuffix) that tells the operator there
-	// are four more orphaned rego policies to go looking for, not just this
-	// one.
-	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s (1 of %d rego policies for this tenant)",
-		deciding.PolicyID, n)
+	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate %d rego policies for this tenant", n)
 	if legResult.Reason != wantReason {
 		t.Errorf("FoldVerdicts() reason = %q, want %q", legResult.Reason, wantReason)
-	}
-	// None of the four sibling ids leak into the attributed Reason: a
-	// Reason that grew with N would be the "substantially noisier" outcome
-	// the brief asks to be reported plainly rather than hidden, and this is
-	// the assertion that it did not happen.
-	for i := 0; i < n; i++ {
-		id := fmt.Sprintf("orphan-%d", i)
-		if id != deciding.PolicyID && strings.Contains(legResult.Reason, id) {
-			t.Errorf("Reason = %q unexpectedly names sibling orphaned policy %q — the attributed reason must "+
-				"stay a single-policy denial, not grow to list every orphan", legResult.Reason, id)
-		}
 	}
 }
 
@@ -342,16 +328,23 @@ func TestMulti_PrepareFailureDeniesNamingLanguageWithoutSuppressingOthers(t *tes
 	if !strings.Contains(regoVerdict.Reason, "rego") || !strings.Contains(regoVerdict.Reason, prepareErr.Error()) {
 		t.Errorf("rego verdict Reason = %q, want it to name the language and the underlying error %q", regoVerdict.Reason, prepareErr.Error())
 	}
-	if regoVerdict.PolicyID != "rego-1" {
-		t.Errorf("rego verdict PolicyID = %q, want %q — audit_chain.policy_id must be queryable for a "+
-			"prepare-failure denial too, not only an orphan-language one", regoVerdict.PolicyID, "rego-1")
+	// PolicyID stays empty on this language-level verdict — it does not
+	// name one policy for a fact about the whole batch. The affected id
+	// lives on UnevaluatedPolicyIDs instead, the same purpose-built,
+	// fold-surviving home orphanVerdicts uses.
+	if regoVerdict.PolicyID != "" {
+		t.Errorf("rego verdict PolicyID = %q, want empty: this verdict is about the whole batch, not one policy",
+			regoVerdict.PolicyID)
+	}
+	if wantIDs := []string{"rego-1"}; !slices.Equal(regoVerdict.UnevaluatedPolicyIDs, wantIDs) {
+		t.Errorf("rego verdict UnevaluatedPolicyIDs = %v, want %v", regoVerdict.UnevaluatedPolicyIDs, wantIDs)
 	}
 	// Exact match, not another Contains: the single-policy case is where a
-	// naive %d-driven pluralization would read "1 of 1 rego policies" — this
-	// pins the deliberate singular "policy" for prepareFailureVerdicts too,
-	// the same decision TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically
+	// naive %d-driven pluralization would read "1 rego policies" — this pins
+	// the deliberate singular "policy" for prepareFailureVerdicts too, the
+	// same decision TestMulti_OrphanLanguageSinglePolicyCountReadsGrammatically
 	// pins for orphanVerdicts.
-	wantRegoReason := fmt.Sprintf("principal: preparing rego policies: %s (1 of 1 rego policy for this tenant)", prepareErr)
+	wantRegoReason := fmt.Sprintf("principal: preparing rego policies: %s (1 rego policy for this tenant)", prepareErr)
 	if regoVerdict.Reason != wantRegoReason {
 		t.Errorf("rego verdict Reason = %q, want %q verbatim", regoVerdict.Reason, wantRegoReason)
 	}
@@ -366,16 +359,15 @@ func TestMulti_PrepareFailureDeniesNamingLanguageWithoutSuppressingOthers(t *tes
 	}
 }
 
-// TestMulti_PrepareFailureEmitsOneDenyVerdictPerPolicyInThatLanguage checks
+// TestMulti_PrepareFailureEmitsOneDenyVerdictForTheLanguage checks
 // prepareFailureVerdicts got the same treatment as orphanVerdicts, and for
-// the same underlying reason rather than a coincidental resemblance (see
-// prepareFailureVerdicts' own doc comment): a whole language's Prepare call
-// failing leaves every policy in that language equally unevaluated, not
-// just whichever one the underlying error's text happens to name, so every
-// one of them gets its own deny verdict and its own queryable PolicyID
-// rather than a single verdict covering all three with none of their ids
-// ever reaching audit_chain.policy_id.
-func TestMulti_PrepareFailureEmitsOneDenyVerdictPerPolicyInThatLanguage(t *testing.T) {
+// the same underlying reason (see prepareFailureVerdicts' own doc comment):
+// a whole language's Prepare call failing is one fact about that language's
+// batch, not N independent per-policy decisions — every policy in it is
+// equally unevaluated, not just whichever one the underlying error's text
+// happens to name, so it denies once, naming every affected id on that
+// single verdict's UnevaluatedPolicyIDs.
+func TestMulti_PrepareFailureEmitsOneDenyVerdictForTheLanguage(t *testing.T) {
 	prepareErr := errors.New("boom: malformed rego module")
 	// Fed out of sorted order, same reasoning as the orphan-language test
 	// above: this also proves prepareFailureVerdicts' own sort is real.
@@ -387,33 +379,32 @@ func TestMulti_PrepareFailureEmitsOneDenyVerdictPerPolicyInThatLanguage(t *testi
 	engines := Registry{"rego": stubEngine{language: "rego", prepareErr: prepareErr}}
 
 	got := NewMulti(source, engines).Evaluate(context.Background(), EvaluationInput{})
-	if len(got) != 3 {
-		t.Fatalf("Evaluate() = %d verdicts, want 3 (one per policy in the language whose Prepare call failed, "+
-			"never one verdict for the whole batch): %+v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() = %d verdicts, want exactly 1 (one for the whole language whose Prepare call "+
+			"failed, never one per policy in it): %+v", len(got), got)
 	}
 
+	v := got[0]
+	if v.Effect != authz.EffectDeny {
+		t.Errorf("Effect = %v, want EffectDeny", v.Effect)
+	}
+	if v.Source != "rego" {
+		t.Errorf("Source = %q, want %q", v.Source, "rego")
+	}
+	if v.PolicyID != "" {
+		t.Errorf("PolicyID = %q, want empty: this verdict is about the whole batch, not one policy", v.PolicyID)
+	}
 	wantIDs := []string{"rego-a", "rego-b", "rego-c"}
-	for i, wantID := range wantIDs {
-		v := got[i]
-		if v.Effect != authz.EffectDeny {
-			t.Errorf("verdict %d: Effect = %v, want EffectDeny", i, v.Effect)
-		}
-		if v.Source != "rego" {
-			t.Errorf("verdict %d: Source = %q, want %q", i, v.Source, "rego")
-		}
-		if v.PolicyID != wantID {
-			t.Errorf("verdict %d: PolicyID = %q, want %q", i, v.PolicyID, wantID)
-		}
-		// Exact match, not a widened Contains: this is the dedicated check
-		// for the "how many" signal — whichever one of these three
-		// FoldVerdicts ends up attributing a denial to, its own Reason must
-		// say "N of 3", not merely mention rego and the underlying error
-		// (both of which a count-dropping regression would leave intact).
-		wantReason := fmt.Sprintf("principal: preparing rego policies: %s (%d of %d rego policies for this tenant)",
-			prepareErr, i+1, len(wantIDs))
-		if v.Reason != wantReason {
-			t.Errorf("verdict %d: Reason = %q, want %q verbatim", i, v.Reason, wantReason)
-		}
+	if !slices.Equal(v.UnevaluatedPolicyIDs, wantIDs) {
+		t.Errorf("UnevaluatedPolicyIDs = %v, want %v (sorted, all three)", v.UnevaluatedPolicyIDs, wantIDs)
+	}
+	// Exact match, not a widened Contains: this is the dedicated check for
+	// the "how many" signal — Reason must say "3 rego policies", not merely
+	// mention rego and the underlying error (both of which a
+	// count-dropping regression would leave intact).
+	wantReason := fmt.Sprintf("principal: preparing rego policies: %s (3 rego policies for this tenant)", prepareErr)
+	if v.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q verbatim", v.Reason, wantReason)
 	}
 }
 

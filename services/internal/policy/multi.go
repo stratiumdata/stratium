@@ -105,16 +105,16 @@ func NewMulti(source AllPolicySource, engines Registry) Multi {
 // about what languages even exist, so there is nothing to fall back to.
 // Every other failure this method can encounter — a language with no
 // registered engine, or a registered engine's own Prepare call failing — is
-// folded into the returned set as one deny verdict per policy in that
-// specific language, rather than aborting the whole call: a Rego engine that
-// cannot compile must not silence a Cedar forbid that prepared just fine.
+// folded into the returned set as a deny verdict for that specific language,
+// rather than aborting the whole call: a Rego engine that cannot compile
+// must not silence a Cedar forbid that prepared just fine.
 //
 // err is still non-nil, alongside a fully usable set, when one or more
 // languages failed to *prepare* — never when a language simply has no
-// registered engine; that is not an error, only ever a deny verdict per
-// policy (see orphanVerdicts). This asymmetry is deliberate: Evaluate
-// (below) treats a non-nil set as sufficient regardless of err, because the
-// failure is already recorded as that language's deny verdicts inside it and
+// registered engine; that is not an error, only ever a deny verdict (see
+// orphanVerdicts). This asymmetry is deliberate: Evaluate (below) treats a
+// non-nil set as sufficient regardless of err, because the failure is
+// already recorded as that language's deny verdict inside it and
 // deny-overrides means nothing is lost by proceeding — but pdpgrpc's
 // delegation-creation gate treats any non-nil err as blocking (see
 // delegation.go's CreateDelegation), preserving the pre-Multi distinction
@@ -210,12 +210,22 @@ func (m Multi) Evaluate(ctx context.Context, in EvaluationInput) []authz.PolicyV
 // registered engine, or Prepare itself failed) and would not change by
 // recomputing it per call.
 //
-// Plural, not a single verdict: an orphaned or prepare-failed language
-// denies once per unevaluated policy (see orphanVerdicts and
-// prepareFailureVerdicts below), the same one-verdict-per-policy shape
-// every registered engine's own Evaluate already follows, so
-// audit_chain.policy_id stays populated and queryable on exactly these
-// denials instead of every id but one living only inside free-text Reason.
+// verdicts holds exactly one element for an orphaned or prepare-failed
+// language, never one per unevaluated policy — that per-policy split was
+// tried (commit 7522731) and reverted: it dressed up "this language could
+// not be evaluated," a single fact about the deployment, as N separate deny
+// decisions, and it did not even reach the goal it was written for —
+// audit_chain.policy_id staying queryable for these denials — because
+// authz.FoldVerdicts attributes a decision to the lexicographically smallest
+// (Source, PolicyID), Source is the language name, and "cedar" sorts before
+// "json", "rego", and "xacml", so an orphan verdict loses to any Cedar
+// verdict a tenant also has, no matter how many pieces it was split into.
+// The slice type is kept — rather than reverting to a single *authz.
+// PolicyVerdict field — only because multiSet.Evaluate's own loop already
+// handles "zero or one verdicts for this language" uniformly for both this
+// case and a registered engine's real (possibly multi-verdict) output; see
+// orphanVerdicts and prepareFailureVerdicts below for where the ids that
+// verdict cannot individually carry actually go instead.
 type languageEntry struct {
 	language string
 	set      CompiledPolicySet
@@ -303,110 +313,115 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 	return verdicts, nil
 }
 
-// orphanVerdicts is one deny verdict per policy stored in a language with no
-// registered engine — D10: an operator who authored a policy in a language
-// this deployment cannot run must learn it from a denial naming that exact
-// policy, not from a system that behaves as though they never wrote it.
+// orphanVerdicts is the single deny verdict a language with policies but no
+// registered engine contributes — D10: an operator who authored a policy in
+// a language this deployment cannot run must learn it, not have the system
+// behave as though they never wrote it.
 //
-// One verdict per policy, not one verdict naming every policy: PolicyID is
-// singular (authz.PolicyVerdict), so a single verdict for N orphaned
-// policies can only ever populate it with one of them (or leave it empty,
-// which is what this function used to do) — audit_chain.policy_id stays
-// unqueryable either way, with every id living only inside free-text
-// Reason. Splitting into N verdicts, each carrying its own PolicyID, is what
-// makes every orphaned policy individually queryable, and is harmless under
-// deny-overrides: N denies fold to the same outcome one would, FoldVerdicts
-// simply has more equally-valid candidates to pick a stable attribution
-// from (see authz.FoldVerdicts' own tie-break).
+// One verdict, not one per orphaned policy: this used to split into N deny
+// verdicts, one per policy (commit 7522731), on the reasoning that PolicyID
+// is singular so a single verdict could only ever name one of N orphaned
+// ids in a queryable column. That reasoning was correct about the
+// limitation and wrong about the fix. "No rego engine is registered" is one
+// fact about this deployment, true whether the tenant authored one rego
+// policy or fifty — it does not become N separate authorization decisions
+// just because N policies happen to be unevaluated by it, and dressing it
+// up as N deny verdicts is a category error: verdicts are supposed to be
+// per-policy answers to "does this policy permit the request," and this
+// language never answered that question for any of them, let alone N times
+// over. It also never achieved the queryability it was written for:
+// authz.FoldVerdicts attributes a decision to the lexicographically
+// smallest (Source, PolicyID), Source is the language name, and "cedar"
+// sorts before "json", "rego", and "xacml" — so an orphan verdict loses the
+// tie-break to any Cedar verdict a tenant also has, and none of the N
+// PolicyIDs the split produced ever reached audit_chain.policy_id for a
+// tenant with any Cedar policy at all. See
+// TestIntegration_Live_OrphanLanguageDeniesNamingIt (internal/store) for
+// that exact case proven live.
 //
-// Sorted by ID before returning, the same defensive-determinism reasoning
-// multiSet.Evaluate applies to a sub-engine's own output (see that method's
-// doc comment): AllPolicySource makes no ordering promise in its interface,
-// so this does not lean on store.LoadAllPolicies' own ORDER BY id happening
-// to hold today, or on every other implementation of the interface (test
-// doubles included) doing the same. The sorted rank also feeds countSuffix
-// below, so "1 of 5" is as stable across calls as which policy is "1".
+// The ids this verdict cannot individually carry go on
+// UnevaluatedPolicyIDs instead (authz.PolicyVerdict), which
+// authz.Decide aggregates across every verdict it sees — not just the one
+// FoldVerdicts picks — into Result.UnevaluatedPolicyIDs, and
+// audit_chain.unevaluated_policy_ids (migrations/000010) is the queryable
+// home that column gives them: an operator can ask
+// WHERE 'some-id' = ANY(unevaluated_policy_ids) and find it regardless of
+// which verdict a decision was attributed to.
 //
-// Splitting into N verdicts costs something the single-verdict form did not:
-// FoldVerdicts (unmodified) still picks exactly one to attribute
-// PrincipalReason and the audit row to, so an operator reading either sees
-// one policy id and, without more, cannot tell a single orphaned policy from
-// fifteen. countSuffix restores that signal in every verdict's own Reason,
-// so whichever one FoldVerdicts happens to pick still tells the operator
-// there are others to go looking for.
+// UnevaluatedPolicyIDs is sorted before returning, the same
+// defensive-determinism reasoning multiSet.Evaluate applies to a
+// sub-engine's own output (see that method's doc comment): AllPolicySource
+// makes no ordering promise in its interface, so this does not lean on
+// store.LoadAllPolicies' own ORDER BY id happening to hold today, or on
+// every other implementation of the interface (test doubles included)
+// doing the same. The sorted length also feeds countSuffix below, so "3
+// rego policies" is as stable across calls as the ids themselves.
 func orphanVerdicts(language string, policies []StoredPolicy) []authz.PolicyVerdict {
-	sorted := make([]StoredPolicy, len(policies))
-	copy(sorted, policies)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-
-	verdicts := make([]authz.PolicyVerdict, len(sorted))
-	for i, p := range sorted {
-		verdicts[i] = authz.PolicyVerdict{
-			Effect:   authz.EffectDeny,
-			Source:   language,
-			PolicyID: p.ID,
-			Reason: fmt.Sprintf("principal: no %s engine registered; cannot evaluate policy ID %s (%s)",
-				language, p.ID, countSuffix(i, len(sorted), language)),
-		}
-	}
-	return verdicts
+	ids := policyIDs(policies)
+	return []authz.PolicyVerdict{{
+		Effect: authz.EffectDeny,
+		Source: language,
+		Reason: fmt.Sprintf("principal: no %s engine registered; cannot evaluate %s",
+			language, countSuffix(len(ids), language)),
+		UnevaluatedPolicyIDs: ids,
+	}}
 }
 
-// prepareFailureVerdicts is one deny verdict per policy stored in a language
-// whose registered engine's Prepare call itself failed for the whole batch —
-// the same "preparing %s policies" wording Configured's own denyf used for
-// the one-language case, so the two failure modes read the same way in an
-// audit log whether a tenant has one engine or four.
+// prepareFailureVerdicts is the single deny verdict a language contributes
+// when its registered engine's Prepare call itself fails for the whole
+// batch — the same "preparing %s policies" wording Configured's own denyf
+// used for the one-language case, so the two failure modes read the same
+// way in an audit log whether a tenant has one engine or four.
 //
-// One verdict per policy, the same shape orphanVerdicts uses above, and for
-// the same underlying reason rather than a coincidental resemblance: every
-// engine in this tree stops at its first bad policy and returns a single
-// error for the whole Prepare call (see e.g. cedar.Engine.Prepare's own doc
-// comment), so every policy in policies is equally unevaluated when this
-// fires — not only whichever one err's own text happens to name. err's text
-// is shared verbatim across every returned verdict, because there is
-// exactly one underlying failure to report, while PolicyID differs per
-// verdict — so audit_chain.policy_id is queryable for every one of them,
-// not only whichever id happened to reach the free-text Reason first.
-//
-// Carries the same countSuffix orphanVerdicts does, and for the same reason:
-// err's text already names one specific offending policy, but FoldVerdicts
-// still picks only one verdict to surface, so an operator reading it cannot
-// tell "this language's whole batch is one policy" from "this language's
-// whole batch is fifteen policies, all now unevaluated" without it.
+// One verdict, the same shape orphanVerdicts uses above and reverted for
+// the same reason (see that function's own doc comment): a Prepare call
+// failing is one fact about this language's whole batch — every engine in
+// this tree stops at its first bad policy and returns a single error for
+// the entire call (see e.g. cedar.Engine.Prepare's own doc comment), so
+// every policy in policies is equally unevaluated, not just whichever one
+// err's text happens to name — not N independent per-policy decisions.
+// UnevaluatedPolicyIDs carries every one of those ids for the same
+// purpose-built, fold-surviving home orphanVerdicts' own doc comment
+// describes.
 func prepareFailureVerdicts(language string, policies []StoredPolicy, err error) []authz.PolicyVerdict {
-	sorted := make([]StoredPolicy, len(policies))
-	copy(sorted, policies)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-
-	verdicts := make([]authz.PolicyVerdict, len(sorted))
-	for i, p := range sorted {
-		verdicts[i] = authz.PolicyVerdict{
-			Effect:   authz.EffectDeny,
-			Source:   language,
-			PolicyID: p.ID,
-			Reason: fmt.Sprintf("principal: preparing %s policies: %s (%s)",
-				language, err, countSuffix(i, len(sorted), language)),
-		}
-	}
-	return verdicts
+	ids := policyIDs(policies)
+	return []authz.PolicyVerdict{{
+		Effect: authz.EffectDeny,
+		Source: language,
+		Reason: fmt.Sprintf("principal: preparing %s policies: %s (%s)",
+			language, err, countSuffix(len(ids), language)),
+		UnevaluatedPolicyIDs: ids,
+	}}
 }
 
-// countSuffix reports the 1-indexed rank of index i among total policies
-// stored for language, e.g. "1 of 5 rego policies for this tenant" -- the
-// "how many" signal orphanVerdicts and prepareFailureVerdicts both attach to
-// every verdict's Reason, so whichever one FoldVerdicts picks still tells an
-// operator there are (or are not) siblings to go looking for, not just which
-// one policy this particular denial names.
+// policyIDs extracts and sorts policies' ids — shared by orphanVerdicts and
+// prepareFailureVerdicts, both of which need the same sorted id list: once
+// to populate UnevaluatedPolicyIDs, and once (its length) to feed
+// countSuffix.
+func policyIDs(policies []StoredPolicy) []string {
+	ids := make([]string, len(policies))
+	for i, p := range policies {
+		ids[i] = p.ID
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// countSuffix reports how many policies are stored for language, e.g. "5
+// rego policies for this tenant" — the "how many" signal orphanVerdicts and
+// prepareFailureVerdicts both attach to their single verdict's Reason, so a
+// lone denial still tells an operator whether there is one orphaned policy
+// to go looking for or fifteen; the exact ids are UnevaluatedPolicyIDs' job,
+// not this string's.
 //
 // Pluralized to "policy" only when total == 1, decided deliberately rather
-// than left to read "1 of 1 policies": see multi_test.go's own single-orphan
+// than left to read "1 policies": see multi_test.go's own single-orphan
 // case, which pins this exact wording. Shared by both callers so neither
 // denial's wording can drift out of sync with the other.
-func countSuffix(i, total int, language string) string {
+func countSuffix(total int, language string) string {
 	word := "policies"
 	if total == 1 {
 		word = "policy"
 	}
-	return fmt.Sprintf("%d of %d %s %s for this tenant", i+1, total, language, word)
+	return fmt.Sprintf("%d %s %s for this tenant", total, language, word)
 }
