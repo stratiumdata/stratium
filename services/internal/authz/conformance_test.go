@@ -1,9 +1,18 @@
 // Conformance suite for the authorization security properties in
 // docs/superpowers/specs/2026-08-08-agent-authorization-redesign-design.md §7.
 //
-// These are the CI merge gate. Properties whose implementation lands in a later
-// phase skip with the phase named — a skip is a visible commitment, not a
-// silent gap. Do not delete a property to make the suite pass.
+// These are the CI merge gate. A property that does not pass right here
+// calls exactly one of two helpers (conformance_outcome_test.go) instead of
+// a bare t.Skip: notBuilt, when the subsystem it needs does not exist
+// anywhere in this tree yet, or provenElsewhere, when the property is
+// proven in a package this pure, DB-free, network-free suite structurally
+// cannot reach (see the purity rule below) — carrying a pointer that
+// conformance_pointer_test.go checks against real source on every run, so a
+// renamed or deleted proof fails loudly instead of the comment quietly
+// going stale. Do not delete a property to make the suite pass:
+// TestConformanceSuiteIsComplete catches one deleted from this file, and the
+// Makefile's conformance target (not just this test) catches this file
+// itself disappearing, which would take that test down with it.
 package authz
 
 import (
@@ -19,15 +28,19 @@ import (
 
 // conformanceRan records which C-numbered properties actually executed in
 // this run; conformanceNames (bottom of file) names them so a gap can be
-// reported by number and by name.
+// reported by number and by name. conformanceOutcome
+// (conformance_outcome_test.go) is the parallel array for WHICH of the
+// three outcomes each one landed in — a separate concern: this one is
+// "did the function run at all," and stays that way regardless of what
+// notBuilt/provenElsewhere do internally.
 //
 // Populated by markRan, called as the first statement of every TestC*
-// below — including the t.Skip ones: a phase-deferred property that
-// legitimately skips still ran, and completeness cares whether the
-// function executed, not whether it currently passes.
-// TestConformanceSuiteIsComplete (bottom of file) reads this once every
-// TestC* below has had a chance to run. See that test for why this exists
-// instead of a TestMain.
+// below — including the ones that end in notBuilt or provenElsewhere: a
+// property that legitimately does not pass here still ran, and
+// completeness cares whether the function executed, not whether it
+// currently passes. TestConformanceSuiteIsComplete (bottom of file) reads
+// this once every TestC* below has had a chance to run. See that test for
+// why this exists instead of a TestMain.
 var conformanceRan [26]bool // index 0 unused; C-numbers are 1..25
 
 // markRan records that conformance property cNum executed.
@@ -77,7 +90,7 @@ func TestC4_TierOverrideRaiseOnly(t *testing.T) {
 
 func TestC5_AgentWritableOverrideNotHonored(t *testing.T) {
 	markRan(5)
-	t.Skip("Phase 2: requires the PAP override write path")
+	notBuilt(t, 5, "Phase 2: requires the PAP override write path")
 }
 
 // TestC6_DelegationClampedToPrincipalAuthority is the property Phase 2d
@@ -270,20 +283,55 @@ func TestC15_AuditChainDetectsMutation(t *testing.T) {
 	}
 }
 
+// C16 reads "an action whose audit write fails is denied." It cannot become
+// a pass HERE: internal/authz.Decide is a pure function with no database
+// handle (see the package doc in types.go), so it has nothing to fail an
+// audit write against in the first place — same shape as C18 below.
+//
+// The property is proven for real by proof6
+// ("proof6_failed_audit_append_blocks_the_decision"), a t.Run subtest
+// inside TestEndToEnd in internal/store/store_integration_test.go. The
+// pointer below names TestEndToEnd itself, not the subtest: verifyPointer
+// checks top-level Go function declarations via go/ast, and a t.Run
+// subtest name is a string argument evaluated at run time, not a
+// declaration the parser can see. Requires the integration build tag and a
+// live Postgres (make integration) — go test -race ./... alone does not
+// even compile this file.
 func TestC16_FailedAuditWriteDeniesAction(t *testing.T) {
 	markRan(16)
-	t.Skip("Integration: a failed audit write denying the decision is proven against " +
-		"Postgres by proof6 in store_integration_test.go (build tag integration), not in unit tests")
+	provenElsewhere(t, 16, "internal/store", "TestEndToEnd")
 }
 
 func TestC17_CryptoShreddingPreservesChain(t *testing.T) {
 	markRan(17)
-	t.Skip("Phase 2+: blocked on per-tenant key management (spec §8)")
+	notBuilt(t, 17, "Phase 2+: blocked on per-tenant key management (spec §8)")
 }
 
+// C18 reads "a cross-tenant read is impossible at the data layer, not
+// merely absent from queries." It cannot become a pass HERE: RLS is a
+// Postgres session property (SET LOCAL app.tenant_id), and internal/authz —
+// a pure function with no database handle — has no session to set, let
+// alone violate. Same shape as C16 above.
+//
+// Its reason used to say only "RLS is proven against Postgres in Task 9,"
+// naming a task instead of a test, because Task 9's own proof
+// (.superpowers/sdd/2026-08-08-phase-0-1-foundation/task-9-report.md) was a
+// manual psql session against a throwaway container: real evidence at the
+// time, but nothing verifyPointer — or anyone reading this file later —
+// could check, which is exactly the kind of claim that goes stale silently.
+// Two automated tests have since taken over that job for real:
+// TestIntegration_Multi_CrossTenantIsolationAcrossLanguages proves a second
+// tenant's policy rows never reach LoadAllPolicies or policy.Multi.Evaluate's
+// fold; TestIntegration_Escalation_CrossTenantCannotReadOrApprove proves the
+// same for LoadApproval (a cross-tenant read returns nothing) and that a
+// cross-tenant UPDATE affects zero rows. Both require the integration build
+// tag and a live Postgres (make integration); RLS cannot be exercised any
+// other way.
 func TestC18_CrossTenantReadImpossible(t *testing.T) {
 	markRan(18)
-	t.Skip("Integration: RLS is proven against Postgres in Task 9, not in unit tests")
+	provenElsewhere(t, 18, "internal/store",
+		"TestIntegration_Multi_CrossTenantIsolationAcrossLanguages",
+		"TestIntegration_Escalation_CrossTenantCannotReadOrApprove")
 }
 
 // C19 reads "with the PDP unreachable and no valid cache entry, every
@@ -306,20 +354,29 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 //     case has no cache in the picture at all, so it cannot yet distinguish
 //     "no valid entry" from "no cache mechanism to have an entry in."
 //
-// Converting this to a pass would be forcing it: unskip once mcp/proxy/
+// Classified NOT BUILT, not proven elsewhere: provenElsewhere requires the
+// property to hold, in full, somewhere this package cannot reach — but
+// three of the four surfaces the property's own wording commits to, and the
+// entire cache subsystem, do not exist anywhere in this tree, not just
+// here. TestRunHook_UnreachablePDP_ExitsTwo proves a real subset (one
+// surface, no cache dimension to even test), not the property C19 actually
+// states. Pointing provenElsewhere at it would be precisely the kind of
+// claim conformance_pointer_test.go exists to stop: a pointer whose named
+// test is real but does not prove what the property says. Converting this
+// to a pass would be forcing it just the same: unskip once mcp/proxy/
 // extauthz all exist and the decision cache lands, not before.
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	t.Skip("Phase 4+: the hook surface alone proves this today " +
-		"(cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), but C19 says " +
-		"'every surface' (hook, mcp, proxy, extauthz — spec §3.2 A2; only hook exists) " +
-		"'with no valid cache entry' (no PEP decision cache exists yet — same blocker as C20). " +
+	notBuilt(t, 19, "Phase 4+: the hook surface alone proves this today "+
+		"(cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), but C19 says "+
+		"'every surface' (hook, mcp, proxy, extauthz — spec §3.2 A2; only hook exists) "+
+		"'with no valid cache entry' (no PEP decision cache exists yet — same blocker as C20). "+
 		"Requires the remaining three surfaces and the decision cache.")
 }
 
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 	markRan(20)
-	t.Skip("Phase 3: requires the PEP decision cache")
+	notBuilt(t, 20, "Phase 3: requires the PEP decision cache")
 }
 
 // C21 reads "escalation routes to the root principal, not an intermediate
@@ -349,13 +406,9 @@ func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 // their own skip reasons for the precedent this follows.
 func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 	markRan(21)
-	t.Skip("Proven at internal/pdpgrpc/escalation_test.go: TestDecide_Escalation_" +
-		"CreatesApprovalWithRootPrincipalAsApprover and TestDecide_Escalation_" +
-		"RootPrincipalRoutesAroundIntermediateDelegate (the depth-2 case that actually " +
-		"distinguishes root from an intermediate delegate). Cannot pass HERE: internal/authz " +
-		"has no Approval type and no notion of an approver at all — that concept lives in " +
-		"internal/pdpgrpc/escalation.go and pkg/models/approval.go, one layer above what this " +
-		"package may import (same shape as C16/C18's own skip reasons).")
+	provenElsewhere(t, 21, "internal/pdpgrpc",
+		"TestDecide_Escalation_CreatesApprovalWithRootPrincipalAsApprover",
+		"TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate")
 }
 
 // C22 reads "escalation timeout denies." Its reason used to say "Phase 2:
@@ -384,12 +437,9 @@ func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 // real, proven, at a layer this file cannot reach.
 func TestC22_EscalationTimeoutDenies(t *testing.T) {
 	markRan(22)
-	t.Skip("Proven at cmd/stratium-pep/hook_test.go: TestRunHook_Escalate_TimeoutStillPendingDenies " +
-		"(a still-pending approval denies at ApprovalTimeout, provably rather than by hanging) and " +
-		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies. Cannot pass HERE: C22 is " +
-		"about blocking and a clock the PEP owns (cmd/stratium-pep/escalation.go); internal/authz.Decide " +
-		"is a single synchronous pure call with no poll loop and nothing to time out " +
-		"(same shape as C16/C18/C21's own skip reasons).")
+	provenElsewhere(t, 22, "cmd/stratium-pep",
+		"TestRunHook_Escalate_TimeoutStillPendingDenies",
+		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies")
 }
 
 // C23 reads "on a non-blocking surface, escalate returns deny plus a
@@ -428,25 +478,32 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 // surface would need is a real, tested fact; it is not the same claim as a
 // surface using it. Unskipping this needs the extauthz mode itself, same as
 // C19's own remaining gap.
+//
+// Classified NOT BUILT, same reasoning as C19 above: DegradeEscalateToDeny
+// is a real, passing test of a real, useful fact, but it proves a narrower
+// claim than "on a non-blocking surface, escalate returns deny plus a
+// pending record" — no non-blocking surface exists to make that return.
+// provenElsewhere is for a property proven in full elsewhere, not for a
+// supporting fact about a property that is not built yet.
 func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 	markRan(23)
-	t.Skip("Phase 5: the response mapping a non-blocking surface needs is proven directly at " +
-		"internal/pdpgrpc/nonblocking_test.go (DegradeEscalateToDeny) — EFFECT_ESCALATE degrades to deny " +
-		"with approval_id retained for a later retry, exactly what spec E5/§4.7 describes. Still requires " +
-		"the extauthz PEP mode itself (spec §3.2 A2; cmd/stratium-pep's own package doc still calls it a " +
+	notBuilt(t, 23, "Phase 5: the response mapping a non-blocking surface needs is proven directly at "+
+		"internal/pdpgrpc/nonblocking_test.go (DegradeEscalateToDeny) — EFFECT_ESCALATE degrades to deny "+
+		"with approval_id retained for a later retry, exactly what spec E5/§4.7 describes. Still requires "+
+		"the extauthz PEP mode itself (spec §3.2 A2; cmd/stratium-pep's own package doc still calls it a "+
 		"'later surface' — same gap C19 already names), which remains unbuilt.")
 }
 
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	markRan(24)
-	t.Skip("Phase 3: the property is about an expired TOKEN with a live cache " +
-		"entry; neither exists yet. Delegation expiry alone is covered by " +
+	notBuilt(t, 24, "Phase 3: the property is about an expired TOKEN with a live cache "+
+		"entry; neither exists yet. Delegation expiry alone is covered by "+
 		"TestDelegationLeg_DeniesExpiredHop.")
 }
 
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
 	markRan(25)
-	t.Skip("Phase 2: DPoP verification lives in the PDP transport layer")
+	notBuilt(t, 25, "Phase 2: DPoP verification lives in the PDP transport layer")
 }
 
 // conformanceNames is the authoritative list of C-numbered properties this
@@ -500,14 +557,80 @@ var conformanceNames = map[int]string{
 // tier_test.go, agent_test.go, and every other unrelated test in this
 // package that has nothing to do with conformance.
 func TestConformanceSuiteIsComplete(t *testing.T) {
+	if missing := missingProperties(); len(missing) > 0 {
+		t.Fatalf("conformance suite is incomplete: %d of 25 properties did not run: %s",
+			len(missing), strings.Join(missing, ", "))
+	}
+}
+
+// missingProperties returns the C-numbers (formatted "Cn (TestName)") that
+// have not run, in ascending order, or nil if all 25 have. Shared by
+// TestConformanceSuiteIsComplete and TestConformanceTally
+// (conformance_outcome_test.go) so both fail the same way if a property
+// vanished, instead of the tally test silently reporting a
+// confident-looking count computed from incomplete data.
+func missingProperties() []string {
 	var missing []string
 	for n := 1; n <= 25; n++ {
 		if !conformanceRan[n] {
 			missing = append(missing, fmt.Sprintf("C%d (%s)", n, conformanceNames[n]))
 		}
 	}
-	if len(missing) > 0 {
-		t.Fatalf("conformance suite is incomplete: %d of 25 properties did not run: %s",
+	return missing
+}
+
+// TestConformanceTally reports the three-way breakdown a single pass/skip
+// count hid: how many of the 25 properties in docs/superpowers/specs/
+// 2026-08-08-agent-authorization-redesign-design.md §7 pass right here, how
+// many are proven in a package this one cannot import (a checked pointer,
+// not a claim — see conformance_outcome_test.go and
+// conformance_pointer_test.go), and how many name a subsystem that does not
+// exist yet. "14 pass, 11 skip" reads as under half done; this is the
+// number that says which half of "not passing here" is actually finished
+// work elsewhere.
+//
+// Declared last in this file, deliberately: it must run after
+// TestC1..TestC25 have populated conformanceOutcome, and declaration order
+// within one file is the one ordering go test actually guarantees — see
+// conformanceOutcome's own doc comment for why this test does not simply
+// live next to that variable instead.
+//
+// Re-checks completeness itself with the same missingProperties()
+// TestConformanceSuiteIsComplete uses, rather than assuming that test
+// already ran and passed: both are top-level tests in this file, and go
+// test does not guarantee one test's pass/fail outcome is visible to
+// another, only that both run. A tally computed after a property silently
+// failed to run would otherwise report a confident-looking count built on
+// missing data.
+func TestConformanceTally(t *testing.T) {
+	if missing := missingProperties(); len(missing) > 0 {
+		t.Fatalf("conformance tally: cannot be trusted, %d of 25 properties did not run: %s",
 			len(missing), strings.Join(missing, ", "))
 	}
+
+	var pass, elsewhere, notBuiltCount int
+	for n := 1; n <= 25; n++ {
+		switch conformanceOutcome[n] {
+		case outcomePass:
+			pass++
+		case outcomeProvenElsewhere:
+			elsewhere++
+		case outcomeNotBuilt:
+			notBuiltCount++
+		}
+	}
+
+	// A cross-check against conformanceOutcome itself, not just against
+	// conformanceRan above: the two arrays are populated independently
+	// (markRan unconditionally; conformanceOutcome only by notBuilt/
+	// provenElsewhere), so this catches a bookkeeping bug — an outcome
+	// written outside those two helpers — that completeness alone would
+	// not.
+	if total := pass + elsewhere + notBuiltCount; total != 25 {
+		t.Fatalf("conformance tally: %d pass + %d proven elsewhere + %d not built = %d, want 25 "+
+			"(an outcome was recorded outside notBuilt/provenElsewhere/the pass default)",
+			pass, elsewhere, notBuiltCount, total)
+	}
+
+	t.Logf("conformance tally: %d pass, %d proven elsewhere, %d not built (25 total)", pass, elsewhere, notBuiltCount)
 }
