@@ -85,7 +85,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
+	"github.com/lib/pq" // also registers the "postgres" database/sql driver (used directly for pq.Array below)
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -506,7 +506,7 @@ func TestIntegration_LoadAllPolicies_RoundTripsPriority(t *testing.T) {
 const auditChainQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, actor,
 	agent_id, delegation_id, root_delegation_id, chain_depth,
 	tool_name, action, declared_tier, derived_tier,
-	decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, input_digest
+	decision, denied_leg, denied_at_depth, reason, policy_source, policy_id, unevaluated_policy_ids, input_digest
 	FROM audit_chain ORDER BY seq ASC`
 
 // fetchAuditChain reads a tenant's entire chain from the first entry,
@@ -516,13 +516,17 @@ const auditChainQuery = `SELECT prev_hash, tenant_id, occurred_at, event_type, a
 //
 // policy_source/policy_id decode through sql.NullString into Entry's plain
 // string fields, mirroring store.scanAuditTail exactly: NULL and ""
-// resolve to the same Go zero value. That is what makes audit.Verify's hash
-// recomputation reproduce the same digest for a row written before
-// migrations/000006 as for one written after with an explicitly empty
-// verdict (see "chain_verifies_across_the_migration_boundary" below) — but
-// it also means this function alone cannot tell "never populated" apart
-// from "correctly empty." auditRowProvenance, below, is the query that
-// keeps NULL-ness visible for exactly that reason.
+// resolve to the same Go zero value. unevaluated_policy_ids scans straight
+// into pq.Array(&e.UnevaluatedPolicyIDs), also mirroring scanAuditTail: NULL
+// decodes to a nil []string (pq.StringArray's own Scan), which pkg/audit.
+// Entry.Hash's list encoding treats identically to an explicit empty array.
+// That is what makes audit.Verify's hash recomputation reproduce the same
+// digest for a row written before migrations/000006 or 000010 as for one
+// written after with explicitly empty provenance (see
+// "chain_verifies_across_the_migration_boundary" below) — but it also means
+// this function alone cannot tell "never populated" apart from "correctly
+// empty." auditRowProvenance and auditRowUnevaluatedPolicyIDs, below, are
+// the queries that keep NULL-ness visible for exactly that reason.
 func fetchAuditChain(t *testing.T, tenant string) []audit.Entry {
 	t.Helper()
 	var entries []audit.Entry
@@ -542,7 +546,7 @@ func fetchAuditChain(t *testing.T, tenant string) []audit.Entry {
 				&e.AgentID, &e.DelegationID, &e.RootDelegationID, &e.ChainDepth,
 				&e.ToolName, &e.Action, &e.DeclaredTier, &e.DerivedTier,
 				&e.Decision, &e.DeniedLeg, &e.DeniedAtDepth, &e.Reason,
-				&policySource, &policyID, &inputDigest,
+				&policySource, &policyID, pq.Array(&e.UnevaluatedPolicyIDs), &inputDigest,
 			); err != nil {
 				t.Fatalf("scan audit_chain row: %v", err)
 			}
@@ -584,6 +588,28 @@ func auditRowProvenance(t *testing.T, tenant string) (source, policyID sql.NullS
 		}
 	})
 	return source, policyID
+}
+
+// auditRowUnevaluatedPolicyIDs reads unevaluated_policy_ids for a tenant's
+// single most recent audit_chain row — the purpose-built column
+// migrations/000010_audit_unevaluated_policy_ids adds so an operator can ask
+// WHERE 'some-id' = ANY(unevaluated_policy_ids) directly, without needing
+// the affected policy's language to have won authz.FoldVerdicts' own
+// tie-break first. See TestIntegration_Live_OrphanLanguageDeniesNamingIt,
+// the reason this helper exists: it is the one live proof that this column
+// is populated even when a DIFFERENT verdict (a Cedar deny) decides the
+// outcome.
+func auditRowUnevaluatedPolicyIDs(t *testing.T, tenant string) []string {
+	t.Helper()
+	var ids []string
+	withTenantTx(t, tenant, func(tx *sql.Tx) {
+		row := tx.QueryRowContext(t.Context(),
+			`SELECT unevaluated_policy_ids FROM audit_chain ORDER BY seq DESC LIMIT 1`)
+		if err := row.Scan(pq.Array(&ids)); err != nil {
+			t.Fatalf("query latest audit_chain row's unevaluated_policy_ids column: %v", err)
+		}
+	})
+	return ids
 }
 
 const loadDelegationForAssertionQuery = `SELECT max_action_tier, approved_tools, depth, root_delegation_id ` +
@@ -659,14 +685,30 @@ func wantCode(t *testing.T, err error, want codes.Code) *status.Status {
 const noPoliciesReason = "principal: no policies configured for this tenant"
 
 // migrationBeforeProvenance and migrationWithProvenance pin the version
-// boundary migrations/000006_audit_policy_provenance.up.sql sits on. Package
-// migrations exposes only Up, which always targets the latest version (see
-// its doc comment on why) — there is no exported constant for either
-// version, so both are pinned here against that migration's own filename
-// rather than left as bare magic numbers.
+// boundary "chain_verifies_across_the_migration_boundary" (below) needs to
+// cross. Package migrations exposes only Up, which always targets the
+// latest version (see its doc comment on why) — there is no exported
+// constant for either version, so both are pinned here rather than left as
+// bare magic numbers.
+//
+// migrationWithProvenance points at 000010_audit_unevaluated_policy_ids, not
+// 000006_audit_policy_provenance as its name might suggest at first glance:
+// it originally did point at 000006 (the only audit_chain-provenance
+// migration that existed then), and was repointed here rather than
+// duplicated when 000010 became the next migration to touch audit_chain's
+// schema, for the same reason a caller of store.AppendAudit must reach — the
+// real function's own INSERT names every provenance column unconditionally,
+// unevaluated_policy_ids included, so exercising it against a database
+// deliberately migrated only up to 000006 would fail on a column that does
+// not exist yet at that version. Migrating straight from
+// migrationBeforeProvenance to migrationWithProvenance still exercises the
+// 000006 boundary along the way — golang-migrate applies every intervening
+// up script in sequence — so nothing about the original 000006 boundary
+// this test existed for stops being covered; 000010's own boundary is
+// additive coverage from the same live migrate-then-append.
 const (
 	migrationBeforeProvenance = 5
-	migrationWithProvenance   = 6
+	migrationWithProvenance   = 10
 )
 
 // preProvenanceAuditInsertQuery is store's own (unexported) insertAuditQuery
@@ -913,6 +955,12 @@ func TestIntegration_Multi_FourLanguagesProduceFourVerdicts(t *testing.T) {
 // over-the-wire counterpart Phase 4a Task 5 added — this test alone does not
 // exercise pdpgrpc.Server.Decide or its copy of FoldVerdicts' chosen reason
 // into DecideResponse.PrincipalReason at all, only policy.Multi.Evaluate.
+//
+// PolicyID stays empty here — it names one policy, and this verdict is
+// about the whole (one-policy) language, not a policy-level answer. The
+// orphaned id lives on UnevaluatedPolicyIDs instead; see orphanVerdicts'
+// own doc comment in multi.go for why a per-policy PolicyID split was tried
+// and reverted.
 func TestIntegration_Multi_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	const tenant = "tenant-multilang-orphan-integration"
 	const purpose = "orphan-language proof"
@@ -938,17 +986,21 @@ func TestIntegration_Multi_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	if v.Source != "rego" {
 		t.Errorf("Source = %q, want %q", v.Source, "rego")
 	}
-	if v.PolicyID != policyID {
-		t.Errorf("PolicyID = %q, want %q — audit_chain.policy_id must be queryable for this denial, not empty", v.PolicyID, policyID)
+	if v.PolicyID != "" {
+		t.Errorf("PolicyID = %q, want empty: this verdict is about the whole language, not one policy", v.PolicyID)
 	}
-	// "1 of 1", singular "policy": this tenant's only rego policy is the
-	// whole orphaned set, so the "how many" signal (countSuffix, multi.go)
-	// must say so explicitly rather than reading as though a count was
-	// merely omitted.
-	wantReason := fmt.Sprintf("principal: no rego engine registered; cannot evaluate policy ID %s (1 of 1 rego policy for this tenant)", policyID)
+	if want := []string{policyID}; !slices.Equal(v.UnevaluatedPolicyIDs, want) {
+		t.Errorf("UnevaluatedPolicyIDs = %v, want %v — audit_chain.unevaluated_policy_ids must be queryable for "+
+			"this denial", v.UnevaluatedPolicyIDs, want)
+	}
+	// Singular "policy": this tenant's only rego policy is the whole
+	// orphaned set, so the "how many" signal (countSuffix, multi.go) must
+	// say so explicitly rather than reading as though a count was merely
+	// omitted.
+	wantReason := "principal: no rego engine registered; cannot evaluate 1 rego policy for this tenant"
 	if v.Reason != wantReason {
-		t.Errorf("Reason = %q, want %q — the effect alone is not enough; D10 requires naming the unregistered language, the orphaned policy ID, and how many orphaned policies exist",
-			v.Reason, wantReason)
+		t.Errorf("Reason = %q, want %q — the effect alone is not enough; D10 requires naming the unregistered "+
+			"language and how many orphaned policies exist", v.Reason, wantReason)
 	}
 }
 
@@ -966,11 +1018,30 @@ const narrowRegistryMissingLanguage = "rego"
 // permanent test this file's own "Phase 4 Task 6" banner used to claim was
 // impossible (see the correction inside that banner). policy.Multi.Evaluate
 // is exercised directly there, never through pdpgrpc.Server.Decide or its
-// toResponse — so a regression in how DecideResponse.PrincipalReason is
-// copied from FoldVerdicts' chosen reason would leave that test green while
-// operators silently stopped being told which language went unevaluated.
-// Only a test that goes all the way over gRPC, as this one does, exercises
-// that copy at all.
+// toResponse/appendAudit — so a regression in how a decision's provenance is
+// copied onto the wire response and the audit row would leave that test
+// green while operators silently stopped being told which language went
+// unevaluated. Only a test that goes all the way over gRPC, as this one
+// does, exercises that copy at all.
+//
+// The tenant here carries TWO languages, deliberately, not one: a Cedar
+// forbid (which pdp-narrow's registry CAN evaluate) alongside orphaned rego
+// policies (which it cannot — narrowRegistryMissingLanguage). This is the
+// combination an earlier version of this test — one policy, one language,
+// orphaned rego alone — could never have caught: authz.FoldVerdicts
+// attributes a decision to the lexicographically smallest (Source,
+// PolicyID), Source is the language name, and "cedar" sorts before "rego" —
+// so the moment ANY Cedar verdict is also present, it wins that tie-break
+// over an orphaned rego verdict every time, regardless of how the orphan
+// fact is shaped. A prior fix (commit 7522731) tried to make the orphaned
+// policy's id reach audit_chain.policy_id by splitting into one deny
+// verdict per orphaned policy — which this exact scenario proves could
+// never have worked, since every one of those split verdicts still has
+// Source "rego" and still loses to Cedar's. The real fix is
+// audit_chain.unevaluated_policy_ids (migrations/000010): populated by
+// aggregating UnevaluatedPolicyIDs across authz.Decide's WHOLE verdict
+// slice (internal/authz/compound.go), not just the one FoldVerdicts
+// attributes the decision to, so it survives regardless of who wins.
 //
 // Reaching this case live needs a second, independently configured PDP —
 // deploy/docker/docker-compose.yml's pdp-narrow, with its own
@@ -985,7 +1056,17 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, narrowTenant, agentID, "integration-agent-narrow-registry", models.TrustTierUnverified)
 	acting := singleHopDelegation(t, narrowTenant, agentID, models.ActionTierInternalModify, purpose)
-	policyID := seedPolicyLang(t, narrowTenant, "live-orphan-rego-policy", narrowRegistryMissingLanguage,
+
+	// An unconditional forbid: pdp-narrow registers cedar, so this is
+	// actually evaluated and actually denies — the decision this whole
+	// request must be attributed to.
+	cedarForbidID := seedPolicyLang(t, narrowTenant, "live-orphan-cedar-forbid", "cedar",
+		`forbid(principal, action, resource);`, "deny")
+	// Two orphaned rego policies, not one: proves UnevaluatedPolicyIDs is a
+	// real aggregate, not a single id that happens to work.
+	regoID1 := seedPolicyLang(t, narrowTenant, "live-orphan-rego-policy-1", narrowRegistryMissingLanguage,
+		regoPurposeCondition(purpose), "allow")
+	regoID2 := seedPolicyLang(t, narrowTenant, "live-orphan-rego-policy-2", narrowRegistryMissingLanguage,
 		regoPurposeCondition(purpose), "allow")
 
 	resp, err := narrowPdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
@@ -998,8 +1079,8 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide() against pdp-narrow error = %v, want a decision", err)
 	}
-	t.Logf("Decide() against pdp-narrow (registered: cedar,json,xacml; missing: %s) for a tenant whose only "+
-		"policy is in the missing language -> effect=%s denied_leg=%q principal_reason=%q decided_source=%q "+
+	t.Logf("Decide() against pdp-narrow (registered: cedar,json,xacml; missing: %s) for a tenant with a cedar "+
+		"forbid AND two orphaned rego policies -> effect=%s denied_leg=%q principal_reason=%q decided_source=%q "+
 		"(present=%t) decided_policy_id=%q (present=%t)",
 		narrowRegistryMissingLanguage, resp.GetEffect(), resp.GetDeniedLeg(), resp.GetPrincipalReason(),
 		resp.GetDecidedSource(), resp.DecidedSource != nil, resp.GetDecidedPolicyId(), resp.DecidedPolicyId != nil)
@@ -1010,54 +1091,55 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 	if resp.GetDeniedLeg() != "principal" {
 		t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "principal")
 	}
-	// The assertion this test exists for: PrincipalReason itself — the field
-	// toResponse copies from FoldVerdicts' chosen reason (pdpgrpc/server.go)
-	// — must name the missing language and the orphaned policy over the
-	// wire, not merely Effect. An effect-only check would also pass a
-	// PrincipalReason broken by a bad copy (empty, truncated, or naming the
-	// wrong verdict entirely), which is exactly the regression this test is
-	// for (see the mutation-testing note in this task's own report).
-	//
-	// Two separate substring checks, not one verbatim comparison: multi_test.go
-	// already pins orphanVerdicts' exact wording cheaply and precisely, many
-	// times over (single- and multi-policy cases alike) — this expensive,
-	// Docker-backed test does not need to re-pin the same literal a second
-	// time, and re-pinning it would make this test brittle to a wording
-	// tweak (spacing, punctuation) that changes nothing this test actually
-	// cares about. What it cares about are the two facts D10 and this fix
-	// round exist for: which policy (the id, still the queryable part, kept
-	// first) and that there were others to go looking for (the count).
-	principalReason := resp.GetPrincipalReason()
-	wantIDPhrase := fmt.Sprintf("cannot evaluate policy ID %s", policyID)
-	if !strings.Contains(principalReason, wantIDPhrase) {
-		t.Errorf("PrincipalReason = %q, want it to contain %q", principalReason, wantIDPhrase)
+
+	// Attribution: Cedar, correctly — one decision, one attributed policy.
+	// "cedar" sorts before "rego" lexicographically, so FoldVerdicts' own
+	// tie-break picks Cedar's verdict over the orphan-language one no matter
+	// how many rego policies are orphaned — this is what makes this exact
+	// tenant shape (not the single-rego-policy shape the old version of this
+	// test used) the one that actually exercises the bug the per-policy
+	// split never fixed.
+	if resp.DecidedSource == nil || resp.GetDecidedSource() != "cedar" {
+		t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, "cedar")
 	}
-	wantCountPhrase := fmt.Sprintf("1 of 1 %s policy for this tenant", narrowRegistryMissingLanguage)
-	if !strings.Contains(principalReason, wantCountPhrase) {
-		t.Errorf("PrincipalReason = %q, want it to contain %q — an operator must learn there was only one "+
-			"orphaned policy, not just which one, so a lone denial doesn't read as if a count was silently dropped",
-			principalReason, wantCountPhrase)
+	if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != cedarForbidID {
+		t.Errorf("DecidedPolicyId = %v, want present and %q (the cedar forbid, not either orphaned rego policy)",
+			resp.DecidedPolicyId, cedarForbidID)
 	}
-	if resp.DecidedSource == nil || resp.GetDecidedSource() != narrowRegistryMissingLanguage {
-		t.Errorf("DecidedSource = %v, want present and %q", resp.DecidedSource, narrowRegistryMissingLanguage)
-	}
-	if resp.DecidedPolicyId == nil || resp.GetDecidedPolicyId() != policyID {
-		t.Errorf("DecidedPolicyId = %v, want present and %q", resp.DecidedPolicyId, policyID)
+	if principalReason := resp.GetPrincipalReason(); strings.Contains(principalReason, narrowRegistryMissingLanguage) {
+		t.Errorf("PrincipalReason = %q must not name %q — the decision is cedar's, not rego's orphan fact",
+			principalReason, narrowRegistryMissingLanguage)
 	}
 
-	// The audit row, independently queried — not merely that response and
-	// row agree (audit_row_provenance_matches_response, elsewhere in this
-	// file, already covers that general property), but that the orphaned
-	// policy's own id specifically reached a real audit_chain row: the
-	// second half of what "PolicyID empty on exactly the denials D10 exists
-	// to surface" (this task's own brief) was about.
+	// The audit row's provenance pair agrees with the response — the general
+	// "response and row agree" property is covered elsewhere in this file
+	// (audit_row_provenance_matches_response); this is the specific instance
+	// that matters here: the orphaned rego policies must NOT have leaked
+	// into policy_source/policy_id just because they are also present.
 	source, auditPolicyID := auditRowProvenance(t, narrowTenant)
-	if !source.Valid || source.String != narrowRegistryMissingLanguage {
-		t.Errorf("stored policy_source = %q (valid=%t), want %q", source.String, source.Valid, narrowRegistryMissingLanguage)
+	if !source.Valid || source.String != "cedar" {
+		t.Errorf("stored policy_source = %q (valid=%t), want %q", source.String, source.Valid, "cedar")
 	}
-	if !auditPolicyID.Valid || auditPolicyID.String != policyID {
-		t.Errorf("stored policy_id = %q (valid=%t), want %q — the orphaned policy id must reach the audit row, "+
-			"not just live in free-text Reason", auditPolicyID.String, auditPolicyID.Valid, policyID)
+	if !auditPolicyID.Valid || auditPolicyID.String != cedarForbidID {
+		t.Errorf("stored policy_id = %q (valid=%t), want %q", auditPolicyID.String, auditPolicyID.Valid, cedarForbidID)
+	}
+
+	// The assertion this test exists for: the orphaned rego ids still reach
+	// a real audit_chain row, in the purpose-built column, even though the
+	// decision itself is attributed to cedar. This is
+	// authz.Result.UnevaluatedPolicyIDs, aggregated across authz.Decide's
+	// whole verdict slice (internal/authz/compound.go) rather than read off
+	// Deciding alone — the aggregation mutation-tested in that package's own
+	// TestDecide_UnevaluatedPolicyIDsSurviveLosingTheFold, proven here live,
+	// end to end, against a real orphaned language and a real deciding
+	// Cedar policy together.
+	wantIDs := []string{regoID1, regoID2}
+	slices.Sort(wantIDs)
+	gotIDs := auditRowUnevaluatedPolicyIDs(t, narrowTenant)
+	slices.Sort(gotIDs)
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Errorf("audit_chain.unevaluated_policy_ids = %v, want %v — both orphaned rego policies must reach "+
+			"this column even though the decision itself is attributed to cedar", gotIDs, wantIDs)
 	}
 }
 
@@ -2621,16 +2703,16 @@ allow if {
 	})
 
 	// chain_verifies_across_the_migration_boundary: a chain that started
-	// before migrations/000006_audit_policy_provenance added
-	// policy_source/policy_id, migrated live while that chain already had an
-	// entry, then grew a second entry with real provenance through the real
-	// store.AppendAudit path — must still verify. audit.Link/Hash reconstruct
-	// a full Entry from whatever the tail read returns (see
-	// store.scanAuditTail's own doc comment); a column silently absent from
-	// that read — the exact shape of the Task 2/3 seam defect — changes the
-	// recomputed hash and breaks the chain invisibly, not loudly. This is a
-	// permanent, automated version of the manual proof described in the
-	// Task 2 report.
+	// before migrations/000006_audit_policy_provenance and
+	// 000010_audit_unevaluated_policy_ids added their columns, migrated live
+	// while that chain already had an entry, then grew a second entry with
+	// real provenance through the real store.AppendAudit path — must still
+	// verify. audit.Link/Hash reconstruct a full Entry from whatever the
+	// tail read returns (see store.scanAuditTail's own doc comment); a
+	// column silently absent from that read — the exact shape of the Task
+	// 2/3 seam defect — changes the recomputed hash and breaks the chain
+	// invisibly, not loudly. This is a permanent, automated version of the
+	// manual proof described in the Task 2 report.
 	//
 	// A dedicated tenant that no other subtest touches: the down/up
 	// migration below changes audit_chain's SCHEMA (ALTER TABLE, not a
@@ -2706,22 +2788,24 @@ allow if {
 		t.Logf("inserted genesis audit entry for tenant %q under the pre-migration schema (no provenance columns)", boundaryTenant)
 
 		if err := m.Migrate(migrationWithProvenance); err != nil {
-			t.Fatalf("migrate up to v%d (provenance): %v", migrationWithProvenance, err)
+			t.Fatalf("migrate up to v%d (unevaluated_policy_ids, which also carries the schema through "+
+				"000006's own policy_source/policy_id along the way): %v", migrationWithProvenance, err)
 		}
 		t.Logf("migrated to v%d: the genesis row's new columns now read back NULL", migrationWithProvenance)
 
 		second := audit.Entry{
-			TenantID:      boundaryTenant,
-			OccurredAt:    time.Now(),
-			EventType:     "decision",
-			Actor:         "integration-test:boundary-post-migration",
-			ToolName:      "Bash",
-			Action:        "read",
-			Decision:      "DENY",
-			DeniedAtDepth: -1,
-			Reason:        "post-migration entry: real provenance through the real AppendAudit path",
-			PolicySource:  "cedar-synthetic",
-			PolicyID:      "policy-boundary-42",
+			TenantID:             boundaryTenant,
+			OccurredAt:           time.Now(),
+			EventType:            "decision",
+			Actor:                "integration-test:boundary-post-migration",
+			ToolName:             "Bash",
+			Action:               "read",
+			Decision:             "DENY",
+			DeniedAtDepth:        -1,
+			Reason:               "post-migration entry: real provenance through the real AppendAudit path",
+			PolicySource:         "cedar-synthetic",
+			PolicyID:             "policy-boundary-42",
+			UnevaluatedPolicyIDs: []string{"boundary-orphan-1", "boundary-orphan-2"},
 		}
 		if err := store.New(testDB, boundaryTenant).AppendAudit(t.Context(), second); err != nil {
 			t.Fatalf("AppendAudit for the post-migration entry: %v", err)
@@ -2735,15 +2819,23 @@ allow if {
 			t.Errorf("pre-migration entry PolicySource/PolicyID = %q/%q, want empty (NULL decoded to the zero value)",
 				entries[0].PolicySource, entries[0].PolicyID)
 		}
+		if len(entries[0].UnevaluatedPolicyIDs) != 0 {
+			t.Errorf("pre-migration entry UnevaluatedPolicyIDs = %v, want empty (NULL decoded to the zero value)",
+				entries[0].UnevaluatedPolicyIDs)
+		}
 		if entries[1].PolicySource != "cedar-synthetic" || entries[1].PolicyID != "policy-boundary-42" {
 			t.Errorf("post-migration entry PolicySource/PolicyID = %q/%q, want %q/%q",
 				entries[1].PolicySource, entries[1].PolicyID, "cedar-synthetic", "policy-boundary-42")
+		}
+		if want := []string{"boundary-orphan-1", "boundary-orphan-2"}; !slices.Equal(entries[1].UnevaluatedPolicyIDs, want) {
+			t.Errorf("post-migration entry UnevaluatedPolicyIDs = %v, want %v", entries[1].UnevaluatedPolicyIDs, want)
 		}
 
 		if err := audit.Verify(entries); err != nil {
 			t.Fatalf("audit.Verify() across the migration boundary error = %v, want nil", err)
 		}
-		t.Logf("audit.Verify() PASSED over a %d-entry chain spanning migrations/000006_audit_policy_provenance", len(entries))
+		t.Logf("audit.Verify() PASSED over a %d-entry chain spanning migrations/000006_audit_policy_provenance "+
+			"and 000010_audit_unevaluated_policy_ids", len(entries))
 
 		// The boundary this subtest exists to prove is exactly v5->v6, so
 		// everything above deliberately stops at v6, not "the latest."
