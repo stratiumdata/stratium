@@ -345,7 +345,7 @@ var knownTierVocabulary = map[string][]string{
 	"context.delegation.max_action_tier": actionTierNameValues,
 }
 
-// checkTierVocabulary rejects an == or != comparison between one of
+// checkTierVocabulary rejects an == comparison between one of
 // knownTierVocabulary's paths and a STRING literal that is not a real
 // member of that tier's own String() spellings. One membership check is
 // what catches three of the thirteen audited forms alike — a wrong-case
@@ -353,6 +353,26 @@ var knownTierVocabulary = map[string][]string{
 // a padded literal (" CERTIFIED ") — because all three are simply absent
 // from the set, for the same underlying reason: each reads as if it
 // configures the comparison and does not.
+//
+// != is a different question, not a mirror image of ==, and is
+// deliberately NOT rejected here even though asOperator still matches it:
+// path is always exactly one of vocab (the field is a closed, exhaustively
+// modeled String — see knownTierVocabulary's own doc comment), so when the
+// literal is NOT a member, `path == literal` is a CONTRADICTION (provably
+// always false — the case this function exists to catch) but `path !=
+// literal` is the opposite, a TAUTOLOGY (provably always true, since
+// path's real value can never equal a spelling outside its own
+// vocabulary). Both are "this can never be a meaningful comparison," but
+// only the first is "this can never match" — the specific, narrow claim
+// every check in this file exists to prove (see checkLiteralContradiction's
+// own doc comment: "A tautology (1 == 1) is left alone — it is not the
+// defect class this task audits"). Rejecting a tautological != would tell
+// an author their condition "can never match" when it always does, and
+// would reject exactly the kind of forward-compatible guard a `!=
+// "Certified"` typo can still accidentally BE — e.g. `unless {
+// trust_tier != "SOME_FUTURE_TIER" }`, which today is a no-op precisely
+// because SOME_FUTURE_TIER is not (yet) real, but reads as intentional
+// defensive spelling, not a mistake this checker can safely assume away.
 //
 // This is a value-level check and deliberately only half of what these two
 // paths need: a non-string literal (5, true) is a KIND mismatch, not a
@@ -370,7 +390,7 @@ var knownTierVocabulary = map[string][]string{
 // own doc comment gives for why ITS kind and range checks are scoped the
 // way they are.
 func checkTierVocabulary(expr json.RawMessage) error {
-	_, b, ok := asOperator(expr, "==", "!=")
+	op, b, ok := asOperator(expr, "==", "!=")
 	if !ok {
 		return nil
 	}
@@ -389,6 +409,10 @@ func checkTierVocabulary(expr json.RawMessage) error {
 		return nil
 	}
 	if slices.Contains(vocab, s) {
+		return nil
+	}
+	if op == "!=" {
+		// A tautology, not a contradiction — see the doc comment above.
 		return nil
 	}
 	return fmt.Errorf("condition compares %s to %q, which is not a real tier spelling — must be exactly one of %v (case-sensitive, no surrounding whitespace); this can never match any value buildRequest actually produces",
@@ -516,10 +540,14 @@ func checkContextFieldKind(expr json.RawMessage) error {
 // compared via == or != ("name instead of ordinal": derived_tier ==
 // "DESTRUCTIVE" can never be true, since a Long is never equal to a String),
 // or a numeric literal outside ActionTier's real ordinal range, compared via
-// any of the six operators ("out-of-lattice ceiling": derived_tier > 99 can
-// never be true, since no ActionTier value exceeds DESTRUCTIVE's ordinal).
-// models.ParseActionTier — not a hand-rolled min/max here — is the range
-// check, the same range-checking function models already exports for
+// an operator for which that makes the comparison a CONTRADICTION rather
+// than a tautology ("out-of-lattice ceiling": derived_tier > 99 can never be
+// true, since no ActionTier value exceeds DESTRUCTIVE's ordinal) — see
+// derivedTierRangeIsContradiction's own doc comment for why the range check
+// is scoped to only some (operator, direction) pairs and not every one a
+// literal outside the range reaches. models.ParseActionTier — not a
+// hand-rolled min/max here — is what detects "outside the range" in the
+// first place, the same range-checking function models already exports for
 // exactly this purpose (see its own doc comment: "casting an untrusted int
 // directly to ActionTier would admit values outside the lattice").
 //
@@ -553,9 +581,59 @@ func checkDerivedTierComparison(expr json.RawMessage) error {
 		return nil
 	}
 	if _, err := models.ParseActionTier(int(n)); err != nil {
+		if !derivedTierRangeIsContradiction(op, int(n)) {
+			// A tautology, not a contradiction — see
+			// derivedTierRangeIsContradiction's own doc comment.
+			return nil
+		}
 		return fmt.Errorf("condition compares context.derived_tier to %v, which is not a valid action tier ordinal — this can never match any value buildRequest actually produces: %w", lit, err)
 	}
 	return nil
+}
+
+// derivedTierRangeIsContradiction reports whether comparing
+// context.derived_tier — always one of models.ParseActionTier's valid
+// ordinals — to out-of-range n via op can NEVER hold (a contradiction), as
+// opposed to ALWAYS holding (a tautology). Only meaningful once
+// models.ParseActionTier has already confirmed n itself is out of range
+// (checkDerivedTierComparison, above, is the only caller): a valid n is
+// neither a contradiction nor a tautology, since some real request value
+// equals it and others do not.
+//
+// derived_tier's real value is always within [Reasoning, Destructive]. When
+// n is above Destructive, every operator asking "derived_tier reaches n or
+// higher" (==, >, >=) can never hold — no real value is that high — while
+// every operator asking "derived_tier stays below n, or simply isn't n"
+// (!=, <, <=) always holds, since every real value already is. Below
+// Reasoning is the mirror image, with the two operator groups swapped:
+// ==, <, and <= can never hold; !=, >, and >= always do. The out-of-lattice
+// ceiling fixture this function was added to stop over-rejecting Cedar's
+// own `derived_tier > 99` (Fixtures.DeadForms, "out-of-lattice ceiling")
+// falls in the first group (n above Destructive, op ">") and must keep
+// being reported as a contradiction — this function returning true for
+// exactly that pairing is what TestDerivedTierRangeIsContradiction pins.
+//
+// Worked through explicitly as a small table rather than derived from a
+// general total-order formula: six operators, two directions, is a small
+// enough case count to just state and audit by inspection, rather than an
+// inequality a future reader has to re-derive to check it is right.
+func derivedTierRangeIsContradiction(op string, n int) bool {
+	if n > int(models.ActionTierDestructive) {
+		switch op {
+		case "==", ">", ">=":
+			return true
+		default: // "!=", "<", "<="
+			return false
+		}
+	}
+	// n < int(models.ActionTierReasoning): the only other way
+	// models.ParseActionTier(n) rejects n.
+	switch op {
+	case "==", "<", "<=":
+		return true
+	default: // "!=", ">", ">="
+		return false
+	}
 }
 
 // checkLiteralContradiction rejects an == or != comparison between two pure

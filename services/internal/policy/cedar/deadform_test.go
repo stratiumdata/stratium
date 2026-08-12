@@ -3,6 +3,7 @@ package cedar
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -85,6 +86,217 @@ func TestCheckTierVocabulary_OperandOrderIndependent(t *testing.T) {
 	const reversed = `permit(principal, action, resource) when { "Certified" == context.agent.trust_tier };`
 	if err := checkTierVocabulary(firstWhenBody(t, reversed)); err == nil {
 		t.Errorf("checkTierVocabulary(%q) = nil, want an error (reversed operand order must still be caught)", reversed)
+	}
+}
+
+// TestCheckTierVocabulary_NotEqualAgainstUnknownSpellingIsNotRejected pins
+// the bug fix: != against a literal that is not a real tier spelling is a
+// TAUTOLOGY, not a contradiction — the field's real value, always one of
+// knownTierVocabulary's own spellings, can never equal a literal outside
+// that set, so the comparison always holds — and must not be rejected with
+// a "can never match" error that is simply false. The == cases alongside it
+// are the mutation guard: without them, a checkTierVocabulary that stopped
+// checking == too (rather than specifically carving out !=) would also pass
+// every != subtest below.
+func TestCheckTierVocabulary_NotEqualAgainstUnknownSpellingIsNotRejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		wantErr bool
+	}{
+		{
+			"!= wrong-case trust_tier is accepted (tautology)",
+			`permit(principal, action, resource) when { context.agent.trust_tier != "Certified" };`,
+			false,
+		},
+		{
+			"!= wrong-case max_action_tier is accepted (tautology)",
+			`permit(principal, action, resource) when { context.delegation.max_action_tier != "Certified" };`,
+			false,
+		},
+		{
+			"!= a real spelling is accepted (an ordinary, meaningful condition)",
+			`permit(principal, action, resource) when { context.agent.trust_tier != "CERTIFIED" };`,
+			false,
+		},
+		{
+			"== wrong-case trust_tier is still rejected (contradiction, unchanged)",
+			`permit(principal, action, resource) when { context.agent.trust_tier == "Certified" };`,
+			true,
+		},
+		{
+			"== wrong-case max_action_tier is still rejected (contradiction, unchanged)",
+			`permit(principal, action, resource) when { context.delegation.max_action_tier == "Certified" };`,
+			true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkTierVocabulary(firstWhenBody(t, tc.text))
+			if tc.wantErr && err == nil {
+				t.Errorf("checkTierVocabulary(%q) = nil, want an error", tc.text)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("checkTierVocabulary(%q) = %v, want nil", tc.text, err)
+			}
+		})
+	}
+}
+
+// TestCheckDeadForms_NotEqualTautologyAcceptedAndAlwaysMatches is the
+// positive-control proof behind the fix above: a policy the checker now
+// accepts because its != condition is a tautology must actually BEHAVE like
+// one — matching unconditionally, for every real trust tier including
+// CERTIFIED itself — not merely fail to error. Without this, "the checker no
+// longer rejects it" would not distinguish "correctly recognized as a
+// tautology" from "the check simply broke and stopped catching anything."
+func TestCheckDeadForms_NotEqualTautologyAcceptedAndAlwaysMatches(t *testing.T) {
+	const text = `permit(principal, action, resource) when { context.agent.trust_tier != "Certified" };`
+	set, err := (Engine{}).Prepare(context.Background(), []policy.StoredPolicy{
+		{ID: "p1", Name: "tautology", Text: text, Priority: 1, Version: 1},
+	})
+	if err != nil {
+		t.Fatalf("Prepare rejected a tautological != condition, want it accepted: %v", err)
+	}
+
+	for _, tier := range []models.AgentTrustTier{
+		models.TrustTierUnverified, models.TrustTierRegistered,
+		models.TrustTierCertified, models.TrustTierPlatformTrusted,
+	} {
+		t.Run(tier.String(), func(t *testing.T) {
+			verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{
+				Agent: authz.AgentInfo{TrustTier: tier},
+			})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectAllow {
+				t.Fatalf("got %+v, want exactly one EffectAllow verdict (!= \"Certified\" must hold for every real tier)", verdicts)
+			}
+		})
+	}
+}
+
+// TestDerivedTierRangeIsContradiction is the exhaustive proof behind
+// checkDerivedTierComparison's range check: every (operator, direction) pair
+// derivedTierRangeIsContradiction can be asked about, checked against what
+// the comparison actually means for a derived_tier that is always within
+// [Reasoning, Destructive]. This is what makes the fix's correctness
+// auditable case by case, rather than trusting the few directions singly
+// exercised through checkDerivedTierComparison below and through
+// Fixtures.DeadForms (engine_test.go).
+func TestDerivedTierRangeIsContradiction(t *testing.T) {
+	const (
+		aboveMax = int(models.ActionTierDestructive) + 1 // out of range above
+		belowMin = int(models.ActionTierReasoning) - 1   // out of range below
+	)
+	tests := []struct {
+		op             string
+		n              int
+		wantContradict bool
+	}{
+		// n above the highest real tier: derived_tier can never reach it, so
+		// "derived_tier reaches n or higher" is impossible (contradiction);
+		// "derived_tier stays below n, or simply isn't n" always holds
+		// (tautology).
+		{"==", aboveMax, true},
+		{">", aboveMax, true},
+		{">=", aboveMax, true},
+		{"!=", aboveMax, false},
+		{"<", aboveMax, false},
+		{"<=", aboveMax, false},
+
+		// n below the lowest real tier: the mirror image, the two operator
+		// groups swapped.
+		{"==", belowMin, true},
+		{"<", belowMin, true},
+		{"<=", belowMin, true},
+		{"!=", belowMin, false},
+		{">", belowMin, false},
+		{">=", belowMin, false},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%s %d", tc.op, tc.n), func(t *testing.T) {
+			if got := derivedTierRangeIsContradiction(tc.op, tc.n); got != tc.wantContradict {
+				t.Errorf("derivedTierRangeIsContradiction(%q, %d) = %v, want %v", tc.op, tc.n, got, tc.wantContradict)
+			}
+		})
+	}
+}
+
+// TestCheckDerivedTierComparison_TautologyDirectionsAreAccepted proves the
+// fix through the real entry point (parsed Cedar JSON, not a bare (op, n)
+// pair passed directly to the helper) — one representative case per
+// direction; TestDerivedTierRangeIsContradiction above is what gives
+// exhaustive operator coverage. This is what proves asOperator,
+// pathAndLiteral, and models.ParseActionTier actually wire up to the fix
+// correctly, not just the helper in isolation.
+func TestCheckDerivedTierComparison_TautologyDirectionsAreAccepted(t *testing.T) {
+	tests := []string{
+		`permit(principal, action, resource) when { context.derived_tier != 99 };`,
+		`permit(principal, action, resource) when { context.derived_tier < 99 };`,
+		`permit(principal, action, resource) when { context.derived_tier > -1 };`,
+		`permit(principal, action, resource) when { context.derived_tier >= -1 };`,
+	}
+	for _, text := range tests {
+		t.Run(text, func(t *testing.T) {
+			if err := checkDerivedTierComparison(firstWhenBody(t, text)); err != nil {
+				t.Errorf("checkDerivedTierComparison(%q) = %v, want nil (this is a tautology, not a contradiction)", text, err)
+			}
+		})
+	}
+}
+
+// TestCheckDerivedTierComparison_ContradictionDirectionsStillRejected is the
+// regression guard alongside the fix: the OTHER four (operator, direction)
+// pairs must remain rejected exactly as before. "out-of-lattice ceiling" in
+// Fixtures.DeadForms (engine_test.go) already pins one of these (>,
+// above-max) end to end through Prepare and Validate; this covers the
+// remaining three directly.
+func TestCheckDerivedTierComparison_ContradictionDirectionsStillRejected(t *testing.T) {
+	tests := []string{
+		`permit(principal, action, resource) when { context.derived_tier >= 99 };`,
+		`permit(principal, action, resource) when { context.derived_tier < -1 };`,
+		`permit(principal, action, resource) when { context.derived_tier <= -1 };`,
+	}
+	for _, text := range tests {
+		t.Run(text, func(t *testing.T) {
+			if err := checkDerivedTierComparison(firstWhenBody(t, text)); err == nil {
+				t.Errorf("checkDerivedTierComparison(%q) = nil, want an error (this is a contradiction)", text)
+			}
+		})
+	}
+}
+
+// TestCheckDeadForms_DerivedTierTautologyAcceptedAndAlwaysMatches is
+// derived_tier's own version of
+// TestCheckDeadForms_NotEqualTautologyAcceptedAndAlwaysMatches: a policy the
+// checker now accepts because its range comparison is a tautology must
+// actually match unconditionally, for every real action tier, not merely
+// fail to error.
+func TestCheckDeadForms_DerivedTierTautologyAcceptedAndAlwaysMatches(t *testing.T) {
+	const text = `permit(principal, action, resource) when { context.derived_tier != 99 };`
+	set, err := (Engine{}).Prepare(context.Background(), []policy.StoredPolicy{
+		{ID: "p1", Name: "tautology", Text: text, Priority: 1, Version: 1},
+	})
+	if err != nil {
+		t.Fatalf("Prepare rejected a tautological derived_tier comparison, want it accepted: %v", err)
+	}
+
+	for _, tier := range []models.ActionTier{
+		models.ActionTierReasoning, models.ActionTierReadOnly,
+		models.ActionTierInternalModify, models.ActionTierExternalComms,
+		models.ActionTierDestructive,
+	} {
+		t.Run(tier.String(), func(t *testing.T) {
+			verdicts, err := set.Evaluate(context.Background(), policy.EvaluationInput{DerivedTier: tier})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if len(verdicts) != 1 || verdicts[0].Effect != authz.EffectAllow {
+				t.Fatalf("got %+v, want exactly one EffectAllow verdict (!= 99 must hold for every real tier)", verdicts)
+			}
+		})
 	}
 }
 
