@@ -392,9 +392,49 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 		"(same shape as C16/C18/C21's own skip reasons).")
 }
 
+// C23 reads "on a non-blocking surface, escalate returns deny plus a
+// pending record." Its reason used to say "Phase 4: requires the extauthz
+// PEP mode" — stale in the same way C19's old "Phase 3: requires the PEP
+// client" was: Phase 4 (remaining surfaces) has since landed, and extauthz
+// still does not exist. cmd/stratium-pep/main.go's own package doc still
+// calls "mcp", "proxy", and "extauthz" alike "later surfaces over the same
+// PDP call" — only "hook" is wired. Same gap C19 already names for "every
+// surface" (spec §3.2 A2).
+//
+// What Phase 5 genuinely closes is narrower than the whole surface: the
+// response *mapping* a non-blocking surface would need in order to degrade
+// correctly. EFFECT_ESCALATE has nothing a two-valued (allow/deny) surface
+// can return, so it must become a denial — but the pending approval's id
+// (DecideResponse.approval_id) must survive that translation unchanged, or a
+// retry after approval would have nothing to present. That mapping is
+// pdpgrpc.DegradeEscalateToDeny, proven directly by its own test
+// (internal/pdpgrpc/nonblocking_test.go) against every reachable Effect:
+// escalate degrades to deny with the id retained, an ordinary deny
+// fabricates no id, allow passes through unchanged, and a defensively
+// handled nil response fails closed to deny rather than allow. The response
+// Decide already sends every surface already carries what a non-blocking
+// surface needs; this is that fact, made explicit and tested — not a forced
+// pass on the property C23 actually states.
+//
+// It cannot become a pass HERE for two independent reasons. The usual one:
+// this is a property about a surface's own translation of a response it
+// receives, a concept internal/authz's pure decision function has no way to
+// express even in principle — same shape as C16/C18/C19/C21/C22's own skips
+// in this file. The narrower one is specific to C23: its own wording says
+// "on a non-blocking surface" — an actual extauthz mode receiving an actual
+// bounded-latency call and actually returning "deny plus a pending record"
+// over Envoy's own wire protocol — and no such surface is wired into
+// cmd/stratium-pep or anywhere else in this tree. Proving the mapping a
+// surface would need is a real, tested fact; it is not the same claim as a
+// surface using it. Unskipping this needs the extauthz mode itself, same as
+// C19's own remaining gap.
 func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 	markRan(23)
-	t.Skip("Phase 4: requires the extauthz PEP mode")
+	t.Skip("Phase 5: the response mapping a non-blocking surface needs is proven directly at " +
+		"internal/pdpgrpc/nonblocking_test.go (DegradeEscalateToDeny) — EFFECT_ESCALATE degrades to deny " +
+		"with approval_id retained for a later retry, exactly what spec E5/§4.7 describes. Still requires " +
+		"the extauthz PEP mode itself (spec §3.2 A2; cmd/stratium-pep's own package doc still calls it a " +
+		"'later surface' — same gap C19 already names), which remains unbuilt.")
 }
 
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
