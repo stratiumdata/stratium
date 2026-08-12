@@ -14,13 +14,15 @@ import (
 // tenant has authored before it can decide which per-language groups to
 // prepare. store.LoadAllPolicies is the production implementation.
 //
-// A separate interface from PolicySource (configured.go), not an added
-// method on it: every existing PolicySource — Configured's, and every test
-// double across this codebase — loads one language at a time and has no
-// reason to also answer "give me everything." Bolting that requirement onto
-// every existing caller of Configured to serve Multi's different need would
-// be the same unrequested-abstraction mistake in reverse. *store.Store
-// satisfies both interfaces structurally, with no adapter either way.
+// A separate interface from the single-language PolicySource Configured
+// used (both deleted by Phase 4a Task 4 — see policy.go's own package doc),
+// not an added method on it: every PolicySource implementation, Configured's
+// and every test double across this codebase alike, loaded one language at
+// a time and had no reason to also answer "give me everything." Bolting
+// that requirement onto every existing caller of Configured to serve
+// Multi's different need would have been the same unrequested-abstraction
+// mistake in reverse. *store.Store satisfies this interface structurally,
+// with no adapter needed.
 type AllPolicySource interface {
 	LoadAllPolicies(ctx context.Context) ([]StoredPolicy, error)
 }
@@ -37,9 +39,10 @@ type AllPolicySource interface {
 type Registry map[string]PolicyEngine
 
 // Multi evaluates a tenant's policies across every registered engine. It is
-// the multi-language successor to Configured (configured.go): where
-// Configured loads and prepares exactly one PolicyEngine's language, Multi
-// loads every language a tenant has authored in one call and prepares each
+// the multi-language successor to Configured (deleted by Phase 4a Task 4 —
+// see policy.go's own package doc): where Configured loaded and prepared
+// exactly one PolicyEngine's language, Multi loads every language a tenant
+// has authored in one call and prepares each
 // group with whatever engine Registry has for it, so a tenant free to author
 // Cedar, Rego, JSON, and XACML policies side by side gets all of them
 // evaluated — or, for a language nothing is registered for, an honest deny
@@ -63,10 +66,10 @@ type Multi struct {
 var _ PrincipalPolicy = Multi{}
 
 // NewMulti returns a Multi backed by source and engines. Both are required:
-// like Configured, Multi cannot be built with zero arguments, so it cannot
-// be a hardcoded, zero-configuration bypass any more than Configured can —
-// see TestNoExportedConstructorAllows in policy_test.go for how the no-allow
-// guard accounts for that.
+// like Configured before it, Multi cannot be built with zero arguments, so
+// it cannot be a hardcoded, zero-configuration bypass any more than
+// Configured could — see TestNoExportedConstructorAllows in policy_test.go
+// for how the no-allow guard accounts for that.
 //
 // Panics if any Registry entry's key disagrees with its own engine's
 // Language() (see Registry's own doc comment on why nothing downstream
@@ -275,8 +278,9 @@ var _ CompiledPolicySet = multiSet{}
 // Zero entries means PrepareAll loaded no policies for this tenant in any
 // language — a distinct, more specific fact than "every language's policies
 // were consulted and none matched," which is FoldVerdicts' own generic
-// default-deny text downstream. Configured (configured.go) drew the same
-// distinction for its one language; this is that same reasoning applied
+// default-deny text downstream. Configured drew the same distinction for
+// its one language (before Phase 4a Task 4 deleted it — see policy.go's own
+// package doc); this is that same reasoning applied
 // tenant-wide, with the language dropped from the message because the
 // absence is no longer one language's.
 func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.PolicyVerdict, error) {

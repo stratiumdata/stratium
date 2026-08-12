@@ -30,9 +30,10 @@ type GrantProbe struct {
 // do to a runtime decision, and this is precisely why C12's fold moved into
 // authz — a security property enforced in two places drifts.
 //
-// An engine error is not swallowed. It denies — fail-closed, the same as
-// Configured.Evaluate's own failure paths — and is also returned, so a
-// caller can distinguish "policy says no" from "we could not ask."
+// An engine error is not swallowed. It denies — fail-closed, the same
+// posture Multi.Evaluate and multiSet.Evaluate (multi.go) already take on
+// their own error paths — and is also returned, so a caller can distinguish
+// "policy says no" from "we could not ask."
 func Probe(ctx context.Context, set CompiledPolicySet, p GrantProbe) (bool, error) {
 	in := EvaluationInput{
 		Principal:   p.Principal,

@@ -107,45 +107,41 @@ func run(logger *slog.Logger) error {
 
 	repo := store.New(db, cfg.TenantID)
 
-	// policy.Multi, not Unconfigured: a real engine is wired in — registry
-	// (built above, from cfg.PolicyLanguages, before this process opened any
-	// network connection) holds every language this deployment enabled,
-	// default all four. Multi is what closes spec defect D10: a tenant whose
+	// policy.Multi is wired in with a real, non-empty registry (built above,
+	// from cfg.PolicyLanguages, before this process opened any network
+	// connection) holding every language this deployment enabled, default
+	// all four. Multi is what closes spec defect D10: a tenant whose
 	// policies.language names a language with no registered engine — because
 	// this deployment's operator left it out of STRATIUM_POLICY_LANGUAGES, or
 	// because a tenant authored in a language this build has never shipped —
 	// gets an honest deny naming that language (see Multi's own doc comment
-	// in internal/policy/multi.go and orphanVerdicts specifically), rather
-	// than the single-engine policy.Configured this replaced, which would
-	// have silently never loaded or evaluated it at all. Multi loads and
-	// prepares this tenant's policies fresh on every Decide call (no cache —
-	// see the Phase 2c plan's "caching is deliberately out of scope" and
-	// Task 5's and Task 6's own measurements of why). A tenant with no
-	// policies stored still denies at the principal leg, just as Unconfigured
-	// always did.
+	// in internal/policy/multi.go and orphanVerdicts specifically). Multi
+	// loads and prepares this tenant's policies fresh on every Decide call
+	// (no cache — see the Phase 2c plan's "caching is deliberately out of
+	// scope" and Task 5's and Task 6's own measurements of why). A tenant
+	// with no policies stored still denies at the principal leg.
 	//
-	// Unconfigured itself is not wireable here any more: pdpgrpc.NewServer
-	// takes a concrete policy.Multi (it needs PrepareAll for the
-	// delegation-creation gate, which Unconfigured — a bare PrincipalPolicy —
-	// does not expose), so a deployment that wants no policy engine at all
-	// would need an explicitly empty Multi (NewMulti(repo, policy.Registry{}))
-	// instead — not reachable through STRATIUM_POLICY_LANGUAGES today, since
-	// an empty configured value is treated as unset (see config.Load's own
-	// envOr-style default), only by code choosing to build one.
+	// A deployment that wants no policy engine at all today needs an
+	// explicitly empty Multi (NewMulti(repo, policy.Registry{})) — not
+	// reachable through STRATIUM_POLICY_LANGUAGES, since an empty configured
+	// value is treated as unset (see config.Load's own envOr-style default),
+	// only by code choosing to build one. pdpgrpc.NewServer takes a concrete
+	// policy.Multi specifically because it needs PrepareAll for the
+	// delegation-creation gate.
 	//
-	// Unconfigured, policy.Configured, policy.PolicySource, and
-	// store.LoadPolicies used to remain in the tree at this point, unused,
-	// with the decision of whether they still earned their keep left to a
-	// future task. Phase 4a Task 4 is that task, and it took the decision:
-	// all four are deleted. A Registry with one entry behaves identically to
-	// Configured with that entry's engine, so Configured was redundant with
-	// Multi even before considering that it was also worse than merely
-	// unused — Configured(source, cedar.New()) loaded exactly one language
-	// and silently ignored every policy a tenant wrote in any other, no
-	// error, no verdict, no audit trace, which is defect D10 itself, the
-	// defect this whole phase exists to eliminate. Keeping a redundant path
-	// shaped exactly like the bug around, on the theory that it might still
-	// "earn its keep," kept that bug wireable.
+	// Unconfigured (a bare, single-engine PrincipalPolicy with no allow-all
+	// variant), policy.Configured (which delegated to exactly one
+	// PolicyEngine), policy.PolicySource, and store.LoadPolicies are gone —
+	// Phase 4a Task 4 deleted all four (see internal/policy/policy.go's own
+	// package doc for the full history). A Registry with one entry behaves
+	// identically to Configured with that entry's engine, so Configured was
+	// redundant with Multi even before considering that it was also worse
+	// than merely unused — Configured(source, cedar.New()) loaded exactly
+	// one language and silently ignored every policy a tenant wrote in any
+	// other, no error, no verdict, no audit trace, which is defect D10
+	// itself, the defect this whole phase exists to eliminate. Keeping a
+	// redundant path shaped exactly like the bug around, on the theory that
+	// it might still "earn its keep," kept that bug wireable.
 	//
 	// repo satisfies both Store (pdpgrpc's own dependency interface) and
 	// policy.AllPolicySource structurally, so it needs no adapter to serve

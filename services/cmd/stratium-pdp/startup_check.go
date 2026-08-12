@@ -25,8 +25,7 @@ const sqlStateUndefinedObject = "42704"
 // the ownership split from a deployment convention (whoever wires up
 // STRATIUM_DATABASE_URL must remember not to grant this) into an enforced
 // invariant — the same reasoning that put the tenant check inside
-// audit.Verify rather than in a doc comment, and behind policy.Unconfigured
-// having no allow-all variant.
+// audit.Verify rather than in a doc comment.
 var ErrServingIdentityIsAuditOwner = errors.New(
 	"serving identity holds membership in stratium_audit_owner: it must never hold DDL rights over audit_chain")
 

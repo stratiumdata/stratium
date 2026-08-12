@@ -74,8 +74,8 @@ type StoredPolicy struct {
 	// evaluate ratio — see PolicyEngine's own doc comment). It is loaded now,
 	// ahead of that decision, so the next reader finds it already threaded
 	// through the store rather than needing a second migration-shaped change
-	// once caching actually lands. Do not delete this as dead: unlike Effect
-	// above, nothing about it can go stale by sitting unread — it is just
-	// early.
+	// once caching actually lands. Do not delete this as dead: unlike the
+	// policies.effect column discussed above, nothing about Version can go
+	// stale by sitting unread — it is just early.
 	Version int64
 }
