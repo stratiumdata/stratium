@@ -1,0 +1,30 @@
+-- Adds the per-delegation escalation threshold (spec §4.6.1, Phase 5 E9):
+-- the tier at or above which DelegationLeg's leg escalates instead of
+-- allowing outright, up to and including max_action_tier — see
+-- internal/authz/delegation.go's own doc comment for the closed band this
+-- column and max_action_tier together define.
+--
+-- Nullable, no default, and NULL means "never escalate" — not tier 0. That
+-- is the opposite of max_action_tier's own NOT NULL discipline, and
+-- deliberately so: REASONING is tier 0 (pkg/models/tier.go), so a column
+-- that defaulted to 0 would silently turn every delegation already in this
+-- table into "escalate on every action" the instant this migration ran. A
+-- row written before this migration reads escalate_at back as NULL, which
+-- pkg/models.Delegation.EscalateAt decodes as nil, the same "never
+-- escalate" behavior that row had before this column existed. Only a
+-- delegation written after this migration with an explicit value escalates
+-- at all.
+--
+-- CHECK, not a foreign key or enum: ActionTier has no lookup table, so an
+-- inline range check is what max_action_tier's own CHECK
+-- (000001_baseline.up.sql) already does for the same four-tier range.
+-- BETWEEN 0 AND 4 against a NULL column evaluates to NULL, and Postgres
+-- CHECK constraints only reject FALSE, never NULL/UNKNOWN — so the nullable
+-- column and this CHECK coexist with no separate "OR escalate_at IS NULL"
+-- clause needed.
+--
+-- No grant migration: delegations already has table-level SELECT (000005)
+-- and INSERT (000008) for stratium_app, and 000010's own comment establishes
+-- the precedent this repo follows — a table-level grant covers columns
+-- added to that table later.
+ALTER TABLE delegations ADD COLUMN escalate_at SMALLINT CHECK (escalate_at BETWEEN 0 AND 4);
