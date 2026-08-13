@@ -335,43 +335,49 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 }
 
 // C19 reads "with the PDP unreachable and no valid cache entry, every
-// surface denies." Its reason used to say "Phase 3: requires the PEP
-// client" — stale since Phase 3a: the client shipped, and
-// cmd/stratium-pep/hook_test.go's TestRunHook_UnreachablePDP_ExitsTwo
-// already proves an unreachable PDP denies, for the hook surface, with a
-// named reason ("could not reach"). That is real progress, but it is not
-// C19 itself, on two separate axes the property's own wording names:
+// surface denies." Its reason has already been corrected once, from "Phase
+// 3: requires the PEP client" to naming what was left after Phase 4+
+// (hook alone, of four surfaces); Phase 6 (mcp) and Phase 10 Tasks 1-3
+// (extauthz) have since landed and that text went stale a second time
+// without being updated — flagged by both of those tasks' own reports and
+// left for Phase 10 Task 4 to fix. It is still not a pass, on the same two
+// axes the property's own wording names, just a narrower gap than before:
 //
 //   - "every surface": spec §3.2 (A2) commits to four first-class surfaces —
-//     hook, mcp, proxy, extauthz. Only hook exists;
-//     cmd/stratium-pep/main.go's own package doc calls the other three
-//     "later surfaces over the same PDP call." A property naming "every
-//     surface" is not established by one of four.
+//     hook, mcp, proxy, extauthz. Three of four now exist and are proven
+//     against the real thing they enforce: hook and mcp against a real
+//     claude session, extauthz against a real Envoy
+//     (services/internal/store/extauthz_integration_test.go, Task 4).
+//     cmd/stratium-pep/main.go's own package doc now calls only "proxy" a
+//     later surface. A property naming "every surface" is still not
+//     established by three of four.
 //   - "no valid cache entry": this presupposes a cache with entries that can
 //     be valid or not. No PEP decision cache exists yet anywhere in this
 //     tree — the same absence that keeps C20 (the sibling property about a
-//     stale cache entry) skipped below. hook_test.go's own unreachable-PDP
-//     case has no cache in the picture at all, so it cannot yet distinguish
-//     "no valid entry" from "no cache mechanism to have an entry in."
+//     stale cache entry) skipped below, and that keeps C24 skipped for an
+//     analogous reason. Nothing built in this phase touches it.
 //
 // Classified NOT BUILT, not proven elsewhere: provenElsewhere requires the
-// property to hold, in full, somewhere this package cannot reach — but
-// three of the four surfaces the property's own wording commits to, and the
-// entire cache subsystem, do not exist anywhere in this tree, not just
-// here. TestRunHook_UnreachablePDP_ExitsTwo proves a real subset (one
-// surface, no cache dimension to even test), not the property C19 actually
-// states. Pointing provenElsewhere at it would be precisely the kind of
-// claim conformance_pointer_test.go exists to stop: a pointer whose named
-// test is real but does not prove what the property says. Converting this
-// to a pass would be forcing it just the same: unskip once mcp/proxy/
-// extauthz all exist and the decision cache lands, not before.
+// property to hold, in full, somewhere this package cannot reach — but one
+// of the four surfaces the property's own wording commits to, and the
+// entire cache subsystem, still do not exist anywhere in this tree, not
+// just here. The three surfaces that do exist each have their own real,
+// live-stack proof of "PDP unreachable/token-invalid denies" (hook, mcp,
+// and now extauthz), but no single test proves the property as C19 actually
+// states it — "every surface," not "three of four" — and none has a cache
+// dimension to test at all. Pointing provenElsewhere at any one of them
+// would be precisely the kind of claim conformance_pointer_test.go exists
+// to stop. Converting this to a pass would be forcing it just the same:
+// unskip once proxy exists and the decision cache lands, not before.
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	notBuilt(t, 19, "Phase 4+: the hook surface alone proves this today "+
-		"(cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), but C19 says "+
-		"'every surface' (hook, mcp, proxy, extauthz — spec §3.2 A2; only hook exists) "+
-		"'with no valid cache entry' (no PEP decision cache exists yet — same blocker as C20). "+
-		"Requires the remaining three surfaces and the decision cache.")
+	notBuilt(t, 19, "Phase 10+: three of the four surfaces C19 says 'every surface' now exist and are each "+
+		"proven against a live stack — hook (cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), "+
+		"mcp, and extauthz (internal/store/extauthz_integration_test.go: "+
+		"TestIntegration_Envoy_NoTokenDeniedNoFallback and its sibling proofs, against a real Envoy). "+
+		"'proxy' (spec §3.2 A2) remains unbuilt, and no PEP decision cache exists yet anywhere in this tree "+
+		"(same blocker as C20/C24) — 'no valid cache entry' has nothing to be tested against. "+
+		"Requires the remaining surface and the decision cache.")
 }
 
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
@@ -460,55 +466,44 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 }
 
 // C23 reads "on a non-blocking surface, escalate returns deny plus a
-// pending record." Its reason used to say "Phase 4: requires the extauthz
-// PEP mode" — stale in the same way C19's old "Phase 3: requires the PEP
-// client" was: Phase 4 (remaining surfaces) has since landed, and extauthz
-// still does not exist. cmd/stratium-pep/main.go's own package doc still
-// calls "mcp", "proxy", and "extauthz" alike "later surfaces over the same
-// PDP call" — only "hook" is wired. Same gap C19 already names for "every
-// surface" (spec §3.2 A2).
+// pending record." Its reason went stale twice over: first from "Phase 4:
+// requires the extauthz PEP mode" once Phase 5 shipped the response
+// *mapping* a non-blocking surface would need (pdpgrpc.DegradeEscalateToDeny,
+// proven directly by internal/pdpgrpc/nonblocking_test.go against every
+// reachable Effect — escalate degrades to deny with approval_id retained, an
+// ordinary deny fabricates no id, allow passes through unchanged, a
+// defensive nil fails closed), and a second time once Phase 10 Tasks 1-3
+// wired the extauthz mode itself into cmd/stratium-pep without this
+// property being reassessed — flagged by both of those tasks' own reports
+// and left for Task 4 to settle, per the phase plan.
 //
-// What Phase 5 genuinely closes is narrower than the whole surface: the
-// response *mapping* a non-blocking surface would need in order to degrade
-// correctly. EFFECT_ESCALATE has nothing a two-valued (allow/deny) surface
-// can return, so it must become a denial — but the pending approval's id
-// (DecideResponse.approval_id) must survive that translation unchanged, or a
-// retry after approval would have nothing to present. That mapping is
-// pdpgrpc.DegradeEscalateToDeny, proven directly by its own test
-// (internal/pdpgrpc/nonblocking_test.go) against every reachable Effect:
-// escalate degrades to deny with the id retained, an ordinary deny
-// fabricates no id, allow passes through unchanged, and a defensively
-// handled nil response fails closed to deny rather than allow. The response
-// Decide already sends every surface already carries what a non-blocking
-// surface needs; this is that fact, made explicit and tested — not a forced
-// pass on the property C23 actually states.
+// Phase 10 Task 4 is what closes the remaining gap: extauthz_integration_
+// test.go's TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_
+// ApprovedRetrySucceeds sends an escalating request through a REAL Envoy, in
+// front of a REAL stratium-pep extauthz, in front of a REAL stratium-pdp —
+// not a constructed CheckRequest — and gets back a 403 carrying a pending
+// approval's id in both a response header and the body text; approves that
+// row out of band, exactly as the control plane would (the PDP itself has
+// no UPDATE grant on approvals, E7); and confirms a retry then succeeds.
+// That is "on a non-blocking surface, escalate returns deny plus a pending
+// record" proven end to end, not merely the response-mapping fact Phase 5
+// proved in isolation — DegradeEscalateToDeny's own first real caller
+// (extauthz.go's checkResponseFromDecide) turned out to need no change, but
+// a helper being the right shape and a surface actually using it correctly,
+// live, are not the same claim, and only the second one is what C23 states.
 //
-// It cannot become a pass HERE for two independent reasons. The usual one:
-// this is a property about a surface's own translation of a response it
-// receives, a concept internal/authz's pure decision function has no way to
-// express even in principle — same shape as C16/C18/C19/C21/C22's own skips
-// in this file. The narrower one is specific to C23: its own wording says
-// "on a non-blocking surface" — an actual extauthz mode receiving an actual
-// bounded-latency call and actually returning "deny plus a pending record"
-// over Envoy's own wire protocol — and no such surface is wired into
-// cmd/stratium-pep or anywhere else in this tree. Proving the mapping a
-// surface would need is a real, tested fact; it is not the same claim as a
-// surface using it. Unskipping this needs the extauthz mode itself, same as
-// C19's own remaining gap.
-//
-// Classified NOT BUILT, same reasoning as C19 above: DegradeEscalateToDeny
-// is a real, passing test of a real, useful fact, but it proves a narrower
-// claim than "on a non-blocking surface, escalate returns deny plus a
-// pending record" — no non-blocking surface exists to make that return.
-// provenElsewhere is for a property proven in full elsewhere, not for a
-// supporting fact about a property that is not built yet.
+// It still cannot become a pass HERE, for the same reason C16/C18/C19/C21/
+// C22 above cannot: this is a property about a surface's own translation of
+// a response it receives, over a real wire protocol, a concept
+// internal/authz's pure decision function has no way to express even in
+// principle. That is a structural fact about this package, unchanged by
+// anything Task 4 built — the property is real and now proven, just never
+// provable at this layer, the same shape as every other provenElsewhere
+// pointer in this file.
 func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 	markRan(23)
-	notBuilt(t, 23, "Phase 5: the response mapping a non-blocking surface needs is proven directly at "+
-		"internal/pdpgrpc/nonblocking_test.go (DegradeEscalateToDeny) — EFFECT_ESCALATE degrades to deny "+
-		"with approval_id retained for a later retry, exactly what spec E5/§4.7 describes. Still requires "+
-		"the extauthz PEP mode itself (spec §3.2 A2; cmd/stratium-pep's own package doc still calls it a "+
-		"'later surface' — same gap C19 already names), which remains unbuilt.")
+	provenElsewhere(t, 23, "internal/store",
+		"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds")
 }
 
 func TestC24_ExpiredDelegationDenied(t *testing.T) {

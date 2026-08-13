@@ -151,10 +151,10 @@ func servicesRoot() (string, error) {
 
 // TestVerifyPointer_FindsRealTestFunctions is the positive case, run
 // against the exact pointers conformance_test.go wires into provenElsewhere
-// for C16, C18, C21, and C22. If a future rename ever broke one of those
-// pointers, this test — not just a full run of make conformance — names it
-// directly, without needing every one of the 25 conformance properties to
-// execute first.
+// for C16, C18, C21, C22, and C23. If a future rename ever broke one of
+// those pointers, this test — not just a full run of make conformance —
+// names it directly, without needing every one of the 25 conformance
+// properties to execute first.
 func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -174,6 +174,9 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 			"TestRunHook_Escalate_TimeoutStillPendingDenies",
 			"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
 			"TestDecideAndRelay_EscalationTimeout_Denies",
+		}},
+		{"C23", "internal/store", []string{
+			"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds",
 		}},
 	}
 	for _, tt := range tests {
