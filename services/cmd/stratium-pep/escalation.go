@@ -18,6 +18,29 @@
 // comment for why the split happened here rather than mcp.go reimplementing
 // the wait.
 //
+// resolveApproval reads three timeouts by VALUE, not a cfg struct — a second
+// reshape, for proxy.go's authorize (Task 2, proxy's own Phase 11), this
+// file's third caller. mcp.go's cfg is genuinely a hookConfig (mcp reuses a
+// session file exactly like hook does), so passing it through unmodified cost
+// nothing. proxy has no session file at all (its token arrives per call in
+// gRPC metadata, never a file this process's own operator wrote ahead of
+// time — see proxy.go's own package doc) and carries ListenAddr/TargetAddr
+// hookConfig has no room for, so proxyConfig and hookConfig are two
+// genuinely different Go types with no shared supertype to convert between.
+// The alternative this rejected: build a hookConfig value inside proxy.go
+// populated with only the three fields this function actually reads
+// (ConnectTimeout, ApprovalPollInterval, ApprovalTimeout) and PDPAddr/
+// AgentID/Subject/SessionFilePath left zero. That compiles, but it is a lie
+// wearing hookConfig's name — a reader grepping for hookConfig usages would
+// find a "hook" config that has never touched a hook, and the zeroed fields
+// are safe today only because resolveApproval happens not to read them, an
+// implementation detail this signature should not depend on a caller
+// noticing. Stating the three durations this function actually needs,
+// directly, is the smaller and more honest fix — the same reasoning Phase 6
+// already applied once to split resolveApproval out of awaitApproval in the
+// first place, applied a second time to the OTHER coupling this function
+// still carried.
+//
 // The approval id lives only in memory for the lifetime of one decision —
 // one runHook invocation, or one tools/call frame under mcp — and travels
 // only over the same gRPC connection Decide already uses -- never written to
@@ -51,7 +74,12 @@ func awaitApproval(
 	req *pdpgrpc.DecideRequest,
 	resp *pdpgrpc.DecideResponse,
 ) int {
-	effect, reason := resolveApproval(client, cfg, req, resp)
+	// context.Background(), not some ctx this function invents: runHook (hook.go) has no incoming
+	// context of its own to propagate -- a CLI invocation has no network peer that could
+	// disconnect mid-poll -- see resolveApproval's own doc comment for why passing anything else
+	// here (in particular runHook's own ConnectTimeout-scoped ctx variable, were it threaded this
+	// far) would be actively wrong, not merely unnecessary.
+	effect, reason := resolveApproval(context.Background(), client, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout, req, resp)
 	if effect == pdpgrpc.Effect_EFFECT_ALLOW {
 		return 0
 	}
@@ -83,9 +111,43 @@ func awaitApproval(
 // resolveEscalation (internal/pdpgrpc/escalation.go) documents for the server
 // side of this same exchange, so this function cannot itself turn a denial
 // into an allow no matter what GetApproval reports.
+//
+// connectTimeout/pollInterval/approvalTimeout are the exact three fields
+// every caller's own config type carries under those names (hookConfig,
+// proxyConfig) — passed by value rather than by a shared config struct; see
+// the package doc for why a concrete hookConfig parameter stopped being the
+// right shape once a caller with no session file needed this function too.
+//
+// ctx is a THIRD reshape this same caller forced, on top of the config-type
+// one above: proxy.go's authorize is the first caller of this function that
+// itself received a real, externally-sourced context (handleStream's own
+// stream.Context(), ultimately) rather than one it synthesized locally from
+// context.Background() with nothing upstream to inherit from (hook.go's
+// runHook and mcp_authorize.go's decideAndRelay are both exactly that --
+// see hook.go's own describeRPCError doc comment, which already states this
+// as settled fact: "every context this hook builds ... derives from
+// context.Background() with only a deadline, never a cancellable parent").
+// ctx is used ONLY as the PARENT for cancellation, never to shorten
+// approvalTimeout itself: context.WithTimeout(ctx, approvalTimeout) resolves
+// whichever of ctx's own cancellation or approvalTimeout comes first, so a
+// caller passing context.Background() (hook.go, mcp_authorize.go -- neither
+// has a deadline of its own to contribute) sees IDENTICAL behavior to before
+// this parameter existed, while proxy.go's real stream ctx additionally lets
+// this function stop promptly if the original caller disconnects mid-poll,
+// instead of continuing to hold a goroutine and spend GetApproval calls
+// against a call nothing is listening for anymore. This is why hook.go's own
+// ctx variable (built inside runHook, scoped to cfg.ConnectTimeout -- a much
+// SHORTER budget meant for one RPC's round trip, not an entire escalation
+// wait) is deliberately NOT what awaitApproval passes here: reusing it would
+// silently cap every hook escalation at ConnectTimeout instead of
+// ApprovalTimeout, the exact miscalibration this function's own
+// long-standing "independent of connectTimeout" contract (below) exists to
+// prevent. Each caller passes what it actually has to offer, not whatever
+// context.Context value happens to be lying around in its own scope.
 func resolveApproval(
+	ctx context.Context,
 	client pdpgrpc.PDPServiceClient,
-	cfg hookConfig,
+	connectTimeout, pollInterval, approvalTimeout time.Duration,
 	req *pdpgrpc.DecideRequest,
 	resp *pdpgrpc.DecideResponse,
 ) (effect pdpgrpc.Effect, reason string) {
@@ -101,15 +163,17 @@ func resolveApproval(
 			resp.GetReason())
 	}
 
-	// pollCtx bounds the ENTIRE wait at cfg.ApprovalTimeout — independent of
-	// cfg.ConnectTimeout, which governs one RPC's round trip, not how long a
-	// human may reasonably take to act. A timeout here must deny, never poll
-	// forever: an agent silently blocked past this deadline is
-	// indistinguishable from a hung tool call (C22).
-	pollCtx, cancel := context.WithTimeout(context.Background(), cfg.ApprovalTimeout)
+	// pollCtx bounds the wait at approvalTimeout AT THE LATEST -- independent
+	// of connectTimeout, which governs one RPC's round trip, not how long a
+	// human may reasonably take to act -- or ends sooner if ctx itself ends
+	// first (see this function's own doc comment for why that is safe for
+	// every caller, not just the one that motivated it). A timeout here must
+	// deny, never poll forever: an agent silently blocked past this deadline
+	// is indistinguishable from a hung tool call (C22).
+	pollCtx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
 
-	ok, pollReason := pollApproval(pollCtx, client, cfg.ApprovalPollInterval, approvalID)
+	ok, pollReason := pollApproval(pollCtx, client, pollInterval, approvalID)
 	if !ok {
 		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason)
 	}
@@ -119,12 +183,14 @@ func resolveApproval(
 	// correctness: resolveEscalation binds the approval to this exact
 	// request via input_digest (Task 3), so resending anything other than
 	// byte-identical tool/verb/raw_input/normalized_input would legitimately
-	// fail that check. A fresh ConnectTimeout budget, not whatever remains of
+	// fail that check. A fresh connectTimeout budget, not whatever remains of
 	// pollCtx: a slow-but-answering PDP on this one call is the same failure
 	// describeRPCError already names for the very first call, not a reason to
 	// keep counting against an escalation timeout the poll has already
-	// satisfied.
-	retryCtx, retryCancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
+	// satisfied. Still derived from ctx, for the identical early-exit reason
+	// pollCtx is: a caller that vanished during the poll has no more use for
+	// a retry that succeeds after it than for one that keeps polling.
+	retryCtx, retryCancel := context.WithTimeout(ctx, connectTimeout)
 	defer retryCancel()
 	req.ApprovalId = &approvalID
 	retryResp, err := client.Decide(retryCtx, req)

@@ -9,13 +9,36 @@
 // before it could be policed at all. Needing no agent change is the entire reason a proxy is
 // worth deploying over that shape (plan §SHAPE RULING).
 //
-// TASK 1 SCOPE. This task builds the forwarding machinery and its configuration only: the
-// codec, the handler, the dial to cfg.TargetAddr, and every config field the modes that
-// already exist require. It calls the PDP not at all -- authorize (below) is a fixed function
-// of nothing, and forward, the machinery that WOULD relay an allowed call, is unreachable from
-// any real caller because authorize never allows one. Task 2 adds the real decision; Task 3
-// documents this mechanism's limits (per-message authorization, opaque message bodies -- see
-// plan §P3/P4); Task 4 proves the whole thing against a real service.
+// TASK 2: THE REAL DECISION. Task 1 built the forwarding machinery with nothing to decide with;
+// authorize (below) now builds a DecideRequest from the call it was actually asked to make a
+// decision about -- tool is the full method (P1, catalogable per-tenant exactly like write_file
+// and extauthz's path), token comes from gRPC metadata's own "authorization: Bearer" key (P2),
+// and raw_input is that same metadata, JSON-encoded, with every credential header already
+// stripped (P3) -- calls the PDP, and either allows (forward runs, no longer unreachable),
+// blocks on EFFECT_ESCALATE (proxy IS a blocking surface, spec §4.6, unlike extauthz -- see the
+// ESCALATE BLOCKS section below), or denies. Task 3 documents this mechanism's remaining limits
+// (per-message authorization, opaque message bodies -- plan §P3/P4, consequences A and B); Task
+// 4 proves the whole thing against a real service.
+//
+// ESCALATE BLOCKS. Unlike extauthz.go's Check, which cannot hold a call open (Envoy's ext_authz
+// budget is milliseconds, not minutes -- pdpgrpc.DegradeEscalateToDeny) and so degrades
+// EFFECT_ESCALATE straight to a denial, this surface holds the caller's own stream open exactly
+// like hook and mcp already do, by calling escalation.go's resolveApproval -- the same
+// transport-free wait mcp_authorize.go's decideAndRelay already reuses unmodified for its own
+// blocking surface, not a second poll loop written for a third time. See escalation.go's own
+// package doc for what reusing it here required changing in that file, and why.
+//
+// NO REISSUE ON DENY. hook.go's runHook and mcp_authorize.go's decideAndRelay each attempt
+// exactly one reissueAndRetryDecide on a first EFFECT_DENY, because a session file
+// (session_file.go) gives them a real delegation id to mint a fresh token against if the denial
+// was actually an expired token rather than a policy refusal. This surface has no session file
+// (see NO SESSION FILE, below) and therefore no delegation id anywhere it could reissue against
+// -- spec K4 removed the bare delegation id specifically so there is no fallback identity left on
+// this wire at all. A caller-supplied bearer token the PDP denies is the caller's own problem to
+// refresh, not something this process can paper over by minting a replacement on its behalf.
+// extauthz.go's Check makes the identical call for the identical reason (it has no session file
+// either); this is not a proxy-specific policy, it is what "no session file" already implies
+// everywhere it applies.
 //
 // PASSTHROUGH CODEC + UNKNOWN-SERVICE HANDLER. This proxy has no target .proto for anything it
 // forwards -- that is the entire point of "transparent" -- so it cannot register a real service
@@ -54,27 +77,42 @@
 // to hand-roll against the platform's lowest-level supported primitives rather than depend on
 // someone else's convenience wrapper around them.
 //
-// DENY BY DEFAULT. A forwarding skeleton that allows is an open relay from the moment it is
-// deployed -- Phase 10's extauthz established the precedent this task follows: its Task 1 Check
-// denied every request unconditionally because no code path could produce an honest ALLOW yet
-// (extauthz.go's own package doc). authorize (below) is this file's equivalent: it never
-// contacts the PDP and never returns true, for any method, including one shaped to look
-// obviously harmless -- see authorize's own doc comment for why that includes reflection and
-// health-check methods by name, not just by construction. TestHandleStream_UnaryCall_DeniedAndTargetNeverContacted,
-// TestHandleStream_StreamingCall_DeniedAndTargetNeverContacted, and
-// TestHandleStream_ReflectionAndHealthCheckMethods_StillDenied (proxy_test.go) all assert this
-// against the FAKE TARGET's own received-call count, not merely against what the caller
-// observed -- a proxy that forwards and then errors has already leaked the request, which
-// checking only the caller's own response would miss entirely.
+// DENY BY DEFAULT, STILL. A forwarding skeleton that allows is an open relay from the moment it
+// is deployed -- Phase 10's extauthz established the precedent this task follows: its Task 1
+// Check denied every request unconditionally because no code path could produce an honest ALLOW
+// yet (extauthz.go's own package doc). Task 1's authorize (below) was that file's own equivalent:
+// a fixed function of nothing. Task 2 gives it a real PDP call, but the deny-by-default DISCIPLINE
+// does not loosen -- it grows more failure modes to hold the line on, not fewer: authorize still
+// classifies no method by name (no allowlist, no exemption for reflection or health-check methods
+// -- TestHandleStream_ReflectionAndHealthCheckMethods_StillDenied, proxy_test.go, is the test the
+// task's own binding constraint asks for by name, and it still passes unmodified, because
+// authorize never compared method against anything before and does not start now), and it fails
+// closed on every one of: no token, a malformed token, an unreachable PDP, a PDP application
+// error, a genuine EFFECT_DENY, and an escalation that times out -- every one of those denies AND
+// forwards nothing, asserted, per TestHandleStream_UnaryCall_DeniedAndTargetNeverContacted's own
+// precedent, against the FAKE TARGET's own received-call count wherever a test below can reach
+// one, not merely against what the caller observed: a proxy that forwards and then errors has
+// already leaked the request, which checking only the caller's own response would miss entirely.
+//
+// NO TOKEN, NO PDP CALL (P2, spec K4). A missing or malformed "authorization: Bearer" metadata
+// value denies WITHOUT ever calling Decide -- there is no fallback credential on this wire to ask
+// the PDP about instead (K4 removed the bare delegation id precisely so none exists), so a round
+// trip could not answer anything the missing credential does not already answer.
+// TestHandleStream_MissingToken_DeniesWithoutContactingPDP (over the real wire) and
+// TestAuthorize_MissingToken_DeniesWithoutContactingPDP/TestAuthorize_MalformedToken_DeniesWithoutContactingPDP
+// (direct, table-driven) all assert this against the PDP's own received-call count, mirroring
+// extauthz.go's identical M2/K4 tests for the analogous HTTP header.
 //
 // NO SESSION FILE. Unlike hook and mcp, there is no SessionFilePath field on proxyConfig below,
-// and unlike extauthz there is no separate credential-carrying field at all in Task 1's own
+// and unlike extauthz there is no separate credential-carrying field at all in this surface's own
 // config -- the same absence extauthzConfig's own doc comment calls out, for the same reason:
-// the token that will authenticate a forwarded call (plan §P2: gRPC metadata's own
+// the token that authenticates a forwarded call (plan §P2: gRPC metadata's own
 // "authorization: Bearer" key) arrives fresh on every call this process accepts, in the request
 // itself, never from a file this process's own operator wrote ahead of a session starting. A
 // reader who knows hook's session file should read this absence as that same deliberate design
-// carried over to a third transport, not an oversight repeated twice.
+// carried over to a third transport, not an oversight repeated twice. It is also why authorize
+// never attempts reissueAndRetryDecide on a DENY the way hook and mcp do -- see the package doc's
+// NO REISSUE ON DENY section above.
 //
 // FAIL CLOSED. Every required value in proxyConfig has no default (loadProxyConfigFromEnv,
 // below, names every missing one at once -- see config.go's requiredEnv), and a missing or
@@ -90,22 +128,31 @@
 // strictly more than any surface in this binary has handled before it (extauthz.go's own
 // package doc makes the identical claim about itself relative to hook and mcp; this file goes
 // one step further than extauthz, which terminates HTTP metadata, because forward's job is
-// relaying protobuf message BODIES too, which extauthz never touches). authorize's one denial
-// reason (below) is a fixed string naming no method, no metadata, and nothing about any
-// specific call -- Task 1 has nothing case-specific to say, and building a per-call string here
-// would be the first step toward exactly the local classification (D1) this binary exists to
-// refuse. forward and its two relay helpers never construct a log line or an error string from
-// a proxyFrame's payload or from any metadata.MD value under any circumstance; the one thing
-// stderr in this file ever carries is runProxyCmd's own startup configuration, the same
-// operator-supplied-not-request-derived line every other mode's runXCmd already writes once.
+// relaying protobuf message BODIES too, which extauthz never touches). authorize's denial
+// reasons ARE per-call as of this task (the PDP's own resp.GetReason() on a genuine DENY, or
+// describeRPCError's fixed vocabulary on a transport failure -- both the identical text hook.go
+// and extauthz.go already return their own callers, never text this file invents from a token or
+// a metadata value) -- but every one of them is returned to THIS CALL's own caller, inside the
+// codes.PermissionDenied status handleStream constructs, never written to stderr or any other log
+// this process keeps. decideRequestFromStream builds DecideRequest.RawInput once, from the
+// caller's own metadata with every credential header already stripped by omission (see
+// extractBearerTokenFromMetadata, below), and hands it to exactly one place -- the PDP, over the
+// same gRPC connection Decide already uses -- never to an error string, a log line, or anything
+// this process's own stderr ever sees. forward and its two relay helpers still never construct a
+// log line or an error string from a proxyFrame's payload or from any metadata.MD value under any
+// circumstance; the one thing stderr in this file ever carries is runProxyCmd's own startup
+// configuration, the same operator-supplied-not-request-derived line every other mode's runXCmd
+// already writes once.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -113,6 +160,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"stratium/internal/pdpgrpc"
 )
 
 // proxyFrame carries one gRPC message's raw wire bytes, and nothing else -- never unmarshaled
@@ -167,15 +216,18 @@ var proxyStreamDesc = &grpc.StreamDesc{
 
 // proxyConfig is what runProxyCmd needs to serve a transparent proxy: where to listen, where to
 // forward (TargetAddr), and the PDP address, agent identity, subject, connect timeout, and
-// escalation poll interval/timeout hook and mcp already require. Task 1's handleStream reads
-// none of the latter six -- authorize is a fixed function of nothing (see the package doc) --
-// loaded and validated now anyway, for the identical reason extauthzConfig loads PDPAddr,
-// AgentID, Subject, and ConnectTimeout before its own Task 1 Check ever read them (see that
-// file's package doc): the ENV VAR CONTRACT an operator must satisfy should not change shape
-// between this task and the one that first reads a given field. ApprovalPollInterval/
-// ApprovalTimeout are here, unlike extauthzConfig, because this surface -- like hook and mcp,
-// unlike extauthz -- can hold a call open while a human approves (plan §BLOCKING SURFACE);
-// extauthz never grew them because it cannot block at all (E5).
+// escalation poll interval/timeout hook and mcp already require. Task 1 loaded and validated all
+// eight before authorize (a fixed function of nothing, then) read any of the latter six, for the
+// identical reason extauthzConfig loads PDPAddr, AgentID, Subject, and ConnectTimeout before its
+// own Task 1 Check ever read them (see that file's package doc): the ENV VAR CONTRACT an operator
+// must satisfy should not change shape between this task and the one that first reads a given
+// field. As of this task authorize reads every one of them: PDPAddr is where runProxyCmd now
+// dials the PDP client authorize calls, AgentID/Subject become DecideRequest.AgentId/Subject on
+// every request decideRequestFromStream builds, ConnectTimeout bounds that call, and
+// ApprovalPollInterval/ApprovalTimeout bound resolveApproval's wait (escalation.go) -- here,
+// unlike extauthzConfig, because this surface -- like hook and mcp, unlike extauthz -- can hold a
+// call open while a human approves (plan §BLOCKING SURFACE, spec §4.6); extauthz never grew them
+// because it cannot block at all (E5).
 //
 // There is deliberately no SessionFilePath field -- see the package doc's NO SESSION FILE
 // section.
@@ -246,14 +298,17 @@ func loadProxyConfigFromEnv() (proxyConfig, error) {
 
 // proxyServer implements the passthrough handler every accepted connection runs through.
 // targetConn is forward's only means of reaching cfg.TargetAddr, dialed once at startup
-// (runProxyCmd) the same lazy way every other mode in this binary dials the PDP. There is
-// deliberately no cfg or pdpClient field here in Task 1, unlike extauthzServer: authorize
-// (below) is a fixed function of nothing, so there is nothing yet for either field to supply --
-// Task 2 adds them together with the code that first reads them, rather than carrying them
-// unread on this struct in the meantime (contrast proxyConfig's own doc comment, which is a
-// claim about the env var CONTRACT, not about this struct's internal layout).
+// (runProxyCmd) the same lazy way every other mode in this binary dials the PDP. client and cfg
+// are this task's own addition -- Task 1 carried neither, since authorize was a fixed function of
+// nothing with nothing for either to supply; they arrive now together with the code that first
+// reads them, mirroring extauthzServer's identical client/cfg pair one file over (its own doc
+// comment explains the same three pieces of configuration -- AgentID, Subject, ConnectTimeout --
+// this struct's cfg also supplies to every Decide call authorize makes).
 type proxyServer struct {
 	targetConn *grpc.ClientConn
+
+	client pdpgrpc.PDPServiceClient
+	cfg    proxyConfig
 }
 
 // newProxyGRPCServer builds the *grpc.Server every entry point into this mode constructs
@@ -279,10 +334,11 @@ func newProxyGRPCServer(handler grpc.StreamHandler) *grpc.Server {
 // handleStream is the grpc.UnknownServiceHandler for every method this process ever receives --
 // there is no other handler, because a transparent proxy registers no services of its own (see
 // the package doc). It is the single call site where authorize's verdict is read and acted on:
-// denied without ever touching forward, or -- once Task 2 gives authorize something real to
-// decide with -- forwarded. Task 1's authorize never returns true, so forward is unreachable
-// from any real caller through this function; proxy_test.go's TestForward_RelaysMessagesBothDirections
-// exercises it directly instead, bypassing this gate on purpose (see forward's own doc comment).
+// denied without ever touching forward, or -- as of this task, when authorize has something real
+// to decide with -- forwarded. stream.Context() is threaded into authorize (not just fullMethod,
+// as Task 1 left it) because that context is the only place the caller's own gRPC metadata --
+// P2's "authorization: Bearer" token among it -- is reachable; see decideRequestFromStream for
+// where it is actually read.
 func (p *proxyServer) handleStream(_ any, stream grpc.ServerStream) error {
 	fullMethod, ok := grpc.MethodFromServerStream(stream)
 	if !ok {
@@ -293,34 +349,211 @@ func (p *proxyServer) handleStream(_ any, stream grpc.ServerStream) error {
 		return status.Error(codes.Internal, "stratium-pep: proxy: could not determine the called method")
 	}
 
-	if allowed, reason := p.authorize(fullMethod); !allowed {
+	if allowed, reason := p.authorize(stream.Context(), fullMethod); !allowed {
 		return status.Error(codes.PermissionDenied, reason)
 	}
 	return p.forward(fullMethod, stream)
 }
 
-// authorize is Task 1's entire decision surface, and it decides nothing: it calls the PDP not
-// at all -- Task 2 wires that in -- and denies every method, unconditionally, the same
-// precedent extauthz's own Task 1 Check established for the identical reason (see the package
-// doc's DENY BY DEFAULT section). method is accepted, not merely ignored by convention, so
-// Task 2 can grow this function's body into a real Decide call without changing handleStream's
-// own call site or the tests anchored to it.
+// authorize is this task's entire decision surface: it maps ctx and method to a DecideRequest
+// (decideRequestFromStream, P1-P3), calls the PDP, and resolves to a final allow/deny -- blocking
+// on EFFECT_ESCALATE via resolveApproval (escalation.go) rather than degrading it the way
+// extauthz.go's non-blocking checkResponseFromDecide must (see the package doc's ESCALATE BLOCKS
+// section). The signature is still (bool, string): handleStream's own call site needed only ctx
+// threaded through, not a rework, because method was already accepted here in Task 1 for exactly
+// this reason (that function's own prior doc comment said so).
 //
-// There is no allowlist, no exemption for a method that looks like introspection (grpc.health.v1.Health,
-// grpc.reflection.v1alpha.ServerReflection) or anything else "obviously harmless" -- method is
-// read only to pass through unread, never compared against any name. Special-casing a method by
-// name would BE spec defect D1: this process classifying a call's meaning locally instead of
-// leaving that entirely to the PDP, the same defect hook.go's and mcp.go's own package docs
-// describe for their surfaces. TestHandleStream_ReflectionAndHealthCheckMethods_StillDenied
-// (proxy_test.go) is the test the task's own binding constraint asks for by name.
+// There is still no allowlist, no exemption for a method that looks like introspection
+// (grpc.health.v1.Health, grpc.reflection.v1alpha.ServerReflection) or anything else "obviously
+// harmless" -- method is read only to build the request, never compared against any name.
+// Special-casing a method by name would BE spec defect D1: this process classifying a call's
+// meaning locally instead of leaving that entirely to the PDP, the same defect hook.go's and
+// mcp.go's own package docs describe for their surfaces.
+// TestHandleStream_ReflectionAndHealthCheckMethods_StillDenied (proxy_test.go, unmodified since
+// Task 1) is the test the task's own binding constraint asks for by name -- it still passes
+// because a health/reflection-shaped method still carries no token in these tests, and denies on
+// that alone before authorize ever reaches a branch that could special-case a method name even if
+// one existed to reach.
 //
-// The reason string is fixed, not built from method or anything else about the call: Task 1 has
-// nothing case-specific to say -- every call is denied for the identical reason, there is no
-// decision logic yet -- and interpolating method into it here would be the first per-call
-// string this file constructs from request-derived data, which the package doc's NEVER LOG
-// section exists specifically to keep at zero.
-func (p *proxyServer) authorize(method string) (allowed bool, reason string) {
-	return false, "stratium-pep: proxy authorizes nothing yet; every call is denied by default"
+// No reissueAndRetryDecide on EFFECT_DENY -- see the package doc's NO REISSUE ON DENY section for
+// why this surface has no delegation id to reissue against at all, unlike hook.go and
+// mcp_authorize.go.
+func (p *proxyServer) authorize(ctx context.Context, method string) (allowed bool, reason string) {
+	req, err := decideRequestFromStream(ctx, method, p.cfg.AgentID, p.cfg.Subject)
+	if err != nil {
+		return false, fmt.Sprintf("stratium-pep: %s", err)
+	}
+
+	// Derived from ctx, not context.Background() -- the same reason extauthz.go's Check chains
+	// its own Decide call from the incoming Check ctx instead of discarding it (see that
+	// function's own doc comment): handleStream IS a gRPC handler with a real caller-supplied
+	// ctx already carrying the caller's own deadline/cancellation, and a caller that hangs up on
+	// this call should cancel the outbound Decide call too, rather than leaving it running for a
+	// response nothing is still waiting for.
+	decideCtx, cancel := context.WithTimeout(ctx, p.cfg.ConnectTimeout)
+	defer cancel()
+
+	resp, err := p.client.Decide(decideCtx, req)
+	if err != nil {
+		return false, fmt.Sprintf("stratium-pep: %s", describeRPCError(err, agentOrDelegationUnknownMsg))
+	}
+
+	switch resp.GetEffect() {
+	case pdpgrpc.Effect_EFFECT_ALLOW:
+		return true, ""
+	case pdpgrpc.Effect_EFFECT_ESCALATE:
+		// resolveApproval (escalation.go) owns everything from here: it polls GetApproval and
+		// either retries Decide with the resolved approval id or reports why not, bounding the
+		// wait at p.cfg.ApprovalTimeout AT THE LATEST -- the same bound hook.go's and
+		// mcp_authorize.go's identical calls rest on -- but, unlike either of those two callers,
+		// also ending early if ctx itself ends first: this handler's ctx is a real caller-supplied
+		// one (stream.Context(), ultimately), so a caller that disconnects while this call is
+		// still escalating stops the poll promptly instead of holding a goroutine and spending
+		// GetApproval calls against a stream nothing is listening to anymore (see resolveApproval's
+		// own doc comment for why passing ctx here is safe and why hook.go/mcp_authorize.go pass
+		// context.Background() instead, not this same ctx variable). A timed-out or denied
+		// approval both fall out of resolveApproval's own reason text; this function adds nothing
+		// case-specific on top of it.
+		effect, escReason := resolveApproval(ctx, p.client, p.cfg.ConnectTimeout, p.cfg.ApprovalPollInterval, p.cfg.ApprovalTimeout, req, resp)
+		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
+			return true, ""
+		}
+		return false, escReason
+	default:
+		// EFFECT_DENY, and any value this build does not recognize (the proto documents
+		// EFFECT_DENY as the zero value for exactly this case -- see hook.go's identical default
+		// case). Passed through unprefixed: the PDP's own verdict text, not a local diagnostic
+		// this process is synthesizing -- the same convention hook.go's and extauthz.go's own
+		// default DENY cases follow, so a human reading a denial can tell at a glance whether the
+		// PDP refused the call or this process failed before ever asking it one.
+		return false, resp.GetReason()
+	}
+}
+
+// proxyRequestMetadata is raw_input's JSON shape (plan §P3): the called method and the caller's
+// own gRPC metadata, with every credential-bearing entry already removed by
+// extractBearerTokenFromMetadata -- see that function's own doc comment for which and why. The
+// proxy's own counterpart to extauthz.go's requestMetadata (Method + Headers; extauthz also
+// carries a Path, which gRPC has no separate concept of -- the full method string already IS
+// both). Headers is map[string][]string, not extauthz's map[string]string, because gRPC metadata
+// is natively multi-valued (a header may legitimately repeat) and this process has no basis for
+// collapsing that before it is hashed into an audit record it was never asked to lose information
+// for. Method is carried here redundantly with DecideRequest.Tool for the identical reason
+// extauthz's requestMetadata carries its own Method/Path redundantly with DecideRequest.Tool:
+// raw_input is self-contained evidence for the audit chain it ends up hashed into, not a value a
+// reader must cross-reference a sibling field to make sense of. The json tags exist so this shape
+// round-trips predictably for a test (or an auditor's own tooling reading the audit chain) --
+// nothing in this binary ever decodes raw_input again after decideRequestFromStream builds it;
+// the PDP receives it, and reads it, as opaque bytes, exactly like hook.go's tool_input and
+// mcp_authorize.go's arguments.
+type proxyRequestMetadata struct {
+	Method  string              `json:"method"`
+	Headers map[string][]string `json:"headers"`
+}
+
+// decideRequestFromStream maps ctx's incoming gRPC metadata and method to the DecideRequest
+// authorize sends the PDP, or an error naming why no such request can be built at all -- this
+// surface's own counterpart to extauthz.go's decideRequestFromCheck, built from a stream's
+// context instead of an *authv3.CheckRequest because a proxied call's credential arrives in gRPC
+// metadata (P2), not an HTTP header Envoy has already parsed into a CheckRequest for that
+// process.
+//
+// The only failure mode is extractBearerTokenFromMetadata's own: no authorization metadata, or
+// one that is not a well-formed Bearer challenge (P2, spec K4 -- there is no fallback credential
+// this function could use instead). Every other field is unconditional: method is read only to
+// pass through, never inspected for meaning (see authorize's own doc comment on D1), and
+// agentID/subject are this process's own configured identity, never derived from the call.
+//
+// declared_tier and resource are never set on the returned request, the same omission hook.go,
+// mcp_authorize.go, and extauthz.go all make for the identical reason: this process has no real
+// tier or resource to declare, and both are re-derived server-side from tool/raw_input against
+// the tenant's own catalog regardless of what a caller claims -- see any of those three files'
+// own package docs. TestAuthorize_NeverSendsDeclaredTier asserts this on the wire, mirroring the
+// other three surfaces' identical tests.
+func decideRequestFromStream(ctx context.Context, method, agentID, subject string) (*pdpgrpc.DecideRequest, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+
+	token, stripped, err := extractBearerTokenFromMetadata(md)
+	if err != nil {
+		return nil, err
+	}
+
+	rawInput, err := json.Marshal(proxyRequestMetadata{Method: method, Headers: stripped})
+	if err != nil {
+		// method is a plain string and stripped is a flat map[string][]string with no cycles --
+		// Marshal cannot fail for this shape in practice. Reported rather than assumed away, the
+		// same caution decideRequestFromCheck's own identical Marshal call takes (extauthz.go).
+		return nil, fmt.Errorf("could not serialize request metadata: %w", err)
+	}
+
+	return &pdpgrpc.DecideRequest{
+		AgentId:  agentID,
+		Subject:  subject,
+		Tool:     method, // P1: the full method IS the tool identity.
+		RawInput: string(rawInput),
+		Token:    token,
+	}, nil
+}
+
+// extractBearerTokenFromMetadata is extauthz.go's extractBearerToken adapted to gRPC's own
+// metadata.MD shape (map[string][]string, since a header may repeat) instead of Envoy's flat
+// map[string]string -- the same single-pass extract-and-strip loop, the same case-insensitive
+// match against credentialHeaderNames (extauthz.go), reused directly rather than re-declared:
+// Phase 10 Task 2 already settled which headers count as a credential and why (see that var's own
+// doc comment), and this file adds no fourth header to that list for a fourth surface.
+//
+// md's keys are matched via strings.ToLower, never a direct map lookup on the key as received,
+// for the same reason extractBearerToken's own doc comment gives for doing the identical thing to
+// Envoy's headers: a client or an intermediary between it and this process gets one chance to
+// send a metadata key this function must still recognize regardless of how it capitalized the
+// name. google.golang.org/grpc/metadata's own FromIncomingContext (called by
+// decideRequestFromStream, above, before this function ever sees md) already lower-cases every
+// key on ITS way out -- verified directly against this module's own vendored source, not merely
+// documented -- which is exactly why relying on it here would look correct in every test that
+// only ever calls this function through that path. This function is called directly, with a
+// hand-built, deliberately NOT lower-cased metadata.MD, by
+// TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound and
+// TestExtractBearerTokenFromMetadata_StripsCredentialHeadersCaseInsensitively specifically
+// because routing those cases through a real incoming context would launder them through
+// FromIncomingContext's own normalization before this function ever ran, silently proving nothing
+// about THIS function's own defensiveness -- exercising it directly is the only way to prove it
+// does not merely inherit a guarantee a caller three lines up already happens to provide.
+//
+// An error means there is no credential here worth sending to the PDP at all: no authorization
+// metadata, one that is not a Bearer challenge, or one whose token is empty once the scheme is
+// removed. token and stripped are both zero values in every error case -- there is no partial
+// result a careless caller could mistake for a usable one.
+func extractBearerTokenFromMetadata(md metadata.MD) (token string, stripped map[string][]string, err error) {
+	stripped = make(map[string][]string, len(md))
+	var authValue string
+	found := false
+	for name, values := range md {
+		lower := strings.ToLower(name)
+		if credentialHeaderNames[lower] {
+			if lower == "authorization" && len(values) > 0 {
+				// RFC 7235 defines exactly one credential per Authorization header; a second,
+				// repeated value is non-conformant, not a shape this function has grounds to
+				// prefer the LAST of over the first. The first is also what every other value in
+				// values, credential or not, would have contributed FIRST on the wire, so taking
+				// it here is consistent with how a normal single-valued header is read.
+				authValue, found = values[0], true
+			}
+			continue
+		}
+		stripped[name] = values
+	}
+
+	if !found {
+		return "", nil, errors.New("no authorization metadata")
+	}
+	if !strings.HasPrefix(authValue, bearerPrefix) {
+		return "", nil, errors.New("authorization metadata is not a Bearer token")
+	}
+	token = strings.TrimPrefix(authValue, bearerPrefix)
+	if token == "" {
+		return "", nil, errors.New("authorization metadata carries an empty Bearer token")
+	}
+	return token, stripped, nil
 }
 
 // forward relays fullMethod between serverStream (the caller handleStream accepted) and
@@ -330,15 +563,20 @@ func (p *proxyServer) authorize(method string) (allowed bool, reason string) {
 // it preserves that distinction for it to branch on: "unary" here just means "exactly one
 // message crossed before the caller's own stub stopped sending," never a separate code path.
 //
-// Task 1 builds this and never calls it through the real dispatch: handleStream's authorize
-// gate denies every method first, so no test dialed against srv.handleStream ever reaches this
-// function. proxy_test.go's TestForward_RelaysMessagesBothDirections calls it directly instead,
-// via newProxyGRPCServer with a handler that invokes forward straight away (startForwardOnlyServer),
-// bypassing handleStream's gate on purpose while still sharing the SAME codec-registering
-// construction srv.handleStream's own callers use -- see newProxyGRPCServer's own doc comment
-// for why that sharing matters. This proves the relay mechanics are sound ahead of Task 2
-// putting a real gate in front of them and Task 4 proving the whole thing against a real
-// service.
+// Reachable through the real dispatch as of this task, on ALLOW (direct or escalated) --
+// handleStream's authorize gate no longer denies every method. proxy_test.go still also exercises
+// this function directly, via newProxyGRPCServer with a handler that invokes forward straight
+// away (startForwardOnlyServer), bypassing handleStream's gate on purpose while still sharing the
+// SAME codec-registering construction srv.handleStream's own callers use -- see
+// newProxyGRPCServer's own doc comment for why that sharing matters. That bypass remains useful
+// even now that the gate can open: it isolates the relay mechanics (headers, trailers, a target's
+// own error status) from PDP wiring entirely, which is what TestForward_RelaysResponseHeaders,
+// TestForward_RelaysTrailers, and TestForward_RelaysHeadersEvenWhenTargetErrorsBeforeAnyMessage
+// (which also checks the target's own error status/message, alongside the header fix it exists
+// for) all use it for -- proving forward "relays the response back faithfully" (this task's own
+// brief) as a property of forward alone, before TestHandleStream_Allow_ReachesTargetAndResponseReturns
+// and TestHandleStream_AllowedStream_ForwardsBothDirections prove the gate actually reaches it.
+// Task 4 still proves the whole thing against a real service.
 //
 // Adapted from the pattern github.com/mwitkow/grpc-proxy popularized (see the package doc's
 // LIBRARY VS STDLIB section) rather than copied from it: two goroutines, one per direction,
@@ -415,35 +653,53 @@ func relayCallerToTarget(serverStream grpc.ServerStream, targetStream grpc.Clien
 	}
 }
 
-// relayTargetToCaller copies every message the target sends back to the caller, forwarding the
-// target's own response headers ahead of the first one -- gRPC requires headers before the
-// first message on a stream, and a target's headers are only readable (Header() blocks until
-// they arrive) once it has sent something, so the first successful RecvMsg here is the one
-// point this can happen in the right order. A target that errors or completes before sending
-// anything never has headers explicitly forwarded this way; grpc-go's own ServerStream.SetHeader
-// doc comment covers what happens instead (metadata set but never explicitly sent still goes
-// out when the RPC's own status does) -- a known limitation of this relay shape, not a bug, and
-// Task 3's job to document alongside the mechanism's others (plan §P3/P4).
+// relayTargetToCaller forwards the target's own response headers, then copies every message the
+// target sends back to the caller, until the target's stream ends.
+//
+// Header() is called exactly once, UNCONDITIONALLY, before the relay loop below ever runs -- not
+// lazily on a first successful RecvMsg, which is what Task 1 shipped and which this task's own
+// mutation testing (see this task's report) proved drops a target's response headers outright for
+// a target that errors, or completes, before ever sending a single message: headerSent stayed
+// false forever on that path, so serverStream.SendHeader(md) was simply never reached, and
+// grpc-go's own fallback (bundling whatever was set via SetHeader, if anything, with the final
+// trailer) still only covers metadata SET on serverStream, never metadata the TARGET sent that
+// this file never read in the first place. Calling Header() first instead works for every
+// cardinality this relay claims to handle, per its own documented contract
+// (grpc.ClientStream.Header's doc comment): "It blocks if the metadata is not ready to read. If
+// the metadata is nil and the error is also nil, then the stream was terminated without headers,
+// and the status can be discovered by calling RecvMsg" -- so this call resolves correctly whether
+// the target goes on to send many messages, one, or none, and a nil md with a nil err (the
+// "terminated without headers" case) is handled by simply skipping SendHeader and falling through
+// to RecvMsg below, which is where the real terminal error actually surfaces (Header's own
+// implementation deliberately swallows a transport error it hit internally rather than returning
+// it, per that same doc comment -- "the user should get it by calling Recv()").
+//
+// Safe to call before the loop despite blocking, because this function already runs on ITS OWN
+// goroutine (forward's own CONCURRENCY note, above): relayCallerToTarget's goroutine keeps
+// forwarding the caller's own messages to the target concurrently while this one waits here, so a
+// client-streaming call (many caller messages before the target sends anything back) cannot
+// deadlock against this blocking on Header() first -- the two directions were already independent
+// before this change, and nothing about which one starts sending only after the other blocks
+// invalidates that.
 //
 // Returns io.EOF for a clean end (the target's own RPC completed) or the error that ended it
 // early; forward's own select reads targetStream.Trailer() only after this returns, per
 // grpc.ClientStream.Trailer's own doc comment (valid only once RecvMsg has returned non-nil).
 func relayTargetToCaller(serverStream grpc.ServerStream, targetStream grpc.ClientStream) error {
-	headerSent := false
+	md, err := targetStream.Header()
+	if err != nil {
+		return err
+	}
+	if md != nil {
+		if err := serverStream.SendHeader(md); err != nil {
+			return err
+		}
+	}
+
 	for {
 		var f proxyFrame
 		if err := targetStream.RecvMsg(&f); err != nil {
 			return err
-		}
-		if !headerSent {
-			md, err := targetStream.Header()
-			if err != nil {
-				return err
-			}
-			if err := serverStream.SendHeader(md); err != nil {
-				return err
-			}
-			headerSent = true
 		}
 		if err := serverStream.SendMsg(&f); err != nil {
 			return err
@@ -460,13 +716,13 @@ func relayTargetToCaller(serverStream grpc.ServerStream, targetStream grpc.Clien
 // job is making that fault deny, not making the process unkillable.
 //
 // cfg.PDPAddr/AgentID/Subject/ConnectTimeout/ApprovalPollInterval/ApprovalTimeout are loaded and
-// logged here like every other required value, even though Task 1's handleStream reads none of
-// them (see proxyConfig's own doc comment) -- a missing or malformed value among them must still
-// fail startup, not surface as a confusing per-call denial only once Task 2 starts reading them.
-// This function does not dial the PDP itself, unlike hook/mcp/extauthz's runXCmd: nothing in
-// Task 1 would ever use that connection, and opening one solely to validate that cfg.PDPAddr
-// parses would be a startup step with no caller -- Task 2 adds the dial together with the first
-// code that actually needs it.
+// logged here like every other required value -- as of this task, authorize reads every one of
+// them on every call (see proxyConfig's own doc comment), so a missing or malformed value among
+// them must still fail startup, not surface as a confusing per-call denial. This function now
+// dials the PDP too, mirroring hook/mcp/extauthz's own runXCmd: authorize (proxy.go) is the first
+// code in this file that needs that connection, so the dial arrives together with it, the same
+// "add the dial with the first caller, not ahead of one" choice Task 1 made for cfg.TargetAddr's
+// own dial below.
 func runProxyCmd(stderr io.Writer) int {
 	cfg, err := loadProxyConfigFromEnv()
 	if err != nil {
@@ -477,8 +733,7 @@ func runProxyCmd(stderr io.Writer) int {
 	// grpc.NewClient dials lazily -- the same non-blocking choice every other mode's PDP dial
 	// makes (runHookCmd, runMCPCmd, runExtauthzCmd) -- so this succeeding proves only that
 	// cfg.TargetAddr parses as a target, not that anything is listening there yet. An
-	// unreachable target is a forward-time failure (Task 2 onward, when forward first becomes
-	// reachable), not a startup one.
+	// unreachable target is a forward-time failure, not a startup one.
 	targetConn, err := grpc.NewClient(cfg.TargetAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create target client: %s\n", err)
@@ -486,13 +741,23 @@ func runProxyCmd(stderr io.Writer) int {
 	}
 	defer func() { _ = targetConn.Close() }()
 
+	// Dialed lazily the same way -- an unreachable PDP is an authorize-time failure (every call
+	// denies on it, per the package doc's FAIL CLOSED section), not a startup failure, the same
+	// way hook's and extauthz's own PDP dials never block startup on the PDP being up.
+	pdpConn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
+		return 1
+	}
+	defer func() { _ = pdpConn.Close() }()
+
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not listen on %s: %s\n", cfg.ListenAddr, err)
 		return 1
 	}
 
-	srv := &proxyServer{targetConn: targetConn}
+	srv := &proxyServer{targetConn: targetConn, client: pdpgrpc.NewPDPServiceClient(pdpConn), cfg: cfg}
 	grpcServer := newProxyGRPCServer(srv.handleStream)
 
 	// This process's own startup configuration, not request data -- see the package doc's NEVER

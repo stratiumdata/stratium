@@ -205,8 +205,12 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		// resolveApproval (escalation.go) owns everything from here: it polls GetApproval and
 		// either retries Decide with the resolved approval id or denies. This file still
 		// classifies nothing and decides nothing -- it blocks, then relays whatever resolveApproval
-		// decided, exactly as hook.go's awaitApproval does for its own transport.
-		effect, reason := resolveApproval(a.client, a.cfg, req, resp)
+		// decided, exactly as hook.go's awaitApproval does for its own transport. context.Background(),
+		// not some ctx this goroutine invents: decideAndRelay has no incoming per-frame context to
+		// propagate -- mcp.go relays over stdio, not a cancellable per-request transport -- see
+		// resolveApproval's own doc comment for why every caller passes what it actually has,
+		// never a locally-scoped ctx built for an unrelated, shorter budget.
+		effect, reason := resolveApproval(context.Background(), a.client, a.cfg.ConnectTimeout, a.cfg.ApprovalPollInterval, a.cfg.ApprovalTimeout, req, resp)
 		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
 			a.forward(line)
 			return
