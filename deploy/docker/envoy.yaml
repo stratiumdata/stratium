@@ -1,0 +1,106 @@
+# Static bootstrap for Task 4's real-Envoy proof: one HTTP listener with the
+# ext_authz filter pointed at stratium-pep's extauthz mode (the pep-extauthz
+# compose service), in front of a trivial echo upstream (the echo-upstream
+# compose service). docker-compose.yml's own comment on the envoy service
+# explains why this stack exists at all; services/internal/store/
+# extauthz_integration_test.go is what actually drives requests at the
+# listener below and checks what comes back.
+#
+# generate_request_id is off, and the one route's timeout is disabled,
+# deliberately, together: extauthz_integration_test.go reconstructs the exact
+# raw_input JSON stratium-pep hashed into the audit chain (proof 6) and
+# reuses that reconstruction, unchanged, as the RawInput of a direct retry
+# Decide call after an escalated request is approved out of band (proof 5).
+# Both need the header set Envoy hands to ext_authz to be a deterministic
+# function of what the test's own HTTP client sent -- a random per-request
+# x-request-id or a router-injected x-envoy-expected-rq-timeout-ms header
+# would otherwise land in that JSON and make the reconstruction (and the
+# retry's own input-digest match against the pending approval,
+# models.Approval.Verify) depend on timing the test does not control.
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: extauthz_proof_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 10000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: extauthz_proof
+                generate_request_id: false
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: backend
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: echo_upstream
+                            timeout: 0s
+                http_filters:
+                  # ext_authz first: every request is checked before the
+                  # router ever sees it. failure_mode_allow is set to false
+                  # explicitly, matching the brief's "fail closed everywhere"
+                  # constraint at the Envoy layer specifically -- it governs
+                  # what Envoy does if THIS PROCESS (pep-extauthz) is
+                  # unreachable, a different failure point from stratium-pep
+                  # extauthz's own handling of an unreachable PDP behind it
+                  # (extauthz.go's package doc, FAIL CLOSED), which already
+                  # denies as an ordinary CheckResponse rather than a
+                  # transport error. false is already Envoy's own default;
+                  # named here anyway, the same "no default trusted silently"
+                  # convention every STRATIUM_* config value in this repo
+                  # already follows.
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: ext_authz_pep
+                        timeout: 5s
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    # ext_authz_pep: stratium-pep extauthz. HTTP/2 (cleartext) is required
+    # explicitly -- Go's grpc-go server (what stratium-pep extauthz's own
+    # grpc.NewServer() speaks, over plain net.Listen with no TLS) only ever
+    # answers h2c, and Envoy's own cluster default is HTTP/1.1, which cannot
+    # carry a gRPC call at all.
+    - name: ext_authz_pep
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: ext_authz_pep
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: pep-extauthz, port_value: 9191 }
+
+    # echo_upstream: the trivial upstream. Plain HTTP/1.1 -- Envoy's default
+    # protocol -- since echo-upstream is an ordinary net/http server.
+    - name: echo_upstream
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: echo_upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: echo-upstream, port_value: 8080 }

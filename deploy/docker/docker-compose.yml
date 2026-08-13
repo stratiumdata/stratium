@@ -155,5 +155,129 @@ services:
     ports:
       - "50051"
 
+  # Fourth PDP instance, wired for one purpose: Task 4's real-Envoy proof
+  # (services/internal/store/extauthz_integration_test.go) needs a PDP that
+  # is safe to seed cedar policies, delegations, tool_catalog rows, and
+  # approvals into from a live HTTP request routed through a live Envoy --
+  # exactly the same reason pdp-narrow and pdp-resource above each exist
+  # instead of reusing pdp's own tenant-one, restated a third time: tenant-one
+  # already carries TestEndToEnd's own cedar policies and its own
+  # order-dependent proofs, and neither pdp-narrow's nor pdp-resource's
+  # tenant is touched by anything outside their own one test file either. A
+  # fourth tenant, touched by nothing but the extauthz proof, is what makes
+  # that proof reachable without an ordering dependency on any other test.
+  #
+  # Shares the same postgres instance as the three PDPs above (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart). Full default policy-language
+  # registry (STRATIUM_POLICY_LANGUAGES left unset), matching pdp and
+  # pdp-resource: the extauthz proof only ever needs cedar.
+  #
+  # Reached two different ways by the integration test: directly, over gRPC
+  # from the host (mint tokens, and — since stratium-pep extauthz has no way
+  # to attach approval_id to a retry, see pep-extauthz's own comment below —
+  # send the approved retry straight to this PDP rather than through Envoy);
+  # and indirectly, through pep-extauthz -> envoy, exactly as a real
+  # deployment's traffic would arrive.
+  pdp-extauthz:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-extauthz-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # See the "pdp" service's own comment on this variable above — same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+    ports:
+      - "50051"
+
+  # stratium-pep, running in extauthz mode: the ext_authz service the envoy
+  # service below calls on every request it fronts. Built from a separate
+  # Dockerfile (Dockerfile.pep, this directory) — see that file's own
+  # comment for why stratium-pdp's own Dockerfile is not simply reused with a
+  # different build target.
+  #
+  # AgentID and Subject are fixed here, not read off any request — the same
+  # fact extauthz.go's own package doc states for why this surface has no
+  # session file (the token, not the identity, is what arrives per request).
+  # That makes them compose-time constants a live HTTP request cannot carry,
+  # so extauthz_integration_test.go hardcodes the identical two values as Go
+  # constants (extauthzAgentID, extauthzSubject) rather than reading them
+  # from an env var this file would otherwise need to also publish — the
+  # same reasoning STRATIUM_TENANT_ID above already establishes for this
+  # compose file (a fixed value the test file's own constant must match, not
+  # a dynamic one the test discovers). The agent ID has no special meaning;
+  # it was generated once with no committed key or secret behind it.
+  #
+  # Never published to the host: only the envoy service below, and other
+  # containers on this compose network, ever dial pep-extauthz directly. A
+  # retry after an escalation is approved goes straight to pdp-extauthz
+  # instead (see that service's own comment) — decideRequestFromCheck
+  # (extauthz.go) never reads an approval_id off an incoming CheckRequest,
+  # by design (Task 3's own report: "the consuming side of a retry is a
+  # direct-PDP-call concern the proto already supports without extauthz
+  # needing new plumbing"), so there is no way to make Envoy carry one even
+  # if this port were exposed.
+  pep-extauthz:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.pep
+    # Dockerfile.pep's ENTRYPOINT is the bare binary with no subcommand
+    # baked in — main.go dispatches on args[0] (main.go's own package doc) —
+    # so the mode this container runs is a compose-level choice, here.
+    command: ["extauthz"]
+    depends_on:
+      - pdp-extauthz
+    environment:
+      STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR: :9191
+      STRATIUM_PEP_PDP_ADDR: pdp-extauthz:50051
+      STRATIUM_PEP_AGENT_ID: 72d38ebe-2e5c-4918-9e73-b0de3607fbfa
+      STRATIUM_PEP_SUBJECT: extauthz-integration@example.com
+      STRATIUM_PEP_CONNECT_TIMEOUT: 5s
+
+  # The trivial upstream envoy's ALLOW path routes to — see
+  # Dockerfile.echo-upstream and echo-upstream/main.go, both this directory.
+  # Never published to the host: only envoy ever routes to it; the
+  # integration test observes it exclusively through Envoy's own responses.
+  echo-upstream:
+    build:
+      # This directory, not the repo root like every other build: unlike
+      # stratium-pdp/stratium-pep, its Dockerfile needs nothing outside
+      # deploy/docker/echo-upstream/, so there is no reason to hand it the
+      # whole repo as build context.
+      context: .
+      dockerfile: Dockerfile.echo-upstream
+
+  # A real Envoy, configured by envoy.yaml (this directory) with the
+  # ext_authz HTTP filter pointed at pep-extauthz, in front of echo-upstream.
+  # This is Task 4's whole reason to exist: every surface built in this
+  # binary before extauthz was proven against the real thing it enforces —
+  # hook and mcp against a real `claude` session — and a hand-driven Check
+  # call (Tasks 1-3's own tests) proves the request/response MAPPING, not
+  # that a real Envoy, which may normalize, add, or reorder headers a
+  # constructed CheckRequest never would, actually drives it correctly.
+  #
+  # Image tag pinned to v1.37.0 to match go.mod's own
+  # github.com/envoyproxy/go-control-plane/envoy version exactly — that
+  # module is Envoy's own generated wire types for the ext_authz contract
+  # this stack exercises for real (extauthz.go's own package doc,
+  # DEPENDENCY), so running the Envoy release those types were generated
+  # from is what makes this a same-version proof rather than a
+  # close-enough one.
+  envoy:
+    image: envoyproxy/envoy:v1.37.0
+    depends_on:
+      - pep-extauthz
+      - echo-upstream
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "10000"
+
 volumes:
   pgdata:

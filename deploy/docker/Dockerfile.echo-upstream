@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+
+# Builds echo-upstream (./echo-upstream/main.go): the trivial upstream Task
+# 4's real-Envoy proof routes ALLOWed traffic to. Single-stage, unlike this
+# directory's own Dockerfile: that one builds stratium-pdp, a component this
+# repo ships, so it earns a distroless runtime stage with no shell or package
+# manager in it. echo-upstream is `make integration`'s own test fixture --
+# it never ships anywhere -- so building and running it from the same
+# golang:alpine stage is the smaller diff for the same result.
+FROM golang:1.25-alpine
+WORKDIR /src
+COPY echo-upstream/main.go .
+RUN go build -o /echo-upstream main.go
+ENTRYPOINT ["/echo-upstream"]

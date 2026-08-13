@@ -111,6 +111,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -208,6 +209,26 @@ var (
 	// full reasoning.
 	resourcePdpClient pdpgrpc.PDPServiceClient
 	resourceTenant    string
+
+	// envoyPdpClient and envoyTenant back extauthz_integration_test.go
+	// (Phase 10 Task 4): a fourth, independently configured PDP
+	// (deploy/docker/docker-compose.yml's pdp-extauthz service), its own
+	// tenant, touched by nothing else in this file — the same reasoning
+	// narrowPdpClient and resourcePdpClient's own comments already give,
+	// restated a third time in that file's own package doc rather than
+	// here. Dialed directly like the other three: extauthz_integration_
+	// test.go needs a host-reachable gRPC client both to seed fixtures via
+	// mintToken (IssueToken, the same real re-issuance path every other live
+	// proof in this file uses) and to send the direct, out-of-band retry
+	// Decide call proof 5 needs, which cannot go through Envoy at all (see
+	// that test file's own comment on why).
+	envoyPdpClient pdpgrpc.PDPServiceClient
+	envoyTenant    string
+
+	// envoyAddr is the real Envoy listener extauthz_integration_test.go
+	// drives every one of its six proofs against — an http.Client target,
+	// not a gRPC one, unlike every other package-level address here.
+	envoyAddr string
 )
 
 func TestMain(m *testing.M) {
@@ -225,20 +246,24 @@ func runTestMain(m *testing.M) int {
 	narrowTenant = os.Getenv("STRATIUM_IT_NARROW_TENANT_ID")
 	resourcePdpAddr := os.Getenv("STRATIUM_IT_PDP_RESOURCE_ADDR")
 	resourceTenant = os.Getenv("STRATIUM_IT_RESOURCE_TENANT_ID")
+	envoyPdpAddr := os.Getenv("STRATIUM_IT_PDP_EXTAUTHZ_ADDR")
+	envoyTenant = os.Getenv("STRATIUM_IT_EXTAUTHZ_TENANT_ID")
+	envoyAddr = os.Getenv("STRATIUM_IT_ENVOY_ADDR")
 	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
-		resourcePdpAddr == "" || resourceTenant == "" {
+		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" {
 		fmt.Fprintln(os.Stderr,
 			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
-				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, and "+
-				"STRATIUM_IT_RESOURCE_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
+				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, "+
+				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, and "+
+				"STRATIUM_IT_ENVOY_ADDR must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
 	tenants := map[string]bool{
-		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true,
+		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true,
 	}
-	if len(tenants) != 4 {
+	if len(tenants) != 5 {
 		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
-			"and the test's hardcoded second tenant must all be distinct from one another")
+			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, and the test's hardcoded second tenant must all be distinct from one another")
 		return 1
 	}
 
@@ -292,6 +317,27 @@ func runTestMain(m *testing.M) int {
 	}
 	defer closeResourceConn()
 	resourcePdpClient = resourceClient
+
+	envoyClient, closeEnvoyPdpConn, err := dialAndWaitForServing(ctx, envoyPdpAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-extauthz: %v\n", err)
+		return 1
+	}
+	defer closeEnvoyPdpConn()
+	envoyPdpClient = envoyClient
+
+	// Envoy itself has no gRPC health service to poll (dialAndWaitForServing
+	// is specific to the PDP's own grpc_health_v1 registration, which
+	// stratium-pep extauthz deliberately does not have — Task 1's own
+	// report, "no health-check service registered"; extauthz.go's package
+	// doc explains why adding one was left alone for this task too). An
+	// ordinary HTTP request Envoy can only answer once its own listener,
+	// its ext_authz cluster to pep-extauthz, and pep-extauthz's own gRPC
+	// listener are all up is the readiness signal instead.
+	if err := waitForEnvoy(ctx, envoyAddr); err != nil {
+		fmt.Fprintf(os.Stderr, "envoy: %v\n", err)
+		return 1
+	}
 
 	return m.Run()
 }
@@ -355,6 +401,39 @@ func waitForServing(ctx context.Context, conn *grpc.ClientConn) (time.Duration, 
 		resp, err := health.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
 		if err == nil && resp.GetStatus() == grpc_health_v1.HealthCheckResponse_SERVING {
 			return time.Since(start), nil
+		}
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// waitForEnvoy polls addr with a deliberately credential-free GET until it
+// gets back an ordinary HTTP response (any status code) rather than a
+// connection error — proof that a real TCP round trip through Envoy, its
+// ext_authz call to pep-extauthz, and pep-extauthz's own answer all
+// completed, not just that Envoy's listener accepted a connection. A
+// request with no authorization header always denies (extractBearerToken,
+// extauthz.go — K4, no fallback), so this doubles as a first, cheap witness
+// that the deny path this test suite's own proof 3 later asserts in detail
+// is already wired end to end before any fixture is seeded.
+func waitForEnvoy(ctx context.Context, addr string) error {
+	url := "http://" + addr + "/waiting-for-envoy"
+	client := &http.Client{Timeout: 2 * time.Second}
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("last error: %w: %w", lastErr, ctx.Err())
+		default:
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("build readiness request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			return nil
 		}
 		lastErr = err
 		time.Sleep(250 * time.Millisecond)
