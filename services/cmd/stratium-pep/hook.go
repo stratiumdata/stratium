@@ -8,27 +8,24 @@
 //
 // The boundary that matters: runHook reads tool_name and forwards
 // tool_input verbatim, as bytes, into DecideRequest.raw_input — always,
-// unconditionally. It also extracts DecideRequest.normalized_input
-// (normalize.go) and DecideRequest.resource (resource.go), but only by
-// field-name lookups keyed on tool_name: "the shell tool's argument lives
-// under .command," never "this text looks like rm -rf." Nothing here — in
-// this file, normalize.go, or resource.go — parses what tool_input's
-// content *means*: no per-tool special-casing of what a dangerous call
-// looks like, and resource.go's extraction stops at an identifier, never a
-// classification (see its own package doc — that boundary is higher-stakes
-// than normalized_input's). That classification is the PDP's job,
-// server-side, from raw_input and normalized_input together
-// (internal/authz.BuiltinTier); doing any of it here would be exactly the
-// predecessor's local-classifier defect (spec D1) in a new coat of paint.
-// toolVerbs below derives a verb from the tool *name* only, which is not
-// the same thing — see its doc comment.
-//
-// normalized_input can only help classification, never hurt it:
-// BuiltinTier's combining rule lets a positive destructive-or-external match
-// on raw_input win outright, before normalized_input is even consulted — so
-// a tool this hook does not recognize, or a field extraction that misses or
-// under-reports, degrades to raw-only classification, never below it. See
-// normalize.go's doc comment for the extraction table itself.
+// unconditionally — and sends nothing else derived from it. This file used
+// to also compute DecideRequest.normalized_input and .resource (normalize.go
+// and resource.go, both field-name lookups keyed on tool_name: "the shell
+// tool's argument lives under .command," never "this text looks like
+// rm -rf") and DecideRequest.verb (toolVerbs, a per-tool-name label, defined
+// below this comment until this file's own task deleted it). Spec §4.4.2 T3
+// deleted all three: the per-tenant tool_catalog table (Task 1) and the
+// PDP's own server-side extraction (internal/authz.ExtractFromCatalog /
+// ApplyExtraction, Task 2) now do everything those three tables did — read a
+// tenant-registered field name or verb for a tool, never infer one from
+// tool_input's content — from data the PDP itself trusts, rather than a
+// guess this process sent it. Nothing in this file parses what tool_input's
+// content *means*, and after this task there is nothing left in this file
+// that even parses tool_input's *shape*: no per-tool special-casing of what
+// a dangerous call looks like. That classification is, and was always meant
+// to be, entirely the PDP's job, server-side (internal/authz.BuiltinTier);
+// doing any of it here would be exactly the predecessor's local-classifier
+// defect (spec D1) in a new coat of paint.
 //
 // declared_tier is never set on the outgoing request, deliberately: the
 // field exists in the proto for callers that have a real tier to declare,
@@ -66,33 +63,6 @@ import (
 type hookStdin struct {
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
-}
-
-// toolVerbs labels a known Claude Code tool name with a generic verb.
-//
-// This is not classification. It is a label whose meaning the PDP's own
-// tier table is authoritative for, and BuiltinTier (internal/authz/tier.go)
-// classifies raw_input first and takes precedence over any verb whenever
-// raw_input is non-empty — so this map cannot itself soften or sharpen a
-// decision, only annotate it. An unrecognized tool name (every MCP tool,
-// "mcp__server__method", and anything added to Claude Code after this map
-// was written) deliberately maps to the zero value "": that is an honest
-// "unknown", left for the PDP to resolve from raw_input, not a guess.
-var toolVerbs = map[string]string{
-	"Bash":         "execute",
-	"BashOutput":   "read",
-	"KillShell":    "execute",
-	"Read":         "read",
-	"NotebookEdit": "write",
-	"Write":        "write",
-	"Edit":         "write",
-	"Glob":         "read",
-	"Grep":         "read",
-	"WebFetch":     "read",
-	"WebSearch":    "read",
-	"Task":         "execute",
-	"TodoWrite":    "write",
-	"SlashCommand": "execute",
 }
 
 // hookConfig is what runHook needs beyond stdin: the identity presented to
@@ -223,15 +193,14 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 	}
 
 	req := &pdpgrpc.DecideRequest{
-		DelegationId:    session.GetDelegationId(),
-		AgentId:         cfg.AgentID,
-		Subject:         cfg.Subject,
-		Tool:            in.ToolName,
-		Verb:            toolVerbs[in.ToolName],
-		RawInput:        string(in.ToolInput),
-		NormalizedInput: extractNormalizedInput(in.ToolName, in.ToolInput),
-		Resource:        extractResourceAttrs(in.ToolName, in.ToolInput),
-		// DeclaredTier: deliberately never set. See the package doc.
+		DelegationId: session.GetDelegationId(),
+		AgentId:      cfg.AgentID,
+		Subject:      cfg.Subject,
+		Tool:         in.ToolName,
+		RawInput:     string(in.ToolInput),
+		// Verb, NormalizedInput, Resource: none of these exist on the wire
+		// (Verb, NormalizedInput) or are ever set here (Resource) anymore —
+		// see the package doc. DeclaredTier: deliberately never set, same doc.
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)

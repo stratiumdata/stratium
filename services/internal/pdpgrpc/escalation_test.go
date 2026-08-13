@@ -56,7 +56,6 @@ func escalationFixture() (*fakeStore, *DecideRequest, *models.Delegation) {
 		AgentId:      agentID.String(),
 		Subject:      "requesting-subject@example.com",
 		Tool:         "Bash",
-		Verb:         "execute",
 		RawInput:     "rm -rf /tmp/scratch",
 	}
 	return fs, req, root
@@ -146,8 +145,15 @@ func TestDecide_Escalation_CreatesApprovalWithRootPrincipalAsApprover(t *testing
 	if a.ToolName != req.GetTool() {
 		t.Errorf("approval ToolName = %q, want %q", a.ToolName, req.GetTool())
 	}
-	if a.Action != req.GetVerb() {
-		t.Errorf("approval Action = %q, want %q", a.Action, req.GetVerb())
+	// Action traces back to the tenant's tool_catalog, not the request:
+	// DecideRequest carries no verb field at all after Task 3, and this
+	// fixture's "Bash" has no catalog row, so action.Verb — and therefore
+	// the approval's Action — is "" here, the same uncataloged-tool zero
+	// value TestApplyExtraction_UncatalogedToolLeavesActionAndResourceUnchanged
+	// (internal/authz/extract_test.go) and TestDecide_CatalogedVerbReachesAudit
+	// (server_test.go) already pin for the audit trail's own copy of it.
+	if a.Action != "" {
+		t.Errorf("approval Action = %q, want \"\" (Bash is not cataloged in this fixture)", a.Action)
 	}
 	if a.DerivedTier != models.ActionTierDestructive {
 		t.Errorf("approval DerivedTier = %v, want %v", a.DerivedTier, models.ActionTierDestructive)
@@ -201,7 +207,7 @@ func TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate(t *test
 	}
 	req := &DecideRequest{
 		DelegationId: actingID.String(), AgentId: agentID.String(),
-		Subject: "requesting-subject@example.com", Tool: "Bash", Verb: "execute",
+		Subject: "requesting-subject@example.com", Tool: "Bash",
 		RawInput: "rm -rf /tmp/scratch",
 	}
 	srv := NewServer(fs, escalationPolicy(), testConfig())

@@ -182,12 +182,15 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 
 	now := time.Now()
 	principal := authz.Principal{Subject: req.GetSubject()}
+	// Verb and NormalizedInput start unset, deliberately: DecideRequest no
+	// longer carries either (spec §4.4.2 T3 retired both from the wire
+	// alongside the PEP's per-tool tables that used to compute them). Both
+	// are populated below, per tool, only when the tenant's own catalog
+	// names this one — authz.ApplyExtraction — never from a caller's claim.
 	action := authz.Action{
-		Tool:            req.GetTool(),
-		Verb:            req.GetVerb(),
-		RawInput:        req.GetRawInput(),
-		NormalizedInput: req.GetNormalizedInput(),
-		DeclaredTier:    declaredTier,
+		Tool:         req.GetTool(),
+		RawInput:     req.GetRawInput(),
+		DeclaredTier: declaredTier,
 	}
 	resource := req.GetResource()
 
@@ -208,12 +211,12 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	}
 
 	// Extraction happens before tiers is even built, and touches only
-	// action.NormalizedInput and resource — never action.RawInput (see
-	// authz.ApplyExtraction's own doc comment). DeriveTier below re-scans
-	// RawInput for destructive-or-external evidence unconditionally
-	// (tier.go's destructiveEvidence), so the order extraction runs in
-	// relative to that scan cannot matter: nothing on this path can narrow
-	// what the evidence check sees.
+	// action.Verb, action.NormalizedInput, and resource — never
+	// action.RawInput (see authz.ApplyExtraction's own doc comment).
+	// DeriveTier below re-scans RawInput for destructive-or-external
+	// evidence unconditionally (tier.go's destructiveEvidence), so the order
+	// extraction runs in relative to that scan cannot matter: nothing on
+	// this path can narrow what the evidence check sees.
 	extracted := authz.ExtractFromCatalog(catalogEntries, action)
 	action, resource = authz.ApplyExtraction(extracted, action, resource)
 

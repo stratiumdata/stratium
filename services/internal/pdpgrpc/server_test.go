@@ -173,7 +173,6 @@ func wellFormedFixture() (*fakeStore, *DecideRequest) {
 		AgentId:      agentID.String(),
 		Subject:      "alice@example.com",
 		Tool:         "Bash",
-		Verb:         "read",
 	}
 	return fs, req
 }
@@ -277,6 +276,15 @@ func TestDecide_WellFormedRequestReachesADecision(t *testing.T) {
 // EFFECT_ALLOW back means the field was never wired.
 func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	fs, req := wellFormedFixture()
+	// wellFormedFixture's bare Bash call has no raw_input and, after Task 3,
+	// no verb either, so on its own it derives REASONING — indistinguishable
+	// from DerivedTier's own zero value, which would silently defeat the
+	// assertion below. A bare (not JSON-wrapped; this constructs the wire
+	// request directly, not through a real PEP) read-only command gives
+	// BuiltinTier's raw-input classifier positive evidence to derive a
+	// specific, non-zero tier instead, restoring this test's ability to tell
+	// "really computed READ_ONLY" apart from "never set at all".
+	req.RawInput = "ls -la"
 	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
 	resp, err := srv.Decide(context.Background(), req)
@@ -320,27 +328,6 @@ func TestDecide_ApprovalIDEmptyWhenNotEscalating(t *testing.T) {
 	}
 }
 
-// normalized_input must reach the derivation the same way raw_input does.
-// internal/authz's TestBuiltinTier_* prove the classification itself (more
-// severe of RawInput/NormalizedInput wins); this proves the field actually
-// travels from the wire request into the Action Decide derives from, rather
-// than being parsed and dropped.
-func TestDecide_NormalizedInputReachesDerivation(t *testing.T) {
-	fs, req := wellFormedFixture()
-	req.RawInput = "ls"
-	req.NormalizedInput = "rm -rf /"
-	srv := NewServer(fs, denyAllPolicy(), testConfig())
-
-	resp, err := srv.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Decide() error = %v", err)
-	}
-	if resp.GetDerivedTier() != int32(models.ActionTierDestructive) {
-		t.Errorf("DerivedTier = %d, want %d (DESTRUCTIVE): normalized_input must reach BuiltinTier",
-			resp.GetDerivedTier(), models.ActionTierDestructive)
-	}
-}
-
 // The catalog Task 1 wires into tiers here must reach the real server path,
 // not just the pure authz package: a bare Read call — a path, no verb, no
 // shell-command-shaped raw_input — must derive READ_ONLY through the
@@ -351,7 +338,6 @@ func TestDecide_NormalizedInputReachesDerivation(t *testing.T) {
 func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
 	fs, req := wellFormedFixture()
 	req.Tool = "Read"
-	req.Verb = ""
 	req.RawInput = "/tmp/notes.txt"
 	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
@@ -369,19 +355,26 @@ func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
 // regression guard for the resource dimension: fakeStore's zero-value
 // catalog (nil — no rows for any tenant, the state of every deployment
 // before an operator adds a row) must leave req.GetResource() reaching the
-// delegation leg exactly as it does today. wellFormedFixture's own Bash/read
-// call with no raw_input derives READ_ONLY (verbTiers), comfortably under
-// the fixture's INTERNAL_MODIFY ceiling, so ALLOW here is attributable only
-// to the resource constraint actually matching — not to the ceiling check
-// never being reached.
+// delegation leg exactly as it does today. wellFormedFixture's own bare
+// Bash call — no raw_input, and after Task 3 no verb either, since neither
+// exists on the wire for an uncataloged tool to supply — has nothing for
+// BuiltinTier to classify and derives REASONING (tier 0, DeriveTier's own
+// UnknownTier floor), comfortably under the fixture's INTERNAL_MODIFY
+// ceiling, so ALLOW here is attributable only to the resource constraint
+// actually matching — not to the ceiling check never being reached.
 //
-// This is the resource half of the property; the tier half — that the
-// wire's normalized_input must still reach derivation with no catalog rows
-// — already has its own standing test, TestDecide_NormalizedInputReachesDerivation
-// above, which continues to pass unmodified through this task's change (see
-// authz.ApplyExtraction's own doc comment, which names both tests as proof
-// its not-cataloged branch is exercised end to end, not just at the pure
-// function layer).
+// This is the resource half of the property. The tier half — that
+// ApplyExtraction's not-cataloged branch leaves Action untouched, byte for
+// byte, so a call to an uncataloged tool derives identically to how it did
+// before this function existed — is internal/authz's own
+// TestApplyExtraction_UncatalogedToolLeavesActionAndResourceUnchanged
+// (extract_test.go); TestDecide_CatalogDerivesReadOnlyForBareReadCall just
+// above is the real-server-path proof that this holds all the way through
+// Decide for an uncataloged tool, with nothing but tool and raw_input on the
+// wire. Task 3 retired normalized_input from the wire entirely, so there is
+// no longer a dedicated "wire-supplied normalized_input passes through
+// unchanged" test to point to here — there is no wire value left for a
+// not-cataloged branch to pass through in the first place.
 func TestDecide_NoCatalogRowsPassesWireResourceThroughUnchanged(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.chain[0].ResourceConstraints = map[string]string{"id": "wire-supplied-resource-id"}
@@ -432,6 +425,66 @@ func TestDecide_CatalogedToolReplacesWireResourceForDelegationLeg(t *testing.T) 
 	}
 }
 
+// TestDecide_CatalogedVerbReachesAudit is Task 3's own addition, proving the
+// verb decision that task made: DecideRequest no longer carries a verb field
+// at all (cmd/stratium-pep's toolVerbs table, which used to populate it, is
+// deleted), so the tenant's own tool_catalog row is now the only source —
+// internal/authz.ExtractFromCatalog/ApplyExtraction, proven in isolation by
+// TestExtractFromCatalog_CarriesVerbFromCatalogRowRegardlessOfRawInput and
+// TestApplyExtraction_CatalogedToolReplacesWireValuesEvenWhenExtractionIsEmpty
+// (extract_test.go). This is the real-server-path proof that the derived
+// verb actually reaches somewhere a caller can observe: appendAudit
+// (server.go) writes action.Verb into audit.Entry.Action unconditionally, on
+// every decision, so a verb that never left ApplyExtraction would leave
+// every audit row for a cataloged tool as uninformative as an uncataloged
+// one — the exact plumbed-but-unconsumed shape ToolCatalogEntry.Verb was in
+// before this task (pkg/models/catalog.go's own doc comment on that field).
+func TestDecide_CatalogedVerbReachesAudit(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		catalog  []models.ToolCatalogEntry
+		wantVerb string
+	}{
+		{
+			name:     "cataloged tool: audit carries the catalog's own verb",
+			toolName: "search_docs",
+			catalog:  []models.ToolCatalogEntry{{ToolName: "search_docs", ActionTier: models.ActionTierReadOnly, Verb: "search"}},
+			wantVerb: "search",
+		},
+		{
+			// No catalog row for this tool (or for any tool: fs.catalog is
+			// left at its nil zero value) — there is no wire verb left to
+			// fall back to either, so the audit row's Action must be "",
+			// not a guess. This is the same uncataloged branch
+			// TestApplyExtraction_UncatalogedToolLeavesActionAndResourceUnchanged
+			// pins at the pure-function layer.
+			name:     "uncataloged tool: audit carries no verb",
+			toolName: "Bash",
+			catalog:  nil,
+			wantVerb: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, req := wellFormedFixture()
+			fs.catalog = tt.catalog
+			req.Tool = tt.toolName
+			srv := NewServer(fs, denyAllPolicy(), testConfig())
+
+			if _, err := srv.Decide(context.Background(), req); err != nil {
+				t.Fatalf("Decide() error = %v", err)
+			}
+			if len(fs.appended) != 1 {
+				t.Fatalf("AppendAudit called %d times, want 1", len(fs.appended))
+			}
+			if got := fs.appended[0].Action; got != tt.wantVerb {
+				t.Errorf("audit entry Action = %q, want %q", got, tt.wantVerb)
+			}
+		})
+	}
+}
+
 // TestDecide_CatalogEntryCannotMaskDestructiveEvidence is the evidence-rule
 // property proven through the real server wiring, not just the pure authz
 // functions (internal/authz/extract_test.go's
@@ -447,7 +500,6 @@ func TestDecide_CatalogEntryCannotMaskDestructiveEvidence(t *testing.T) {
 		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
 	}}
 	req.Tool = "Read"
-	req.Verb = "read"
 	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
 	srv := NewServer(fs, denyAllPolicy(), testConfig())
 
@@ -529,7 +581,6 @@ func TestDecide_PolicySeesEvidenceProtectedDerivedTier(t *testing.T) {
 		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
 	}}
 	req.Tool = "Read"
-	req.Verb = "read"
 	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
 
 	capture := &capturingVerdictSet{}

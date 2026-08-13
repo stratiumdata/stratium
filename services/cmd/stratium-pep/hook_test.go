@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -755,11 +754,29 @@ func TestRunHook_EffectUnset_DeniesByZeroValue(t *testing.T) {
 	}
 }
 
+// TestRunHook_RequestCarriesRawInputAndNoDeclaredTier is the wire-level proof
+// of this file's entire contract after spec §4.4.2 T3: raw_input travels
+// unconditionally and nothing else is ever derived from it. Task 3 deleted
+// three test functions that used to live here, each proving a PEP-side
+// extraction table actually reached the wire --
+// TestRunHook_RequestCarriesNormalizedInput (normalize.go's
+// extractNormalizedInput), TestRunHook_RequestCarriesResourceAttrs and
+// TestRunHook_RequestNeverCarriesClassificationOrHierarchy (resource.go's
+// extractResourceAttrs), and TestRunHook_VerbDependsOnlyOnToolName_NotOnInput
+// (hook.go's toolVerbs) -- because the tables themselves are deleted: there
+// is nothing left to extract, so there is nothing left for those tests to
+// prove reached the wire. The Resource assertion below is that property's
+// replacement, folded into this test rather than kept as its own: an
+// adversarial input (carrying "classification"/"hierarchy" under their own
+// names, exactly what the deleted classification-boundary test used)
+// combined with a non-nil, non-empty check is a STRICTLY stronger claim than
+// either deleted test made individually -- an empty map can never carry
+// those two keys, or any others, regardless of what tool_input contains.
 func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
 	client := startFakePDP(t, fake)
 
-	const toolInput = `{"command":"rm -rf /"}`
+	const toolInput = `{"command":"rm -rf /","classification":"TOP-SECRET","hierarchy":"nato"}`
 	cfg := testCfg(t)
 	// Overwrite testCfg's random delegation ID with a known one, so the
 	// identity assertion below can compare against something this test
@@ -792,155 +809,8 @@ func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 		t.Errorf("request identity = (agent=%q subject=%q delegation=%q), want (%q, %q, %q)",
 			req.GetAgentId(), req.GetSubject(), req.GetDelegationId(), cfg.AgentID, cfg.Subject, wantDelegationID)
 	}
-}
-
-// End-to-end proof that runHook wires extractNormalizedInput's result onto
-// the outgoing request, alongside the unconditional raw_input -- the unit
-// tests in normalize_test.go cover extraction itself, this covers that
-// runHook actually calls it and sends what it returns.
-func TestRunHook_RequestCarriesNormalizedInput(t *testing.T) {
-	tests := []struct {
-		name     string
-		tool     string
-		input    string
-		wantNorm string
-	}{
-		{"Bash command extracted", "Bash", `{"command":"ls -la"}`, "ls -la"},
-		{"Read file_path extracted", "Read", `{"file_path":"/tmp/notes.txt"}`, "/tmp/notes.txt"},
-		{"unrecognized tool yields empty normalized input", "WebFetch", `{"url":"https://example.com"}`, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
-			client := startFakePDP(t, fake)
-
-			var stdout bytes.Buffer
-			code := runHook(stdinBody(tt.tool, tt.input), &stdout, client, testCfg(t))
-			if code != 0 {
-				t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
-			}
-
-			req := fake.lastRequest()
-			if req == nil {
-				t.Fatal("PDP never received a request")
-			}
-			if req.GetNormalizedInput() != tt.wantNorm {
-				t.Errorf("normalized_input = %q, want %q", req.GetNormalizedInput(), tt.wantNorm)
-			}
-			if req.GetRawInput() != tt.input {
-				t.Errorf("raw_input = %q, want the exact tool_input bytes %q -- normalized_input must never replace it",
-					req.GetRawInput(), tt.input)
-			}
-		})
-	}
-}
-
-// End-to-end proof that runHook wires extractResourceAttrs's result onto the
-// outgoing request -- resource_test.go covers extraction itself in
-// isolation, this covers that runHook actually calls it and sends what it
-// returns.
-func TestRunHook_RequestCarriesResourceAttrs(t *testing.T) {
-	tests := []struct {
-		name     string
-		tool     string
-		input    string
-		wantResc map[string]string
-	}{
-		{"Read file_path becomes resource id and type", "Read", `{"file_path":"/tmp/notes.txt"}`,
-			map[string]string{"id": "/tmp/notes.txt", "type": "file"}},
-		{"Bash command becomes resource id, no type", "Bash", `{"command":"ls -la"}`,
-			map[string]string{"id": "ls -la"}},
-		// The input deliberately also carries "command" and "file_path" --
-		// recognized field names, just attached to an unrecognized tool.
-		// TestExtractResourceAttrs_UnrecognizedToolSendsEmptyMapNotNilNotError's
-		// own doc comment explains why this matters: a benign fixture whose
-		// field names never overlap the recognized vocabulary (e.g. a bare
-		// {"url":...}) cannot tell "correctly recognized nothing" apart from
-		// "guessed and found nothing to guess" -- this fixture can.
-		{"unrecognized tool yields empty resource map even with recognized field names present",
-			"WebFetch", `{"url":"https://example.com","command":"ls","file_path":"/etc/shadow"}`,
-			map[string]string{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
-			client := startFakePDP(t, fake)
-
-			var stdout bytes.Buffer
-			code := runHook(stdinBody(tt.tool, tt.input), &stdout, client, testCfg(t))
-			if code != 0 {
-				t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
-			}
-
-			req := fake.lastRequest()
-			if req == nil {
-				t.Fatal("PDP never received a request")
-			}
-			if got := req.GetResource(); !maps.Equal(got, tt.wantResc) {
-				t.Errorf("resource = %v, want %v", got, tt.wantResc)
-			}
-		})
-	}
-}
-
-// The wire-level half of the D1 guarantee, mirroring why
-// TestRunHook_RequestCarriesRawInputAndNoDeclaredTier insists on a real gRPC
-// round trip rather than a mock: resource_test.go proves extractResourceAttrs
-// itself never produces these keys, across every tool and an adversarial
-// input, but it cannot see a stray literal added directly to the
-// DecideRequest struct at the call site in hook.go. This proves that too, on
-// the actual wire message the fake PDP received -- not just a Go value this
-// process happened to construct.
-func TestRunHook_RequestNeverCarriesClassificationOrHierarchy(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
-	client := startFakePDP(t, fake)
-
-	// The input itself carries classification/hierarchy under their own
-	// names, exactly as TestExtractResourceAttrs_KeysAreLimitedToIDAndType's
-	// adversarialInput does -- proving the ban holds even when tempting data
-	// is sitting right there in tool_input.
-	const toolInput = `{"file_path":"/tmp/x","classification":"TOP-SECRET","hierarchy":"nato"}`
-	var stdout bytes.Buffer
-	code := runHook(stdinBody("Read", toolInput), &stdout, client, testCfg(t))
-	if code != 0 {
-		t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
-	}
-
-	resource := fake.lastRequest().GetResource()
-	if _, ok := resource["classification"]; ok {
-		t.Errorf("request resource = %v, must never carry \"classification\" -- CheckCap consumes exactly this key", resource)
-	}
-	if _, ok := resource["hierarchy"]; ok {
-		t.Errorf("request resource = %v, must never carry \"hierarchy\" -- CheckCap consumes exactly this key", resource)
-	}
-}
-
-// Proves "verb derived from the tool name only, not the input" directly: the
-// same tool name with two very different inputs must produce the same verb.
-// If it did not, the verb would itself be a second, informal classification
-// channel alongside raw_input -- exactly what the task brief singles out as
-// not fine ("Deriving anything from tool_input is not fine").
-func TestRunHook_VerbDependsOnlyOnToolName_NotOnInput(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
-	client := startFakePDP(t, fake)
-
-	var stdout bytes.Buffer
-	if code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, testCfg(t)); code != 0 {
-		t.Fatalf("runHook() (harmless input) = %d, want 0", code)
-	}
-	harmlessVerb := fake.lastRequest().GetVerb()
-
-	stdout.Reset()
-	if code := runHook(stdinBody("Bash", `{"command":"rm -rf /"}`), &stdout, client, testCfg(t)); code != 0 {
-		t.Fatalf("runHook() (destructive input) = %d, want 0", code)
-	}
-	destructiveVerb := fake.lastRequest().GetVerb()
-
-	if harmlessVerb != destructiveVerb {
-		t.Errorf("verb changed with input: %q (harmless) vs %q (destructive), want identical", harmlessVerb, destructiveVerb)
-	}
-	if harmlessVerb != toolVerbs["Bash"] {
-		t.Errorf("verb = %q, want the tool-name label %q", harmlessVerb, toolVerbs["Bash"])
+	if resc := req.GetResource(); len(resc) != 0 {
+		t.Errorf("resource = %v, want empty -- this file extracts nothing anymore, for any tool or input", resc)
 	}
 }
 

@@ -4,14 +4,19 @@
 // error correlated to the request's own id. See mcp.go's package doc for the relay properties this
 // must not disturb (id fidelity, no serialization, fail-closed on transport faults), and hook.go's
 // package doc for the classification boundary this file draws identically: an MCP tool name is
-// never assumed to mean anything by itself, and nothing here inspects what a tool's arguments
-// contain beyond the field-name lookups normalize.go and resource.go already do for hook.
+// never assumed to mean anything by itself, and -- after spec §4.4.2 T3 deleted this file's own
+// field-name lookups alongside hook.go's normalize.go/resource.go/toolVerbs -- nothing here inspects
+// a tool's arguments at all. The request this file builds carries only the tool name and the
+// arguments verbatim, as raw_input; everything else the PDP once received as a caller's claim
+// (verb, normalized_input, resource) it now derives itself, server-side, from the tenant's own
+// tool_catalog row for that tool (internal/authz.ExtractFromCatalog / ApplyExtraction) when one
+// exists, exactly as it does for hook.go's requests.
 //
 // EVERY REQUEST THIS FILE BUILDS OMITS declared_tier, THE SAME AS hook.go's. The PDP re-derives the
-// tier from tool/verb/raw_input/normalized_input regardless of what a caller claims, so a caller
-// that has no real tier to declare (this proxy, exactly like the hook, never does) gains nothing by
-// guessing and risks exactly the defect this whole binary exists not to reintroduce (D1) if a
-// future edit ever adds one "just to be helpful." TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier
+// tier from tool, raw_input, and the tenant's own catalog regardless of what a caller claims, so a
+// caller that has no real tier to declare (this proxy, exactly like the hook, never does) gains
+// nothing by guessing and risks exactly the defect this whole binary exists not to reintroduce (D1)
+// if a future edit ever adds one "just to be helpful." TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier
 // asserts this on the wire, mirroring hook_test.go's identical assertion for the other surface.
 package main
 
@@ -156,16 +161,16 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	}
 
 	req := &pdpgrpc.DecideRequest{
-		DelegationId:    session.GetDelegationId(),
-		AgentId:         a.cfg.AgentID,
-		Subject:         a.cfg.Subject,
-		Tool:            frame.Params.Name,
-		Verb:            toolVerbs[frame.Params.Name],
-		RawInput:        string(frame.Params.Arguments),
-		NormalizedInput: extractNormalizedInput(frame.Params.Name, frame.Params.Arguments),
-		Resource:        extractResourceAttrs(frame.Params.Name, frame.Params.Arguments),
-		// DeclaredTier: deliberately never set -- see this file's own package doc and hook.go's;
-		// the reasoning is identical for both surfaces.
+		DelegationId: session.GetDelegationId(),
+		AgentId:      a.cfg.AgentID,
+		Subject:      a.cfg.Subject,
+		Tool:         frame.Params.Name,
+		RawInput:     string(frame.Params.Arguments),
+		// Verb, NormalizedInput, Resource: none of these exist on the wire
+		// (Verb, NormalizedInput) or are ever set here (Resource) anymore --
+		// see this file's own package doc. DeclaredTier: deliberately never
+		// set -- see this file's own package doc and hook.go's; the
+		// reasoning is identical for both surfaces.
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.ConnectTimeout)

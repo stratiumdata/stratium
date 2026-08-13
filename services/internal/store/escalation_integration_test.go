@@ -146,7 +146,6 @@ func escalationDecideRequest(delegationID, agentID uuid.UUID, subject string, ap
 		AgentId:      agentID.String(),
 		Subject:      subject,
 		Tool:         "Bash",
-		Verb:         "execute",
 		RawInput:     escalationRawInput,
 		ApprovalId:   approvalID,
 	}

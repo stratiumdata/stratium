@@ -1296,7 +1296,6 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 		AgentId:      agentID.String(),
 		Subject:      "live-orphan-subject@example.com",
 		Tool:         "Bash",
-		Verb:         "read",
 	})
 	if err != nil {
 		t.Fatalf("Decide() against pdp-narrow error = %v, want a decision", err)
@@ -1423,7 +1422,6 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 			AgentId:      agentID.String(),
 			Subject:      subject,
 			Tool:         "Read",
-			Verb:         "read",
 			Resource:     resource,
 		})
 		if err != nil {
@@ -1911,7 +1909,6 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      agentID.String(),
 			Subject:      "alice@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2061,7 +2058,6 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      otherAgentID.String(),
 			Subject:      "mallory@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		if resp != nil {
 			t.Fatalf("Decide() response = %+v, want nil", resp)
@@ -2122,7 +2118,6 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      agentID.String(),
 			Subject:      "carol@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2222,7 +2217,6 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      agentID.String(),
 			Subject:      "dave@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2282,7 +2276,14 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      agentID.String(),
 			Subject:      "erin@example.com",
 			Tool:         "Bash",
-			Verb:         "delete", // -> ActionTierDestructive (see authz's verbTiers)
+			// Bash carries no catalog entry (DefaultCatalog's own doc
+			// comment) and DecideRequest carries no verb field at all after
+			// spec §4.4.2 T3, so a destructive RawInput -- not a verb -- is
+			// what this proof now needs to reach ActionTierDestructive: raw
+			// input's own regex classifier (authz.classifyInput) matches
+			// "rm -rf" directly, the same mechanism a real Bash tool call
+			// would trigger.
+			RawInput: "rm -rf /tmp/erin-ceiling-proof",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2344,7 +2345,6 @@ func TestEndToEnd(t *testing.T) {
 			AgentId:      agentID.String(),
 			Subject:      "alice@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		baselineLatency = time.Since(callStart)
 		if err != nil {
@@ -2376,7 +2376,6 @@ func TestEndToEnd(t *testing.T) {
 					AgentId:      agentID.String(),
 					Subject:      "alice@example.com",
 					Tool:         "Bash",
-					Verb:         "read",
 				})
 				switch {
 				case err == nil && resp != nil:
@@ -2591,7 +2590,6 @@ deny if {
 			AgentId:      heidiAgentID.String(),
 			Subject:      subject,
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2660,7 +2658,6 @@ deny if {
 			AgentId:      ivanAgentID.String(),
 			Subject:      "ivan@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		fourEngineLatency = time.Since(callStart)
 		if err != nil {
@@ -2689,7 +2686,6 @@ deny if {
 					AgentId:      ivanAgentID.String(),
 					Subject:      "ivan@example.com",
 					Tool:         "Bash",
-					Verb:         "read",
 				})
 				switch {
 				case err == nil:
@@ -2876,12 +2872,12 @@ deny if {
 			Subject:      "frank@example.com",
 			Tool:         "Read",
 			// Read is catalogued READ_ONLY (Phase 3c), so this sits UNDER the
-			// INTERNAL_MODIFY ceiling rather than exactly at it. Verb no longer
-			// reaches derivation for a catalogued tool. What this call
-			// establishes is unchanged and is all the proof below needs: the
-			// tool itself is permitted, so the denial that follows is
-			// attributable to the tier and not to the tool check.
-			Verb: "update",
+			// INTERNAL_MODIFY ceiling rather than exactly at it. DecideRequest
+			// carries no verb field at all after spec §4.4.2 T3, so there is
+			// nothing left to set here anyway. What this call establishes is
+			// unchanged and is all the proof below needs: the tool itself is
+			// permitted, so the denial that follows is attributable to the
+			// tier and not to the tool check.
 		})
 		if err != nil {
 			t.Fatalf("Decide() at the granted ceiling: error = %v, want a decision", err)
@@ -2897,15 +2893,15 @@ deny if {
 			AgentId:      delegationGateAgentID.String(),
 			Subject:      "frank@example.com",
 			Tool:         "Read",
-			Verb:         "delete",
-			// The tier has to come from the input, not the verb: Read's catalog
-			// entry pins a catalogued tool's tier, and a verb cannot raise it.
-			// A destructive raw input can — that is the evidence rule in
-			// DeriveTier, and routing this proof through it means the same call
-			// also demonstrates that a benign tool name cannot mask a hostile
-			// payload. Read stays the tool because it is the only one proof10's
-			// clamp granted; anything else would deny at the tool check and
-			// prove nothing about the ceiling.
+			// The tier has to come from the input, not a verb -- which no
+			// longer exists on the wire at all (spec §4.4.2 T3): Read's
+			// catalog entry pins a catalogued tool's tier, and only a
+			// destructive raw input can raise above it. That is the evidence
+			// rule in DeriveTier, and routing this proof through it means the
+			// same call also demonstrates that a benign tool name cannot mask
+			// a hostile payload. Read stays the tool because it is the only
+			// one proof10's clamp granted; anything else would deny at the
+			// tool check and prove nothing about the ceiling.
 			RawInput: `{"command":"rm -rf /var/data"}`,
 		})
 		if err != nil {
@@ -3129,7 +3125,6 @@ allow if {
 			AgentId:      ginaAgentID.String(),
 			Subject:      subject,
 			Tool:         "Read",
-			Verb:         "read",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -3150,12 +3145,23 @@ allow if {
 		// denied at runtime, using the SAME delegation — the delegation
 		// leg's own ApprovedTools check, independent of what the principal
 		// leg says.
+		//
+		// RawInput carries a bare, non-destructive command so this call
+		// derives READ_ONLY via BuiltinTier's raw-input classifier: Bash has
+		// no catalog entry and (after spec §4.4.2 T3) no verb on the wire
+		// either, so an empty RawInput here would derive REASONING (tier 0)
+		// — which gina-tier-ceiling-internal-modify's own `derived_tier > 0`
+		// condition rejects, denying at the PRINCIPAL leg for an unrelated
+		// reason and masking the delegation-leg property this subtest
+		// exists to prove. A non-zero tier is what makes the denial
+		// attributable to ApprovedTools specifically, the same way it was
+		// before this task when a wire-supplied verb produced it instead.
 		bashResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
 			DelegationId: resp.GetDelegationId(),
 			AgentId:      ginaAgentID.String(),
 			Subject:      subject,
 			Tool:         "Bash",
-			Verb:         "read",
+			RawInput:     "ls -la",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -3346,7 +3352,6 @@ allow if {
 			AgentId:      agentID.String(),
 			Subject:      "alice@example.com",
 			Tool:         "Bash",
-			Verb:         "read",
 		})
 		if resp != nil {
 			t.Fatalf("Decide() response = %+v, want nil: a decision must not escape a failed audit write", resp)

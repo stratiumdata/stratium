@@ -1,15 +1,22 @@
-// extract.go is the PDP's own field extraction (spec §4.4.2 T2): pulling a
-// tool call's resource identity and command out of raw_input by the field
-// names a tenant's tool_catalog row registered for that tool. It replaces
-// the PEP-side extraction cmd/stratium-pep/normalize.go and resource.go
-// perform today (Task 3 deletes that code); this file draws the identical
-// boundary theirs did — a schema map, never a policy — because moving WHERE
-// extraction runs does not change WHAT it is allowed to do: see resource.go's
-// own package doc for the classification boundary this file must not cross
-// either (spec §3.9 R1/R3).
+// extract.go is the PDP's own field extraction (spec §4.4.2 T2/T3): pulling
+// a tool call's resource identity, command, and verb out of raw_input and
+// the tenant's own tool_catalog row for that tool. It replaces the PEP-side
+// extraction cmd/stratium-pep/normalize.go, resource.go, and hook.go's
+// toolVerbs table used to perform — Task 3 (spec §4.4.2 T3) deleted all
+// three outright once this file could derive everything they did, itself,
+// from data the PDP already trusts. This file draws the identical boundary
+// they did — a schema map, never a policy: it may look up WHICH field or
+// column holds a value, by name, but may never inspect what a value MEANS —
+// because moving WHERE extraction runs does not change WHAT it is allowed to
+// do (spec §3.9 R1/R3). A PEP willing to mislabel a call was equally willing
+// to extract wrongly (Phase 3b's original argument for why raw_input travels
+// unconditionally, never replaced); a catalog row is tenant-authored
+// configuration, not a per-call claim, but the boundary this file must not
+// cross is the same one regardless of who is asking it to extract: this file
+// answers "which field/column", never "what does it mean".
 //
 // Structurally simpler than its PEP-side predecessors, not merely relocated:
-// normalizedInputFields/resourceIDFields each name a tool's field with a
+// normalizedInputFields/resourceIDFields each named a tool's field with a
 // short-circuiting LIST of candidate spellings ({"file_path", "path"}),
 // because a hardcoded table had to guess which one a given tool used. A
 // tool_catalog row does not guess — an operator names exactly one field per
@@ -17,7 +24,10 @@
 // firstNamedField-style walk, and no third near-identical table
 // (resourceFieldTypes) naming a resource TYPE by field name: ToolCatalogEntry
 // (pkg/models) carries no type column, so this file cannot emit one and does
-// not try to.
+// not try to. toolVerbs' verb guess needed no fallback list — one tool name,
+// one label — but it still needed a whole second table keyed on a Claude
+// Code-specific vocabulary; ToolCatalogEntry.Verb replaces it with one more
+// column on the row this file already reads.
 package authz
 
 import (
@@ -33,8 +43,22 @@ import (
 // value) — ApplyExtraction treats the two differently, so collapsing them
 // into a single "found nothing" signal would lose the distinction its caller
 // actually needs.
+//
+// Verb is not a raw_input field lookup like ResourceID and Command — it is
+// the matched row's own Verb column, copied straight through. Task 2 left
+// ToolCatalogEntry.Verb unconsumed by design (that field's own doc comment
+// in pkg/models/catalog.go), deferring the decision to Task 3: retire
+// DecideRequest.verb (the PEP-computed field it replaces) alongside
+// normalized_input, and have the PDP derive it here instead, keyed on the
+// same tool-name match ResourceID/Command already use. The alternative —
+// leave DecideRequest.verb on the wire with nothing left to populate it,
+// now that cmd/stratium-pep's toolVerbs table is deleted — is exactly the
+// plumbed-but-unconsumed shape this project's house style rules out, just
+// moved from "a catalog column nothing reads" to "a wire field nothing
+// sends."
 type ExtractedInput struct {
 	Cataloged  bool
+	Verb       string
 	ResourceID string
 	Command    string
 }
@@ -43,18 +67,23 @@ type ExtractedInput struct {
 // tool_catalog rows, never DefaultCatalog(), which carries tiers only and
 // registers no field name at all — and, when found, pulls the resource
 // identity and command out of a.RawInput using that row's ResourceField and
-// CommandField.
+// CommandField, and copies the row's Verb straight through.
 //
-// Field lookup only, never value inspection: the only two case analyses here
-// are on a field NAME drawn from the catalog row, and neither ever asks what
-// the matched field's VALUE means beyond "is this a non-empty JSON string" —
-// so this function has no path that could read a "classification" or
-// "hierarchy" attribute out of raw_input, regardless of what the catalog row
-// names or what raw_input contains (spec §3.9 R3). A field that is absent,
-// present but not a JSON string, or present but empty all read as "this call
-// did not carry it" — the same convention firstNamedField
-// (cmd/stratium-pep/normalize.go) used at the edge, kept here because the
-// question has not changed, only which table answers it.
+// Field lookup only, never value inspection, for ResourceID and Command: the
+// only two case analyses here are on a field NAME drawn from the catalog
+// row, and neither ever asks what the matched field's VALUE means beyond "is
+// this a non-empty JSON string" — so this function has no path that could
+// read a "classification" or "hierarchy" attribute out of raw_input,
+// regardless of what the catalog row names or what raw_input contains (spec
+// §3.9 R3). A field that is absent, present but not a JSON string, or
+// present but empty all read as "this call did not carry it" — the same
+// convention cmd/stratium-pep's now-deleted firstNamedField applied at the
+// edge, kept here because the question has not changed, only which table
+// answers it. Verb needs no such case analysis at all: it is not read out of
+// a.RawInput by name, it is the matched row's own column, so there is no
+// field-presence question to get wrong and no way for it to vary with what a
+// given call's raw_input happens to contain (see
+// TestExtractFromCatalog_CarriesVerbFromCatalogRowRegardlessOfRawInput).
 //
 // entries is scanned linearly rather than indexed by tool name first: a
 // tenant's catalog is expected to hold tens of rows, not thousands, this
@@ -66,7 +95,7 @@ func ExtractFromCatalog(entries []models.ToolCatalogEntry, a Action) ExtractedIn
 		if e.ToolName != a.Tool {
 			continue
 		}
-		out := ExtractedInput{Cataloged: true}
+		out := ExtractedInput{Cataloged: true, Verb: e.Verb}
 		obj := parseJSONObject(a.RawInput)
 		if e.ResourceField != nil {
 			out.ResourceID = jsonStringField(obj, *e.ResourceField)
@@ -92,24 +121,31 @@ func ExtractFromCatalog(entries []models.ToolCatalogEntry, a Action) ExtractedIn
 // — a tenant with no catalog rows, or a call to a tool the tenant's catalog
 // does not name, must derive identically to how it did before this function
 // existed — and it holds per TOOL, not only for a tenant with zero rows
-// overall: TestDecide_NormalizedInputReachesDerivation and
-// TestDecide_CatalogDerivesReadOnlyForBareReadCall (pdpgrpc/server_test.go),
-// both predating this task, depend on exactly this branch for tools their
-// fixtures never catalog.
+// overall: TestDecide_CatalogDerivesReadOnlyForBareReadCall
+// (pdpgrpc/server_test.go), predating this task, depends on exactly this
+// branch for a tool its fixture never catalogs. Task 3 retired
+// DecideRequest.verb and normalized_input from the wire entirely, so for an
+// uncataloged tool action.Verb and action.NormalizedInput now simply start,
+// and stay, at Go's own zero value "" — there is no wire value left for this
+// branch to preserve or discard either way, which is a stronger form of the
+// same regression guard, not a weaker one: nothing upstream of this function
+// can smuggle a claimed verb or normalized form past it for a tool the
+// tenant never registered.
 //
 // Cataloged: the catalog OWNS this tool's extraction from here, even where
-// it found nothing. ext.Command (possibly "") replaces
-// action.NormalizedInput, and ext.ResourceID (possibly "") becomes the
-// entire resource map via resourceFromID, discarding whatever the wire
-// carried. Replacing rather than merging is deliberate, for two reasons: it
-// is what "field extraction moves from the PEP to the PDP" (spec §4.4.2 T2)
-// means for a tool the tenant has actually registered — the PDP's own,
-// verified reading of raw_input is authoritative for that tool, not a
-// supplement to a claim the PEP already made — and it is what makes "the PDP
-// never infers a classification" hold by construction rather than by care:
-// resourceFromID's output can only ever be {} or {"id": v}, so nothing the
-// wire sent, however it was produced, can ride along into a decision for a
-// cataloged tool.
+// it found nothing. ext.Verb (possibly "") replaces action.Verb, ext.Command
+// (possibly "") replaces action.NormalizedInput, and ext.ResourceID
+// (possibly "") becomes the entire resource map via resourceFromID,
+// discarding whatever action/resource already held. Replacing rather than
+// merging is deliberate, for two reasons: it is what "field extraction moves
+// from the PEP to the PDP" (spec §4.4.2 T2/T3) means for a tool the tenant
+// has actually registered — the PDP's own, verified reading of raw_input (or,
+// for Verb, the tenant's own registered column) is authoritative for that
+// tool, not a supplement to a claim a caller already made — and it is what
+// makes "the PDP never infers a classification" hold by construction rather
+// than by care: resourceFromID's output can only ever be {} or {"id": v}, so
+// nothing a caller sent, however it was produced, can ride along into a
+// decision for a cataloged tool.
 //
 // action.RawInput is never touched, on either branch. RawInput is the one
 // field DeriveTier's evidence check (destructiveEvidence, tier.go) reads,
@@ -125,6 +161,7 @@ func ApplyExtraction(ext ExtractedInput, action Action, resource map[string]stri
 	if !ext.Cataloged {
 		return action, resource
 	}
+	action.Verb = ext.Verb
 	action.NormalizedInput = ext.Command
 	return action, resourceFromID(ext.ResourceID)
 }

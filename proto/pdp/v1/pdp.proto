@@ -58,7 +58,22 @@ message DecideRequest {
   string subject = 3;
 
   string tool = 4;
-  string verb = 5;
+
+  // Fields 5 (verb) and 9 (normalized_input) were retired together (spec
+  // §4.4.2 T3): both were a PEP-side guess -- cmd/stratium-pep's now-deleted
+  // toolVerbs and normalizedInputFields tables -- derived from Claude Code's
+  // own tool names and field shapes, in a message meant to serve any agent
+  // framework, and neither guess was verifiable by the PDP that received it.
+  // The per-tenant tool_catalog table (migrations/000013_tool_catalog) now
+  // holds both per tool, and internal/authz.ExtractFromCatalog /
+  // ApplyExtraction derive them server-side from a call's own raw_input and
+  // the tenant's own row -- the PDP's own reading, not a caller's claim.
+  // Reserved, not reused: a caller still built against the old contract must
+  // fail to decode field 5 or 9 rather than have either silently
+  // reinterpreted as whatever a future field puts there.
+  reserved 5, 9;
+  reserved "verb", "normalized_input";
+
   string raw_input = 6;
 
   // declared_tier is the caller's claimed action tier. It is optional so
@@ -73,26 +88,16 @@ message DecideRequest {
   // resource carries attributes the classification and delegation-scope
   // checks read (e.g. classification hierarchy levels). Caller-supplied and
   // untrusted like every other field here — it narrows what a delegation
-  // permits, it does not widen it.
+  // permits, it does not widen it. Neither PEP in this repo populates this
+  // anymore: cmd/stratium-pep sends only tool and raw_input (spec §4.4.2 T3)
+  // and leaves this field unset. A cataloged tool's resource identity is
+  // extracted server-side instead, from raw_input, by
+  // internal/authz.ExtractFromCatalog, which replaces whatever this field
+  // carries; an uncataloged tool passes it through unchanged, which for
+  // every caller in this repo today is simply empty. The field itself stays
+  // on the contract for a caller this repo does not control that has a real,
+  // externally-verified resource identity to assert.
   map<string, string> resource = 8;
-
-  // normalized_input is a best-effort extraction the caller performs from
-  // raw_input — e.g. pulling "ls -la" out of {"command":"ls -la"} before
-  // classification ever runs, so an agent framework that wraps tool input in
-  // JSON does not defeat the read-only pattern's anchoring. It never
-  // replaces raw_input: both travel on the wire, and
-  // internal/authz.BuiltinTier combines them so that a positive destructive
-  // or external match on raw_input wins outright and is never lowered;
-  // otherwise a normalized_input that classifies is used; otherwise
-  // raw_input's result, including its default. A positive pattern match is
-  // evidence, a default is not — taking simply the more severe would let
-  // raw's "unrecognised, assume it modifies" default override a correct
-  // read-only extraction, which is the defect this field exists to fix. An
-  // extraction that under-reports (or a caller that omits this field) can
-  // never lower the tier below what a positive raw_input match produces. Plain (non-optional) proto3 string:
-  // unlike declared_tier above, there is no absent-vs-empty distinction to
-  // preserve here, because an empty extraction changes nothing.
-  string normalized_input = 9;
 
   // approval_id, when set, names a pending approval this call should
   // consume rather than create: the retry sent after a prior call returned

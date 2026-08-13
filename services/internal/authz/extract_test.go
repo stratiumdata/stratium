@@ -95,6 +95,34 @@ func TestExtractFromCatalog_PullsResourceIDAndCommandByFieldName(t *testing.T) {
 	}
 }
 
+// TestExtractFromCatalog_CarriesVerbFromCatalogRowRegardlessOfRawInput is
+// Task 3's own addition: ToolCatalogEntry.Verb (populated by Task 1, left
+// deliberately unconsumed by Task 2 — see that field's own doc comment in
+// pkg/models/catalog.go) is now this function's third output. Unlike
+// ResourceID and Command, Verb is never a raw_input field lookup — it is a
+// straight copy of the matched row's own column — so the property worth
+// proving is not "found the right field" but "came from the catalog row and
+// nothing else": the same two raw_input bodies here (one harmless, one
+// destructive) must yield the identical verb, because a verb that tracked
+// raw_input content would be a second, informal classification channel
+// alongside it — exactly what hook.go's now-deleted toolVerbs table was
+// built to avoid, and what its own now-deleted
+// TestRunHook_VerbDependsOnlyOnToolName_NotOnInput proved at the PEP layer.
+// This is that property's successor at the layer that now actually derives
+// verb.
+func TestExtractFromCatalog_CarriesVerbFromCatalogRowRegardlessOfRawInput(t *testing.T) {
+	entries := []models.ToolCatalogEntry{{ToolName: "Bash", Verb: "execute"}}
+
+	harmless := ExtractFromCatalog(entries, Action{Tool: "Bash", RawInput: `{"command":"ls"}`})
+	destructive := ExtractFromCatalog(entries, Action{Tool: "Bash", RawInput: `{"command":"rm -rf /"}`})
+
+	if harmless.Verb != "execute" || destructive.Verb != "execute" {
+		t.Fatalf("Verb = %q (harmless input), %q (destructive input), want %q for both — "+
+			"verb must come from the catalog row's own column, never from raw_input",
+			harmless.Verb, destructive.Verb, "execute")
+	}
+}
+
 // TestApplyExtraction_UncatalogedToolLeavesActionAndResourceUnchanged is the
 // regression guard at the fold-in step: for a tool the tenant's catalog does
 // not name, ApplyExtraction must be a no-op, byte for byte, on both action
@@ -125,12 +153,23 @@ func TestApplyExtraction_UncatalogedToolLeavesActionAndResourceUnchanged(t *test
 // "fall back to the wire when extraction finds nothing" instead of "the
 // wire's contribution is discarded either way" — this test is what makes
 // the actual, chosen behavior fail loudly if it regresses to the other one.
+//
+// action.Verb starts at a wire-shaped value even though Task 3 retired the
+// wire's own verb field (DecideRequest no longer carries one at all) — the
+// same starting point ApplyExtraction would see from any OTHER caller-set
+// value the catalog now owns, proving the replace-even-when-empty rule
+// applies to Verb identically to NormalizedInput and resource, not as a
+// special case.
 func TestApplyExtraction_CatalogedToolReplacesWireValuesEvenWhenExtractionIsEmpty(t *testing.T) {
-	action := Action{Tool: "Read", NormalizedInput: "the-original-wire-normalized-input"}
+	action := Action{Tool: "Read", Verb: "some-other-verb", NormalizedInput: "the-original-wire-normalized-input"}
 	resource := map[string]string{"id": "the-original-wire-resource-id"}
 
 	gotAction, gotResource := ApplyExtraction(ExtractedInput{Cataloged: true}, action, resource)
 
+	if gotAction.Verb != "" {
+		t.Errorf("Verb = %q, want \"\": a cataloged tool's empty (unset) catalog verb must replace "+
+			"whatever the action already held, not fall back to it", gotAction.Verb)
+	}
 	if gotAction.NormalizedInput != "" {
 		t.Errorf("NormalizedInput = %q, want \"\": a cataloged tool's empty extraction must replace the "+
 			"wire's value, not fall back to it", gotAction.NormalizedInput)
