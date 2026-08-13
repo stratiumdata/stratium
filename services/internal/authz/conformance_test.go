@@ -513,9 +513,14 @@ func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	markRan(24)
-	notBuilt(t, 24, "Phase 3: the property is about an expired TOKEN with a live cache "+
-		"entry; neither exists yet. Delegation expiry alone is covered by "+
-		"TestDelegationLeg_DeniesExpiredHop.")
+	notBuilt(t, 24, "Phase 3: the property is an expired TOKEN denied even when a live CACHE entry "+
+		"exists. As of Phase 9, the token half is no longer missing — real, expiring, signed tokens "+
+		"exist, and an expired one already denies on its own, with no cache in the picture at all "+
+		"(TestDecide_ExpiredToken_Denies, internal/pdpgrpc/authenticate_test.go). What C24 actually "+
+		"asks is still unbuilt: no PEP decision cache exists anywhere in this tree, so there is nothing "+
+		"for an expired token to override, and this property stays unprovable until one does. "+
+		"Delegation expiry alone (the row itself, independent of any token or cache) is covered "+
+		"separately by TestDelegationLeg_DeniesExpiredHop.")
 }
 
 func TestC25_MissingDPoPProofDenies(t *testing.T) {

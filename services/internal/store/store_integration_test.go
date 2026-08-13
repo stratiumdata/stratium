@@ -101,12 +101,18 @@ package store_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -126,6 +132,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"stratium/internal/authz"
+	"stratium/internal/config"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
 	"stratium/internal/policy/cedar"
@@ -133,6 +140,7 @@ import (
 	"stratium/internal/policy/rego"
 	"stratium/internal/policy/xacml"
 	"stratium/internal/store"
+	"stratium/internal/token"
 	"stratium/migrations"
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
@@ -1912,6 +1920,447 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 			t.Errorf("Reason = %q, want it to name the mismatched value extracted from raw_input", mismatched.GetReason())
 		}
 	})
+}
+
+// Phase 9 Task 5 (docs/superpowers/sdd/2026-08-13-phase-9-tokens/
+// task-5-brief.md): the five live-stack token proofs. Placed here,
+// immediately after TestIntegration_Live_ToolCatalogEnforcement and before
+// TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother/
+// TestEndToEnd — not a new file — for the same file-ordering reason that
+// test's own doc comment already establishes for resourceTenant: Go runs
+// top-level tests within one file in declaration order, and TestEndToEnd's
+// own last subtest permanently revokes the serving role's INSERT on
+// audit_chain for the rest of this postgres instance's life (role-level, not
+// tenant-scoped — every tenant's Decide calls would stop auditing after it
+// runs). A new file sorting alphabetically after "store_integration_test.go"
+// (e.g. "token_integration_test.go") would register its tests AFTER this
+// one's, i.e. after that revoke — breaking every proof below that expects an
+// audited ALLOW/DENY. Declaring these functions inside this file, before
+// TestEndToEnd, is what keeps them safe regardless of what a future edit
+// adds to this file after them.
+//
+// TestIntegration_Live_TokenAuthentication proves proofs 1, 2, and 4 against
+// the REAL containerized PDP (resourcePdpClient/resourceTenant) — the actual
+// Dockerfile-baked signing key and main.go's real token.Load wiring, not a
+// stand-in — because none of the three needs control over what key the
+// server trusts. resourceTenant, not a fresh tenant: this test seeds its own
+// agent, policy, and delegations, the same "safe to add to" discipline
+// TestIntegration_Live_ToolCatalogEnforcement (above) already established
+// for this exact tenant — see that test's own doc comment for why.
+//
+// TestIntegration_Live_TokenKeyRotation and
+// TestIntegration_Live_TokenCrossTenantNotFound (proofs 3 and 5, below) do
+// need control over which key a server trusts, which none of the three
+// docker-compose services can give this process: their signing keys are
+// generated fresh inside the image at build time and never reach this test
+// (mintToken's own doc comment), and none is configured with a previous key
+// (deploy/docker/docker-compose.yml only ever sets
+// STRATIUM_TOKEN_SIGNING_KEY_PATH). Both use an in-process pdpgrpc.Server
+// against real Postgres instead — the same tool
+// escalation_integration_test.go's own banner already established as
+// genuinely "live" for exactly this reason (only the transport differs, not
+// the database, the schema, RLS, or the production Server.Decide/IssueToken
+// code).
+func TestIntegration_Live_TokenAuthentication(t *testing.T) {
+	const subject = "token-auth-proof@example.com"
+
+	agentID := uuid.New()
+	seedAgent(t, resourceTenant, agentID, "integration-agent-token-auth", models.TrustTierPlatformTrusted)
+	seedPolicy(t, resourceTenant, "permit-token-auth-proof", escalationBlanketPermit, "allow")
+
+	// proof 1: session-start (CreateDelegation, which mints a token as its
+	// last step — delegation.go) then hook (Decide, spending that token) —
+	// end to end, over the real gRPC client, exactly the round trip a real
+	// PEP performs.
+	t.Run("session_start_then_hook_allows", func(t *testing.T) {
+		createResp, err := resourcePdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
+			Subject: subject, AgentId: agentID.String(),
+			RequestedScope: &pdpgrpc.RequestedScope{
+				MaxActionTier: int32(models.ActionTierDestructive), Tools: []string{"Read"},
+			},
+			Purpose: "token auth proof: session-start mints a token", TtlSeconds: 3600,
+		})
+		if err != nil {
+			t.Fatalf("CreateDelegation() (session-start) error = %v", err)
+		}
+		if createResp.GetToken() == "" {
+			t.Fatal("CreateDelegation() token is empty")
+		}
+		if createResp.GetToken() == createResp.GetDelegationId() {
+			t.Fatal("token equals the bare delegation id -- session-start must never hand out a bare id as a token")
+		}
+
+		// Tool is "Read" -- catalogued READ_ONLY by authz.DefaultCatalog, no
+		// tool_catalog row involved (see TestIntegration_Live_
+		// ResourceIdentityEnforcement's own comment on this exact tool) --
+		// well under this delegation's DESTRUCTIVE ceiling either way.
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			Token: createResp.GetToken(), AgentId: agentID.String(), Subject: subject, Tool: "Read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() (hook) error = %v", err)
+		}
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW (reason %q)", resp.GetEffect(), resp.GetReason())
+		}
+	})
+
+	// proof 1's second half: a denied call still denies for the same reason
+	// it did before tokens existed. The tier-ceiling wording comes from
+	// internal/authz/delegation.go's DelegationLeg, untouched by Phase 9 --
+	// wrapping the delegation reference in a verified token changes nothing
+	// about what that leg decides, only how the caller identified which
+	// delegation to load.
+	t.Run("denied_call_same_reason_as_before_tokens", func(t *testing.T) {
+		id := uuid.New()
+		lowCeiling := seedDelegation(t, &models.Delegation{
+			ID: id, TenantID: resourceTenant, UserID: subject, AgentID: agentID,
+			ApprovedTools: []string{}, MaxActionTier: models.ActionTierReadOnly,
+			ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
+			Purpose: "token auth proof: denial reason unchanged by tokens", ExpiresAt: time.Now().Add(time.Hour),
+			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+		})
+
+		// A deliberately fictitious tool name: guaranteed absent from both
+		// authz.DefaultCatalog and this tenant's own tool_catalog rows (which
+		// by now include "read_file"/"write_file" from
+		// TestIntegration_Live_ToolCatalogEnforcement, above), so it falls to
+		// BuiltinTier's own "unrecognized -> assume it modifies" default --
+		// INTERNAL_MODIFY -- deterministically, independent of what any
+		// earlier test in this file has cataloged. RawInput must be non-empty
+		// for that default to apply at all: BuiltinTier only reaches
+		// classifyInput's "unrecognized" fallback when there is a raw string
+		// to classify (destructiveEvidence/haveRaw both require a.RawInput !=
+		// "") -- an empty RawInput skips straight past it to the verb/floor
+		// default (ActionTierReasoning), which this delegation's READ_ONLY
+		// ceiling would not deny. "{}" matches none of tier.go's shell
+		// patterns, the same non-match ToolCatalogEnforcement's own proof4
+		// relies on for "read_file"'s JSON blob.
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			Token: mintToken(t, resourcePdpClient, lowCeiling.ID), AgentId: agentID.String(), Subject: subject,
+			Tool: "Phase9TokenProofUncatalogedTool", RawInput: "{}",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v", err)
+		}
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		const wantReason = "action tier INTERNAL_MODIFY exceeds delegation max_action_tier READ_ONLY at depth 0"
+		if !strings.Contains(resp.GetReason(), wantReason) {
+			t.Errorf("Reason = %q, want it to contain %q -- the exact tier-ceiling wording this system "+
+				"produced before tokens existed", resp.GetReason(), wantReason)
+		}
+	})
+
+	// proof 2 (K3): a token naming a REVOKED delegation is denied AT THE
+	// DELEGATION LEG, not the token check -- the property that makes a token
+	// a reference and not a capability. The token itself is completely
+	// genuine (real signature, unexpired, well-formed, minted while the
+	// delegation was still active); only the row's own Revoked flag,
+	// discovered by the LoadChain call authentication success leads to, can
+	// produce this denial. Two independent checks make this specific, not
+	// just "denied somehow": Reason carries DelegationLeg's own exact
+	// wording and does NOT mention "token", and the audit entry's
+	// DelegationID is populated -- which only happens once LoadChain has
+	// actually run (server.go's appendAudit), never on a pure
+	// authentication failure.
+	t.Run("token_naming_revoked_delegation_denies_at_delegation_leg", func(t *testing.T) {
+		id := uuid.New()
+		revocable := seedDelegation(t, &models.Delegation{
+			ID: id, TenantID: resourceTenant, UserID: subject, AgentID: agentID,
+			ApprovedTools: []string{}, MaxActionTier: models.ActionTierDestructive,
+			ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
+			Purpose:          "token auth proof: K3 -- a token names a reference, not a capability",
+			ExpiresAt:        time.Now().Add(time.Hour),
+			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+		})
+		tok := mintToken(t, resourcePdpClient, revocable.ID) // minted while still active
+
+		withTenantTx(t, resourceTenant, func(tx *sql.Tx) {
+			res, err := tx.ExecContext(t.Context(), `UPDATE delegations SET revoked = true WHERE id = $1`, revocable.ID.String())
+			if err != nil {
+				t.Fatalf("revoke delegation: %v", err)
+			}
+			if n, err := res.RowsAffected(); err != nil || n != 1 {
+				t.Fatalf("revoke delegation: RowsAffected = %d, err = %v, want 1, nil", n, err)
+			}
+		})
+
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			Token: tok, AgentId: agentID.String(), Subject: subject, Tool: "Read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if !strings.Contains(resp.GetReason(), "is revoked") {
+			t.Errorf("Reason = %q, want DelegationLeg's own revocation wording (\"... is revoked\") -- "+
+				"anything else means this was denied somewhere other than the real delegation-leg "+
+				"re-evaluation", resp.GetReason())
+		}
+		if strings.Contains(resp.GetReason(), "token") {
+			t.Errorf("Reason = %q, mentions \"token\" -- a revoked-delegation denial must come from "+
+				"DelegationLeg, which knows nothing about tokens, not from authenticateToken", resp.GetReason())
+		}
+
+		rows := fetchAuditChain(t, resourceTenant)
+		if len(rows) == 0 {
+			t.Fatal("no audit rows for resourceTenant")
+		}
+		last := rows[len(rows)-1]
+		if last.DelegationID == nil || *last.DelegationID != revocable.ID {
+			t.Fatalf("audit entry DelegationID = %v, want %s -- proves LoadChain actually ran (a "+
+				"token-authentication failure's audit row never has one)", last.DelegationID, revocable.ID)
+		}
+	})
+
+	// proof 4 (K4): a request with no token is denied, and -- the proof the
+	// phase exists for -- there is no bare-id fallback anywhere. Two
+	// subcases: no token at all, and a REAL, well-formed, currently-active
+	// delegation id sent bare, unwrapped, exactly the pre-K4 wire shape. The
+	// second is the load-bearing one: it proves the fallback A10's attacker
+	// would reach for (omit the token, send the id an old caller used to
+	// send) is not merely absent from the happy path but actively rejected
+	// even when the id it carries is genuine.
+	t.Run("no_token_denies_and_bare_delegation_id_is_never_a_fallback", func(t *testing.T) {
+		id := uuid.New()
+		real := seedDelegation(t, &models.Delegation{
+			ID: id, TenantID: resourceTenant, UserID: subject, AgentID: agentID,
+			ApprovedTools: []string{}, MaxActionTier: models.ActionTierDestructive,
+			ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
+			Purpose: "token auth proof: K4 -- no bare-id fallback", ExpiresAt: time.Now().Add(time.Hour),
+			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+		})
+
+		t.Run("empty_token", func(t *testing.T) {
+			resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+				Token: "", AgentId: agentID.String(), Subject: subject, Tool: "Read",
+			})
+			if err != nil {
+				t.Fatalf("Decide() error = %v, want a DENY decision, not an RPC error", err)
+			}
+			if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+				t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+			}
+			if resp.GetReason() != "no token provided" {
+				t.Errorf("Reason = %q, want %q", resp.GetReason(), "no token provided")
+			}
+		})
+
+		t.Run("a_real_delegation_id_sent_bare_as_the_token", func(t *testing.T) {
+			resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+				Token: real.ID.String(), AgentId: agentID.String(), Subject: subject, Tool: "Read",
+			})
+			if err != nil {
+				t.Fatalf("Decide() error = %v, want a DENY decision, not an RPC error", err)
+			}
+			if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+				t.Fatalf("Effect = %v, want EFFECT_DENY -- a real delegation id must never authenticate "+
+					"when sent bare, not wrapped in a signed token", resp.GetEffect())
+			}
+			if resp.GetDeniedLeg() != "delegation" {
+				t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+			}
+			if !strings.Contains(resp.GetReason(), "malformed") {
+				t.Errorf("Reason = %q, want it to name malformedness", resp.GetReason())
+			}
+		})
+	})
+}
+
+// freshECKeyPath generates a fresh EC (P-256) private key and writes it as a
+// PEM file inside a fresh t.TempDir(), returning the path rather than a
+// loaded *token.Signer -- escalationSigner (escalation_integration_test.go,
+// this file's sibling in the same package) already does that and is reused
+// directly below wherever only a signer, not its path, is needed.
+// TestIntegration_Live_TokenKeyRotation needs the path itself: the same key
+// must be loadable two different ways -- alone, and as another signer's own
+// previous key -- which only a path, not an already-loaded Signer, can do.
+func freshECKeyPath(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate EC key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal EC key: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "key.pem")
+	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// TestIntegration_Live_TokenKeyRotation is proof 3: a token signed by the
+// previous key still verifies; one signed by an unrelated, never-loaded key
+// does not (K1's rotation promise). See this section's own banner for why
+// this needs an in-process server rather than one of the three
+// docker-compose PDPs.
+func TestIntegration_Live_TokenKeyRotation(t *testing.T) {
+	const tenant = "tenant-token-rotation-integration"
+	const subject = "token-rotation-proof@example.com"
+
+	agentID := uuid.New()
+	seedAgent(t, tenant, agentID, "token-rotation-agent", models.TrustTierPlatformTrusted)
+	seedPolicy(t, tenant, "token-rotation-blanket-permit", escalationBlanketPermit, "allow")
+	delegationID := uuid.New()
+	delegation := seedDelegation(t, &models.Delegation{
+		ID: delegationID, TenantID: tenant, UserID: subject, AgentID: agentID,
+		ApprovedTools: []string{}, MaxActionTier: models.ActionTierDestructive,
+		ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
+		Purpose: "token rotation proof", ExpiresAt: time.Now().Add(time.Hour),
+		RootDelegationID: delegationID, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+	})
+
+	oldKeyPath := freshECKeyPath(t)
+	newKeyPath := freshECKeyPath(t)
+	oldSigner, err := token.Load(oldKeyPath, "")
+	if err != nil {
+		t.Fatalf("token.Load(old) = %v, want success", err)
+	}
+	tokenOld := escalationToken(t, oldSigner, delegation.ID)
+
+	// current=new, previous=old -- the post-rotation shape: mount a new
+	// current key, keep the old one loaded for verification only (K1).
+	rotatedSigner, err := token.Load(newKeyPath, oldKeyPath)
+	if err != nil {
+		t.Fatalf("token.Load(new, old) = %v, want success", err)
+	}
+	repo := store.New(testDB, tenant)
+	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour}
+	rotatedServer := pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, rotatedSigner)
+
+	decide := func(t *testing.T, srv *pdpgrpc.Server, tok string) *pdpgrpc.DecideResponse {
+		t.Helper()
+		resp, err := srv.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			Token: tok, AgentId: agentID.String(), Subject: subject, Tool: "Read",
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		return resp
+	}
+
+	t.Run("previous_key_still_verifies", func(t *testing.T) {
+		resp := decide(t, rotatedServer, tokenOld)
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW (reason %q) -- a token signed moments before "+
+				"rotation must still authenticate and reach the real three-leg evaluation",
+				resp.GetEffect(), resp.GetReason())
+		}
+
+		// Independent double-check -- the same discipline Phase 9 Task 2/3
+		// both learned the hard way (verifying and minting through the same
+		// signer instance cannot tell "verified" apart from "verified
+		// because it happened to be signed by current"). A SEPARATE server
+		// trusting ONLY the new key, nothing to fall back to, must reject
+		// this exact same token -- otherwise the ALLOW above would prove
+		// nothing about the previous key specifically.
+		currentOnlySigner, err := token.Load(newKeyPath, "")
+		if err != nil {
+			t.Fatalf("token.Load(new only) = %v, want success", err)
+		}
+		currentOnlyServer := pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, currentOnlySigner)
+		resp2 := decide(t, currentOnlyServer, tokenOld)
+		if resp2.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY: a signer trusting ONLY the new key must not accept "+
+				"a token signed by the old one", resp2.GetEffect())
+		}
+		if !strings.Contains(resp2.GetReason(), "signature") {
+			t.Errorf("Reason = %q, want it to name the signature specifically", resp2.GetReason())
+		}
+	})
+
+	t.Run("unknown_key_denies", func(t *testing.T) {
+		attacker := escalationSigner(t) // fresh, unrelated key -- never loaded by rotatedServer
+		tokenUnknown := escalationToken(t, attacker, delegation.ID)
+		resp := decide(t, rotatedServer, tokenUnknown)
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+		}
+		if !strings.Contains(resp.GetReason(), "signature") {
+			t.Errorf("Reason = %q, want it to name the signature specifically", resp.GetReason())
+		}
+	})
+}
+
+// TestIntegration_Live_TokenCrossTenantNotFound is proof 5: a token naming a
+// real, live delegation in one tenant is NotFound -- an RPC error, never a
+// denial -- when presented to a PDP configured for a different tenant. RLS
+// is the only tenant boundary a token crosses
+// (internal/pdpgrpc/authenticate.go's own doc comment: the token's own
+// tenant_id claim is deliberately never read or compared at authentication
+// time), so this has to be provable even when both tenants' PDPs trust the
+// identical signing key -- which is the realistic deployment shape K2
+// assumes (the PDP verifies; a shared key infrastructure with RLS as the
+// sole tenant boundary) and exactly why both servers below share ONE
+// *token.Signer rather than two independently generated ones: this proof
+// must not depend on whether two docker-compose services' own
+// independently-built keys happen to collide (see
+// TestIntegration_Live_TokenKeyRotation's own doc comment for the identical
+// caution about that file's own key material). With a shared signer,
+// verification is guaranteed to succeed by construction, so a NotFound
+// result can only come from LoadChain's own RLS scoping, never from an
+// accident of which keys happened to match.
+func TestIntegration_Live_TokenCrossTenantNotFound(t *testing.T) {
+	const tenantOwning = "tenant-token-cross-owner-integration"
+	const tenantForeign = "tenant-token-cross-foreign-integration"
+
+	signer := escalationSigner(t) // shared by both servers below -- see doc comment
+
+	ownerAgentID := uuid.New()
+	seedAgent(t, tenantOwning, ownerAgentID, "cross-tenant-owner-agent", models.TrustTierPlatformTrusted)
+	ownerDelegationID := uuid.New()
+	ownerDelegation := seedDelegation(t, &models.Delegation{
+		ID: ownerDelegationID, TenantID: tenantOwning, UserID: "owner@example.com", AgentID: ownerAgentID,
+		ApprovedTools: []string{}, MaxActionTier: models.ActionTierDestructive,
+		ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
+		Purpose: "cross-tenant proof: belongs to tenantOwning only", ExpiresAt: time.Now().Add(time.Hour),
+		RootDelegationID: ownerDelegationID, Depth: 0, ChainAgentIDs: []uuid.UUID{ownerAgentID},
+	})
+	ownerToken := escalationToken(t, signer, ownerDelegation.ID)
+
+	// A real agent seeded IN tenantForeign, deliberately: this proof is about
+	// the DELEGATION being foreign, not the agent
+	// (proof4_cross_tenant_agent_is_not_found, above, inside TestEndToEnd,
+	// already covers the agent-is-foreign case) -- LoadAgent must succeed
+	// here so the NotFound below is unambiguously LoadChain's own doing, not
+	// an earlier short-circuit.
+	foreignAgentID := uuid.New()
+	seedAgent(t, tenantForeign, foreignAgentID, "cross-tenant-foreign-agent", models.TrustTierPlatformTrusted)
+
+	foreignRepo := store.New(testDB, tenantForeign)
+	foreignCfg := config.Config{TenantID: tenantForeign, MaxDepth: 5, ApprovalTTL: time.Hour}
+	foreignServer := pdpgrpc.NewServer(foreignRepo, policy.NewMulti(foreignRepo, escalationRegistry()), foreignCfg, signer)
+
+	before := fetchAuditChain(t, tenantForeign)
+	resp, err := foreignServer.Decide(t.Context(), &pdpgrpc.DecideRequest{
+		Token: ownerToken, AgentId: foreignAgentID.String(), Subject: "cross-tenant-subject@example.com", Tool: "Read",
+	})
+	if resp != nil {
+		t.Fatalf("Decide() response = %+v, want nil", resp)
+	}
+	st := wantCode(t, err, codes.NotFound)
+	t.Logf("Decide() for tenant %q's delegation, against a PDP configured for %q -> NotFound: %s",
+		tenantOwning, tenantForeign, st.Message())
+
+	after := fetchAuditChain(t, tenantForeign)
+	if len(after) != len(before) {
+		t.Errorf("audit rows for tenantForeign went from %d to %d, want unchanged -- NotFound is an RPC "+
+			"error, not a denial, and must never be audited", len(before), len(after))
+	}
 }
 
 // TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother is
