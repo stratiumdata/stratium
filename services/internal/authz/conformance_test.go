@@ -335,49 +335,77 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 }
 
 // C19 reads "with the PDP unreachable and no valid cache entry, every
-// surface denies." Its reason has already been corrected once, from "Phase
-// 3: requires the PEP client" to naming what was left after Phase 4+
-// (hook alone, of four surfaces); Phase 6 (mcp) and Phase 10 Tasks 1-3
-// (extauthz) have since landed and that text went stale a second time
-// without being updated — flagged by both of those tasks' own reports and
-// left for Phase 10 Task 4 to fix. It is still not a pass, on the same two
-// axes the property's own wording names, just a narrower gap than before:
+// surface denies." Its reason has been corrected twice before this: from
+// "Phase 3: requires the PEP client" to naming what was left after Phase
+// 4+ (hook alone, of four surfaces), then to name three of four once mcp
+// and extauthz landed — flagged stale a third time by Phase 11 Tasks 1-3's
+// own reports (proxy still unbuilt) and left for Task 4 to settle for good.
+// Phase 11 Task 4 is what closes the FIRST of the property's two axes:
 //
 //   - "every surface": spec §3.2 (A2) commits to four first-class surfaces —
-//     hook, mcp, proxy, extauthz. Three of four now exist and are proven
+//     hook, mcp, extauthz, proxy. All four now exist and are each proven
 //     against the real thing they enforce: hook and mcp against a real
 //     claude session, extauthz against a real Envoy
-//     (services/internal/store/extauthz_integration_test.go, Task 4).
-//     cmd/stratium-pep/main.go's own package doc now calls only "proxy" a
-//     later surface. A property naming "every surface" is still not
-//     established by three of four.
+//     (services/internal/store/extauthz_integration_test.go, Phase 10 Task
+//     4), and proxy — as of this task — against a real gRPC service
+//     (services/internal/store/proxy_integration_test.go). This axis is
+//     genuinely closed: there is no fifth surface spec §3.2 names that
+//     remains unbuilt.
 //   - "no valid cache entry": this presupposes a cache with entries that can
 //     be valid or not. No PEP decision cache exists yet anywhere in this
 //     tree — the same absence that keeps C20 (the sibling property about a
 //     stale cache entry) skipped below, and that keeps C24 skipped for an
-//     analogous reason. Nothing built in this phase touches it.
+//     analogous reason. Nothing built in this phase touches it, and the
+//     phase plan does not ask it to.
 //
-// Classified NOT BUILT, not proven elsewhere: provenElsewhere requires the
-// property to hold, in full, somewhere this package cannot reach — but one
-// of the four surfaces the property's own wording commits to, and the
-// entire cache subsystem, still do not exist anywhere in this tree, not
-// just here. The three surfaces that do exist each have their own real,
-// live-stack proof of "PDP unreachable/token-invalid denies" (hook, mcp,
-// and now extauthz), but no single test proves the property as C19 actually
-// states it — "every surface," not "three of four" — and none has a cache
-// dimension to test at all. Pointing provenElsewhere at any one of them
-// would be precisely the kind of claim conformance_pointer_test.go exists
-// to stop. Converting this to a pass would be forcing it just the same:
-// unskip once proxy exists and the decision cache lands, not before.
+// THE JUDGEMENT CALL. With the first axis now closed, the only question
+// left is whether a system with NO cache at all trivially satisfies "no
+// valid cache entry" (zero entries can never include a valid one) or
+// whether the clause is untestable without a cache to exercise. Both
+// readings are internally consistent; this file picks the second,
+// deliberately, for a reason specific to what a conformance PROPERTY is for
+// in this suite: C19 is not a claim about the ABSENCE of a caching bug, it
+// is a claim about a caching layer's own behaviour under a specific
+// condition ("PDP unreachable, and the cache currently holds nothing valid
+// to serve instead") — the same condition C20 exists to test the OTHER half
+// of (a stale, invalid entry that IS present must not be served either). A
+// build with no cache subsystem at all cannot exhibit the bug either
+// property exists to catch — not because it was tested and found absent,
+// but because there is no code path capable of having it. Treating that as
+// a pass would be indistinguishable, from outside this file, from an
+// operator who never implemented a cache correctly noticing their own
+// system trivially "passes" C19 forever. That is precisely the shape of
+// claim conformance_pointer_test.go's machine-checked pointers exist to
+// stop for provenElsewhere; the identical discipline applies here even
+// though notBuilt has no pointer to verify — a judgement call substitutes
+// for one, stated plainly rather than left implicit. C20 and C24 already
+// make the identical call for the identical missing subsystem; letting C19
+// alone read the vacuous case as a pass would contradict both without
+// either's own reasoning having changed.
+//
+// Classified NOT BUILT, not proven elsewhere and not a pass: provenElsewhere
+// requires the property to hold, in full, somewhere this package cannot
+// reach — but the property, on the reading above, does not yet hold
+// anywhere at all, including there, because there is nowhere a cache's
+// actual behaviour under this condition could be exercised. Each of the
+// four surfaces has its own real, live-stack proof of "PDP unreachable or
+// no credential denies" (hook, mcp, extauthz, and now proxy), which is a
+// genuine, narrower fact worth recording — but it is not what C19 itself
+// states, which is a compound claim naming a cache this tree does not yet
+// have. Converting this to a pass on the strength of the surfaces alone
+// would be forcing it exactly the way the task brief warns against.
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	notBuilt(t, 19, "Phase 10+: three of the four surfaces C19 says 'every surface' now exist and are each "+
+	notBuilt(t, 19, "Phase 11 Task 4: all four surfaces C19 says 'every surface' now exist and are each "+
 		"proven against a live stack — hook (cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), "+
-		"mcp, and extauthz (internal/store/extauthz_integration_test.go: "+
-		"TestIntegration_Envoy_NoTokenDeniedNoFallback and its sibling proofs, against a real Envoy). "+
-		"'proxy' (spec §3.2 A2) remains unbuilt, and no PEP decision cache exists yet anywhere in this tree "+
-		"(same blocker as C20/C24) — 'no valid cache entry' has nothing to be tested against. "+
-		"Requires the remaining surface and the decision cache.")
+		"mcp, extauthz (internal/store/extauthz_integration_test.go: TestIntegration_Envoy_NoTokenDeniedNoFallback "+
+		"and its sibling proofs, against a real Envoy), and proxy (internal/store/proxy_integration_test.go: "+
+		"TestIntegration_Proxy_NoTokenDeniesNoFallback and its sibling proofs, against a real gRPC service). "+
+		"That axis is closed. What remains is the cache axis alone: no PEP decision cache exists yet anywhere "+
+		"in this tree (same blocker as C20/C24), and this file's own judgement (see the doc comment above) is "+
+		"that 'no valid cache entry' is a claim about a cache's own behaviour, not a condition a system with no "+
+		"cache at all can be said to have been tested against, however trivially the words might otherwise read. "+
+		"Requires the decision cache.")
 }
 
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
@@ -448,6 +476,24 @@ func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 // hook_test.go and mcp_authorize_test.go, and this pointer is stale again if
 // either one is ever renamed without the other being checked.
 //
+// Extended again in Phase 11 Task 4, correcting a gap Task 2's own report
+// flagged directly ("cites TestDecideAndRelay_EscalationTimeout_Denies
+// (mcp) but not proxy's own timeout tests"): proxy.go's authorize reaches
+// resolveApproval/pollApproval through the identical, unmodified shared
+// helpers hook and mcp already do (proxy.go's own package doc, ESCALATE
+// BLOCKS — the third caller Task 2's own report names), so it is the exact
+// same shape of fact as mcp's own addition above, not a new mechanism.
+// TestAuthorize_EscalationTimeout_Denies proves it directly (authorize
+// alone, a still-pending approval at ApprovalTimeout denies);
+// TestHandleStream_EscalationTimeout_DeniesWithoutForwarding proves it
+// through the real dispatch gate, against a fake target's own
+// received-call counter — the mutation-testing anchor for "treat an
+// escalation timeout as allow" (proxy_test.go's own doc comment on that
+// test). A regression in resolveApproval's timeout handling now fails a
+// test under all three of hook_test.go, mcp_authorize_test.go, and
+// proxy_test.go; this pointer is stale again if any one of the three is
+// ever renamed without the others being checked.
+//
 // It cannot become a pass HERE: C22 is a property of blocking and time —
 // "the agent blocks there" until the PEP's own timeout (spec §4.6.1 E6) —
 // and internal/authz.Decide is a single, synchronous, non-blocking pure
@@ -462,7 +508,9 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 	provenElsewhere(t, 22, "cmd/stratium-pep",
 		"TestRunHook_Escalate_TimeoutStillPendingDenies",
 		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
-		"TestDecideAndRelay_EscalationTimeout_Denies")
+		"TestDecideAndRelay_EscalationTimeout_Denies",
+		"TestAuthorize_EscalationTimeout_Denies",
+		"TestHandleStream_EscalationTimeout_DeniesWithoutForwarding")
 }
 
 // C23 reads "on a non-blocking surface, escalate returns deny plus a
