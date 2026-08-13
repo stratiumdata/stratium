@@ -40,6 +40,50 @@
 // either); this is not a proxy-specific policy, it is what "no session file" already implies
 // everywhere it applies.
 //
+// TASK 3: THE LIMITS. Three properties of this mechanism are permanent, not gaps a later task
+// closes -- each is written down for the operator who never reads this file (docs/pep.md, "The
+// proxy surface's limits") and pinned here by a test for the one who does, per this task's own
+// binding constraint: a limit that is documented but untested is one that can quietly stop being
+// true (this project has paid for that once already, at spec §4.4.1 -- see that section's own
+// "third instance in this project" note).
+//
+// P4, once, at open. authorize (above) runs exactly once per stream, before forward ever reads a
+// message, and forward has no path back to authorize -- there is no hook in its relay loop where a
+// second decision could even be inserted without first parsing a protocol this file deliberately
+// never parses. A delegation revoked, or a policy changed, after that one call does not end a
+// stream already forwarding. TestHandleStream_AllowedStream_OutlivesRevocationAfterOpen
+// (proxy_test.go) proves it against a client scripted to ALLOW the stream's own opening call and
+// DENY every call after -- messages keep crossing and the PDP is asked exactly once, never asked
+// again to find out its answer has changed.
+//
+// P3, no message body, ever. decideRequestFromStream (below) takes ctx and method and nothing
+// else -- no parameter a message frame could reach it through -- which is what makes "authorization
+// cannot see message contents" true by construction, not merely by convention: raw_input is
+// already built, and already sent, before forward reads the first byte of the first message.
+// TestHandleStream_SameMethodDifferentMessageContent_RawInputIdenticalBothCalls (proxy_test.go)
+// sends two calls to one method carrying different payloads and shows the PDP receives
+// byte-identical requests for both. That cuts both ways: TestAuthorize_RawInputCarriesMethod
+// (Task 2, above) already shows the method itself DOES reach raw_input, real enough to catalog a
+// resource_field against -- it is only what is inside a message that this surface cannot see.
+//
+// Feeding the message body into raw_input anyway, to give the evidence rule (spec §4.4.1)
+// something to scan, was proposed and rejected during planning (plan §P3, "DO NOT feed opaque
+// protobuf into raw_input"): opaque bytes matching a shell pattern by coincidence would produce a
+// false denial with a reason no operator could explain, against an audit digest that commits to
+// raw_input and would then be hashing bytes nobody could usefully re-derive the meaning of. Not
+// re-litigated here or in docs/pep.md's own copy of this ruling -- read either before reopening it.
+//
+// No command text, no evidence. destructiveEvidence (internal/authz/tier.go) matches raw input
+// against shell/SQL syntax; a method name and ordinary gRPC metadata are neither, so an uncataloged
+// method here is never raised by anything about the call -- it takes BuiltinTier's own
+// unrecognized-input default, the identical fallback an uncataloged third-party tool already gets
+// on mcp (docs/pep.md, "Seeding the tool catalog"). This is PDP-side behavior this file has no
+// access to and must not reimplement -- internal/authz stays pure, and this binary classifies
+// nothing (package doc, above). It is pinned end to end, through the real Decide path with
+// proxy-shaped input, by TestDecide_ProxyShapedRawInput_UncatalogedMethodTakesClassifierDefault
+// (internal/pdpgrpc/server_test.go) -- necessarily there, not here: there is nothing in this
+// package that computes a tier for this test to call.
+//
 // PASSTHROUGH CODEC + UNKNOWN-SERVICE HANDLER. This proxy has no target .proto for anything it
 // forwards -- that is the entire point of "transparent" -- so it cannot register a real service
 // or unmarshal a real message for ANY method. Two grpc-go primitives together make that

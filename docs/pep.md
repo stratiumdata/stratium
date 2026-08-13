@@ -476,6 +476,88 @@ narrow:
   classification source") and hold off on configuring the cap until one
   exists.
 
+## The `proxy` surface's limits
+
+`proxy` (`services/cmd/stratium-pep/proxy.go`) authorizes a real gRPC
+connection through the same PDP call `hook` and `mcp` use, but it sits
+somewhere neither of them does: in front of a wire protocol it does not own,
+with no `.proto` for anything it forwards. That position is what makes it
+transparent — no agent rewrite, unlike the predecessor's own envelope — and
+it is also where three permanent limits come from, each a direct consequence
+of the same position, not a gap a later release closes. Know these before
+this surface is asked to do something they would change the answer to.
+
+### A stream is authorized once, at open
+
+The method is known the moment a stream opens; nothing that crosses it
+afterward is, because `proxy` never parses a message — there is no schema to
+parse it against (see "Do not feed the message body into `raw_input`" below
+for why that stays true on purpose). One `Decide` call happens when the
+stream opens, and every message the stream ever carries — one, or however
+many a long-lived streaming RPC sends over however long it stays open —
+rides that single decision.
+
+**Say the consequence plainly: revoking the delegation behind an open
+stream, or a policy change that would now deny it, does not end that
+stream.** It keeps forwarding until the caller or the target closes it, or
+its token expires — whichever comes first. There is no mid-stream check to
+add here without parsing a protocol this surface deliberately does not
+parse; a short-lived token is the actual control for anything that must stop
+promptly — the same `ttl_seconds`/`STRATIUM_PEP_APPROVAL_TIMEOUT` bound that
+already governs how long any other surface's decision can outlive a change
+nobody can take back once it has been made.
+
+### Authorization cannot see message contents
+
+`raw_input` here is the called method and the caller's own gRPC metadata,
+JSON-encoded, credential headers stripped — never the message body. Be
+precise about what this does and does not cost, since it is the detail most
+likely to be misread:
+
+- **Resource constraints and classification caps still bind, on the method
+  and metadata.** A tenant can catalog `resource_field: "method"` for a gRPC
+  tool and constrain a delegation to, say, `{method:
+  "/inv.Inventory/GetItem"}` exactly as it would catalog a path for `Read`.
+  Coarse, but real: "may call `GetItem`, may not call `DeleteItem`" is
+  expressible and enforced.
+- **What cannot be expressed is a distinction *within* one call** — "may
+  read item 7 but not item 9," where 7 and 9 are both arguments inside the
+  same `GetItem` call's message body. Nothing on this surface can see far
+  enough into the call to tell those two apart.
+
+"Caps do not work on the proxy" would be the wrong conclusion — they work at
+the granularity this surface can actually see. Design a delegation around
+that granularity (method-level, not argument-level) rather than assuming it
+gets `hook`'s field-level reach for free.
+
+### The evidence rule has nothing to scan here
+
+On `hook` and `mcp`, a destructive-looking command sitting in `raw_input`
+raises the action tier regardless of what the tool catalog says (spec
+§4.4.1) — the rule that stops a mislabeled or lying client from hiding
+`rm -rf /` behind a tool name the catalog calls harmless. `raw_input` on
+`proxy` never carries anything shaped like a command: it is a method name
+and ordinary metadata, and the rule has no shell or SQL syntax there to
+match against — not even a method name that reads as alarming in English.
+`/inv.Inventory/DeleteEverything` is still just a name to it.
+
+**A method with no catalog row is classified by the built-in classifier's
+own default alone** (`INTERNAL_MODIFY` — see "Seeding the tool catalog"
+above), the same fallback every uncatalogued third-party tool already gets
+on `mcp`. **Catalog this surface's methods deliberately; do not rely on a
+safety net that is not here.** An uncatalogued method that actually deletes
+something will not be caught by anything reading its `raw_input` — there is
+nothing in it to read.
+
+**Do not feed the message body into `raw_input` to give the evidence rule
+something to scan.** This was considered and rejected, not overlooked:
+opaque protobuf bytes matching a shell pattern by pure coincidence would
+produce a false denial with a reason no operator could explain, against an
+audit digest that commits to `raw_input` and would then be hashing bytes
+nobody could ever usefully re-derive the meaning of. The fix for an
+under-classified method is the same as for any uncatalogued tool: add a
+catalog row, not a scan of something this surface cannot make sense of.
+
 ## Reading a denial
 
 Both `hook` and `mcp` reach a denial through the same PDP call and the same
@@ -522,5 +604,8 @@ could not ask" matters, because the fix is different:
 | `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured, and nothing told the PDP what the resource's classification is — expected, since nothing in this system supplies one yet. | Not a bug, and not fixable by retrying. See "Classification caps have no labelling source" above. |
 | Anything else | An actual policy decision: a policy was evaluated and does not permit this tool for this principal. | Whoever manages policy for this tenant needs to grant it. |
 
-`proxy` and `extauthz` are later enforcement surfaces over the same PDP call;
-`session-start`, `hook`, and `mcp` exist today.
+`proxy` and `extauthz` are later enforcement surfaces over the same PDP call.
+`session-start`, `hook`, and `mcp` are installed as described above; `proxy`'s
+own limits are documented above ("The `proxy` surface's limits"), though its
+full installation is not — it carries no session file and answers a denial as
+a gRPC status, not either JSON shape this table covers.

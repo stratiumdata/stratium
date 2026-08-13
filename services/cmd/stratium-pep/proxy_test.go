@@ -1658,3 +1658,124 @@ func TestForward_RelaysHeadersEvenWhenTargetErrorsBeforeAnyMessage(t *testing.T)
 			"though it never sent a message before erroring", testProxyHeaderKey, got, testProxyHeaderValue)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Task 3: the limits, pinned. Each test below proves the documented BEHAVIOUR
+// (docs/pep.md, "The proxy surface's limits"; proxy.go's own package doc, TASK
+// 3: THE LIMITS) actually happens -- not merely that the documentation exists.
+// ---------------------------------------------------------------------------
+
+// TestHandleStream_AllowedStream_OutlivesRevocationAfterOpen is P4's own
+// operational consequence, proven directly: a stream authorized once, at
+// open, keeps forwarding even once the decision that authorized it would no
+// longer be granted. wrapped (decideThenDenyClient, hook_test.go) answers the
+// stream's own opening Decide call with ALLOW and every call after that with
+// DENY -- standing in for a delegation revoked, or a policy changed, the
+// instant after this stream's one and only authorization decision was made.
+// Three messages crossing successfully afterward, and wrapped.calls staying
+// at exactly 1, is the fact worth pinning: the PDP is not merely skipped for
+// convenience on messages two and three, asking it again right now would
+// refuse, and the established stream is asked anyway not at all.
+func TestHandleStream_AllowedStream_OutlivesRevocationAfterOpen(t *testing.T) {
+	targetAddr := startEchoTarget(t)
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenDenyClient{PDPServiceClient: client, first: fake.resp, denyReason: "delegation revoked mid-stream (test)"}
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: wrapped, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	ctx := bearerCtx(context.Background(), testProxyBearerToken)
+	stream, err := conn.NewStream(ctx, proxyStreamDesc, "/echo.Echo/Stream", grpc.ForceCodec(proxyCodec{}))
+	if err != nil {
+		t.Fatalf("NewStream() error = %v", err)
+	}
+
+	// Every one of these three messages crosses AFTER the stream's own single
+	// authorization decision -- and, per wrapped's own script, after the point
+	// at which asking again would deny. None of that matters: handleStream
+	// authorizes once, before forward ever runs, and forward has no path back
+	// to authorize.
+	for _, msg := range []string{"one", "two", "three"} {
+		if err := stream.SendMsg(&proxyFrame{payload: []byte(msg)}); err != nil {
+			t.Fatalf("SendMsg(%q) error = %v -- want this to keep succeeding after the simulated revocation", msg, err)
+		}
+		var got proxyFrame
+		if err := stream.RecvMsg(&got); err != nil {
+			t.Fatalf("RecvMsg() error = %v, want the echoed %q", err, msg)
+		}
+		if string(got.payload) != msg {
+			t.Errorf("RecvMsg() payload = %q, want %q", got.payload, msg)
+		}
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("CloseSend() error = %v", err)
+	}
+	var got proxyFrame
+	if err := stream.RecvMsg(&got); !errors.Is(err, io.EOF) {
+		t.Errorf("final RecvMsg() error = %v, want io.EOF", err)
+	}
+
+	if wrapped.calls != 1 {
+		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- an established stream must never be "+
+			"re-authorized, not even once, regardless of what a second call would now answer", wrapped.calls)
+	}
+}
+
+// TestHandleStream_SameMethodDifferentMessageContent_RawInputIdenticalBothCalls
+// is P3's own operational consequence: raw_input carries the method -- which
+// IS what a resource_field: "method" catalog entry could constrain a
+// delegation against -- and nothing else, so two calls to the identical
+// method carrying entirely different message content are indistinguishable
+// to the PDP. "item 7" and "item 9" are this test's own stand-ins for the
+// task brief's own illustration (docs/pep.md, "The proxy surface's limits"):
+// both are payload bytes on an ordinary GetItem-shaped call, never parsed,
+// never reaching raw_input by any path -- decideRequestFromStream is called
+// from authorize, before forward ever reads a message, and takes no
+// parameter a message frame could reach it through.
+func TestHandleStream_SameMethodDifferentMessageContent_RawInputIdenticalBothCalls(t *testing.T) {
+	targetAddr := startEchoTarget(t)
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	const method = "/inventory.Inventory/GetItem"
+	invoke := func(payload string) *pdpgrpc.DecideRequest {
+		ctx := bearerCtx(context.Background(), testProxyBearerToken)
+		var resp proxyFrame
+		if err := conn.Invoke(ctx, method, &proxyFrame{payload: []byte(payload)}, &resp, grpc.ForceCodec(proxyCodec{})); err != nil {
+			t.Fatalf("Invoke(%q) error = %v", payload, err)
+		}
+		req := fake.lastRequest()
+		if req == nil {
+			t.Fatal("PDP never received a request")
+		}
+		return req
+	}
+
+	// Two calls to the SAME method, differing only in message content: one
+	// requesting item 7, the other item 9 -- the exact distinction the task's
+	// own brief names as unavailable to this surface.
+	reqItem7 := invoke(`{"item_id":"7"}`)
+	reqItem9 := invoke(`{"item_id":"9"}`)
+
+	if reqItem7.GetTool() != method || reqItem9.GetTool() != method {
+		t.Fatalf("tool = (%q, %q), want both %q", reqItem7.GetTool(), reqItem9.GetTool(), method)
+	}
+	if reqItem7.GetRawInput() != reqItem9.GetRawInput() {
+		t.Errorf("raw_input differs between item 7's call and item 9's call:\n  item 7: %s\n  item 9: %s\n"+
+			"want identical -- message content must never reach raw_input, so two calls to the same method "+
+			"carrying different arguments are indistinguishable to the PDP", reqItem7.GetRawInput(), reqItem9.GetRawInput())
+	}
+
+	// The other half of the claim: what DOES reach raw_input is real enough to
+	// bind a method-level constraint against -- a tenant cataloging
+	// resource_field: "method" would extract exactly this value.
+	var got proxyRequestMetadata
+	if err := json.Unmarshal([]byte(reqItem7.GetRawInput()), &got); err != nil {
+		t.Fatalf("raw_input is not well-formed JSON: %v", err)
+	}
+	if got.Method != method {
+		t.Errorf("raw_input method = %q, want %q -- a method-level constraint needs this to be the real, called method", got.Method, method)
+	}
+}

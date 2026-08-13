@@ -598,6 +598,46 @@ func TestDecide_CatalogEntryCannotMaskDestructiveEvidence(t *testing.T) {
 	}
 }
 
+// TestDecide_ProxyShapedRawInput_UncatalogedMethodTakesClassifierDefault pins
+// a claim docs/pep.md makes about the gRPC proxy surface
+// (cmd/stratium-pep/proxy.go, "The proxy surface's limits"): raw_input there
+// is a method name and ordinary gRPC metadata, JSON-encoded — never a message
+// body — so an uncataloged method is classified by BuiltinTier's own
+// unrecognized-input default, never raised by anything about the call
+// itself. Unlike a Bash command (TestDecide_CatalogEntryCannotMaskDestructiveEvidence,
+// just above), there is no command text here for the evidence rule to find:
+// the method name is chosen to read as alarming in English
+// ("DeleteEverything") specifically to prove that reading is not what
+// destructiveEvidence (tier.go) does — its patterns match shell/SQL syntax,
+// never an English verb sitting inside a method name or a metadata value.
+//
+// cmd/stratium-pep never imports this package (the PEP classifies nothing —
+// every other test in this file already proves Decide's behavior without
+// it), so this is the one place proxy-shaped input can be run through the
+// real Decide path at all; there is no equivalent test possible from the PEP
+// side of that boundary.
+func TestDecide_ProxyShapedRawInput_UncatalogedMethodTakesClassifierDefault(t *testing.T) {
+	fs, req := wellFormedFixture()
+	const method = "/inv.Inventory/DeleteEverything"
+	req.Tool = method
+	// Shaped exactly like proxy.go's decideRequestFromStream/proxyRequestMetadata:
+	// {"method": ..., "headers": ...}, never a command field, because the
+	// proxy surface has no message body to put one in. fs.catalog is left at
+	// its nil zero value: no tenant row for this method at all.
+	req.RawInput = `{"method":"/inv.Inventory/DeleteEverything","headers":{"x-request-id":["abc-123"]}}`
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDerivedTier() != int32(models.ActionTierInternalModify) {
+		t.Errorf("DerivedTier = %d, want %d (INTERNAL_MODIFY, BuiltinTier's own unrecognized-input default): "+
+			"an uncataloged method must take the classifier's default, never be raised by its own name or by "+
+			"ordinary metadata that carries no shell/SQL-shaped text", resp.GetDerivedTier(), models.ActionTierInternalModify)
+	}
+}
+
 // TestDecide_ToolCatalogLoadFailureDeniesAndAudits is the fail-closed
 // requirement the phase brief states explicitly: a catalog that could not be
 // loaded must deny, audited, rather than the failure being swallowed and the
