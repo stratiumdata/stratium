@@ -184,7 +184,7 @@ func TestDeriveTier_EmptyTenantCatalogFallsBackToDefaultCatalog(t *testing.T) {
 // coincidence.
 func TestBuildTierCatalog_TenantRowOverridesDefaultForThatToolOnly(t *testing.T) {
 	entries := []models.ToolCatalogEntry{
-		{ToolName: "Read", ActionTier: models.ActionTierDestructive},
+		{ToolName: "Read", ActionTier: tierPtr(models.ActionTierDestructive)},
 	}
 	table := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
 
@@ -208,7 +208,7 @@ func TestBuildTierCatalog_TenantRowOverridesDefaultForThatToolOnly(t *testing.T)
 // tier_test.go's own TestDeriveTier_CatalogBeatsBuiltin already does.
 func TestBuildTierCatalog_TenantCanCatalogToolAbsentFromDefaults(t *testing.T) {
 	entries := []models.ToolCatalogEntry{
-		{ToolName: "read_file", ActionTier: models.ActionTierReadOnly},
+		{ToolName: "read_file", ActionTier: tierPtr(models.ActionTierReadOnly)},
 	}
 	table := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
 
@@ -216,5 +216,73 @@ func TestBuildTierCatalog_TenantCanCatalogToolAbsentFromDefaults(t *testing.T) {
 	if err != nil || got != models.ActionTierReadOnly {
 		t.Fatalf("got %v, err %v; want READ_ONLY — an MCP tool absent from DefaultCatalog() must resolve "+
 			"through the tenant's own catalog row instead of BuiltinTier's unrecognized-input default", got, err)
+	}
+}
+
+// TestBuildTierCatalog_NullTierEntryContributesNoFixedTier is the map-level
+// half of the NULL-tier fold (paired below with
+// TestDeriveTier_BashCatalogRowWithCommandFieldClassifiesReadOnly, the same
+// "map inspection alone is not enough" discipline this file already applies
+// throughout — see TestBuildTierCatalog_EmptyEntriesEqualsDefaultCatalog's
+// own doc comment): a tenant row with ActionTier == nil must leave NO entry
+// in the merged map for its tool, not a placeholder tier. Even
+// ActionTierReasoning, ActionTier's own zero value, would let
+// deriveTierByName (tier.go) return a fixed tier immediately and never
+// reach BuiltinTier — exactly the failure a mistakenly catalogued Bash
+// entry always risked (DefaultCatalog's own doc comment).
+//
+// The second case proves the fold actively DELETES a default entry, not
+// merely skips adding one: a tenant nulling out a tool DefaultCatalog()
+// already seeds (here, "Read") must still lose that default, or the
+// tenant's own explicit choice to defer to the command classifier would be
+// silently overruled by a seed it never asked for.
+func TestBuildTierCatalog_NullTierEntryContributesNoFixedTier(t *testing.T) {
+	t.Run("tool absent from defaults", func(t *testing.T) {
+		entries := []models.ToolCatalogEntry{{ToolName: "Bash", CommandField: strPtr("command")}}
+		got := BuildTierCatalog(entries, DefaultCatalog())
+		if tier, ok := got["Bash"]; ok {
+			t.Fatalf("merged catalog has an entry for Bash: %v, want none — a NULL tier must not fix one", tier)
+		}
+	})
+	t.Run("tool present in defaults", func(t *testing.T) {
+		entries := []models.ToolCatalogEntry{{ToolName: "Read", CommandField: strPtr("command")}}
+		got := BuildTierCatalog(entries, DefaultCatalog())
+		if tier, ok := got["Read"]; ok {
+			t.Fatalf("merged catalog has an entry for Read: %v, want none — a tenant's NULL-tier row "+
+				"must delete DefaultCatalog()'s own entry, not leave it in place", tier)
+		}
+	})
+}
+
+// TestDeriveTier_BashCatalogRowWithCommandFieldClassifiesReadOnly is Phase 8
+// Task 3's own disclosed gap (task-3-report.md), closed: a Bash-shaped
+// tool_catalog row — NULL ActionTier, command_field naming where the
+// command lives — must still let DeriveTier reach the command classifier
+// for it, exactly as TestDeriveTier_BashHasNoCatalogEntry above already
+// proves for an entirely absent row. NormalizedInput is set directly here,
+// as if extraction (internal/authz/extract.go) had already run against
+// this same entries slice — the way pdpgrpc.Server.Decide actually chains
+// them — so this test isolates BuildTierCatalog's and DeriveTier's own
+// fold-through behavior from extraction's; the full pipeline, including
+// extraction itself, is TestApplyExtraction_NullTierCatalogRowUsesCommandClassifier
+// (extract_test.go).
+func TestDeriveTier_BashCatalogRowWithCommandFieldClassifiesReadOnly(t *testing.T) {
+	entries := []models.ToolCatalogEntry{{ToolName: "Bash", CommandField: strPtr("command")}}
+	table := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
+
+	cases := []struct {
+		raw, normalized string
+		want            models.ActionTier
+	}{
+		{`{"command":"ls -la"}`, "ls -la", models.ActionTierReadOnly},
+		{`{"command":"rm -rf /"}`, "rm -rf /", models.ActionTierDestructive},
+	}
+	for _, c := range cases {
+		t.Run(c.raw, func(t *testing.T) {
+			got, err := DeriveTier(table, Action{Tool: "Bash", RawInput: c.raw, NormalizedInput: c.normalized})
+			if err != nil || got != c.want {
+				t.Fatalf("Bash %q (catalogued, NULL tier): got %v, err %v; want %v", c.raw, got, err, c.want)
+			}
+		})
 	}
 }

@@ -23,9 +23,33 @@ package models
 // tool has no such field" (nil) apart from "this tool's field name happens
 // to be empty" (the zero value). Same nullable-pointer discipline
 // scanDelegation applies to Purpose and EscalateAt (internal/store/store.go).
+//
+// ActionTier is a *ActionTier for the same reason Delegation.EscalateAt is
+// (that field's own doc comment, Phase 5 Task 1): ActionTierReasoning is
+// tier 0 (ActionTier's own doc comment), so a bare ActionTier field could
+// not tell "this row fixes no tier at all" (nil) apart from "this row fixes
+// REASONING" (the zero value) -- and unlike EscalateAt, where defaulting to
+// zero mainly changes when a delegation escalates, defaulting a mis-scanned
+// NULL tier to zero here is a silent under-classification: deriveTierByName
+// (internal/authz/tier.go) returns whatever BuildTierCatalog put in its map
+// for a tool immediately, without ever reaching BuiltinTier's per-command
+// classifier, so a fixed REASONING entry would flatten every call to that
+// tool -- destructive ones included, were it not for DeriveTier's separate,
+// unconditional evidence re-scan -- to "no side effects."
+//
+// nil means this row fixes no tier: classify the tool's calls with the
+// command classifier instead, by extracting CommandField from raw_input
+// (internal/authz/extract.go) the normal way and letting BuiltinTier
+// (internal/authz/tier.go) rate the result. This is Bash's shape: no fixed
+// tier could ever describe it (DefaultCatalog's own doc comment,
+// internal/authz/catalog.go), only its command can, and this field's
+// nullability (migrations/000014_tool_catalog_nullable_tier) is what lets a
+// tenant catalog it at all -- CommandField must be non-nil whenever this is
+// nil, enforced by that migration's own CHECK constraint, since a NULL tier
+// with no command_field names no field to classify.
 type ToolCatalogEntry struct {
 	ToolName   string
-	ActionTier ActionTier
+	ActionTier *ActionTier
 
 	// Verb is stored but not yet consumed by tier or extraction resolution
 	// (Task 2): DeriveTier keys tier lookups on the incoming Action's own

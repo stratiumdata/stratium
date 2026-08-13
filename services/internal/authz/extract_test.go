@@ -268,7 +268,7 @@ func TestApplyExtraction_CatalogCannotMaskDestructiveRawEvidence(t *testing.T) {
 	const rawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
 	commandField := "safe_summary" // deliberately NOT "command" -- the catalog points at the benign field
 	entries := []models.ToolCatalogEntry{{
-		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
+		ToolName: "Read", ActionTier: tierPtr(models.ActionTierReadOnly), CommandField: &commandField,
 	}}
 	action := Action{Tool: "Read", Verb: "read", RawInput: rawInput}
 
@@ -288,5 +288,86 @@ func TestApplyExtraction_CatalogCannotMaskDestructiveRawEvidence(t *testing.T) {
 		t.Fatalf("DeriveTier() = %v, want DESTRUCTIVE: the catalog rates Read READ_ONLY and its own "+
 			"extracted command reads as \"ls\", but raw_input's untouched \"command\" field still says "+
 			"rm -rf / — evidence must win regardless", got)
+	}
+}
+
+// TestApplyExtraction_NullTierCatalogRowUsesCommandClassifier is Phase 8
+// Task 3's own disclosed gap (task-3-report.md's "the gap: no successor"),
+// closed: a Bash-shaped tool_catalog row — NULL ActionTier, command_field
+// naming where the command lives (pkg/models.ToolCatalogEntry's own doc
+// comment; migrations/000014_tool_catalog_nullable_tier) — must let a
+// shell command wrapped in Claude Code's JSON tool_input classify by what
+// it actually does, not fall to BuiltinTier's opaque-JSON INTERNAL_MODIFY
+// default. This is the regression itself, asserted directly through the
+// full pipeline pdpgrpc.Server.Decide actually chains — ExtractFromCatalog,
+// ApplyExtraction, BuildTierCatalog, DeriveTier — not BuiltinTier in
+// isolation, the way TestBuiltinTier_JSONRawInputAlone (tier_test.go)
+// already pins the pre-fix baseline this test's READ_ONLY case now
+// overturns for a catalogued Bash. rm -rf / rides along in the same table
+// because it is the same row and the same claim: "classifies by command,"
+// not "classifies as read-only."
+func TestApplyExtraction_NullTierCatalogRowUsesCommandClassifier(t *testing.T) {
+	commandField := "command"
+	entries := []models.ToolCatalogEntry{{ToolName: "Bash", CommandField: &commandField}}
+
+	cases := map[string]models.ActionTier{
+		`{"command":"ls -la"}`:   models.ActionTierReadOnly,
+		`{"command":"rm -rf /"}`: models.ActionTierDestructive,
+	}
+	for rawInput, want := range cases {
+		t.Run(rawInput, func(t *testing.T) {
+			action := Action{Tool: "Bash", RawInput: rawInput}
+
+			extracted := ExtractFromCatalog(entries, action)
+			appliedAction, _ := ApplyExtraction(extracted, action, map[string]string{})
+			tiers := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
+
+			got, err := DeriveTier(tiers, appliedAction)
+			if err != nil {
+				t.Fatalf("DeriveTier() error = %v", err)
+			}
+			if got != want {
+				t.Fatalf("DeriveTier() = %v, want %v — a NULL-tier Bash row must classify by its "+
+					"extracted command, not fall to BuiltinTier's opaque-JSON default", got, want)
+			}
+		})
+	}
+}
+
+// TestApplyExtraction_NullTierCatalogRowCannotMaskDestructiveRawEvidence is
+// TestApplyExtraction_CatalogCannotMaskDestructiveRawEvidence's own
+// adversarial shape, replayed against a NULL-tier row instead of a
+// fixed-tier one: a benign-looking catalog-extracted command must not mask
+// a destructive command sitting in the SAME call's raw_input, even when
+// the row carries no fixed tier at all and classification is entirely
+// BuiltinTier's to make. This is what actually distinguishes "a NULL-tier
+// row correctly defers to the command classifier"
+// (TestApplyExtraction_NullTierCatalogRowUsesCommandClassifier above) from
+// "a NULL-tier row can be used to launder a destructive call behind a
+// benign-looking extraction": BuiltinTier's own step 1
+// (destructiveEvidence, tier.go) fires before its step 2 (NormalizedInput),
+// so even a maliciously-benign command_field cannot outrun it.
+func TestApplyExtraction_NullTierCatalogRowCannotMaskDestructiveRawEvidence(t *testing.T) {
+	const rawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
+	commandField := "safe_summary" // deliberately NOT "command" -- points at the benign field
+	entries := []models.ToolCatalogEntry{{ToolName: "Bash", CommandField: &commandField}}
+	action := Action{Tool: "Bash", RawInput: rawInput}
+
+	extracted := ExtractFromCatalog(entries, action)
+	if extracted.Command != "ls" {
+		t.Fatalf("test premise broken: extracted command = %q, want %q", extracted.Command, "ls")
+	}
+
+	appliedAction, _ := ApplyExtraction(extracted, action, map[string]string{})
+	tiers := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
+
+	got, err := DeriveTier(tiers, appliedAction)
+	if err != nil {
+		t.Fatalf("DeriveTier() error = %v", err)
+	}
+	if got != models.ActionTierDestructive {
+		t.Fatalf("DeriveTier() = %v, want DESTRUCTIVE: a NULL-tier Bash row whose own extracted "+
+			"command reads as \"ls\" must not mask raw_input's untouched \"command\" field, which "+
+			"still says rm -rf / — evidence must win regardless of whether the row fixes a tier", got)
 	}
 }

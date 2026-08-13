@@ -11,6 +11,7 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"testing"
@@ -34,18 +35,34 @@ const insertToolCatalogQuery = `INSERT INTO tool_catalog (tenant_id, tool_name, 
 // pattern seedAgent and seedPolicy already use: a successful seed is itself
 // proof RLS's WITH CHECK accepts a correctly tenant-scoped writer, not just
 // proof that some row landed in the table.
+//
+// tier is *models.ActionTier, not models.ActionTier: action_tier is
+// nullable (migrations/000014_tool_catalog_nullable_tier), and a nil tier
+// here seeds a genuine NULL-tier row (a Bash-shaped, command-classified
+// entry) rather than only ever being able to seed a fixed one. See
+// tierPtr below for the ordinary fixed-tier case.
 func seedToolCatalogEntry(
-	t *testing.T, tenant, toolName string, tier models.ActionTier, verb string, resourceField, commandField *string,
+	t *testing.T, tenant, toolName string, tier *models.ActionTier, verb string, resourceField, commandField *string,
 ) {
 	t.Helper()
+	var tierArg any
+	if tier != nil {
+		tierArg = int64(*tier)
+	}
 	withTenantTx(t, tenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(), insertToolCatalogQuery,
-			tenant, toolName, int64(tier), verb, resourceField, commandField,
+			tenant, toolName, tierArg, verb, resourceField, commandField,
 		); err != nil {
 			t.Fatalf("seed tool catalog entry %s: %v", toolName, err)
 		}
 	})
 }
+
+// tierPtr builds a fixed, non-NULL action_tier argument for
+// seedToolCatalogEntry — the ordinary case, spelled out explicitly rather
+// than via a bare value, since a nil *models.ActionTier means something
+// different and specific here (see seedToolCatalogEntry's own doc comment).
+func tierPtr(t models.ActionTier) *models.ActionTier { return &t }
 
 // assertPermissionDenied fails t unless err is specifically a Postgres
 // insufficient_privilege error (SQLSTATE 42501) — not merely a non-nil
@@ -90,7 +107,7 @@ func TestIntegration_ToolCatalog_ServingRoleCannotWrite(t *testing.T) {
 	const tenant = "tenant-tool-catalog-grant-integration"
 	resourceField := "file_path"
 
-	seedToolCatalogEntry(t, tenant, "Read", models.ActionTierReadOnly, "read", &resourceField, nil)
+	seedToolCatalogEntry(t, tenant, "Read", tierPtr(models.ActionTierReadOnly), "read", &resourceField, nil)
 
 	// SELECT first, through the serving role itself: this doubles as proof
 	// the serving role's own grant is sufficient for LoadToolCatalog to
@@ -109,7 +126,7 @@ func TestIntegration_ToolCatalog_ServingRoleCannotWrite(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("LoadToolCatalog() via the serving role returned %d entries, want 1", len(got))
 	}
-	if got[0].ToolName != "Read" || got[0].ActionTier != models.ActionTierReadOnly || got[0].Verb != "read" {
+	if got[0].ToolName != "Read" || got[0].ActionTier == nil || *got[0].ActionTier != models.ActionTierReadOnly || got[0].Verb != "read" {
 		t.Fatalf("LoadToolCatalog() via the serving role = %+v, want the seeded Read row", got[0])
 	}
 	if got[0].ResourceField == nil || *got[0].ResourceField != "file_path" {
@@ -182,7 +199,125 @@ func TestIntegration_ToolCatalog_ServingRoleCannotWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadToolCatalog() via testDB error = %v", err)
 	}
-	if len(final) != 1 || final[0].ToolName != "Read" || final[0].ActionTier != models.ActionTierReadOnly {
+	if len(final) != 1 || final[0].ToolName != "Read" || final[0].ActionTier == nil || *final[0].ActionTier != models.ActionTierReadOnly {
 		t.Fatalf("tool_catalog row changed despite every write being denied: got %+v", final)
 	}
+}
+
+// TestIntegration_ToolCatalog_NullTierRoundTrips is
+// migrations/000014_tool_catalog_nullable_tier's positive proof: a
+// Bash-shaped row — NULL action_tier, a command_field — is this table's
+// other valid shape (alongside a fixed tier), and ALTER COLUMN action_tier
+// DROP NOT NULL must let it be written and read back intact against a real
+// Postgres, not merely accepted by sqlmock's faked driver (which cannot
+// prove a schema change actually took effect — the same limitation
+// TestIntegration_ToolCatalog_ServingRoleCannotWrite's own doc comment
+// notes for resource_field/command_field's nullability).
+func TestIntegration_ToolCatalog_NullTierRoundTrips(t *testing.T) {
+	const tenant = "tenant-tool-catalog-null-tier-roundtrip-integration"
+	commandField := "command"
+
+	seedToolCatalogEntry(t, tenant, "Bash", nil, "execute", nil, &commandField)
+	// This row must not outlive the test: unlike
+	// TestIntegration_ToolCatalog_ServingRoleCannotWrite's seeded row (a
+	// fixed, non-NULL tier), a NULL action_tier is the one value
+	// migrations/000014's own down migration cannot coexist with (ALTER
+	// COLUMN action_tier SET NOT NULL fails while any row anywhere in the
+	// table is still NULL — a table-wide constraint, not a per-tenant one).
+	// TestEndToEnd's chain_verifies_across_the_migration_boundary subtest
+	// (store_integration_test.go) walks every migration down and back up
+	// against this same shared database later in the same run, so this
+	// cleanup runs regardless of pass or fail, the same "always" guarantee
+	// t.Cleanup gives store_test.go's own db.Close().
+	//
+	// A bare testDB.ExecContext DELETE, with no app.tenant_id set first,
+	// would silently delete nothing: tool_catalog is FORCE ROW LEVEL
+	// SECURITY (migrations/000013_tool_catalog), which applies RLS even to
+	// the table owner, so an unscoped session's current_tenant() is unset
+	// and `tenant_id = current_tenant()` matches no row — no error, just a
+	// no-op, exactly the silent-not-actually-cleaned-up failure this
+	// comment exists to prevent a future edit from reintroducing. set_config
+	// first, the same way every write in this file already does.
+	t.Cleanup(func() {
+		tx, err := testDB.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Errorf("cleanup: begin tx: %v", err)
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(context.Background(), `SELECT set_config('app.tenant_id', $1, true)`, tenant); err != nil {
+			t.Errorf("cleanup: set_config app.tenant_id: %v", err)
+			return
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM tool_catalog WHERE tenant_id = $1`, tenant); err != nil {
+			t.Errorf("cleanup: delete tool_catalog rows for tenant %s: %v", tenant, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			t.Errorf("cleanup: commit: %v", err)
+		}
+	})
+
+	got, err := store.New(testDB, tenant).LoadToolCatalog(t.Context())
+	if err != nil {
+		t.Fatalf("LoadToolCatalog() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LoadToolCatalog() returned %d entries, want 1", len(got))
+	}
+	if got[0].ToolName != "Bash" || got[0].Verb != "execute" {
+		t.Fatalf("LoadToolCatalog() = %+v, want the seeded Bash row", got[0])
+	}
+	if got[0].ActionTier != nil {
+		t.Fatalf("ActionTier = %v, want nil (NULL action_tier round-tripped through a real Postgres)", got[0].ActionTier)
+	}
+	if got[0].CommandField == nil || *got[0].CommandField != "command" {
+		t.Fatalf("CommandField = %v, want %q", got[0].CommandField, "command")
+	}
+}
+
+// TestIntegration_ToolCatalog_NullTierRequiresCommandField proves
+// migrations/000014_tool_catalog_nullable_tier's CHECK constraint —
+// tool_catalog_tier_or_command_field — makes a NULL action_tier with no
+// command_field unrepresentable at the database, not merely rejected by
+// application code a future caller could bypass. A NULL tier with no
+// command_field says "classify something" without saying what field to
+// read: it matches neither of this table's two valid shapes (a fixed tier,
+// or "extract and classify command_field"), so the database itself must
+// refuse to store it — the same "make the bad state unrepresentable, not
+// merely handled" discipline 000013's own UNIQUE (tenant_id, tool_name)
+// already gets from this file's TestIntegration_ToolCatalog_ServingRoleCannotWrite.
+//
+// Uses testDB (not servingDB): a CHECK constraint applies to every role
+// alike, ownership included, unlike a GRANT — this test is not about who
+// is permitted to write, only about what value is accepted once they do,
+// the same reasoning TestIntegration_Approvals_StatusCheckConstraintRejectsInvalidValue
+// (store_integration_test.go) gives for its own identical choice. The
+// transaction is deliberately never committed, only ever rolled back: the
+// INSERT is expected to fail, and Postgres aborts the whole transaction on
+// a constraint violation.
+func TestIntegration_ToolCatalog_NullTierRequiresCommandField(t *testing.T) {
+	const tenant = "tenant-tool-catalog-null-tier-check-integration"
+
+	tx, err := testDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(t.Context(), `SELECT set_config('app.tenant_id', $1, true)`, tenant); err != nil {
+		t.Fatalf("set_config app.tenant_id: %v", err)
+	}
+
+	_, insertErr := tx.ExecContext(t.Context(), insertToolCatalogQuery,
+		tenant, "Bash", nil, "execute", nil, nil, // NULL action_tier, NULL command_field
+	)
+	if insertErr == nil {
+		t.Fatal("INSERT with NULL action_tier and NULL command_field succeeded, want a check_violation — " +
+			"migrations/000014_tool_catalog_nullable_tier's CHECK constraint must reject it")
+	}
+	var pqErr *pq.Error
+	if !errors.As(insertErr, &pqErr) || pqErr.Code != sqlStateCheckViolation {
+		t.Fatalf("INSERT error = %v, want SQLSTATE %s (check_violation)", insertErr, sqlStateCheckViolation)
+	}
+	t.Logf("INSERT with NULL action_tier and NULL command_field correctly rejected: %v", insertErr)
 }

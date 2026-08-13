@@ -34,23 +34,32 @@ func scanToolCatalogRows(rows *sql.Rows) ([]models.ToolCatalogEntry, error) {
 	entries := make([]models.ToolCatalogEntry, 0)
 	for rows.Next() {
 		var e models.ToolCatalogEntry
-		var actionTier int64
+		var actionTier sql.NullInt64
 		var resourceField, commandField sql.NullString
 
 		if err := rows.Scan(&e.ToolName, &actionTier, &e.Verb, &resourceField, &commandField); err != nil {
 			return nil, fmt.Errorf("scan tool catalog row: %w", err)
 		}
 
-		// Fail loudly on an out-of-range tier, the same discipline
-		// scanDelegation and scanApproval already apply to their own tier
-		// columns: a corrupt row must error, never silently decode as
-		// ActionTierReasoning (the zero value) and read back as though the
-		// tenant really did declare this tool harmless.
-		tier, err := models.ParseActionTier(int(actionTier))
-		if err != nil {
-			return nil, fmt.Errorf("tool catalog %q action_tier: %w", e.ToolName, err)
+		// action_tier is nullable (migrations/000014_tool_catalog_nullable_tier):
+		// scanned through sql.NullInt64 into a pointer, the same discipline
+		// scanDelegation applies to escalate_at (internal/store/store.go),
+		// and for the same reason -- ActionTierReasoning is tier 0, so
+		// decoding NULL into a bare (non-pointer) field would silently mean
+		// "this tool is always harmless" instead of "no fixed tier; ask the
+		// command classifier" (ToolCatalogEntry.ActionTier's own doc
+		// comment). A non-NULL value still fails loudly on an out-of-range
+		// tier, the same discipline scanDelegation and scanApproval already
+		// apply to their own tier columns: a corrupt row must error, never
+		// silently decode as ActionTierReasoning and read back as though
+		// the tenant really did declare this tool harmless.
+		if actionTier.Valid {
+			tier, err := models.ParseActionTier(int(actionTier.Int64))
+			if err != nil {
+				return nil, fmt.Errorf("tool catalog %q action_tier: %w", e.ToolName, err)
+			}
+			e.ActionTier = &tier
 		}
-		e.ActionTier = tier
 
 		if resourceField.Valid {
 			v := resourceField.String

@@ -22,6 +22,13 @@ import (
 
 const testTenant = "tenant-abc"
 
+// tierPtr builds a fixed-tier ToolCatalogEntry.ActionTier for a test
+// fixture. A nil ActionTier means something specific (no fixed tier;
+// classify via command_field instead — pkg/models.ToolCatalogEntry's own
+// doc comment), so every fixture that wants an ordinary, fixed-tier row
+// must say so explicitly through this helper rather than via a bare value.
+func tierPtr(t models.ActionTier) *models.ActionTier { return &t }
+
 // fakeStore is the fake required in place of *store.Store. calls counts every
 // method invocation so validation-failure tests can assert the store was
 // never reached — "do not proceed" needs to be provably true, not just
@@ -403,7 +410,7 @@ func TestDecide_CatalogedToolReplacesWireResourceForDelegationLeg(t *testing.T) 
 	fs, req := wellFormedFixture()
 	resourceField := "path"
 	fs.catalog = []models.ToolCatalogEntry{{
-		ToolName: "Bash", ActionTier: models.ActionTierReadOnly, ResourceField: &resourceField,
+		ToolName: "Bash", ActionTier: tierPtr(models.ActionTierReadOnly), ResourceField: &resourceField,
 	}}
 	fs.chain[0].ResourceConstraints = map[string]string{"id": "/catalog/extracted/path"}
 	req.RawInput = `{"path":"/catalog/extracted/path"}`
@@ -449,7 +456,7 @@ func TestDecide_CatalogedVerbReachesAudit(t *testing.T) {
 		{
 			name:     "cataloged tool: audit carries the catalog's own verb",
 			toolName: "search_docs",
-			catalog:  []models.ToolCatalogEntry{{ToolName: "search_docs", ActionTier: models.ActionTierReadOnly, Verb: "search"}},
+			catalog:  []models.ToolCatalogEntry{{ToolName: "search_docs", ActionTier: tierPtr(models.ActionTierReadOnly), Verb: "search"}},
 			wantVerb: "search",
 		},
 		{
@@ -497,7 +504,7 @@ func TestDecide_CatalogEntryCannotMaskDestructiveEvidence(t *testing.T) {
 	fs, req := wellFormedFixture()
 	commandField := "safe_summary"
 	fs.catalog = []models.ToolCatalogEntry{{
-		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
+		ToolName: "Read", ActionTier: tierPtr(models.ActionTierReadOnly), CommandField: &commandField,
 	}}
 	req.Tool = "Read"
 	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
@@ -578,7 +585,7 @@ func TestDecide_PolicySeesEvidenceProtectedDerivedTier(t *testing.T) {
 	fs, req := wellFormedFixture()
 	commandField := "safe_summary"
 	fs.catalog = []models.ToolCatalogEntry{{
-		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
+		ToolName: "Read", ActionTier: tierPtr(models.ActionTierReadOnly), CommandField: &commandField,
 	}}
 	req.Tool = "Read"
 	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`

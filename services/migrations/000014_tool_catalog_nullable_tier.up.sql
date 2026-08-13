@@ -1,0 +1,55 @@
+-- Makes tool_catalog.action_tier nullable, closing the gap Phase 8 Task 3
+-- disclosed rather than fixed (out of scope for that task; see
+-- .superpowers/sdd/2026-08-12-phase-8-tool-catalog/task-3-report.md and
+-- this fix's own bash-gap-report.md): 000013 declared action_tier
+-- SMALLINT NOT NULL, so every catalog row had to fix a single tier for its
+-- tool. Bash's tier depends on the COMMAND, not the tool -- that is exactly
+-- why internal/authz.DefaultCatalog has always deliberately omitted it (see
+-- that function's own doc comment) -- so a mandatory action_tier meant Bash
+-- could never be catalogued at all. With no row, Bash's command_field could
+-- never be registered either, so the PDP never learned which raw_input
+-- field held the command, so it was never extracted, so BuiltinTier's
+-- per-command classifier never saw it -- silently reintroducing the exact
+-- defect Phase 3b fixed: a shell command wrapped in Claude Code's JSON
+-- tool_input ({"command":"ls -la"}) fell to the classifier's
+-- INTERNAL_MODIFY default instead of classifying READ_ONLY.
+--
+-- NULL action_tier does not mean tier 0. ActionTierReasoning is tier 0
+-- (pkg/models/tier.go), so a reader that scanned a NULL tier into a bare
+-- (non-pointer) field would silently mean "this tool is always harmless" --
+-- the opposite of what a NULL row here means, and a real under-
+-- classification, not merely a stale default (contrast
+-- 000011_delegations_escalate_at, where a bare zero would misfire in the
+-- safe-ish direction of escalating too often). pkg/models.ToolCatalogEntry.
+-- ActionTier is a *models.ActionTier for exactly the reason
+-- models.Delegation.EscalateAt already is (that field's own doc comment,
+-- Phase 5 Task 1) -- only nil, never the zero value, can mean "no fixed
+-- tier."
+--
+-- What NULL means instead: classify this tool's calls with the command
+-- classifier, not a fixed tier -- extract command_field from raw_input
+-- (internal/authz/extract.go) and run the result through the same
+-- destructive/external/read-only pattern matching Bash always used
+-- (internal/authz/tier.go's classifyInput, via BuiltinTier). A tenant can
+-- now write that as a row instead of relying on this package's own
+-- omission to arrange it.
+--
+-- The CHECK constraint below is what makes a meaningless row
+-- unrepresentable rather than merely rejected in application code -- the
+-- same reasoning 000013's own UNIQUE (tenant_id, tool_name) gives for
+-- refusing to store a duplicate rather than resolving one two ways: a NULL
+-- tier with no command_field says "classify something" without saying what
+-- field to read, matching neither of this table's two valid shapes (a
+-- fixed tier, or "extract and classify command_field"), so the database
+-- refuses to store it at all.
+--
+-- action_tier's existing CHECK (action_tier BETWEEN 0 AND 4), added by
+-- 000013, needs no change to coexist with the new nullability: BETWEEN
+-- against a NULL column evaluates to NULL, and Postgres CHECK constraints
+-- only ever reject FALSE, never NULL/UNKNOWN -- the same point
+-- 000011_delegations_escalate_at's own comment already establishes for
+-- escalate_at's identical range CHECK.
+ALTER TABLE tool_catalog ALTER COLUMN action_tier DROP NOT NULL;
+
+ALTER TABLE tool_catalog ADD CONSTRAINT tool_catalog_tier_or_command_field
+    CHECK (action_tier IS NOT NULL OR command_field IS NOT NULL);

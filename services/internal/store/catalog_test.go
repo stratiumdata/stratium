@@ -58,7 +58,7 @@ func TestStore_LoadToolCatalog_RoundTripsFieldForField(t *testing.T) {
 	if first.ToolName != "mcp__github__search_issues" {
 		t.Errorf("got[0].ToolName = %q, want %q", first.ToolName, "mcp__github__search_issues")
 	}
-	if first.ActionTier != models.ActionTierReadOnly {
+	if first.ActionTier == nil || *first.ActionTier != models.ActionTierReadOnly {
 		t.Errorf("got[0].ActionTier = %v, want %v", first.ActionTier, models.ActionTierReadOnly)
 	}
 	if first.Verb != "search" {
@@ -74,7 +74,7 @@ func TestStore_LoadToolCatalog_RoundTripsFieldForField(t *testing.T) {
 	if second.ToolName != "mcp__infra__run_shell" {
 		t.Errorf("got[1].ToolName = %q, want %q", second.ToolName, "mcp__infra__run_shell")
 	}
-	if second.ActionTier != models.ActionTierDestructive {
+	if second.ActionTier == nil || *second.ActionTier != models.ActionTierDestructive {
 		t.Errorf("got[1].ActionTier = %v, want %v", second.ActionTier, models.ActionTierDestructive)
 	}
 	if second.Verb != "execute" {
@@ -181,6 +181,47 @@ func TestStore_LoadToolCatalog_ActionTierOutOfRangeFailsAndRollsBack(t *testing.
 	}
 	if got != nil {
 		t.Errorf("LoadToolCatalog() = %+v, want nil on decode failure", got)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_LoadToolCatalog_NullActionTierScansAsNilNotZero is the
+// scan-layer half of the nullable action_tier fix
+// (migrations/000014_tool_catalog_nullable_tier): a NULL action_tier column
+// must decode to a nil *models.ActionTier, never a pointer to
+// ActionTierReasoning (its underlying zero value). The distinction is not
+// cosmetic — internal/authz.BuildTierCatalog reads a nil ActionTier as "no
+// fixed tier, defer to the command classifier" and any non-nil one
+// (including a pointer to REASONING) as "fix this tool at this exact
+// tier," so a scan that silently defaulted NULL to a zero-valued pointer
+// would fix every such tool at ActionTierReasoning instead of deferring to
+// per-command classification — the same "corrupt row must error or decode
+// honestly, never as though the tenant declared this tool harmless"
+// discipline TestStore_LoadToolCatalog_ActionTierOutOfRangeFailsAndRollsBack
+// already holds this column to for an out-of-range value.
+func TestStore_LoadToolCatalog_NullActionTierScansAsNilNotZero(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadToolCatalogQuery)).
+		WillReturnRows(sqlmock.NewRows(toolCatalogColumns()).
+			AddRow("Bash", nil, "execute", nil, "command"))
+	mock.ExpectCommit()
+
+	got, err := s.LoadToolCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("LoadToolCatalog() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LoadToolCatalog() returned %d entries, want 1", len(got))
+	}
+	if got[0].ActionTier != nil {
+		t.Fatalf("got[0].ActionTier = %v, want nil (NULL column) — not a pointer to its zero value", got[0].ActionTier)
+	}
+	if got[0].CommandField == nil || *got[0].CommandField != "command" {
+		t.Errorf("got[0].CommandField = %v, want %q", got[0].CommandField, "command")
 	}
 
 	assertExpectationsMet(t, mock)
