@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,6 +52,15 @@ type Store interface {
 	// interface needed to name it.
 	CreateApproval(ctx context.Context, a *models.Approval) error
 	LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approval, error)
+
+	// LoadToolCatalog loads the tenant's per-tool tool_catalog rows (spec
+	// §4.4.2 T1/T2), consulted both for the catalog step of DeriveTier's
+	// resolution order and for the resource/command extraction Decide
+	// performs before deriving a tier. Called fresh on every Decide, the
+	// same no-caching-layer choice LoadAgent and LoadChain already make for
+	// their own per-tenant data — kept consistent rather than special-cased
+	// for this one lookup.
+	LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry, error)
 }
 
 // eventTypeDecision is the audit_chain event_type recorded for every Decide
@@ -172,7 +182,6 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 
 	now := time.Now()
 	principal := authz.Principal{Subject: req.GetSubject()}
-	resource := req.GetResource()
 	action := authz.Action{
 		Tool:            req.GetTool(),
 		Verb:            req.GetVerb(),
@@ -180,10 +189,40 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		NormalizedInput: req.GetNormalizedInput(),
 		DeclaredTier:    declaredTier,
 	}
-	// Catalog is the shipped default (authz.DefaultCatalog, see that
-	// package's doc comment for the Claude-Code-shaped-names trade); tenant
-	// overrides load from the DB starting Phase 2, none exist yet.
-	tiers := authz.TierTable{Catalog: authz.DefaultCatalog()}
+	resource := req.GetResource()
+
+	// The tenant's own tool_catalog rows (spec §4.4.2 T1/T2), loaded fresh
+	// for this decision. A load failure fails closed rather than proceeding
+	// as though the tenant had none: a row that exists but could not be read
+	// might be the one row that would have raised this tool's tier, and
+	// silently falling back to DefaultCatalog() in that case would be
+	// exactly the "skipped row" the phase brief rules out. Routed through
+	// denyAndAudit — the same deny-and-audit shape a DeriveTier failure uses
+	// below — rather than a bare codes.Internal, so this failure is audited
+	// identically to any other pre-decision denial instead of only ever
+	// surfacing as an RPC error with no row in the audit chain.
+	catalogEntries, err := s.store.LoadToolCatalog(ctx)
+	if err != nil {
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
+			fmt.Errorf("load tool catalog: %w", err))
+	}
+
+	// Extraction happens before tiers is even built, and touches only
+	// action.NormalizedInput and resource — never action.RawInput (see
+	// authz.ApplyExtraction's own doc comment). DeriveTier below re-scans
+	// RawInput for destructive-or-external evidence unconditionally
+	// (tier.go's destructiveEvidence), so the order extraction runs in
+	// relative to that scan cannot matter: nothing on this path can narrow
+	// what the evidence check sees.
+	extracted := authz.ExtractFromCatalog(catalogEntries, action)
+	action, resource = authz.ApplyExtraction(extracted, action, resource)
+
+	// The catalog step of §4.4's resolution order (override, catalog,
+	// built-in): the tenant's own rows override DefaultCatalog() per tool,
+	// and a tenant with none yet resolves through an unchanged
+	// DefaultCatalog() — see BuildTierCatalog's own doc comment for why that
+	// is the regression guard that makes shipping this table safe.
+	tiers := authz.TierTable{Catalog: authz.BuildTierCatalog(catalogEntries, authz.DefaultCatalog())}
 
 	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
@@ -200,11 +239,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// identical failure differently.
 	derivedTier, err := authz.DeriveTier(tiers, action)
 	if err != nil {
-		result := authz.DeriveTierDenial(err)
-		if auditErr := s.appendAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), result, now); auditErr != nil {
-			return nil, auditErr
-		}
-		return toResponse(result), nil
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now, err)
 	}
 
 	// acting is the delegation the agent is presenting — the last hop.
@@ -351,6 +386,29 @@ func (s *Server) appendAudit(
 		return status.Errorf(codes.Internal, "audit append: %s", err)
 	}
 	return nil
+}
+
+// denyAndAudit builds the DeriveTierDenial-shaped Result for err, appends
+// the audit entry, and returns the wire response. Two failures on Decide's
+// pre-decision path — a tool catalog that could not be loaded, and a
+// DeriveTier failure — resolve through this one function rather than each
+// inlining its own copy of "build the denial, audit it, respond," so they
+// are audited identically and cannot independently drift the way two
+// hand-written copies of the same three lines eventually would.
+func (s *Server) denyAndAudit(
+	ctx context.Context,
+	agentID, delegationID uuid.UUID,
+	chain []*models.Delegation,
+	action authz.Action,
+	subject string,
+	now time.Time,
+	err error,
+) (*DecideResponse, error) {
+	result := authz.DeriveTierDenial(err)
+	if auditErr := s.appendAudit(ctx, agentID, delegationID, chain, action, subject, result, now); auditErr != nil {
+		return nil, auditErr
+	}
+	return toResponse(result), nil
 }
 
 // parseNonNilUUID parses s as a UUID and rejects the zero value.

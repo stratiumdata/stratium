@@ -58,6 +58,15 @@ type fakeStore struct {
 	loadApproval    *models.Approval
 	loadApprovalErr error
 
+	// catalog/catalogErr back LoadToolCatalog. catalog's zero value (nil) is
+	// deliberately what most tests in this file exercise without setting it
+	// at all: a nil slice is what store.LoadToolCatalog returns for a tenant
+	// with no rows, so the default fakeStore already stands in for "no
+	// catalog rows" — the regression-guard case every pre-existing Decide
+	// test in this file depends on continuing to hold.
+	catalog    []models.ToolCatalogEntry
+	catalogErr error
+
 	calls int
 }
 
@@ -110,6 +119,14 @@ func (f *fakeStore) LoadApproval(context.Context, uuid.UUID) (*models.Approval, 
 		return nil, f.loadApprovalErr
 	}
 	return f.loadApproval, nil
+}
+
+func (f *fakeStore) LoadToolCatalog(context.Context) ([]models.ToolCatalogEntry, error) {
+	f.calls++
+	if f.catalogErr != nil {
+		return nil, f.catalogErr
+	}
+	return f.catalog, nil
 }
 
 // testConfig's ApprovalTTL is a real, positive duration — matching every
@@ -345,6 +362,192 @@ func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
 	if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
 		t.Errorf("DerivedTier = %d, want %d (READ_ONLY): the catalog must classify a bare Read call by tool name",
 			resp.GetDerivedTier(), models.ActionTierReadOnly)
+	}
+}
+
+// TestDecide_NoCatalogRowsPassesWireResourceThroughUnchanged is Task 2's
+// regression guard for the resource dimension: fakeStore's zero-value
+// catalog (nil — no rows for any tenant, the state of every deployment
+// before an operator adds a row) must leave req.GetResource() reaching the
+// delegation leg exactly as it does today. wellFormedFixture's own Bash/read
+// call with no raw_input derives READ_ONLY (verbTiers), comfortably under
+// the fixture's INTERNAL_MODIFY ceiling, so ALLOW here is attributable only
+// to the resource constraint actually matching — not to the ceiling check
+// never being reached.
+//
+// This is the resource half of the property; the tier half — that the
+// wire's normalized_input must still reach derivation with no catalog rows
+// — already has its own standing test, TestDecide_NormalizedInputReachesDerivation
+// above, which continues to pass unmodified through this task's change (see
+// authz.ApplyExtraction's own doc comment, which names both tests as proof
+// its not-cataloged branch is exercised end to end, not just at the pure
+// function layer).
+func TestDecide_NoCatalogRowsPassesWireResourceThroughUnchanged(t *testing.T) {
+	fs, req := wellFormedFixture()
+	fs.chain[0].ResourceConstraints = map[string]string{"id": "wire-supplied-resource-id"}
+	req.Resource = map[string]string{"id": "wire-supplied-resource-id"}
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDelegationEffect() != Effect_EFFECT_ALLOW {
+		t.Errorf("DelegationEffect = %v (%q), want ALLOW: with no catalog rows, the wire's resource must "+
+			"reach the delegation leg's ResourceConstraints check unchanged",
+			resp.GetDelegationEffect(), resp.GetDelegationReason())
+	}
+}
+
+// TestDecide_CatalogedToolReplacesWireResourceForDelegationLeg is Phase 6/7's
+// motivating fix, proven end to end: once the tenant catalogs a tool, the
+// PDP's OWN reading of raw_input — not whatever resource the wire carried —
+// is what the delegation leg's ResourceConstraints checks against. The
+// wire's req.Resource is deliberately a DIFFERENT, stale-looking path so a
+// mutation that fell back to it (instead of the catalog's extraction) would
+// produce a DENY here, not an accidental ALLOW.
+func TestDecide_CatalogedToolReplacesWireResourceForDelegationLeg(t *testing.T) {
+	fs, req := wellFormedFixture()
+	resourceField := "path"
+	fs.catalog = []models.ToolCatalogEntry{{
+		ToolName: "Bash", ActionTier: models.ActionTierReadOnly, ResourceField: &resourceField,
+	}}
+	fs.chain[0].ResourceConstraints = map[string]string{"id": "/catalog/extracted/path"}
+	req.RawInput = `{"path":"/catalog/extracted/path"}`
+	req.Resource = map[string]string{"id": "/stale/wire/supplied/path"}
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
+		t.Errorf("DerivedTier = %d, want READ_ONLY (%d) from the tenant's own catalog row",
+			resp.GetDerivedTier(), models.ActionTierReadOnly)
+	}
+	if resp.GetDelegationEffect() != Effect_EFFECT_ALLOW {
+		t.Errorf("DelegationEffect = %v (%q), want ALLOW: a cataloged tool's PDP-derived resource identity "+
+			"must reach the delegation leg, not the wire's stale value",
+			resp.GetDelegationEffect(), resp.GetDelegationReason())
+	}
+}
+
+// TestDecide_CatalogEntryCannotMaskDestructiveEvidence is the evidence-rule
+// property proven through the real server wiring, not just the pure authz
+// functions (internal/authz/extract_test.go's
+// TestApplyExtraction_CatalogCannotMaskDestructiveRawEvidence already covers
+// those in isolation). This is what would catch a mutation specifically in
+// how server.go assembles the call to DeriveTier — for example, reordering
+// so the tier from a cataloged tool's ActionTier, or its own extracted
+// command, is used without DeriveTier ever re-scanning the true RawInput.
+func TestDecide_CatalogEntryCannotMaskDestructiveEvidence(t *testing.T) {
+	fs, req := wellFormedFixture()
+	commandField := "safe_summary"
+	fs.catalog = []models.ToolCatalogEntry{{
+		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
+	}}
+	req.Tool = "Read"
+	req.Verb = "read"
+	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDerivedTier() != int32(models.ActionTierDestructive) {
+		t.Errorf("DerivedTier = %d, want DESTRUCTIVE (%d): a catalog entry rating Read READ_ONLY, plus a "+
+			"benign-looking catalog-extracted command, must not mask rm -rf / sitting in this call's own "+
+			"raw_input", resp.GetDerivedTier(), models.ActionTierDestructive)
+	}
+}
+
+// TestDecide_ToolCatalogLoadFailureDeniesAndAudits is the fail-closed
+// requirement the phase brief states explicitly: a catalog that could not be
+// loaded must deny, audited, rather than the failure being swallowed and the
+// decision proceeding as though the tenant had no rows at all (which could
+// under-classify whatever the unreadable rows would have raised) or
+// surfacing only as an unaudited RPC error.
+func TestDecide_ToolCatalogLoadFailureDeniesAndAudits(t *testing.T) {
+	fs, req := wellFormedFixture()
+	fs.catalogErr = errors.New("connection reset")
+	srv := NewServer(fs, denyAllPolicy(), testConfig())
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v, want a decision (fail closed, not a bare RPC error)", err)
+	}
+	if resp.GetEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+	}
+	if resp.GetReason() == "" {
+		t.Error("Reason is empty, want the catalog load failure's message")
+	}
+	if len(fs.appended) != 1 {
+		t.Fatalf("AppendAudit called %d times, want 1 — a catalog load failure must still be audited", len(fs.appended))
+	}
+	if fs.appended[0].Decision != "DENY" {
+		t.Errorf("audit entry Decision = %q, want DENY", fs.appended[0].Decision)
+	}
+}
+
+// capturingVerdictSet is a policy.CompiledPolicySet that records the last
+// EvaluationInput it was handed and returns a fixed, uninteresting verdict.
+// It exists because Decide computes the derived tier TWICE (server.go's own
+// comment on the "derived ahead of authz.Decide" step explains why): once
+// here, early, purely so a policy can condition on it, and again inside
+// authz.Decide itself, which is what actually decides the response. That
+// second computation is independent and authoritative for
+// resp.GetDerivedTier() — so a bug that corrupts ONLY the early value would
+// leave the response looking correct while still handing every policy
+// engine the wrong tier to reason about. Nothing else in this file's fixture
+// set can observe that distinction; this type exists so a test can.
+type capturingVerdictSet struct {
+	lastInput *policy.EvaluationInput
+}
+
+func (c *capturingVerdictSet) Evaluate(_ context.Context, in policy.EvaluationInput) ([]authz.PolicyVerdict, error) {
+	cp := in
+	c.lastInput = &cp
+	return []authz.PolicyVerdict{{Effect: authz.EffectDeny, Source: fakeLanguage, Reason: "capturing-fake-deny"}}, nil
+}
+
+// TestDecide_PolicySeesEvidenceProtectedDerivedTier closes the gap
+// TestDecide_CatalogEntryCannotMaskDestructiveEvidence cannot see: that test
+// only asserts the FINAL resp.GetDerivedTier(), which authz.Decide's own
+// redundant re-derivation protects independently of the early value this
+// method computes for the policy engine (see capturingVerdictSet's own doc
+// comment). A tenant policy that conditions on EvaluationInput.DerivedTier —
+// "allow anything under EXTERNAL_COMMS," say — would be handed a
+// silently-wrong tier if the early derivation were ever corrupted, even
+// though the response and the audit row would both still show the correct
+// value. This test is what makes that corruption visible.
+func TestDecide_PolicySeesEvidenceProtectedDerivedTier(t *testing.T) {
+	fs, req := wellFormedFixture()
+	commandField := "safe_summary"
+	fs.catalog = []models.ToolCatalogEntry{{
+		ToolName: "Read", ActionTier: models.ActionTierReadOnly, CommandField: &commandField,
+	}}
+	req.Tool = "Read"
+	req.Verb = "read"
+	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
+
+	capture := &capturingVerdictSet{}
+	srv := NewServer(fs, policy.NewMulti(
+		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "p1", Language: fakeLanguage}}},
+		policy.Registry{fakeLanguage: fakePolicyEngine{set: capture}},
+	), testConfig())
+
+	if _, err := srv.Decide(context.Background(), req); err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if capture.lastInput == nil {
+		t.Fatal("policy engine was never invoked; capture.lastInput is nil")
+	}
+	if capture.lastInput.DerivedTier != models.ActionTierDestructive {
+		t.Errorf("policy saw DerivedTier = %v, want DESTRUCTIVE: the tier fed to policy evaluation must be "+
+			"evidence-protected exactly like the response's own DerivedTier, not merely the response",
+			capture.lastInput.DerivedTier)
 	}
 }
 

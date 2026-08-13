@@ -2,6 +2,7 @@ package authz
 
 import (
 	"errors"
+	"maps"
 	"testing"
 
 	"stratium/pkg/models"
@@ -128,5 +129,92 @@ func TestValidateOverride_CatalogEntryRaiseOnly(t *testing.T) {
 	}
 	if err := ValidateOverride(builtin, models.ActionTierReasoning); !errors.Is(err, ErrOverrideLowersTier) {
 		t.Fatalf("lowering below a catalog entry must be rejected, got %v", err)
+	}
+}
+
+// TestBuildTierCatalog_EmptyEntriesEqualsDefaultCatalog is the map-level
+// half of Task 2's regression guard: with zero tenant rows, the merge must
+// produce a catalog indistinguishable from DefaultCatalog() itself, not an
+// empty map that happens to fall through to the same place today. A merge
+// that forgot to seed from defaults when entries is empty would pass every
+// existing DefaultCatalog()-based test at the BuiltinTier layer (they never
+// go through BuildTierCatalog) while still breaking every caller that does
+// — which is exactly why TestDeriveTier_EmptyTenantCatalogFallsBackToDefaultCatalog
+// below re-proves this through DeriveTier as well, the same "map inspection
+// is not enough" discipline TestDeriveTier_BashHasNoCatalogEntry established
+// for this file.
+func TestBuildTierCatalog_EmptyEntriesEqualsDefaultCatalog(t *testing.T) {
+	got := BuildTierCatalog(nil, DefaultCatalog())
+	want := DefaultCatalog()
+	if !maps.Equal(got, want) {
+		t.Fatalf("BuildTierCatalog(nil, DefaultCatalog()) = %v, want exactly DefaultCatalog(): %v", got, want)
+	}
+}
+
+// TestDeriveTier_EmptyTenantCatalogFallsBackToDefaultCatalog is the
+// through-DeriveTier proof of the same property: a merge that silently drops
+// to an empty (or nil) catalog when entries is empty, instead of seeding
+// from defaults, would flip these two seeded tools from their documented
+// tier to DeriveTier's UnknownTier floor or a DenyUnknown error — the
+// mutation the phase brief names explicitly ("make an empty catalog deny
+// everything").
+func TestDeriveTier_EmptyTenantCatalogFallsBackToDefaultCatalog(t *testing.T) {
+	table := TierTable{Catalog: BuildTierCatalog(nil, DefaultCatalog())}
+	cases := map[string]models.ActionTier{
+		"Read":  models.ActionTierReadOnly,
+		"Write": models.ActionTierInternalModify,
+	}
+	for tool, want := range cases {
+		t.Run(tool, func(t *testing.T) {
+			got, err := DeriveTier(table, Action{Tool: tool})
+			if err != nil || got != want {
+				t.Fatalf("tool %q via a zero-row tenant catalog: got %v, err %v; want %v", tool, got, err, want)
+			}
+		})
+	}
+}
+
+// TestBuildTierCatalog_TenantRowOverridesDefaultForThatToolOnly proves the
+// merge is per tool, not a wholesale replacement: a tenant overriding one
+// tool's tier must not disturb DefaultCatalog()'s entry for any tool it
+// never mentioned. Read and Write are deliberately given DIFFERENT expected
+// tiers here (DESTRUCTIVE vs INTERNAL_MODIFY, neither equal to Read's own
+// default of READ_ONLY) so a merge that accidentally let one entry's value
+// leak onto the other would fail a specific assertion, not pass by
+// coincidence.
+func TestBuildTierCatalog_TenantRowOverridesDefaultForThatToolOnly(t *testing.T) {
+	entries := []models.ToolCatalogEntry{
+		{ToolName: "Read", ActionTier: models.ActionTierDestructive},
+	}
+	table := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
+
+	got, err := DeriveTier(table, Action{Tool: "Read"})
+	if err != nil || got != models.ActionTierDestructive {
+		t.Fatalf("Read: got %v, err %v; want the tenant row's DESTRUCTIVE, not the default READ_ONLY", got, err)
+	}
+	got, err = DeriveTier(table, Action{Tool: "Write"})
+	if err != nil || got != models.ActionTierInternalModify {
+		t.Fatalf("Write: got %v, err %v; want DefaultCatalog()'s INTERNAL_MODIFY, unaffected by the Read row", got, err)
+	}
+}
+
+// TestBuildTierCatalog_TenantCanCatalogToolAbsentFromDefaults is the
+// motivating fix stated end to end: Phase 6 found a READ_ONLY delegation
+// denying every third-party MCP read because read_file (or any MCP tool
+// name) has no DefaultCatalog() entry and fell through to BuiltinTier's
+// "unrecognized -> assume it modifies" default. A tenant's own row for that
+// exact name must now resolve it correctly, through the real merge and the
+// real DeriveTier, not merely through a hand-built TierTable.Catalog map as
+// tier_test.go's own TestDeriveTier_CatalogBeatsBuiltin already does.
+func TestBuildTierCatalog_TenantCanCatalogToolAbsentFromDefaults(t *testing.T) {
+	entries := []models.ToolCatalogEntry{
+		{ToolName: "read_file", ActionTier: models.ActionTierReadOnly},
+	}
+	table := TierTable{Catalog: BuildTierCatalog(entries, DefaultCatalog())}
+
+	got, err := DeriveTier(table, Action{Tool: "read_file", Verb: "read"})
+	if err != nil || got != models.ActionTierReadOnly {
+		t.Fatalf("got %v, err %v; want READ_ONLY — an MCP tool absent from DefaultCatalog() must resolve "+
+			"through the tenant's own catalog row instead of BuiltinTier's unrecognized-input default", got, err)
 	}
 }

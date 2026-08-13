@@ -8,33 +8,10 @@ import (
 	"stratium/pkg/models"
 )
 
-// ToolCatalogEntry is one tenant's declared metadata for one tool: the
-// action tier and verb §4.4's resolution order looks up ahead of the
-// built-in classifier (spec §4.4.2 T1), and which raw_input field names, if
-// any, carry the tool call's resource identity and command (T2).
-//
-// It lives here, in package store, rather than in internal/authz or
-// pkg/models. internal/authz stays pure and is not touched by this task —
-// the catalog is loaded here and passed in, exactly as policies already
-// are — and this type's only consumer today is this file's own loader, the
-// same starting point Approval had before a second package needed to
-// construct one and Task 3 gave it a home in pkg/models (see approval.go's
-// own doc comment). Move ToolCatalogEntry out of store if and when a
-// second package needs to build one; nothing here presumes it will stay.
-//
-// ResourceField and CommandField are pointers, not plain strings: plenty of
-// tools have no resource field, and most have no command field at all —
-// only a shell-shaped tool does — so a bare string could not tell "this
-// tool has no such field" (nil) apart from "this tool's field name happens
-// to be empty" (the zero value). Same nullable-pointer discipline
-// scanDelegation already applies to Purpose and EscalateAt (store.go).
-type ToolCatalogEntry struct {
-	ToolName      string
-	ActionTier    models.ActionTier
-	Verb          string
-	ResourceField *string
-	CommandField  *string
-}
+// ToolCatalogEntry is defined in pkg/models, not here: see that file's own
+// doc comment for why Task 2 moved it out of this package once internal/authz
+// needed to resolve tiers and extract fields from a whole catalog, not just
+// receive rows from this package's own loader.
 
 // loadToolCatalogQuery loads every tool_catalog row RLS scopes the
 // transaction to. id and tenant_id are both real columns
@@ -53,10 +30,10 @@ const loadToolCatalogQuery = `SELECT tool_name, action_tier, verb, resource_fiel
 // the same "map one row" / "run a query inside a transaction" split
 // scanPolicyRows (policy.go) and scanAuditTail (audit.go) already keep
 // separate in this package.
-func scanToolCatalogRows(rows *sql.Rows) ([]ToolCatalogEntry, error) {
-	entries := make([]ToolCatalogEntry, 0)
+func scanToolCatalogRows(rows *sql.Rows) ([]models.ToolCatalogEntry, error) {
+	entries := make([]models.ToolCatalogEntry, 0)
 	for rows.Next() {
-		var e ToolCatalogEntry
+		var e models.ToolCatalogEntry
 		var actionTier int64
 		var resourceField, commandField sql.NullString
 
@@ -106,7 +83,7 @@ func scanToolCatalogRows(rows *sql.Rows) ([]ToolCatalogEntry, error) {
 // already supports for the policy engines — but that fallback is that
 // caller's decision to make, not this function's: LoadToolCatalog reports
 // what the tenant has, nothing more.
-func (s *Store) LoadToolCatalog(ctx context.Context) ([]ToolCatalogEntry, error) {
+func (s *Store) LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry, error) {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
 		return nil, err

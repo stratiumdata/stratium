@@ -94,3 +94,45 @@ func DefaultCatalog() map[string]models.ActionTier {
 		// classifier. See the doc comment above.
 	}
 }
+
+// BuildTierCatalog merges a tenant's own tool_catalog rows (Task 1;
+// store.LoadToolCatalog) over DefaultCatalog(), tenant rows winning per
+// tool. This is §4.4.2 T1's "catalog" step of DeriveTier's resolution order,
+// connected to the database for the first time: DeriveTier itself is
+// unchanged (it has always consulted whatever TierTable.Catalog holds), only
+// what populates that field is new.
+//
+// A tenant with zero rows — every tenant, until the control plane populates
+// one — gets back a catalog equal to DefaultCatalog() itself, so DeriveTier
+// resolves every tool exactly as it did before this table existed. That is
+// the regression guard that makes shipping the table safe on day one, and it
+// is pinned end to end through DeriveTier, not merely as a map comparison,
+// by TestDeriveTier_EmptyTenantCatalogFallsBackToDefaultCatalog
+// (catalog_test.go) — the same "prove it through DeriveTier, not just the
+// map" discipline TestDeriveTier_BashHasNoCatalogEntry already established
+// for this file.
+//
+// The merge is per tool, not per tenant: a tenant that catalogs ONE tool
+// (an MCP server's read_file, say) must not lose DefaultCatalog()'s entries
+// for every OTHER tool it never mentioned. Only names actually present in
+// entries override a default; every other name falls through unchanged. A
+// tenant CAN catalog a built-in name — including "Bash", which
+// DefaultCatalog() deliberately omits (see that function's own doc comment)
+// — and that is the tenant's own choice to make: DeriveTier's evidence rule
+// protects a destructive raw input regardless of what any catalog, built-in
+// or tenant-supplied, claims about the tool's tier.
+//
+// defaults is read, never mutated: a fresh map is returned, the same
+// per-call-fresh-map discipline DefaultCatalog() itself follows (see that
+// function's own doc comment), so a caller still holding the map DefaultCatalog()
+// handed back never sees a tenant's row leak into it.
+func BuildTierCatalog(entries []models.ToolCatalogEntry, defaults map[string]models.ActionTier) map[string]models.ActionTier {
+	merged := make(map[string]models.ActionTier, len(defaults)+len(entries))
+	for tool, tier := range defaults {
+		merged[tool] = tier
+	}
+	for _, e := range entries {
+		merged[e.ToolName] = e.ActionTier
+	}
+	return merged
+}
