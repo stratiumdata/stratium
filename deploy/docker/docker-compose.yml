@@ -47,15 +47,18 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-one
       STRATIUM_LISTEN_ADDR: :50051
-      # ponytail: internal/config.Load requires this var to be non-empty but
-      # (deliberately — see that package's own comment) never opens the file
-      # it names, and no code path reads it yet either: Phase 9 Task 1 built
-      # the signer and its config plumbing but does not wire token.Load into
-      # main.go/pdpgrpc. A placeholder keeps this container starting today.
-      # Becomes load-bearing the moment a later task calls token.Load here —
-      # at which point this must point at a real, readable EC PEM (generated
-      # fresh, e.g. at image build time; never a key committed to the repo).
-      STRATIUM_TOKEN_SIGNING_KEY_PATH: /placeholder-not-yet-read/current.pem
+      # Load-bearing as of Phase 9 Task 2: main.go now calls
+      # internal/token.Load at startup, so this must name a real, readable
+      # EC PEM or the container fails to start. The Dockerfile's builder
+      # stage generates one fresh on every image build (openssl, a
+      # transient build-time dependency only — see that file's own
+      # comment) and COPYs it into the runtime image at this exact path;
+      # nothing here is a key committed to the repo. Good enough for
+      # `make integration`'s own purposes — proving the signing path works
+      # end to end — but is not, and is not meant to be, how a real
+      # deployment's key reaches the PDP (an operator-mounted file, per
+      # K1).
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
     ports:
       - "50051"
 
@@ -89,9 +92,9 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-narrow-registry-integration
       STRATIUM_LISTEN_ADDR: :50051
-      # See the "pdp" service's own comment on this variable — same
-      # placeholder, same reason, same upgrade condition.
-      STRATIUM_TOKEN_SIGNING_KEY_PATH: /placeholder-not-yet-read/current.pem
+      # See the "pdp" service's own comment on this variable above — same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
       # Deliberately omits "rego" — one of the four languages this build
       # ships, not an invented fifth one, so the gap this proves is exactly
       # "an operator's own STRATIUM_POLICY_LANGUAGES left something out,"
@@ -146,9 +149,9 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-resource-identity-integration
       STRATIUM_LISTEN_ADDR: :50051
-      # See the "pdp" service's own comment on this variable — same
-      # placeholder, same reason, same upgrade condition.
-      STRATIUM_TOKEN_SIGNING_KEY_PATH: /placeholder-not-yet-read/current.pem
+      # See the "pdp" service's own comment on this variable above — same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
     ports:
       - "50051"
 

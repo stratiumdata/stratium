@@ -401,3 +401,108 @@ func TestStore_LoadChain_CycleIsBounded(t *testing.T) {
 
 	assertExpectationsMet(t, mock)
 }
+
+// --- LoadDelegation ---
+
+func TestStore_LoadDelegation_Success(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agent := uuid.New(), uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadDelegationQuery)).
+		WithArgs(id.String()).
+		WillReturnRows(addDelegationRow(sqlmock.NewRows(delegationColumns()),
+			delegationRow{id: id, hasParent: false, rootID: id, agentID: agent, depth: 0}))
+	mock.ExpectCommit()
+
+	got, err := s.LoadDelegation(context.Background(), id)
+	if err != nil {
+		t.Fatalf("LoadDelegation() error = %v", err)
+	}
+	if got.ID != id {
+		t.Errorf("ID = %s, want %s", got.ID, id)
+	}
+	if got.AgentID != agent {
+		t.Errorf("AgentID = %s, want %s", got.AgentID, agent)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A row with its own parent set must still resolve through exactly one
+// query: LoadDelegation answers "is this one row alive" and must not pay for
+// LoadChain's walk to the root to do it. sqlmock's expectations are matched
+// in order and exhausted by exactly one query — if the implementation
+// issued a second query to follow parent_delegation_id, this test would fail
+// on an unexpected call, and assertExpectationsMet below would fail on an
+// unmet one if it issued fewer than expected; together they prove exactly
+// one query ran, not merely that the call succeeded.
+func TestStore_LoadDelegation_DoesNotWalkParentChain(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, parent, root, agent := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadDelegationQuery)).
+		WithArgs(id.String()).
+		WillReturnRows(addDelegationRow(sqlmock.NewRows(delegationColumns()),
+			delegationRow{id: id, hasParent: true, parentID: parent, rootID: root, agentID: agent, depth: 2}))
+	mock.ExpectCommit()
+
+	got, err := s.LoadDelegation(context.Background(), id)
+	if err != nil {
+		t.Fatalf("LoadDelegation() error = %v", err)
+	}
+	if got.ParentDelegationID == nil || *got.ParentDelegationID != parent {
+		t.Errorf("ParentDelegationID = %v, want %s: the row's own field must still decode correctly "+
+			"even though it is never followed", got.ParentDelegationID, parent)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_LoadDelegation_NotFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadDelegationQuery)).
+		WithArgs(id.String()).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, err := s.LoadDelegation(context.Background(), id)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadDelegation() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A missing row and a real query failure must be distinguishable: only the
+// former is ErrNotFound — the same property TestStore_LoadAgent_QueryError
+// and TestStore_LoadChain_QueryError already prove for their own queries.
+func TestStore_LoadDelegation_QueryError(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	dbErr := errors.New("connection reset")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadDelegationQuery)).
+		WithArgs(id.String()).
+		WillReturnError(dbErr)
+	mock.ExpectRollback()
+
+	_, err := s.LoadDelegation(context.Background(), id)
+	if err == nil {
+		t.Fatal("LoadDelegation() error = nil, want error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadDelegation() error = %v, must not be ErrNotFound for a query failure", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}

@@ -27,6 +27,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	PDPService_Decide_FullMethodName           = "/stratium.pdp.v1.PDPService/Decide"
 	PDPService_CreateDelegation_FullMethodName = "/stratium.pdp.v1.PDPService/CreateDelegation"
+	PDPService_IssueToken_FullMethodName       = "/stratium.pdp.v1.PDPService/IssueToken"
 	PDPService_GetApproval_FullMethodName      = "/stratium.pdp.v1.PDPService/GetApproval"
 )
 
@@ -36,6 +37,23 @@ const (
 type PDPServiceClient interface {
 	Decide(ctx context.Context, in *DecideRequest, opts ...grpc.CallOption) (*DecideResponse, error)
 	CreateDelegation(ctx context.Context, in *CreateDelegationRequest, opts ...grpc.CallOption) (*CreateDelegationResponse, error)
+	// IssueToken re-issues a token for an existing delegation — the path a
+	// caller whose earlier token expired uses to get a fresh one, without
+	// going through CreateDelegation again (which would mint a NEW
+	// delegation, not refresh access to this one).
+	//
+	// Re-issuance re-checks everything: the delegation named by
+	// delegation_id is loaded fresh from this tenant (RLS makes another
+	// tenant's delegation indistinguishable from a missing one, NOT_FOUND
+	// either way — the same rule every other lookup in this service follows)
+	// and the call is refused, PERMISSION_DENIED, if that row is revoked or
+	// has itself expired. Trusting the id it was handed instead of loading it
+	// would make this RPC a way to resurrect a dead delegation's authority —
+	// the entire point of re-issuance is that the delegation is still alive,
+	// which can only be established by loading it fresh, not assumed from a
+	// caller's assertion. Signing failure fails the call the same way it does
+	// for CreateDelegation: no response without a token, ever.
+	IssueToken(ctx context.Context, in *IssueTokenRequest, opts ...grpc.CallOption) (*IssueTokenResponse, error)
 	// GetApproval reports one approval's current status and expiry, for a PEP
 	// polling after an ESCALATE response. See GetApprovalResponse's own doc
 	// comment for why this RPC has no path to write anything.
@@ -70,6 +88,16 @@ func (c *pDPServiceClient) CreateDelegation(ctx context.Context, in *CreateDeleg
 	return out, nil
 }
 
+func (c *pDPServiceClient) IssueToken(ctx context.Context, in *IssueTokenRequest, opts ...grpc.CallOption) (*IssueTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueTokenResponse)
+	err := c.cc.Invoke(ctx, PDPService_IssueToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *pDPServiceClient) GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetApprovalResponse)
@@ -86,6 +114,23 @@ func (c *pDPServiceClient) GetApproval(ctx context.Context, in *GetApprovalReque
 type PDPServiceServer interface {
 	Decide(context.Context, *DecideRequest) (*DecideResponse, error)
 	CreateDelegation(context.Context, *CreateDelegationRequest) (*CreateDelegationResponse, error)
+	// IssueToken re-issues a token for an existing delegation — the path a
+	// caller whose earlier token expired uses to get a fresh one, without
+	// going through CreateDelegation again (which would mint a NEW
+	// delegation, not refresh access to this one).
+	//
+	// Re-issuance re-checks everything: the delegation named by
+	// delegation_id is loaded fresh from this tenant (RLS makes another
+	// tenant's delegation indistinguishable from a missing one, NOT_FOUND
+	// either way — the same rule every other lookup in this service follows)
+	// and the call is refused, PERMISSION_DENIED, if that row is revoked or
+	// has itself expired. Trusting the id it was handed instead of loading it
+	// would make this RPC a way to resurrect a dead delegation's authority —
+	// the entire point of re-issuance is that the delegation is still alive,
+	// which can only be established by loading it fresh, not assumed from a
+	// caller's assertion. Signing failure fails the call the same way it does
+	// for CreateDelegation: no response without a token, ever.
+	IssueToken(context.Context, *IssueTokenRequest) (*IssueTokenResponse, error)
 	// GetApproval reports one approval's current status and expiry, for a PEP
 	// polling after an ESCALATE response. See GetApprovalResponse's own doc
 	// comment for why this RPC has no path to write anything.
@@ -105,6 +150,9 @@ func (UnimplementedPDPServiceServer) Decide(context.Context, *DecideRequest) (*D
 }
 func (UnimplementedPDPServiceServer) CreateDelegation(context.Context, *CreateDelegationRequest) (*CreateDelegationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateDelegation not implemented")
+}
+func (UnimplementedPDPServiceServer) IssueToken(context.Context, *IssueTokenRequest) (*IssueTokenResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IssueToken not implemented")
 }
 func (UnimplementedPDPServiceServer) GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetApproval not implemented")
@@ -166,6 +214,24 @@ func _PDPService_CreateDelegation_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PDPService_IssueToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssueTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDPServiceServer).IssueToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PDPService_IssueToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDPServiceServer).IssueToken(ctx, req.(*IssueTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PDPService_GetApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetApprovalRequest)
 	if err := dec(in); err != nil {
@@ -198,6 +264,10 @@ var PDPService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateDelegation",
 			Handler:    _PDPService_CreateDelegation_Handler,
+		},
+		{
+			MethodName: "IssueToken",
+			Handler:    _PDPService_IssueToken_Handler,
 		},
 		{
 			MethodName: "GetApproval",

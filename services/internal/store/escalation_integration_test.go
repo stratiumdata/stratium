@@ -107,7 +107,12 @@ func escalationServer(t *testing.T, tenant string) *pdpgrpc.Server {
 	seedPolicy(t, tenant, "escalation-blanket-permit", escalationBlanketPermit, "allow")
 	repo := store.New(testDB, tenant)
 	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour}
-	return pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg)
+	// nil signer: every proof in this file calls Decide/GetApproval only
+	// (this file's own banner above), never CreateDelegation or IssueToken,
+	// so there is nothing here that would ever dereference it — the same
+	// reasoning internal/pdpgrpc.NewServer's own doc comment gives for its
+	// Decide-only unit tests.
+	return pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, nil)
 }
 
 // escalationRawInput is a Bash command internal/authz's destructive-pattern
@@ -647,7 +652,10 @@ func TestIntegration_Escalation_CrossTenantCannotReadOrApprove(t *testing.T) {
 	// policy needed since GetApproval never evaluates one) asked for tenant
 	// A's approval id.
 	repoB := store.New(testDB, tenantB)
-	srvB := pdpgrpc.NewServer(repoB, policy.NewMulti(repoB, escalationRegistry()), config.Config{TenantID: tenantB, MaxDepth: 5, ApprovalTTL: time.Hour})
+	// nil signer: this Server only ever calls GetApproval below (see
+	// escalationServer's own comment on why that is safe).
+	srvB := pdpgrpc.NewServer(repoB, policy.NewMulti(repoB, escalationRegistry()),
+		config.Config{TenantID: tenantB, MaxDepth: 5, ApprovalTTL: time.Hour}, nil)
 	_, err = srvB.GetApproval(t.Context(), &pdpgrpc.GetApprovalRequest{ApprovalId: approvalID.String()})
 	if err == nil {
 		t.Fatal("GetApproval() from tenant B for tenant A's approval id succeeded, want NotFound")

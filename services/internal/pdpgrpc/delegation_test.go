@@ -101,9 +101,16 @@ func (fakePolicyEngine) Validate(context.Context, string) error { return nil }
 // newDelegationServer wires a Server whose CreateDelegation grant probes are
 // answered by set: a policy.Multi with exactly one registered language
 // (fakeLanguage), one fake StoredPolicy for it, and the given fakePolicyEngine
-// as the engine that prepares it into set.
+// as the engine that prepares it into set. Its signer is a fresh, always-
+// succeeding fakeSigner — every test in this file reaches CreateDelegation's
+// final mint-a-token step on its success path, so a nil signer (fine for
+// Decide-only tests elsewhere in this package) would fail every one of them
+// here for a reason unrelated to what each test actually means to exercise.
+// Tests that specifically care about signing (a real, verifiable token; a
+// signing failure) build their own Server directly instead of through this
+// helper.
 func newDelegationServer(fs *fakeStore, set policy.CompiledPolicySet) *Server {
-	return NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set}), testConfig())
+	return NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set}), testConfig(), &fakeSigner{})
 }
 
 // singleFakeLanguagePolicy builds the policy.Multi every CreateDelegation
@@ -360,6 +367,101 @@ func TestCreateDelegation_AuditWriteFailure_ReturnsErrorAndNoID(t *testing.T) {
 	}
 }
 
+// A created delegation returns a token that (a) actually verifies against
+// the signer that issued it and (b) names the delegation it came with —
+// the brief's own "a created delegation returns a verifiable token naming
+// it." Uses a real *token.Signer (testSigner, token_test.go), not
+// newDelegationServer's fakeSigner: only a real Verify() proves the wire
+// artifact is a genuine, well-formed token, not merely that some string was
+// returned. Combined with the same test's exact-claim-key-set assertion
+// below for K3's "carries no scope fields" — this is the strongest form of
+// that property this package can state, since it inspects the token that
+// actually left CreateDelegation, decoded by the same mechanism a real
+// caller would use, rather than a claims map intercepted before signing
+// (TestTokenClaims_CarriesExactlyTheIdentifyingFields, token_test.go, is
+// that narrower, direct-unit-test version of the same property).
+func TestCreateDelegation_ReturnsVerifiableTokenNamingTheDelegationWithNoScopeFields(t *testing.T) {
+	signer := testSigner(t)
+	fs, req, _ := wellFormedDelegationFixture()
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: permissiveGrantSet()}), testConfig(), signer)
+
+	resp, err := srv.CreateDelegation(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if resp.GetToken() == "" {
+		t.Fatal("CreateDelegation() returned an empty token")
+	}
+
+	claims, err := signer.Verify(resp.GetToken())
+	if err != nil {
+		t.Fatalf("Verify() of the returned token = %v, want success", err)
+	}
+	if got := claims[subjectClaim]; got != resp.GetDelegationId() {
+		t.Errorf("token sub = %v, want %s (the delegation this token was returned alongside)",
+			got, resp.GetDelegationId())
+	}
+	if got := claimKeys(claims); !slices.Equal(got, identifyingClaimKeys) {
+		t.Fatalf("token claim keys = %v, want exactly %v: no scope field may ride along "+
+			"(spec K3 — a token is a reference, not a capability)", got, identifyingClaimKeys)
+	}
+}
+
+// A fresh delegation's token expires exactly when the delegation does — not
+// a moment later (which would be the "outlive its delegation" mutation this
+// task's brief names) and not a moment earlier either (which would silently
+// grant less than what CreateDelegation is documented to hand back).
+func TestCreateDelegation_TokenExpiryEqualsDelegationExpiry(t *testing.T) {
+	signer := testSigner(t)
+	fs, req, _ := wellFormedDelegationFixture()
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: permissiveGrantSet()}), testConfig(), signer)
+
+	resp, err := srv.CreateDelegation(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+
+	claims, err := signer.Verify(resp.GetToken())
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	wantExp := fs.created[0].ExpiresAt.Unix()
+	gotExp, ok := claims[expiryClaim].(float64)
+	if !ok || int64(gotExp) != wantExp {
+		t.Errorf("token exp = %v, want exactly %d (the persisted delegation's own expires_at)", claims[expiryClaim], wantExp)
+	}
+}
+
+// The signing-failure sibling of TestCreateDelegation_AuditWriteFailure_
+// ReturnsErrorAndNoID: a delegation with no token to go with it must never
+// reach a caller, even though the row was in fact persisted and audited by
+// the time signing is attempted (mintToken runs last — see CreateDelegation's
+// own doc comment on why). fs.created and fs.appended both still grow by
+// one: the point under test is that nothing about the RESPONSE says so.
+func TestCreateDelegation_SigningFailure_ReturnsErrorAndNoToken(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: permissiveGrantSet()}), testConfig(),
+		&fakeSigner{signErr: errors.New("hsm unavailable")})
+
+	resp, err := srv.CreateDelegation(context.Background(), req)
+	if err == nil {
+		t.Fatal("CreateDelegation() error = nil, want an error when signing fails")
+	}
+	if resp != nil {
+		t.Fatalf("CreateDelegation() response = %+v, want nil: no delegation id may escape without a token", resp)
+	}
+	wantCode(t, err, codes.Internal)
+	if len(fs.created) != 1 {
+		t.Errorf("delegation rows created = %d, want 1: the row is persisted before signing is attempted", len(fs.created))
+	}
+	if len(fs.appended) != 1 {
+		t.Errorf("audit entries appended = %d, want 1: the grant is audited before signing is attempted", len(fs.appended))
+	}
+}
+
 func TestCreateDelegation_ConcurrentAuditAppend_Aborted(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
 	fs.appendErr = fmt.Errorf("wrapped: %w", store.ErrConcurrentAppend)
@@ -478,7 +580,7 @@ func TestCreateDelegation_PreparesPolicySetOnceRegardlessOfProbeCount(t *testing
 	}
 	set := &grantSet{allowedTools: map[string]bool{"Bash": true, "Read": true}, maxTier: models.ActionTierDestructive}
 	prepareCalls := 0
-	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set, prepareCalls: &prepareCalls}), testConfig())
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set, prepareCalls: &prepareCalls}), testConfig(), &fakeSigner{})
 
 	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
 		t.Fatalf("CreateDelegation() error = %v", err)
@@ -499,7 +601,7 @@ func TestCreateDelegation_PreparesPolicySetOnceRegardlessOfProbeCount(t *testing
 // authorization outcome to anything watching gRPC status codes.
 func TestCreateDelegation_PolicySetPrepareFailure_Internal(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
-	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{prepareErr: errors.New("cedar: boom")}), testConfig())
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{prepareErr: errors.New("cedar: boom")}), testConfig(), &fakeSigner{})
 
 	resp, err := srv.CreateDelegation(context.Background(), req)
 	if resp != nil {

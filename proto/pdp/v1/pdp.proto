@@ -260,6 +260,73 @@ message CreateDelegationRequest {
 message CreateDelegationResponse {
   string delegation_id = 1;
   GrantedScope granted_scope = 2;
+
+  // token is a fresh, signed credential naming this delegation (spec
+  // §4.7.1 K3: it is an authenticated REFERENCE, never a capability — it
+  // carries none of granted_scope's fields, deliberately, so a later
+  // revocation or narrowing of the row this token names takes effect
+  // immediately instead of being contradicted by a stale copy the token
+  // carried itself). Its expiry is exactly this delegation's own
+  // expires_at — decode the token's own "exp" claim to read it rather than
+  // this message repeating a second copy that could drift from the first,
+  // the way IssueTokenResponse.expires_at below legitimately can (that
+  // response's requested ttl_seconds may be clamped; this one is never
+  // independently requested at all, so there is nothing to clamp).
+  // Signing failure fails the whole call (see the service's IssueToken
+  // comment for why the same rule applies there) — a delegation_id ever
+  // reaches a caller here only paired with a token that names it.
+  string token = 3;
+}
+
+// IssueTokenRequest asks for a fresh token naming an existing delegation —
+// re-issuance for a caller whose earlier token expired while the delegation
+// it named did not. It never re-derives or re-clamps scope: that was
+// already decided once, by CreateDelegation, and this message carries
+// nothing that could change it — see IssueToken's own doc comment on the
+// service below for what re-issuance re-checks instead.
+message IssueTokenRequest {
+  // delegation_id is the delegation the new token should name. A UUID
+  // string, always required and never legitimately empty — the same
+  // convention parent_delegation_id (CreateDelegationRequest) and
+  // approval_id (GetApprovalRequest) use for a required id.
+  string delegation_id = 1;
+
+  // ttl_seconds is how long the caller would like the new token to remain
+  // valid, measured from the instant the server issues it — the same
+  // "positive, measured from now" contract CreateDelegationRequest.ttl_seconds
+  // already uses. The token's ACTUAL expiry is never later than the named
+  // delegation's own expires_at, whatever this value asks for: a token
+  // outliving the delegation it names would be a credential authenticating
+  // authority that no longer exists. IssueTokenResponse.expires_at reports
+  // what was actually granted, and clamped_to_delegation_expiry says
+  // whether that differed from what was requested here.
+  int64 ttl_seconds = 2;
+}
+
+// IssueTokenResponse is the re-issued token and its actual, possibly
+// clamped, expiry.
+message IssueTokenResponse {
+  string token = 1;
+
+  // expires_at is the new token's actual expiry: IssueTokenRequest's
+  // requested ttl_seconds added to the issuing instant, then clamped to the
+  // named delegation's own expires_at. Restated here rather than left for
+  // the caller to decode from the token's own "exp" claim — unlike
+  // CreateDelegationResponse.token, whose expiry can never differ from its
+  // delegation's, this one legitimately can, and a caller scheduling its
+  // next re-issuance needs the real value without needing to be a JWT
+  // parser just to learn whether it got what it asked for.
+  google.protobuf.Timestamp expires_at = 2;
+
+  // clamped_to_delegation_expiry is true when the requested ttl_seconds
+  // would have produced an expiry later than the named delegation's own
+  // expires_at, and the server shortened it instead of granting what was
+  // asked. A caller that assumed it received a full ttl_seconds and
+  // scheduled its next refresh accordingly would otherwise learn its token
+  // was already dead only by having a call unexpectedly denied — this makes
+  // the gap between "asked for" and "got" explicit instead of something a
+  // caller must infer by comparing two timestamps itself.
+  bool clamped_to_delegation_expiry = 3;
 }
 
 // GetApprovalRequest asks for one approval's current disposition by id.
@@ -300,6 +367,24 @@ message GetApprovalResponse {
 service PDPService {
   rpc Decide(DecideRequest) returns (DecideResponse);
   rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
+
+  // IssueToken re-issues a token for an existing delegation — the path a
+  // caller whose earlier token expired uses to get a fresh one, without
+  // going through CreateDelegation again (which would mint a NEW
+  // delegation, not refresh access to this one).
+  //
+  // Re-issuance re-checks everything: the delegation named by
+  // delegation_id is loaded fresh from this tenant (RLS makes another
+  // tenant's delegation indistinguishable from a missing one, NOT_FOUND
+  // either way — the same rule every other lookup in this service follows)
+  // and the call is refused, PERMISSION_DENIED, if that row is revoked or
+  // has itself expired. Trusting the id it was handed instead of loading it
+  // would make this RPC a way to resurrect a dead delegation's authority —
+  // the entire point of re-issuance is that the delegation is still alive,
+  // which can only be established by loading it fresh, not assumed from a
+  // caller's assertion. Signing failure fails the call the same way it does
+  // for CreateDelegation: no response without a token, ever.
+  rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse);
 
   // GetApproval reports one approval's current status and expiry, for a PEP
   // polling after an ESCALATE response. See GetApprovalResponse's own doc

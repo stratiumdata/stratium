@@ -35,6 +35,7 @@ import (
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
 	"stratium/internal/store"
+	"stratium/internal/token"
 	"stratium/migrations"
 )
 
@@ -67,6 +68,20 @@ func run(logger *slog.Logger) error {
 	registry, err := buildRegistry(cfg.PolicyLanguages)
 	if err != nil {
 		return fmt.Errorf("build policy registry: %w", err)
+	}
+
+	// Loaded here for the same reason buildRegistry is checked first: pure
+	// filesystem and crypto, no network connection open yet, so a missing or
+	// malformed signing key fails before this process has touched the
+	// database at all — the cheapest possible fail fast, and the one K1
+	// itself calls for ("a PDP that starts without a signing key and fails
+	// every decision looks like a policy problem, not a deployment one").
+	// The private key never leaves this process from here on: signer is
+	// passed to pdpgrpc.NewServer below and nowhere else, so the PDP stays
+	// the sole signing-key holder (spec A4).
+	signer, err := token.Load(cfg.TokenSigningKeyPath, cfg.TokenPreviousKeyPath)
+	if err != nil {
+		return fmt.Errorf("load signing key: %w", err)
 	}
 
 	if cfg.MigrationDatabaseURL != "" {
@@ -148,7 +163,7 @@ func run(logger *slog.Logger) error {
 	// both — and Multi itself now supplies pdpgrpc's CreateDelegation gate
 	// with a compiled set via PrepareAll, so repo and an engine no longer
 	// need to be passed to NewServer a second time raw.
-	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg)
+	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg, signer)
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {

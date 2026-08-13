@@ -109,7 +109,7 @@ func escalate(t *testing.T, srv *Server, req *DecideRequest) *DecideResponse {
 // below, for the depth-2 chain that can tell the two apart.
 func TestDecide_Escalation_CreatesApprovalWithRootPrincipalAsApprover(t *testing.T) {
 	fs, req, root := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	resp := escalate(t, srv, req)
 
@@ -210,7 +210,7 @@ func TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate(t *test
 		Subject: "requesting-subject@example.com", Tool: "Bash",
 		RawInput: "rm -rf /tmp/scratch",
 	}
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	escalate(t, srv, req)
 
@@ -233,7 +233,7 @@ func TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate(t *test
 func TestDecide_Escalation_DenyOverridesEscalate_NoApprovalCreated(t *testing.T) {
 	fs, req, root := escalationFixture()
 	root.MaxActionTier = models.ActionTierInternalModify // now below the derived DESTRUCTIVE tier
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestDecide_Escalation_DenyOverridesEscalate_NoApprovalCreated(t *testing.T)
 // the audit chain would be worse than one that denied them.
 func TestDecide_Escalation_ValidApprovalAllowsAndBothDecisionsAudited(t *testing.T) {
 	fs, req, root := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
@@ -301,7 +301,7 @@ func TestDecide_Escalation_ValidApprovalAllowsAndBothDecisionsAudited(t *testing
 // only thing that can catch this.
 func TestDecide_Escalation_RetryWithDifferentInputDenies(t *testing.T) {
 	fs, req, root := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
@@ -322,7 +322,7 @@ func TestDecide_Escalation_RetryWithDifferentInputDenies(t *testing.T) {
 
 func TestDecide_Escalation_ExpiredApprovalRetryDenies(t *testing.T) {
 	fs, req, root := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	approved := approveCreatedApproval(fs, root.UserID)
@@ -369,7 +369,7 @@ func TestDecide_Escalation_ExpiredApprovalRetryDenies(t *testing.T) {
 // error a retrying PEP might mistake for transient.
 func TestDecide_Escalation_UnknownApprovalIDDenies(t *testing.T) {
 	fs, req, _ := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	escalate(t, srv, req)
 	unknown := uuid.New()
@@ -393,7 +393,7 @@ func TestDecide_Escalation_UnknownApprovalIDDenies(t *testing.T) {
 // verified denies"), not just the not-found case.
 func TestDecide_Escalation_ApprovalLoadErrorDenies(t *testing.T) {
 	fs, req, _ := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	fs.loadApprovalErr = errors.New("connection reset")
@@ -417,7 +417,7 @@ func TestDecide_Escalation_ApprovalLoadErrorDenies(t *testing.T) {
 func TestDecide_Escalation_CreateApprovalFailure_Internal(t *testing.T) {
 	fs, req, _ := escalationFixture()
 	fs.createApprovalErr = errors.New("disk full")
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
@@ -438,7 +438,7 @@ func TestDecide_Escalation_CreateApprovalFailure_Internal(t *testing.T) {
 // since been revoked must deny, not allow.
 func TestDecide_Escalation_ValidApproval_RevokedDelegationStillDenies(t *testing.T) {
 	fs, req, root := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
@@ -467,7 +467,7 @@ func TestDecide_Escalation_ValidApproval_RevokedDelegationStillDenies(t *testing
 // the escalation and the retry.
 func TestDecide_Escalation_ValidApproval_SuspendedAgentStillDenies(t *testing.T) {
 	fs, req, root := escalationFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig())
+	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
@@ -495,7 +495,7 @@ func TestDecide_Escalation_ValidApproval_SuspendedAgentStillDenies(t *testing.T)
 func TestDecide_Escalation_ValidApproval_PolicyDenyStillDenies(t *testing.T) {
 	fs, req, root := escalationFixture()
 	set := &grantSet{allowedTools: map[string]bool{"Bash": true}, maxTier: models.ActionTierDestructive}
-	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set}), testConfig())
+	srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: set}), testConfig(), nil)
 
 	first := escalate(t, srv, req)
 	fs.loadApproval = approveCreatedApproval(fs, root.UserID)

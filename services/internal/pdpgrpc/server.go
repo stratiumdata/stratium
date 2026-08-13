@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -61,6 +62,33 @@ type Store interface {
 	// their own per-tenant data — kept consistent rather than special-cased
 	// for this one lookup.
 	LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry, error)
+
+	// LoadDelegation loads one delegation row by id, without walking its
+	// parent chain — token.go's IssueToken (re-issuance) is its only
+	// caller, and it needs only this row's own liveness (revoked, expired,
+	// this tenant via RLS), never the full chain LoadChain assembles for
+	// three-leg evaluation. *store.Store's own doc comment on the method
+	// covers why this is a deliberately smaller operation than LoadChain,
+	// not a redundant one.
+	LoadDelegation(ctx context.Context, id uuid.UUID) (*models.Delegation, error)
+}
+
+// TokenSigner is what CreateDelegation and IssueToken (token.go) need from
+// internal/token to mint a bearer credential naming a delegation: sign a
+// claim set, get back a compact token. *token.Signer satisfies it; tests
+// substitute a fake that can be made to fail on demand, the same reason
+// Store above is a local interface rather than *store.Store directly —
+// exercising "a signing failure fails the call" needs a seam no real EC key
+// can be made to fail through.
+//
+// Defined here, where it is consumed, rather than in package token, which
+// has no reason to know about its gRPC caller — the same layering Store
+// documents for itself just above. Deliberately one method, matching what
+// this package actually calls: internal/token.Signer also exposes Verify,
+// but nothing in this file needs it — verifying a caller-presented token is
+// Task 3's concern (Decide), not issuance's.
+type TokenSigner interface {
+	Sign(claims jwt.MapClaims) (string, error)
 }
 
 // eventTypeDecision is the audit_chain event_type recorded for every Decide
@@ -104,15 +132,30 @@ type Server struct {
 	policy policy.Multi
 
 	cfg config.Config
+
+	// signer mints tokens for CreateDelegation and IssueToken (token.go).
+	// The PDP is the sole signing-key holder (spec A4) — signer is the only
+	// place that authority enters this package, and internal/authz never
+	// sees it at all (that package stays pure: no cryptography, per the
+	// phase's global constraints).
+	signer TokenSigner
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum
 // delegation depth; both are startup configuration, never per-request.
-func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config) *Server {
+// signer is required — every caller of this constructor supplies one,
+// matching every other dependency here (store, principalPolicy, cfg) having
+// no nil-means-something-sensible default. cmd/stratium-pdp/main.go builds
+// its signer via internal/token.Load at startup, before this constructor is
+// ever called; a Decide-only test that never calls CreateDelegation or
+// IssueToken passes nil explicitly, which is exactly as safe as it looks —
+// the signer is never dereferenced on Decide's own path.
+func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, signer TokenSigner) *Server {
 	return &Server{
 		store:  store,
 		policy: principalPolicy,
 		cfg:    cfg,
+		signer: signer,
 	}
 }
 

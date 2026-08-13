@@ -183,6 +183,38 @@ func (s *Store) LoadChain(ctx context.Context, actingDelegationID uuid.UUID) ([]
 	return chain, nil
 }
 
+// LoadDelegation loads one delegation row by id, without walking its parent
+// chain. This is deliberately a different, smaller operation than LoadChain:
+// a caller re-issuing a token (pdpgrpc.IssueToken) needs only this row's own
+// liveness — revoked, expired, and, implicitly through RLS, this tenant's —
+// not the full root-first chain LoadChain assembles for three-leg
+// evaluation. Paying for a chain walk (and being exposed to LoadChain's own
+// maxChainWalk cycle guard, which exists for a different problem) to answer
+// a question about one row would be solving the wrong-sized problem.
+//
+// RLS scopes the row exactly like LoadChain/LoadAgent: a row for another
+// tenant, or no row at all, is ErrNotFound either way — see the package doc.
+func (s *Store) LoadDelegation(ctx context.Context, id uuid.UUID) (*models.Delegation, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	d, err := scanDelegation(tx.QueryRowContext(ctx, loadDelegationQuery, id.String()))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: delegation %s", ErrNotFound, id)
+		}
+		return nil, fmt.Errorf("store: load delegation %s: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return d, nil
+}
+
 // scanDelegation scans one delegations row, decoding its JSONB columns
 // explicitly (database/sql cannot scan JSONB into []string,
 // map[string]string, or []uuid.UUID) and converting its nullable purpose

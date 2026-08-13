@@ -208,9 +208,27 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		return nil, err
 	}
 
+	// A delegation with no way to use it is not useful — the caller already
+	// has a round trip here, so the token comes back with the id rather than
+	// requiring a second call. Minted last, after persist and audit both
+	// succeeded: the delegation is a fact of record before this method ever
+	// asks the signer for anything, matching D3's "a delegation created
+	// without a record did not happen" — a signing failure here means the
+	// row exists and is audited but this call still fails closed, the same
+	// shape as a failed audit write above (no delegation id ever escapes
+	// without what it is paired with). requestedExpiry == delegationExpiresAt
+	// == d.ExpiresAt: a freshly created delegation's token has no
+	// independently requested lifetime, so mintToken's clamp is structurally
+	// a no-op here — see IssueToken (token.go) for the path where it is not.
+	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, now, d.ExpiresAt, d.ExpiresAt)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
+	}
+
 	return &CreateDelegationResponse{
 		DelegationId: d.ID.String(),
 		GrantedScope: toProtoGrantedScope(granted),
+		Token:        tok,
 	}, nil
 }
 
