@@ -588,6 +588,19 @@ func TestExtractBearerTokenFromMetadata(t *testing.T) {
 			md:      metadata.Pairs("authorization", "Bearer"),
 			wantErr: true,
 		},
+		{
+			// A repeated authorization key is non-conformant (RFC 7235 defines exactly one
+			// credential per header) but not unconstructible on this wire -- metadata.Pairs
+			// accumulates repeated keys into one []string, exactly as a client or an
+			// interceptor that appended a second value would produce. This is the anchor for
+			// a mutation this task's own report found survived on its first attempt (values[0]
+			// swapped for the last element): only a fixture carrying genuinely more than one
+			// value can distinguish "always reads the first" from "always reads the last" --
+			// every other case in this table has exactly one value, where both choices agree.
+			name:      "multiple authorization values -- the first one wins",
+			md:        metadata.Pairs("authorization", "Bearer "+testProxyBearerToken, "authorization", "Bearer "+testProxyOtherCredentialValue),
+			wantToken: testProxyBearerToken,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			token, _, err := extractBearerTokenFromMetadata(tc.md)
