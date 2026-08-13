@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -371,18 +372,21 @@ func TestCheck_BearerTokenExtracted(t *testing.T) {
 	}
 }
 
-// TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse proves the
-// boundary the package doc's TASK 2 ADDITIONS section describes: even when
-// every precondition for an eventual ALLOW is met -- a well-formed Bearer
-// token, and a PDP that actually answers EFFECT_ALLOW -- this task's Check
-// still denies, because turning that answer into an OkResponse is Task 3's
-// addition. TestCheck_NoDecisionLogicYet_DeniesEveryRequestUnconditionally
-// (Task 1) already proves the skeleton denies when there is nothing to ask
-// the PDP about; this is the harder claim, proven against a PDP that was
-// actually asked and actually said yes -- and, via requestCount, proves it
-// actually WAS asked, which is what makes "still denies anyway" meaningful
-// rather than a restatement of Task 1's own test.
-func TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse(t *testing.T) {
+// TestCheck_Allow_ReturnsOkResponse is the property
+// TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse (Task 2)
+// existed specifically to prove did NOT hold yet: a well-formed credential
+// and a PDP that answers EFFECT_ALLOW now produces an OK CheckResponse, not
+// a denial. That Task 2 test is gone, not merely widened, because its
+// premise (a well-formed request the PDP allows still denies) is no longer
+// this function's behavior. Checked two ways, mirroring
+// TestCheck_NoDecisionLogicYet_DeniesEveryRequestUnconditionally's own
+// multi-signal approach for the deny case: the top-level Status.Code
+// Envoy's filter actually keys allow/deny off of, and the HttpResponse
+// oneof's concrete type -- a mutation that flips one but not the other
+// still fails this test. requestCount confirms the PDP really was asked,
+// the same "still X anyway" discipline the old test used, applied to the
+// new outcome.
+func TestCheck_Allow_ReturnsOkResponse(t *testing.T) {
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Reason: "policy allows"}}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
@@ -393,8 +397,11 @@ func TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse(t *testing.T
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
-	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
-		t.Errorf("Status.Code = %d, want %d (PERMISSION_DENIED) -- Task 2 must never allow, even when the PDP itself would", got, want)
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_OK); got != want {
+		t.Errorf("Status.Code = %d, want %d (OK) -- a well-formed credential and an ALLOW from the PDP must let Envoy forward the request", got, want)
+	}
+	if _, ok := resp.GetHttpResponse().(*authv3.CheckResponse_OkResponse); !ok {
+		t.Errorf("HttpResponse = %T, want *authv3.CheckResponse_OkResponse", resp.GetHttpResponse())
 	}
 	if got := fake.requestCount(); got != 1 {
 		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- a well-formed credential must reach the PDP", got)
@@ -816,5 +823,315 @@ func TestExtractBearerToken_StripsCredentialHeadersCaseInsensitively(t *testing.
 	if v, ok := stripped[testAuthLikeHeaderName]; !ok || v != testAuthLikeHeaderValue {
 		t.Errorf("stripped[%q] = (%q, %v), want (%q, true) -- not every auth-ish name is a credential",
 			testAuthLikeHeaderName, v, ok, testAuthLikeHeaderValue)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 3: DecideResponse -> CheckResponse mapping, and escalation degrade.
+// ---------------------------------------------------------------------------
+
+// TestCheck_Deny_CarriesPDPReasonVerbatimAndUnprefixed defends the
+// "distinguishable reasons" property for the simplest case: a genuine
+// EFFECT_DENY's reason reaches the caller exactly as the PDP wrote it, with
+// no stratium-pep framing added -- the same unprefixed-passthrough
+// convention hook.go's own default DENY case uses (see its own doc
+// comment), so a human reading a denial can tell at a glance whether the
+// PDP refused the action or this process failed before ever asking it one.
+// Checked in both places the reason appears (Status.Message and
+// DeniedResponse.Body) and confirmed no approval header rides along, since
+// a genuine deny names no pending approval.
+func TestCheck_Deny_CarriesPDPReasonVerbatimAndUnprefixed(t *testing.T) {
+	const pdpReason = "extauthz-deny-reason-3f8c1a2d-fixture: delegation revoked"
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason, DeniedLeg: "delegation"}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
+		t.Errorf("Status.Code = %d, want %d (PERMISSION_DENIED)", got, want)
+	}
+	if got := resp.GetStatus().GetMessage(); got != pdpReason {
+		t.Errorf("Status.Message = %q, want the PDP's own reason %q, verbatim", got, pdpReason)
+	}
+	denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
+	if !ok {
+		t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+	}
+	if got := denied.DeniedResponse.GetBody(); got != pdpReason {
+		t.Errorf("DeniedResponse.Body = %q, want the PDP's own reason %q, verbatim", got, pdpReason)
+	}
+	if hdrs := denied.DeniedResponse.GetHeaders(); len(hdrs) != 0 {
+		t.Errorf("DeniedResponse.Headers = %v, want none -- a genuine deny carries no approval id", hdrs)
+	}
+}
+
+// TestCheck_Escalate_DeniesAndApprovalIDReachesBothChannels is the E5/M4
+// property this task exists for: an ESCALATE degrades to an ordinary
+// PERMISSION_DENIED, and the approval id it created reaches the caller in
+// BOTH channels checkResponseFromDecide's own doc comment justifies --
+// approvalIDHeader, for a retry tool to read deterministically, and the
+// body text, for a human who only has the response body -- because a
+// pending record neither reader can find is a record that helps nobody.
+func TestCheck_Escalate_DeniesAndApprovalIDReachesBothChannels(t *testing.T) {
+	const approvalID = "6b9e0c1a-4f2d-4a7e-9c3b-7f1e2d3a4b5c"
+	const pdpReason = "extauthz-escalate-reason-9d2b1f-fixture: tier exceeds delegated ceiling"
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: pdpReason, ApprovalId: approvalID,
+	}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
+		t.Errorf("Status.Code = %d, want %d (PERMISSION_DENIED) -- extauthz cannot block for approval (E5)", got, want)
+	}
+	denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
+	if !ok {
+		t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+	}
+
+	var headerValue string
+	var headerFound bool
+	for _, h := range denied.DeniedResponse.GetHeaders() {
+		if h.GetHeader().GetKey() == approvalIDHeader {
+			headerValue, headerFound = h.GetHeader().GetValue(), true
+		}
+	}
+	if !headerFound || headerValue != approvalID {
+		t.Errorf("%s header = (%q, found=%v), want (%q, true) -- an operator or retry tool must be able to "+
+			"read the approval id without parsing prose", approvalIDHeader, headerValue, headerFound, approvalID)
+	}
+	if body := denied.DeniedResponse.GetBody(); !strings.Contains(body, approvalID) {
+		t.Errorf("DeniedResponse.Body = %q, want it to also contain approval id %q -- a human reading only the body must still find it", body, approvalID)
+	}
+}
+
+// TestCheck_EscalateWithNoApprovalID_DeniesWithoutClaimingOneExists guards
+// the defensive branch checkResponseFromDecide's own doc comment describes:
+// a PDP that answers EFFECT_ESCALATE without an approval id has violated
+// its own contract (DecideResponse.approval_id) and left nothing to find.
+// This must still deny, and must not attach approvalIDHeader with an empty
+// value -- an empty header would name no real pending approval, which is
+// worse than no header at all for an operator trying to act on it.
+//
+// The body-text assertion below is not decorative: a mutation that deletes
+// this whole defensive branch and lets the ordinary "is pending (approval
+// id %s)" framing run with an empty %s still produces zero headers (the
+// SAME denyCheckResponse guard this test's header assertion checks), so
+// that assertion alone does not catch it -- only the wording differing from
+// the misleading empty-slot version does. Found by running exactly that
+// mutation, unprompted, during this task's own mutation-testing pass.
+func TestCheck_EscalateWithNoApprovalID_DeniesWithoutClaimingOneExists(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: "escalated, no id"}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
+		t.Errorf("Status.Code = %d, want %d (PERMISSION_DENIED)", got, want)
+	}
+	denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
+	if !ok {
+		t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+	}
+	const wantSubstring = "no approval id to attach"
+	if body := denied.DeniedResponse.GetBody(); !strings.Contains(body, wantSubstring) {
+		t.Errorf("DeniedResponse.Body = %q, want it to contain %q -- this case must read differently from an "+
+			"ordinary pending-approval denial, not silently reuse that framing with an empty id slot", body, wantSubstring)
+	}
+	if hdrs := denied.DeniedResponse.GetHeaders(); len(hdrs) != 0 {
+		t.Errorf("DeniedResponse.Headers = %v, want none -- there is no approval id to attach", hdrs)
+	}
+}
+
+// TestCheck_PDPError_DeniesAsOrdinaryResponse is
+// TestCheck_UnreachablePDP_DeniesAsOrdinaryResponse_NotTransportError's
+// twin for the other shape describeRPCError distinguishes: a PDP that was
+// reached and answered with an application-level error, rather than one
+// that could not be reached at all. Both must deny as an ordinary
+// (*CheckResponse, nil), never a transport error -- but they take different
+// branches inside describeRPCError, so a mutation could plausibly catch one
+// without catching the other, which is why each gets its own test.
+func TestCheck_PDPError_DeniesAsOrdinaryResponse(t *testing.T) {
+	fake := &fakePDP{err: errors.New("pdp-error-fixture: something went wrong evaluating this request")}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() returned a transport error (%v); a PDP application-level error must still produce an ordinary "+
+			"(*CheckResponse, nil) -- see Check's own doc comment", err)
+	}
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
+		t.Errorf("Status.Code = %d, want %d (PERMISSION_DENIED)", got, want)
+	}
+}
+
+// TestCheck_UnsetEffect_DeniesAsOrdinaryResponse is the test the brief asks
+// for by name: DecideResponse.Effect's zero value is EFFECT_DENY,
+// deliberately (proto/pdp/v1/pdp.proto's own doc comment) -- this proves
+// that holds over a REAL wire round trip, not merely in an in-memory struct
+// literal. fake.resp below never sets Effect at all; proto3 omits a scalar
+// field equal to its zero value from the wire entirely, so grpc-go
+// marshals this DecideResponse with no Effect bytes on the wire, sends it
+// over the real TCP loopback connection startFakePDP dials this server's
+// own client through, and unmarshals it back inside Check's handler -- if
+// decoding ever invented ambiguity instead of the documented zero value, or
+// if this file's own mapping ever treated that ambiguity as anything but a
+// denial, this is the test that would catch it, not a comment repeating the
+// proto's own promise.
+func TestCheck_UnsetEffect_DeniesAsOrdinaryResponse(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Reason: "no effect was ever set"}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
+		t.Errorf("Status.Code = %d, want %d (PERMISSION_DENIED) -- an unset Effect must decode to, and be treated as, EFFECT_DENY", got, want)
+	}
+	if _, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse); !ok {
+		t.Errorf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+	}
+}
+
+// TestCheck_ReasonsAreDistinguishableAcrossThreeClasses defends the
+// property named directly in the brief: "your token expired", "your
+// delegation was revoked", and "this needs approval, which is pending" must
+// send an operator to three different places, which means their text must
+// actually DIFFER -- not merely each be non-empty, which a single generic
+// "denied" string would also satisfy. Three real Check() calls, scripted
+// with three fakePDP responses standing in for those three classes (two
+// distinct ordinary DENYs, and a degraded ESCALATE), asserting all three
+// resulting texts are pairwise distinct, plus that the escalate class reads
+// as pending rather than final.
+func TestCheck_ReasonsAreDistinguishableAcrossThreeClasses(t *testing.T) {
+	reasonFor := func(t *testing.T, resp *pdpgrpc.DecideResponse) string {
+		t.Helper()
+		fake := &fakePDP{resp: resp}
+		pdpClient := startFakePDP(t, fake)
+		client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+		got, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+			"authorization": "Bearer " + testBearerToken,
+		}))
+		if err != nil {
+			t.Fatalf("Check() error = %v", err)
+		}
+		return got.GetStatus().GetMessage()
+	}
+
+	tokenExpired := reasonFor(t, &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token expired", DeniedLeg: "agent"})
+	delegationRevoked := reasonFor(t, &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "delegation revoked", DeniedLeg: "delegation"})
+	pendingApproval := reasonFor(t, &pdpgrpc.DecideResponse{
+		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: "requires approval", ApprovalId: "d290f1ee-6c54-4b01-90e6-d701748f0851",
+	})
+
+	classes := map[string]string{
+		"token expired":      tokenExpired,
+		"delegation revoked": delegationRevoked,
+		"pending approval":   pendingApproval,
+	}
+	seen := map[string]string{}
+	for name, text := range classes {
+		if other, dup := seen[text]; dup {
+			t.Errorf("%q and %q produced identical reason text (%q) -- they must be distinguishable, not merely both non-empty", name, other, text)
+		}
+		seen[text] = name
+	}
+	if !strings.Contains(pendingApproval, "pending") {
+		t.Errorf("escalate-degraded reason %q does not say this is pending -- an operator reading it must be able to tell this is not a final refusal", pendingApproval)
+	}
+}
+
+// TestCheckResponseFromDecide_DenyWithStrayApprovalID_NotTreatedAsEscalation
+// is the mutation nobody asked for. DecideResponse.approval_id's own doc
+// comment promises it is populated only on EFFECT_ESCALATE, and the real
+// Decide implementation upholds that structurally (server.go) -- but
+// checkResponseFromDecide does not get to assume a promise about the OTHER
+// end of this RPC holds, for the same reason it does not get to assume
+// Effect's own zero-value promise holds without checking
+// (TestCheck_UnsetEffect_DeniesAsOrdinaryResponse above). A fixture that
+// violates the approval_id contract -- impossible from this repo's own PDP,
+// not impossible from DecideResponse's own type signature -- must still
+// read as an ordinary denial: no approval-pending framing, no header,
+// because there is no genuine pending approval behind this EFFECT_DENY for
+// either of those to point an operator at.
+func TestCheckResponseFromDecide_DenyWithStrayApprovalID_NotTreatedAsEscalation(t *testing.T) {
+	const reason = "policy denies -- unrelated to any approval"
+	resp := checkResponseFromDecide(&pdpgrpc.DecideResponse{
+		Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: reason, ApprovalId: "stray-id-should-be-ignored",
+	})
+
+	if got := resp.GetStatus().GetMessage(); got != reason {
+		t.Errorf("Status.Message = %q, want the plain deny reason %q, unframed by any escalation text", got, reason)
+	}
+	denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
+	if !ok {
+		t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+	}
+	if hdrs := denied.DeniedResponse.GetHeaders(); len(hdrs) != 0 {
+		t.Errorf("DeniedResponse.Headers = %v, want none -- a stray approval id on a genuine DENY must not surface as a pending-approval header", hdrs)
+	}
+}
+
+// TestCheckResponseFromDecide is the direct, wire-free table of every
+// Effect value this mapping must handle -- faster and more exhaustive than
+// routing every case through a real gRPC round trip, which
+// TestCheck_UnsetEffect_DeniesAsOrdinaryResponse and the tests around it
+// above already do for the cases that specifically need to prove something
+// about the WIRE. This table's job is the branching logic itself: every
+// reachable Effect, plus the defensive nil case, in one place.
+func TestCheckResponseFromDecide(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		resp       *pdpgrpc.DecideResponse
+		wantCode   int32
+		wantHeader bool
+	}{
+		{name: "allow", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}, wantCode: int32(rpccode.Code_OK)},
+		{name: "deny", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "denied"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+		{name: "escalate with approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: "id-1"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED), wantHeader: true},
+		{name: "escalate with no approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+		{name: "unset effect (zero value)", resp: &pdpgrpc.DecideResponse{}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+		{name: "nil response", resp: nil, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkResponseFromDecide(tc.resp)
+			if code := got.GetStatus().GetCode(); code != tc.wantCode {
+				t.Errorf("Status.Code = %d, want %d", code, tc.wantCode)
+			}
+			_, isOk := got.GetHttpResponse().(*authv3.CheckResponse_OkResponse)
+			if wantOk := tc.wantCode == int32(rpccode.Code_OK); wantOk != isOk {
+				t.Errorf("HttpResponse is OkResponse = %v, want %v", isOk, wantOk)
+			}
+			var hasHeader bool
+			if denied, ok := got.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse); ok {
+				hasHeader = len(denied.DeniedResponse.GetHeaders()) > 0
+			}
+			if hasHeader != tc.wantHeader {
+				t.Errorf("has approval header = %v, want %v", hasHeader, tc.wantHeader)
+			}
+		})
 	}
 }

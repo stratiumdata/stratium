@@ -21,10 +21,28 @@ package pdpgrpc
 // impossible here) fails closed the same way: GetEffect's own nil handling
 // returns EFFECT_DENY, never EFFECT_ALLOW.
 //
-// No extauthz mode calls this today — that surface itself does not exist.
+// Its first real caller is cmd/stratium-pep/extauthz.go's
+// checkResponseFromDecide, wired in the same phase that made the extauthz
+// surface exist at all (Phase 10 Task 3) — and this shape needed no change
+// to serve it. deny is exactly the ALLOW/not-ALLOW fold Check needs to
+// choose between an OkResponse and a PERMISSION_DENIED; approvalID is
+// exactly the value that denial attaches when there is one. What that
+// caller does NOT lean on this function for is which reason text to show:
+// deciding whether a denial should read as an ordinary refusal or as "this
+// is pending approval" is a response-framing question this function was
+// never asked, so checkResponseFromDecide reads resp.GetEffect() itself for
+// that rather than inferring escalation from approvalID being non-empty a
+// second time — the same "assert the invariant, do not lean on it holding"
+// discipline this function's own defensive nil-handling above already
+// follows for EFFECT_DENY's zero value. See checkResponseFromDecide's own
+// doc comment for why, and its
+// TestCheckResponseFromDecide_DenyWithStrayApprovalID_NotTreatedAsEscalation
+// for the case that distinction actually guards.
+//
 // See TestC23_NonBlockingSurfaceDegradesToDeny
-// (internal/authz/conformance_test.go) for exactly what remains unbuilt, and
-// this function's own test for the mapping proven directly.
+// (internal/authz/conformance_test.go) for the separate question of whether
+// that conformance property can now be unskipped — Phase 10 Task 4's call,
+// since internal/authz itself stays untouched here, not this function's.
 func DegradeEscalateToDeny(resp *DecideResponse) (deny bool, approvalID string) {
 	return resp.GetEffect() != Effect_EFFECT_ALLOW, resp.GetApprovalId()
 }

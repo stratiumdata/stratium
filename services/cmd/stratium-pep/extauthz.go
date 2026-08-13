@@ -7,20 +7,33 @@
 // PEP sitting beside Envoy instead: Envoy calls Check, and this server
 // answers allow or deny.
 //
-// TASK 2 ADDITIONS. Task 1 left Check reading nothing: no code path could
-// produce an honest ALLOW yet, so the only answer that did not lie about
-// what was decided was an unconditional deny. This task adds the request
-// side of a real decision -- decideRequestFromCheck extracts the tool
-// identity, the bearer token, and a credential-stripped raw_input from a
-// CheckRequest (plan §§M1-M3) -- and Check now calls the PDP with whatever
+// REQUEST MAPPING (Task 2). Task 1 left Check reading nothing: no code path
+// could produce an honest ALLOW yet, so the only answer that did not lie
+// about what was decided was an unconditional deny. Task 2 added the
+// request side of a real decision -- decideRequestFromCheck extracts the
+// tool identity, the bearer token, and a credential-stripped raw_input from
+// a CheckRequest (plan §§M1-M3) -- and Check calls the PDP with whatever
 // that produces, when it produces anything at all: a request with no usable
 // credential denies before the PDP is ever dialed (M2, K4 -- see
-// decideRequestFromCheck's and extractBearerToken's own doc comments). Check
-// still never returns an honest ALLOW, on purpose: turning what the PDP
-// actually said into an OkResponse, a DENY carrying its reason, or an
-// ESCALATE degraded to a pending approval is Task 3's addition, not this
-// one's -- see Check's own doc comment for why this task's version denies
-// even after a successful PDP round trip that said yes.
+// decideRequestFromCheck's and extractBearerToken's own doc comments).
+//
+// RESPONSE MAPPING (Task 3). Task 2's Check still denied unconditionally
+// even after a successful PDP round trip, on purpose, because turning what
+// the PDP actually said into a real answer was left for this task.
+// checkResponseFromDecide (below) is that mapping: EFFECT_ALLOW becomes an
+// OkResponse; EFFECT_DENY -- and any effect this build does not recognize,
+// including an entirely unset one, the proto's own deliberate zero-value
+// invariant -- becomes a PERMISSION_DENIED carrying the PDP's own reason
+// verbatim; and EFFECT_ESCALATE degrades to that same PERMISSION_DENIED
+// shape plus a pending approval's id, attached in both a dedicated response
+// header and the denial's own body text (see checkResponseFromDecide's and
+// denyCheckResponse's own doc comments for why both, and why an unset
+// Effect is asserted rather than assumed to decode as deny). That degrade
+// is pdpgrpc.DegradeEscalateToDeny's first real caller -- Phase 5 wrote it
+// for exactly this surface before this surface existed; see
+// nonblocking.go's own doc comment for what using it for real confirmed,
+// and checkResponseFromDecide's for the one thing it does not by itself
+// decide (which reason text to show).
 //
 // DEPENDENCY: github.com/envoyproxy/go-control-plane/envoy v1.37.0 as of
 // this writing (see go.mod) -- Envoy's own canonical, versioned source for
@@ -100,6 +113,14 @@
 // writes to stderr unconditionally (runExtauthzCmd's startup line) is this
 // process's own operator-supplied configuration, never anything from a
 // Check call.
+//
+// The same rule binds a fact this task introduces on the RESPONSE side: a
+// degraded ESCALATE's approval id names a live pending authorization (spec
+// E5) exactly as a token names a live delegation, and this file's stderr
+// stays as free of it as it already is of every credential above --
+// checkResponseFromDecide places it only on the CheckResponse handed back
+// to Envoy, never in an error string or a log line this process itself
+// writes.
 package main
 
 import (
@@ -112,6 +133,7 @@ import (
 	"strings"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	rpccode "google.golang.org/genproto/googleapis/rpc/code"
@@ -148,7 +170,8 @@ import (
 // ApprovalTimeout, unlike hookConfig: this is a non-blocking surface (plan
 // §M4) -- an escalation degrades straight to a deny plus a pending record
 // rather than polling for a human, so there is nothing here to bound a wait
-// for. That degrade is Task 3's addition, not this one's.
+// for. That degrade lives in checkResponseFromDecide, not in this config --
+// extauthzConfig needed no new field to serve it, then or now.
 type extauthzConfig struct {
 	ListenAddr     string
 	PDPAddr        string
@@ -433,35 +456,42 @@ func decideRequestFromCheck(req *authv3.CheckRequest, agentID, subject string) (
 	}, nil
 }
 
+// approvalIDHeader is the response header name checkResponseFromDecide
+// attaches a pending approval's id to, on a denial degraded from
+// EFFECT_ESCALATE (E5/M4). No "x-" prefix: RFC 6648 deprecates minting new
+// x-prefixed headers, and there is no ambiguity here to hedge against --
+// stratium-pep both defines this header and is the only thing that ever
+// sets it. Lowercase because HTTP header names are case-insensitive and
+// this is the spelling this file itself sends, the same convention
+// extractBearerToken's own doc comment already applies to every header name
+// this file reads.
+const approvalIDHeader = "stratium-approval-id"
+
 // Check maps req to a DecideRequest (decideRequestFromCheck, per plan
-// §§M1-M3) and, when that mapping succeeds, calls the PDP with it -- but it
-// still answers every request with a deny, exactly like Task 1's version,
-// regardless of what the PDP says or whether it could be reached at all.
-// That is deliberate, not an oversight left for later: turning
-// EFFECT_ALLOW into an OkResponse, EFFECT_DENY into a PERMISSION_DENIED
-// carrying the PDP's own reason, and EFFECT_ESCALATE into a degraded
-// deny-plus-pending-approval is Task 3's addition (see the package doc's
-// TASK 2 ADDITIONS section) -- this function's job ends at proving the
-// request this server builds and sends is correct, never at acting on what
-// comes back. Returning ALLOW from here, even once, for any reason, would
-// be exactly the open-proxy failure Task 1's own doc comment describes --
-// calling the PDP does not change that rule, it just means this task can
-// prove the call it makes is the right one.
-// TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse asserts
-// this even when the PDP itself answers EFFECT_ALLOW.
+// §§M1-M3), calls the PDP with it when that mapping succeeds, and maps
+// whatever comes back onto the one contract Envoy's ext_authz filter
+// understands (checkResponseFromDecide, denyCheckResponse, okCheckResponse,
+// below) -- the response-mapping half of this surface Task 1 and Task 2
+// both deliberately left denying unconditionally until it existed. See the
+// package doc's RESPONSE MAPPING section for why that boundary held for two
+// tasks and what closes it here.
 //
-// The one branch that changes observable behavior from Task 1: a request
-// this server cannot extract a credential from -- no authorization header,
-// or one that is not a well-formed Bearer challenge -- denies WITHOUT ever
-// calling client.Decide (plan §M2, spec K4: there is no fallback credential
-// to try instead, so a PDP round trip could not answer anything a missing
-// credential does not already answer).
-// TestCheck_MissingAuthorizationHeader_DeniesWithoutContactingPDP and
-// TestCheck_MalformedAuthorizationHeader_DeniesWithoutContactingPDP both
-// assert this against the PDP's own received-call count, not merely
-// against Check's response -- a build that let a stray call through before
-// denying anyway would still pass a test that only inspected the
-// CheckResponse.
+// Task 2's own TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse
+// existed specifically to prove a well-formed request the PDP allows still
+// denied; that test is gone now, not merely widened, because its premise no
+// longer holds -- TestCheck_Allow_ReturnsOkResponse proves the replacement
+// claim.
+//
+// The one branch that changed observable behavior from Task 1 to Task 2
+// still holds unchanged here: a request this server cannot extract a
+// credential from -- no authorization header, or one that is not a
+// well-formed Bearer challenge -- denies WITHOUT ever calling client.Decide
+// (plan §M2, spec K4: there is no fallback credential to try instead, so a
+// PDP round trip could not answer anything a missing credential does not
+// already answer). TestCheck_MissingAuthorizationHeader_DeniesWithoutContactingPDP
+// and TestCheck_MalformedAuthorizationHeader_DeniesWithoutContactingPDP both
+// assert this against the PDP's own received-call count, not merely against
+// Check's response.
 //
 // Returning (resp, nil) rather than (nil, status.Error(codes.PermissionDenied, ...))
 // for every outcome -- including a failed PDP call -- is the same
@@ -471,15 +501,20 @@ func decideRequestFromCheck(req *authv3.CheckRequest, agentID, subject string) (
 // reserves a returned Go error for the RPC itself failing -- a distinction
 // Envoy's own failure_mode_allow setting treats very differently (a failed
 // RPC can be configured to fail open; a well-formed PERMISSION_DENIED
-// response cannot). An unreachable PDP is folded into that SAME
+// response cannot). An unreachable PDP, and separately a PDP that answers
+// with an application-level error, are both folded into that SAME
 // ordinary-denial shape, exactly like a missing credential or a policy
 // DENY, never surfaced as a transport-level Go error -- doing the latter
 // would hand failure_mode_allow precisely the fail-open option this rule
 // exists to take away from it.
+// TestCheck_UnreachablePDP_DeniesAsOrdinaryResponse_NotTransportError and
+// TestCheck_PDPError_DeniesAsOrdinaryResponse assert the two cases
+// separately: a mutation could plausibly catch one and not the other, since
+// they take different branches inside describeRPCError (hook.go).
 func (s *extauthzServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
 	decideReq, err := decideRequestFromCheck(req, s.cfg.AgentID, s.cfg.Subject)
 	if err != nil {
-		return denyCheckResponse(fmt.Sprintf("stratium-pep: %s", err)), nil
+		return denyCheckResponse(fmt.Sprintf("stratium-pep: %s", err), ""), nil
 	}
 
 	// Derived from ctx, not context.Background(): unlike hook.go and
@@ -494,16 +529,123 @@ func (s *extauthzServer) Check(ctx context.Context, req *authv3.CheckRequest) (*
 	// waiting for.
 	callCtx, cancel := context.WithTimeout(ctx, s.cfg.ConnectTimeout)
 	defer cancel()
-	reason := "stratium-pep: extauthz has no response-mapping logic yet (Task 2 skeleton); denying unconditionally"
-	if _, decideErr := s.client.Decide(callCtx, decideReq); decideErr != nil {
+
+	resp, decideErr := s.client.Decide(callCtx, decideReq)
+	if decideErr != nil {
 		// describeRPCError/agentOrDelegationUnknownMsg (hook.go) are shared
 		// across every surface that calls Decide with this same
 		// agent_id/subject/token shape, so an operator sees one
 		// vocabulary for "PDP unreachable" or "unknown agent/delegation"
 		// no matter which of hook, mcp, or extauthz hit it.
-		reason = fmt.Sprintf("stratium-pep: %s", describeRPCError(decideErr, agentOrDelegationUnknownMsg))
+		return denyCheckResponse(fmt.Sprintf("stratium-pep: %s", describeRPCError(decideErr, agentOrDelegationUnknownMsg)), ""), nil
 	}
-	return denyCheckResponse(reason), nil
+
+	return checkResponseFromDecide(resp), nil
+}
+
+// checkResponseFromDecide is the response-side counterpart to
+// decideRequestFromCheck: it maps what the PDP decided onto the
+// CheckResponse Envoy understands, and is the only place in this file that
+// does. It never inspects req, tool, or raw_input -- only resp -- because by
+// the time Check calls this, the PDP has already made the only
+// classification/decision this binary is allowed to make (the package
+// doc's D1 rule): this function transcribes an answer, it does not compute
+// one, and it overrides nothing the PDP decided in either direction.
+//
+// EFFECT_ALLOW becomes okCheckResponse(). Everything else -- EFFECT_DENY,
+// EFFECT_ESCALATE degraded per E5, and an entirely unset Effect -- becomes a
+// PERMISSION_DENIED denyCheckResponse. pdpgrpc.DegradeEscalateToDeny (Phase
+// 5; this is its first real caller) supplies exactly the first of those two
+// facts: deny is literally "not ALLOW," and this function asks it no second
+// question. TestCheck_UnsetEffect_DeniesAsOrdinaryResponse asserts the
+// zero-value case specifically over a real gRPC round trip -- a
+// DecideResponse whose Effect field a fake PDP never sets, marshaled, sent,
+// and unmarshaled for real -- rather than trusting the proto's own
+// doc-comment claim that an unset field decodes to EFFECT_DENY; the wire
+// either holds that invariant or it does not, and that test checks rather
+// than assumes it does.
+//
+// What DegradeEscalateToDeny does NOT decide is which of DENY or a degraded
+// ESCALATE this is -- a plain bool for "should this deny" was the entire
+// brief it was written to, and reason-framing was never part of that. This
+// function reads resp.GetEffect() itself for that, rather than inferring
+// "this was an escalation" from approvalID being non-empty a second time:
+// DecideResponse.approval_id's own doc comment promises the field is
+// populated only on EFFECT_ESCALATE, and the real Decide implementation
+// upholds that structurally (server.go's Decide sets it from a local
+// newApprovalID that stays "" on every path but a fresh escalation) -- but
+// this file does not get to assume a promise about the OTHER end of this
+// RPC holds, any more than it gets to assume Effect's own zero-value
+// promise holds without checking. A DENY that happened to carry a stray
+// approval id -- impossible from this repo's own PDP, not impossible from
+// this function's own type signature -- must still read as an ordinary
+// denial, not a misleading "pending, wait for approval" message pointing an
+// operator at an id that names nothing escalated.
+// TestCheckResponseFromDecide_DenyWithStrayApprovalID_NotTreatedAsEscalation
+// asserts exactly this: a mutation nobody asked for.
+//
+// A degraded ESCALATE's reason and approvalID both go on the response --
+// see denyCheckResponse's own doc comment for the header, and this
+// function's own reason text below for the body -- because "the approval
+// must be findable" has two different readers with two different needs. A
+// header is what a retry tool or gateway can extract deterministically, key
+// by key, without parsing prose that might be reworded later; the body is
+// what a human staring at a captured 403 -- in a browser, a curl
+// transcript, a log line that only kept the body -- can read without first
+// knowing to look for a header named stratium-approval-id. Neither channel
+// alone serves both readers, so this sends both: the same
+// self-describing-without-a-convention-memorized reasoning
+// denyCheckResponse's own doc comment already applies to Status versus
+// DeniedResponse, applied a second time to this one field.
+//
+// A PDP that escalates without attaching an id (approvalID == "" despite
+// EFFECT_ESCALATE) has violated DecideResponse.approval_id's own contract
+// and left nothing to find -- this denies with a reason that says so,
+// mirroring hook.go's resolveApproval, which defends the identical shape
+// for the blocking surfaces (see its own doc comment), rather than sending
+// a pending-approval message that names an id which does not exist.
+func checkResponseFromDecide(resp *pdpgrpc.DecideResponse) *authv3.CheckResponse {
+	deny, approvalID := pdpgrpc.DegradeEscalateToDeny(resp)
+	if !deny {
+		return okCheckResponse()
+	}
+
+	if resp.GetEffect() == pdpgrpc.Effect_EFFECT_ESCALATE {
+		if approvalID == "" {
+			return denyCheckResponse(fmt.Sprintf(
+				"stratium-pep: PDP escalated this action but returned no approval id to attach; denying (PDP reason: %s)",
+				resp.GetReason()), "")
+		}
+		reason := fmt.Sprintf(
+			"stratium-pep: this action requires approval and is pending (approval id %s); a retry after approval succeeds -- PDP: %s",
+			approvalID, resp.GetReason())
+		return denyCheckResponse(reason, approvalID)
+	}
+
+	// EFFECT_DENY, and any value this build does not recognize (including
+	// entirely unset -- see this function's own doc comment). Passed
+	// through unprefixed, exactly as the PDP wrote it: this is the PDP's
+	// own verdict text, not a local diagnostic this process is
+	// synthesizing, and the two must stay visually distinguishable to a
+	// human reading the denial -- the same convention hook.go's own default
+	// DENY case follows, for the same reason (see its own doc comment).
+	return denyCheckResponse(resp.GetReason(), "")
+}
+
+// okCheckResponse is the ALLOW mapping: an OkResponse carrying no header or
+// body content of its own. This server never asks Envoy to rewrite,
+// inject, or strip anything from a forwarded request -- it has no
+// authority to (the package doc's D1 rule again: this server classifies
+// nothing, so it has nothing of its own to add to an allowed request
+// either) -- so an empty OkHttpResponse is not a placeholder for
+// functionality left out; it is the complete, correct answer.
+func okCheckResponse() *authv3.CheckResponse {
+	return &authv3.CheckResponse{
+		Status: &rpcstatus.Status{Code: int32(rpccode.Code_OK)},
+		HttpResponse: &authv3.CheckResponse_OkResponse{
+			OkResponse: &authv3.OkHttpResponse{},
+		},
+	}
 }
 
 // denyCheckResponse builds an ext_authz denial carrying reason in both the
@@ -515,21 +657,36 @@ func (s *extauthzServer) Check(ctx context.Context, req *authv3.CheckRequest) (*
 // documented default (403, when DeniedResponse.Status is left unset), is
 // what makes a captured response self-describing to a human or a test
 // reading it directly, without first needing to know that default by
-// heart. Parameterized by reason rather than hardcoding Task 1's own
-// skeleton text is what should let Task 3 reuse this unchanged for a real
-// PDP denial reason, rather than this function growing a second, near-
-// identical copy of itself once one exists.
-func denyCheckResponse(reason string) *authv3.CheckResponse {
+// heart.
+//
+// approvalID, when non-empty, is also attached as a dedicated response
+// header (approvalIDHeader) on the same DeniedHttpResponse -- see
+// checkResponseFromDecide's own doc comment for why a degraded ESCALATE
+// needs a channel a retry tool can read deterministically, on top of the
+// prose reason that already carries the id for a human. Every other caller
+// in this file passes "" and gets back exactly the shape Task 1 and Task 2
+// already had. This signature grew one parameter for the one case that
+// needed it, rather than gaining a second, near-identical response
+// constructor alongside this one -- the risk this function's own original
+// comment already named, before there was a second case to weigh it
+// against.
+func denyCheckResponse(reason, approvalID string) *authv3.CheckResponse {
+	denied := &authv3.DeniedHttpResponse{
+		Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+		Body:   reason,
+	}
+	if approvalID != "" {
+		denied.Headers = []*corev3.HeaderValueOption{
+			{Header: &corev3.HeaderValue{Key: approvalIDHeader, Value: approvalID}},
+		}
+	}
 	return &authv3.CheckResponse{
 		Status: &rpcstatus.Status{
 			Code:    int32(rpccode.Code_PERMISSION_DENIED),
 			Message: reason,
 		},
 		HttpResponse: &authv3.CheckResponse_DeniedResponse{
-			DeniedResponse: &authv3.DeniedHttpResponse{
-				Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
-				Body:   reason,
-			},
+			DeniedResponse: denied,
 		},
 	}
 }
