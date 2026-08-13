@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"stratium/internal/pdpgrpc"
 )
@@ -283,6 +285,135 @@ func TestDecideAndRelay_SessionFileReadFreshPerCall_RevocationTakesEffectNextCal
 	assertNoFrame(t, h.upstreamReceived, 100*time.Millisecond)
 }
 
+// --- Reissue (Task 4, Phase 9): mirrors hook_test.go's own reissue block ---
+// for the second surface decideAndRelay shares reissueAndRetryDecide (reissue.go)
+// with -- see that function's own doc comment for why it never tries to tell an
+// expired token apart from an ordinary policy denial before attempting exactly
+// one reissue and retry.
+
+// The happy path: a denied first Decide, one successful IssueToken, and an
+// allowing retry -- carrying the FRESH token, not the stale one -- forwards
+// the original frame. issueRequestCount()==1 is the load-bearing assertion
+// for "exactly one attempt": a mutant that retried re-issuance in a loop
+// would still reach this same forwarded outcome the first time IssueToken
+// happened to succeed.
+func TestDecideAndRelay_ExpiredToken_ReissuesOnceThenForwards(t *testing.T) {
+	const reissuedToken = "freshly-reissued-token"
+	fake := &fakePDP{
+		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token: verify: token is expired"},
+		issueResp: &pdpgrpc.IssueTokenResponse{Token: reissuedToken},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
+	cfg := testCfg(t)
+	h := newMCPHarness(t, wrapped, cfg)
+
+	const req = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/x"}}}`
+	h.sendFromAgent(t, req)
+
+	if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != req {
+		t.Errorf("upstream received %q, want the original request %q forwarded unchanged after reissue", got, req)
+	}
+	if got := fake.issueRequestCount(); got != 1 {
+		t.Errorf("IssueToken called %d times, want exactly 1", got)
+	}
+	if got := wrapped.calls; got != 2 {
+		t.Errorf("Decide called %d times, want exactly 2 (the original denial, then one retry)", got)
+	}
+	// Never a bare delegation id: the retry's own token must be the freshly
+	// issued one, not IssueToken's own delegation_id argument.
+	if got := wrapped.lastDecideReq.GetToken(); got != reissuedToken {
+		t.Errorf("retry Decide request token = %q, want the freshly reissued token %q", got, reissuedToken)
+	}
+	if got := fake.lastIssueRequest().GetDelegationId(); got == wrapped.lastDecideReq.GetToken() {
+		t.Errorf("retry Decide's token equals IssueToken's own delegation_id (%q) -- a bare delegation id "+
+			"must never be sent as a token", got)
+	}
+}
+
+// The reissue succeeds, but the retry -- a full, fresh evaluation -- still
+// denies for an unrelated reason. The JSON-RPC error must carry the RETRY's
+// own reason, and IssueToken must not be called a second time just because
+// the retry also denied.
+func TestDecideAndRelay_ExpiredToken_ReissuesOnceThenDeniesWithRetrysOwnReason(t *testing.T) {
+	const retryDenyReason = "principal has no policy permitting read_file:call"
+	fake := &fakePDP{
+		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token: verify: token is expired"},
+		issueResp: &pdpgrpc.IssueTokenResponse{Token: "freshly-reissued-token"},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenDenyClient{PDPServiceClient: client, first: fake.resp, denyReason: retryDenyReason}
+	cfg := testCfg(t)
+	h := newMCPHarness(t, wrapped, cfg)
+
+	const req = `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/x"}}}`
+	h.sendFromAgent(t, req)
+
+	out := decodeJSONRPCError(t, readFrame(t, h.agentReceived, time.Second))
+	if out.Error.Message != retryDenyReason {
+		t.Errorf("error.message = %q, want the RETRY's own reason %q", out.Error.Message, retryDenyReason)
+	}
+	if got := fake.issueRequestCount(); got != 1 {
+		t.Errorf("IssueToken called %d times, want exactly 1 -- a second denial must not trigger a second "+
+			"reissue attempt", got)
+	}
+	assertNoFrame(t, h.upstreamReceived, 100*time.Millisecond)
+}
+
+// A failed reissue denies outright, with no retry Decide call at all --
+// requestCount() staying at 1 proves the failure short-circuits before any
+// retry is attempted, the mutation-testing anchor for "treat a failed
+// re-issue as allow".
+func TestDecideAndRelay_ReissueFails_Denies(t *testing.T) {
+	fake := &fakePDP{
+		resp:     &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token: verify: token is expired"},
+		issueErr: status.Error(codes.PermissionDenied, "delegation 3fa85f64-5717-4562-b3fc-2c963f66afa6 is revoked"),
+	}
+	client := startFakePDP(t, fake)
+	h := newMCPHarness(t, client, testCfg(t))
+
+	const req = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/x"}}}`
+	h.sendFromAgent(t, req)
+
+	out := decodeJSONRPCError(t, readFrame(t, h.agentReceived, time.Second))
+	if !strings.Contains(out.Error.Message, "re-issue token") {
+		t.Errorf("error.message = %q, want it to say the token could not be re-issued", out.Error.Message)
+	}
+	if got := fake.requestCount(); got != 1 {
+		t.Errorf("Decide called %d times, want exactly 1 -- a failed reissue must never reach a retry Decide call", got)
+	}
+	assertNoFrame(t, h.upstreamReceived, 100*time.Millisecond)
+}
+
+// The mcp-mode twin of TestRunHook_SessionFileHasNoToken_ExitsTwo: a session
+// file that parses and names a delegation, but whose token field is empty,
+// must deny before ever reaching the network.
+func TestDecideAndRelay_SessionFileHasNoToken_Denies(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	client := startFakePDP(t, fake)
+	cfg := testCfg(t)
+	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: uuid.NewString()}) // Token deliberately left unset
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(cfg.SessionFilePath, data, sessionFileMode); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	h := newMCPHarness(t, client, cfg)
+
+	const req = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/x"}}}`
+	h.sendFromAgent(t, req)
+
+	out := decodeJSONRPCError(t, readFrame(t, h.agentReceived, time.Second))
+	if !strings.Contains(out.Error.Message, "has no token") {
+		t.Errorf("error.message = %q, want it to say the session file has no token", out.Error.Message)
+	}
+	if fake.requestCount() != 0 {
+		t.Errorf("PDP was called %d times, want 0 -- a session file with no token must not reach the network", fake.requestCount())
+	}
+	assertNoFrame(t, h.upstreamReceived, 100*time.Millisecond)
+}
+
 // --- Request shape: raw_input, no declared_tier, verb from tool name only --
 
 // Assert its absence on the wire, as the task requires -- mirrors
@@ -300,7 +431,8 @@ func TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	client := startFakePDP(t, fake)
 	cfg := testCfg(t)
 	wantDelegationID := uuid.NewString()
-	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID)
+	wantToken := "wire-proof-token-" + uuid.NewString()
+	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID, wantToken)
 	h := newMCPHarness(t, client, cfg)
 
 	const arguments = `{"command":"rm -rf /","classification":"TOP-SECRET","hierarchy":"nato"}`
@@ -326,11 +458,18 @@ func TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 		t.Errorf("request identity = (agent=%q subject=%q), want (%q, %q)",
 			got.GetAgentId(), got.GetSubject(), cfg.AgentID, cfg.Subject)
 	}
-	// got.GetToken() is deliberately not asserted here -- see hook_test.go's
-	// identically-worded comment on its own version of this test for why
-	// (Phase 9 Task 3/Task 4 boundary). wantDelegationID above still names a
-	// real delegation for writeTestSessionFile to persist; it is simply no
-	// longer carried onto the wire from here.
+	// The property Phase 9 Task 4 exists for, mirroring hook_test.go's
+	// identically-worded assertion on its own version of this test: the
+	// session file's TOKEN reaches the wire, and the delegation id --
+	// structurally absent from DecideRequest since Task 3 -- never does,
+	// under any name.
+	if got.GetToken() != wantToken {
+		t.Errorf("token = %q, want the session file's own token %q", got.GetToken(), wantToken)
+	}
+	if got.GetToken() == wantDelegationID {
+		t.Errorf("token = %q, want it to differ from the delegation id %q -- a bare delegation id must never "+
+			"be sent as the token", got.GetToken(), wantDelegationID)
+	}
 	if resc := got.GetResource(); len(resc) != 0 {
 		t.Errorf("resource = %v, want empty -- this file extracts nothing anymore, for any tool or arguments", resc)
 	}
@@ -436,7 +575,7 @@ func TestRunMCPCmd_DeniedToolsCall_NeverReachesRealUpstreamSubprocess(t *testing
 	t.Cleanup(gs.Stop)
 
 	sessionPath := filepath.Join(t.TempDir(), "session.json")
-	writeTestSessionFile(t, sessionPath, uuid.NewString())
+	writeTestSessionFile(t, sessionPath, uuid.NewString(), testSessionToken)
 	setAllHookEnv(t, map[string]string{
 		"STRATIUM_PEP_PDP_ADDR":     lis.Addr().String(),
 		"STRATIUM_PEP_SESSION_FILE": sessionPath,

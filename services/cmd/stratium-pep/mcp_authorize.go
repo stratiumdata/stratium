@@ -152,11 +152,12 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	// reason (see loadSessionFile's own doc comment and session_file.go): mcp is a long-lived
 	// process handling many tool calls over one session, not exec'd fresh per call the way hook is,
 	// which makes caching this across calls a MORE tempting shortcut here than it ever was for
-	// hook, not a less dangerous one -- a cached delegation reference would mean a revocation
-	// takes effect only after this process restarts rather than on the very next tool call. The
-	// decoded value itself is discarded -- see the request build below for why -- but the call
-	// stays as this binary's own local fail-closed gate on "a session was actually started."
-	_, err := loadSessionFile(a.cfg.SessionFilePath)
+	// hook, not a less dangerous one -- a cached token or delegation id would mean a revocation
+	// takes effect only after this process restarts rather than on the very next tool call. sess
+	// stays in scope past this check, unlike before Phase 9 Task 4: it is now the only source for
+	// the token and delegation id the request below and a possible reissue use, not merely this
+	// binary's own local fail-closed gate on "a session was actually started."
+	sess, err := loadSessionFile(a.cfg.SessionFilePath)
 	if err != nil {
 		a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", err))
 		return
@@ -167,8 +168,7 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		Subject:  a.cfg.Subject,
 		Tool:     frame.Params.Name,
 		RawInput: string(frame.Params.Arguments),
-		// Token: left unset -- see hook.go's identically-worded comment on
-		// its own request build for why (Phase 9 Task 3/Task 4 boundary).
+		Token:    sess.GetToken(),
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
 		// (Verb, NormalizedInput) or are ever set here (Resource) anymore --
 		// see this file's own package doc. DeclaredTier: deliberately never
@@ -182,6 +182,20 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	if err != nil {
 		a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", describeRPCError(err, agentOrDelegationUnknownMsg)))
 		return
+	}
+
+	if resp.GetEffect() == pdpgrpc.Effect_EFFECT_DENY {
+		// The cached token may simply have expired -- see reissue.go's own package doc for why this
+		// does not try to tell that apart from an ordinary policy denial before attempting exactly
+		// one reissue and retry, mirroring hook.go's runHook one call site over. A failure here (the
+		// reissue call itself, or the retried Decide) denies; a success replaces resp with the
+		// retry's own response and falls through to the same switch below.
+		reissued, reissueErr := reissueAndRetryDecide(a.client, a.cfg, sess.GetDelegationId(), req)
+		if reissueErr != nil {
+			a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", reissueErr))
+			return
+		}
+		resp = reissued
 	}
 
 	switch resp.GetEffect() {

@@ -93,6 +93,80 @@ it does not (and any stale file at that path was removed) — check stderr
 for why before starting the agent: PDP unreachable, the requested scope
 denied outright, etc.
 
+### The session file is bearer authority, not a label
+
+Say this plainly, because it changed under this file without changing shape:
+`STRATIUM_PEP_SESSION_FILE` used to cache a delegation *id* — a reference,
+useless without also reaching the PDP as this session's own trusted local
+process. As of Phase 9 it caches a signed **token** instead (`hook` and `mcp`
+both read it and send the token, never the id, to `Decide` — spec §4.7.1
+K4). A token is a bearer credential: whoever presents it authenticates as
+this delegation, full stop, with no second factor and no check that the
+presenter is the process session-start was run for. **Anyone who can read
+this file can act as this session's agent — with its exact granted scope,
+against the real PDP, from anywhere with network access to it — until the
+token expires**, not merely until someone notices.
+
+This was already true in the narrower sense that a leaked delegation id
+plus network access to the PDP was also a problem — but a bare id was never
+enough by itself before Phase 9 (K4 removed exactly the fallback that would
+have let one work), and after this file's Task 4 there is no other
+credential in play: the token IS the whole of what authenticates a call.
+Treat a copy of this file exactly as you would a copy of the token it
+contains, because that is what it is.
+
+What this means for where it may be written:
+
+- **Local disk only, on the machine actually running the agent.** Never a
+  shared or network filesystem, never a location another user or another
+  agent's session on the same host can read — `sessionFileMode` (0600) stops
+  a different *user*, never a different process running as the *same* user,
+  and a multi-tenant host runs agents as the same user more often than the
+  0600 mode alone would suggest is safe.
+- **Never committed, logged, or attached anywhere.** Not to source control,
+  not to a bug report, not to a support ticket — the same rule this project
+  already holds for `raw_input` and an approval id (hook.go's package doc)
+  applies to this file's entire contents with more force, because unlike
+  those two, this file is bytes sitting at rest on disk between tool calls,
+  not a value that only ever exists in memory for one request.
+- **Scoped to one session's lifetime.** A stale file left behind after an
+  agent's work is done is a live credential with nobody watching it; remove
+  it (or let a fresh `session-start` overwrite it — see "Fail closed on
+  creation failure" in that command's own behavior) rather than leaving it
+  sitting on disk once the session that needed it has ended.
+- **The token's own expiry is the real bound, re-issuance included.** A
+  captured token stops working once it expires — but a captured session
+  *file* keeps handing out fresh ones for as long as the delegation itself
+  is alive: `hook`/`mcp` reissue automatically when the cached token has
+  expired (see "Re-issue on expiry" below), and so would anyone else holding
+  a copy of this file. The token's expiry bounds one credential; the file's
+  own exposure window is bounded only by the delegation's `ttl_seconds` and
+  by however long the file sits somewhere it should not.
+
+None of this is new caution about a new class of file — it is the same
+"treat this like a password" instinct most people already apply to an SSH
+private key or an API token in an env file, applied here because, as of this
+task, that is exactly what this file is.
+
+### Re-issue on expiry
+
+A short-lived token can (and, over a long enough agent session, will)
+expire before the delegation behind it does. `hook` and `mcp` handle this
+themselves: when `Decide` denies a call, each surface asks the PDP for one
+fresh token (`IssueToken`, naming the delegation this session's file already
+recorded) and retries the SAME call exactly once before deciding anything.
+A re-issue that fails — the delegation was itself revoked or has expired,
+or the PDP could not be reached — denies the call; nothing here retries a
+second time or waits indefinitely, the same bounded-wait discipline this
+project already applies to an escalation (`STRATIUM_PEP_APPROVAL_TIMEOUT`).
+The reissued token is used for that one call and discarded — it is never
+written back to `STRATIUM_PEP_SESSION_FILE` — so a session whose cached
+token keeps expiring keeps paying the same re-issue cost on every
+subsequent call rather than silently caching a fresher credential in a
+process's memory. Run `session-start` again for a session expected to run
+long past its current token's lifetime rather than relying on this path to
+carry it indefinitely.
+
 ### Grant discovery tools, not just access tools
 
 `Grep` and `Glob` are in the example above deliberately. A scope of
@@ -435,7 +509,10 @@ could not ask" matters, because the fix is different:
 |---|---|---|
 | `no session file at ... -- run 'stratium-pep session-start' first` | No session was ever started, or one ended. | Run `session-start`. |
 | `session file ... is malformed` | The file exists but is not valid JSON. | Delete it and run `session-start` again. |
+| `session file ... has no token -- run 'stratium-pep session-start' again` | The file exists and parses, but its token field is empty — a hand-edited file, or one written by a build that predates Phase 9 Task 4. | Run `session-start` again. |
 | `PDP says the delegation or agent this request names is unknown to it` | The session names a delegation (or agent) the PDP has never heard of — expired, revoked, or copied from elsewhere. | Run `session-start` again. |
+| `re-issue token: ...` | The cached token was rejected, and the automatic re-issue attempt (see "Re-issue on expiry" above) also failed — the delegation itself is revoked or expired, or the PDP could not be reached for the re-issue call. | If the delegation is dead, run `session-start` again; otherwise treat the wrapped reason like `could not reach PDP`/`PDP returned an error` above. |
+| `retry after re-issuing token: ...` | Re-issuance itself succeeded, but the retried `Decide` call with the fresh token failed at the transport level (unreachable PDP, timeout). | Treat the wrapped reason like `could not reach PDP`/`PDP did not respond in time` above. |
 | `could not reach PDP` | Transport failure — the PDP process may be down or the address wrong. | Check the PDP is running and `STRATIUM_PEP_PDP_ADDR` is correct. |
 | `PDP did not respond in time` | The PDP is reachable but did not answer inside `STRATIUM_PEP_CONNECT_TIMEOUT`. | Check PDP health/load, or raise the timeout. |
 | `PDP returned an error` | The PDP is up and answered, but the call itself failed server-side. | Check the PDP's own logs. |

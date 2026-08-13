@@ -20,13 +20,21 @@ import (
 	"stratium/internal/pdpgrpc"
 )
 
+// testSessionToken is the token every testCfg-backed session file carries
+// unless a test names its own -- an opaque fixed string, deliberately not
+// derived from a delegation id (see writeTestSessionFile's own doc comment
+// on why that separation matters), since fakePDP.Decide never verifies it:
+// only its presence on the wire is ever what a test in this file checks.
+const testSessionToken = "test-session-token"
+
 // testCfg returns a valid baseline hookConfig: an existing, well-formed
 // session file under a test-scoped temp directory, naming a fresh
-// delegation ID, plus a generous ConnectTimeout -- so a test that is not
-// itself about the session file or about timing (most of them) does not
-// have to think about either. Tests that need a specific failure mode (no
-// file, a malformed file, a delegation the fake PDP does not recognize, a
-// short timeout) build on top of this instead of duplicating it.
+// delegation ID and testSessionToken, plus a generous ConnectTimeout -- so a
+// test that is not itself about the session file or about timing (most of
+// them) does not have to think about either. Tests that need a specific
+// failure mode (no file, a malformed file, a delegation the fake PDP does
+// not recognize, a short timeout) build on top of this instead of
+// duplicating it.
 //
 // ApprovalPollInterval/ApprovalTimeout are small (milliseconds), not
 // ConnectTimeout's generous seconds: only escalation.go's poll loop reads
@@ -45,18 +53,25 @@ func testCfg(t *testing.T) hookConfig {
 		ApprovalPollInterval: 5 * time.Millisecond,
 		ApprovalTimeout:      500 * time.Millisecond,
 	}
-	writeTestSessionFile(t, cfg.SessionFilePath, uuid.NewString())
+	writeTestSessionFile(t, cfg.SessionFilePath, uuid.NewString(), testSessionToken)
 	return cfg
 }
 
 // writeTestSessionFile writes a well-formed session file naming
-// delegationID at path -- the same shape session-start's own
-// writeSessionFile (session_file.go) produces, so hook_test.go's fixtures
-// do not silently drift from what a real session-start run would leave
-// behind.
-func writeTestSessionFile(t *testing.T, path, delegationID string) {
+// delegationID and token at path -- the same shape session-start's own
+// writeSessionFile (session_file.go) produces, so hook_test.go's fixtures do
+// not silently drift from what a real session-start run would leave behind.
+//
+// Two separate parameters, never one derived from the other: a fixture that
+// set token to some function of delegationID (a prefix, a suffix) would
+// still pass a test that mistakenly sent the delegation id where the token
+// belongs, as long as that test's assertion only checked for a substring
+// match. Callers that need to prove which of the two crossed the wire
+// (TestRunHook_RequestCarriesRawInputAndNoDeclaredTier and its mcp mirror)
+// pass values with nothing in common for exactly that reason.
+func writeTestSessionFile(t *testing.T, path, delegationID, token string) {
 	t.Helper()
-	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: delegationID})
+	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: delegationID, Token: token})
 	if err != nil {
 		t.Fatalf("marshal test session file: %v", err)
 	}
@@ -103,9 +118,22 @@ func TestRunHook_Allow_ExitsZeroSilently(t *testing.T) {
 // hook carrying that shortcut would still pass every other test in this
 // file; this is the one that catches it, because it is the one place a tool
 // commonly assumed "obviously safe" is asked for and denied anyway.
+//
+// requestCount()==2, not 1: since Phase 9 Task 4, an initial DENY always
+// triggers exactly one reissue-and-retry (reissue.go) before this hook
+// commits to a denial -- see that file's own doc comment for why it never
+// tries to tell this ordinary policy denial apart from an expired token
+// first. The fixture's issueResp lets that retry complete normally rather
+// than relying on fakePDP's zero-value IssueToken behavior; the retry then
+// denies again, for the same reason, because fake.resp answers every Decide
+// call identically. A shortcut mutation for "Read" would still leave BOTH
+// counts at zero, so this remains the same catch it always was.
 func TestRunHook_Deny_ExitsTwoWithPDPReason(t *testing.T) {
 	const pdpReason = "principal has no policy permitting Read:read"
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason}}
+	fake := &fakePDP{
+		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason},
+		issueResp: &pdpgrpc.IssueTokenResponse{Token: "reissued-for-this-test"},
+	}
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
@@ -114,8 +142,12 @@ func TestRunHook_Deny_ExitsTwoWithPDPReason(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
 	}
-	if fake.requestCount() != 1 {
-		t.Fatalf("PDP was called %d times, want exactly 1 -- a Read shortcut would leave this at 0", fake.requestCount())
+	if fake.requestCount() != 2 {
+		t.Fatalf("Decide was called %d times, want exactly 2 (the original denial, then one reissue retry) -- "+
+			"a Read shortcut would leave this at 0", fake.requestCount())
+	}
+	if fake.issueRequestCount() != 1 {
+		t.Errorf("IssueToken was called %d times, want exactly 1", fake.issueRequestCount())
 	}
 	out := decodeHookOutput(t, stdout.Bytes())
 	if out.HookSpecificOutput.HookEventName != "PreToolUse" {
@@ -574,15 +606,244 @@ func TestRunHook_UnreachablePDP_ExitsTwo(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Fail-closed matrix (Task 3). Every scenario below must exit 2, and each
-// produces its own distinct, actionable reason -- see describeRPCError
-// and loadSessionFile's doc comments (hook.go, session_file.go) for why a
-// single flat "denied" would not be good enough. Together with
-// TestRunHook_UnreachablePDP_ExitsTwo above and
-// TestRunHookCmd_MissingConfig_Denies below, this is the full set the task
-// brief asks for: no session file; a malformed session file; a session file
-// naming a delegation that no longer exists; PDP unreachable; PDP returns an
-// error; PDP times out; and a response whose effect is unset.
+// Reissue (Task 4, Phase 9): when the first Decide response is EFFECT_DENY,
+// runHook calls IssueToken exactly once and retries Decide exactly once
+// before deciding anything -- reissue.go's own doc comment covers why this
+// never tries to tell an expired token apart from an ordinary policy denial
+// first. decideThenAllowClient/decideThenDenyClient (above, this file) both
+// embed the real fakePDP-backed client and override only Decide, so
+// IssueToken calls made through either wrapper still reach fakePDP's own
+// scriptable IssueToken (pdp_fake_test.go) unmodified.
+// ---------------------------------------------------------------------------
+
+// The happy path: an expired (or otherwise rejected) token denies once, the
+// reissue succeeds, and the retry -- now carrying the FRESH token, not the
+// stale one -- allows. issueRequestCount()==1 is the load-bearing assertion
+// for "exactly one attempt", not the exit code alone: a mutant that retried
+// re-issuance in a loop would still land on this same ALLOW outcome the
+// first time IssueToken happened to succeed, and only a call-count check
+// tells the two apart.
+func TestRunHook_ExpiredToken_ReissuesOnceThenAllows(t *testing.T) {
+	const staleReason = "token: verify: token is expired"
+	const reissuedToken = "freshly-reissued-token"
+	fake := &fakePDP{
+		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: staleReason},
+		issueResp: &pdpgrpc.IssueTokenResponse{Token: reissuedToken},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
+	cfg := testCfg(t)
+
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg)
+
+	if code != 0 {
+		t.Fatalf("runHook() = %d, want 0 (reissue then an allowing retry); stdout: %s", code, stdout.String())
+	}
+	if got := fake.issueRequestCount(); got != 1 {
+		t.Errorf("IssueToken called %d times, want exactly 1", got)
+	}
+	if got := wrapped.calls; got != 2 {
+		t.Errorf("Decide called %d times, want exactly 2 (the original denial, then one retry)", got)
+	}
+	if got := wrapped.lastDecideReq.GetToken(); got != reissuedToken {
+		t.Errorf("retry Decide request token = %q, want the freshly reissued token %q, not the stale one that was just replaced",
+			got, reissuedToken)
+	}
+}
+
+// The reissue succeeds, but the retry -- a full, fresh evaluation, not a
+// re-check of the same denial -- still denies, for an unrelated reason (a
+// real policy denial, not a token problem). The retry's OWN reason must
+// surface, and IssueToken must not be called a second time just because the
+// retry also denied -- that would be the "retry re-issuance more than once"
+// mutation this anchors.
+func TestRunHook_ExpiredToken_ReissuesOnceThenDeniesWithRetrysOwnReason(t *testing.T) {
+	const staleReason = "token: verify: token is expired"
+	const retryDenyReason = "principal has no policy permitting Bash:read"
+	fake := &fakePDP{
+		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: staleReason},
+		issueResp: &pdpgrpc.IssueTokenResponse{Token: "freshly-reissued-token"},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenDenyClient{PDPServiceClient: client, first: fake.resp, denyReason: retryDenyReason}
+	cfg := testCfg(t)
+
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg)
+
+	if code != 2 {
+		t.Fatalf("runHook() = %d, want 2", code)
+	}
+	out := decodeHookOutput(t, stdout.Bytes())
+	if got := out.HookSpecificOutput.PermissionDecisionReason; got != retryDenyReason {
+		t.Errorf("permissionDecisionReason = %q, want the RETRY's own reason %q, not the stale-token reason "+
+			"the first call carried", got, retryDenyReason)
+	}
+	if got := fake.issueRequestCount(); got != 1 {
+		t.Errorf("IssueToken called %d times, want exactly 1 -- a second denial must not trigger a second "+
+			"reissue attempt", got)
+	}
+}
+
+// A failed reissue -- the delegation itself is dead, or the PDP could not be
+// reached for the IssueToken call -- denies outright, with no retry Decide
+// call at all. This is the mutation-testing anchor for "treat a failed
+// re-issue as allow": fake.requestCount() staying at 1 proves the failure
+// short-circuits before any retry is even attempted, not merely that the
+// eventual exit code happens to be 2.
+func TestRunHook_ReissueFails_Denies(t *testing.T) {
+	fake := &fakePDP{
+		resp:     &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token: verify: token is expired"},
+		issueErr: status.Error(codes.PermissionDenied, "delegation 3fa85f64-5717-4562-b3fc-2c963f66afa6 is revoked"),
+	}
+	client := startFakePDP(t, fake)
+	cfg := testCfg(t)
+
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+
+	if code != 2 {
+		t.Fatalf("runHook() = %d, want 2", code)
+	}
+	out := decodeHookOutput(t, stdout.Bytes())
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(reason, "re-issue token") {
+		t.Errorf("permissionDecisionReason = %q, want it to say the token could not be re-issued", reason)
+	}
+	if got := fake.requestCount(); got != 1 {
+		t.Errorf("Decide called %d times, want exactly 1 -- a failed reissue must never reach a retry Decide call", got)
+	}
+	if got := fake.issueRequestCount(); got != 1 {
+		t.Errorf("IssueToken called %d times, want exactly 1", got)
+	}
+}
+
+// A reissue is never even attempted for ALLOW or ESCALATE -- only a DENY
+// looks like a rejected token. Reusing escalateResp's fixture (above, this
+// file) proves this directly: an escalation must reach GetApproval, never
+// IssueToken.
+func TestRunHook_Escalate_NeverAttemptsReissue(t *testing.T) {
+	approvalID := uuid.NewString()
+	fake := &fakePDP{
+		resp:                 escalateResp(approvalID),
+		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{{Status: "approved"}},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
+
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t))
+
+	if code != 0 {
+		t.Fatalf("runHook() = %d, want 0 (escalated, then approved)", code)
+	}
+	if got := fake.issueRequestCount(); got != 0 {
+		t.Errorf("IssueToken called %d times, want 0 -- an escalation is not a rejected token", got)
+	}
+}
+
+// TestRunHook_NoCodePathSendsABareDelegationID is the dedicated,
+// explicitly-named assertion the task brief calls for, across BOTH paths
+// through runHook that ever send a DecideRequest: the ordinary call, and
+// the reissue retry. DecideRequest has had no delegation_id field to
+// accidentally populate since Task 3 reserved it on the wire
+// (proto/pdp/v1/pdp.proto) -- what remains possible, and what this test
+// actually guards against, is Token being set TO the delegation id string
+// by mistake: on the first call (the session file's own DelegationId,
+// confused with its Token) or on the retry (IssueTokenRequest.DelegationId,
+// which this file DOES legitimately send to IssueToken, echoed into the
+// retried Decide's Token instead of IssueTokenResponse's own freshly issued
+// one). wantDelegationID and both tokens below share nothing in common, so
+// any of those three confusions would fail a different assertion here.
+func TestRunHook_NoCodePathSendsABareDelegationID(t *testing.T) {
+	const reissuedToken = "reissued-token-shares-nothing-with-any-id"
+	fake := &fakePDP{
+		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token: verify: token is expired"},
+		issueResp: &pdpgrpc.IssueTokenResponse{Token: reissuedToken},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
+	cfg := testCfg(t)
+
+	wantDelegationID := uuid.NewString()
+	wantSessionToken := "session-token-shares-nothing-with-any-id"
+	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID, wantSessionToken)
+
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg)
+	if code != 0 {
+		t.Fatalf("runHook() = %d, want 0 (reissue then an allowing retry); stdout: %s", code, stdout.String())
+	}
+
+	// Call 1 (the original, denied Decide): Token must be the session
+	// file's own token, never the delegation id.
+	if got := wrapped.lastDecideReq; got == nil {
+		t.Fatal("Decide was never called")
+	}
+	// IssueToken is the one call that IS supposed to carry the delegation
+	// id -- confirming it arrived there, correctly, is what makes the
+	// negative assertions below meaningful rather than vacuous.
+	if got := fake.lastIssueRequest().GetDelegationId(); got != wantDelegationID {
+		t.Fatalf("IssueToken's own delegation_id = %q, want %q", got, wantDelegationID)
+	}
+	// Call 2 (the retry): Token must be the FRESHLY reissued token, never
+	// the delegation id IssueToken was just asked about.
+	if got := wrapped.lastDecideReq.GetToken(); got == wantDelegationID {
+		t.Errorf("retry Decide's token = the delegation id (%q) -- a bare delegation id must never be sent as a token", got)
+	}
+	if got := wrapped.lastDecideReq.GetToken(); got != reissuedToken {
+		t.Errorf("retry Decide's token = %q, want the reissued token %q", got, reissuedToken)
+	}
+}
+
+// The new loadSessionFile check Task 4 adds: a session file that parses and
+// names a delegation, but whose token field is empty -- a hand-edited file,
+// or one written by a build that predates this task. Must deny before ever
+// reaching the network, with a reason distinct from "malformed" (the file
+// IS well-formed JSON; it is simply missing the one field that now matters
+// most -- see loadSessionFile's own doc comment on why that check runs
+// first).
+func TestRunHook_SessionFileHasNoToken_ExitsTwo(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	client := startFakePDP(t, fake)
+
+	cfg := testCfg(t)
+	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: uuid.NewString()}) // Token deliberately left unset
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(cfg.SessionFilePath, data, sessionFileMode); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+
+	if code != 2 {
+		t.Fatalf("runHook() = %d, want 2", code)
+	}
+	if fake.requestCount() != 0 {
+		t.Errorf("PDP was called %d times, want 0 -- a session file with no token must not reach the network", fake.requestCount())
+	}
+	out := decodeHookOutput(t, stdout.Bytes())
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(reason, "has no token") {
+		t.Errorf("permissionDecisionReason = %q, want it to say the session file has no token", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fail-closed matrix (Task 3, extended by Task 4). Every scenario below must
+// exit 2, and each produces its own distinct, actionable reason -- see
+// describeRPCError and loadSessionFile's doc comments (hook.go,
+// session_file.go) for why a single flat "denied" would not be good enough.
+// Together with TestRunHook_UnreachablePDP_ExitsTwo and the reissue tests
+// above, and TestRunHookCmd_MissingConfig_Denies below, this is the full set
+// the task brief asks for: no session file; a session file with no token; a
+// malformed session file; a session file naming a delegation that no longer
+// exists; PDP unreachable; PDP returns an error; PDP times out; a response
+// whose effect is unset; and a failed token reissue.
 // ---------------------------------------------------------------------------
 
 func TestRunHook_NoSessionFile_ExitsTwo(t *testing.T) {
@@ -778,12 +1039,13 @@ func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 
 	const toolInput = `{"command":"rm -rf /","classification":"TOP-SECRET","hierarchy":"nato"}`
 	cfg := testCfg(t)
-	// Overwrite testCfg's random delegation ID with a known one, so the
-	// identity assertion below can compare against something this test
-	// controls rather than something buried inside cfg -- cfg no longer
-	// carries a DelegationID field at all; it lives in the session file.
+	// Overwrite testCfg's random delegation ID and token with known,
+	// deliberately UNRELATED values (see writeTestSessionFile's own doc
+	// comment) so the assertions below can tell exactly which one crossed
+	// the wire, not merely that something did.
 	wantDelegationID := uuid.NewString()
-	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID)
+	wantToken := "wire-proof-token-" + uuid.NewString()
+	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID, wantToken)
 
 	var stdout bytes.Buffer
 	code := runHook(stdinBody("Bash", toolInput), &stdout, client, cfg)
@@ -809,14 +1071,19 @@ func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 		t.Errorf("request identity = (agent=%q subject=%q), want (%q, %q)",
 			req.GetAgentId(), req.GetSubject(), cfg.AgentID, cfg.Subject)
 	}
-	// req.GetToken() is deliberately not asserted here: DecideRequest carries
-	// a signed token instead of a bare delegation id as of Phase 9 Task 3
-	// (spec K4), and this binary does not mint or forward one yet -- see
-	// runHook's own comment on its request build (hook.go) and the phase's
-	// Task 4. wantDelegationID above still names a real delegation for
-	// writeTestSessionFile to persist -- loadSessionFile still requires a
-	// structurally valid session file -- it is simply no longer carried onto
-	// the wire from here.
+	// The property Phase 9 Task 4 exists for: the session file's TOKEN
+	// reaches the wire, and the delegation id -- structurally absent from
+	// DecideRequest since Task 3 reserved that field number -- never does,
+	// under any name. Comparing against wantDelegationID here (not just
+	// asserting Token == wantToken) is what would catch a mutant that sent
+	// the delegation id in the token field by mistake.
+	if req.GetToken() != wantToken {
+		t.Errorf("token = %q, want the session file's own token %q", req.GetToken(), wantToken)
+	}
+	if req.GetToken() == wantDelegationID {
+		t.Errorf("token = %q, want it to differ from the delegation id %q -- a bare delegation id must never "+
+			"be sent as the token", req.GetToken(), wantDelegationID)
+	}
 	if resc := req.GetResource(); len(resc) != 0 {
 		t.Errorf("resource = %v, want empty -- this file extracts nothing anymore, for any tool or input", resc)
 	}

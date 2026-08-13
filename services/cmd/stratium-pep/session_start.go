@@ -1,10 +1,14 @@
 // session_start.go implements the "session-start" subcommand: creates a
 // delegation for an agent session via the PDP's CreateDelegation RPC and
-// caches the result -- delegation ID and *granted* scope -- to a session
-// file (session_file.go's writeSessionFile). "hook" (hook.go) reads that
+// caches the result -- delegation ID, *granted* scope, and (Phase 9 Task 4)
+// the token naming that delegation -- to a session file (session_file.go's
+// writeSessionFile). "hook" (hook.go) and "mcp" (mcp_authorize.go) read that
 // file fresh on every tool call via session_file.go's loadSessionFile, so a
 // session-start or a revocation between tool calls takes effect on the very
-// next one rather than waiting on a cache to expire.
+// next one rather than waiting on a cache to expire. Of the three cached
+// fields, the token is now the one an enforcement surface actually presents
+// to Decide (K4); delegation ID survives alongside it only to support
+// reissue.go's reissueAndRetryDecide, never sent on the wire itself.
 //
 // Two rules from the task brief, both enforced by construction below rather
 // than by convention:
@@ -192,11 +196,18 @@ func runSessionStart(client pdpgrpc.PDPServiceClient, cfg sessionStartConfig, st
 
 	// Defense at the wire boundary, not a re-check of policy: the real PDP
 	// (internal/pdpgrpc/delegation.go) never returns err == nil alongside an
-	// empty delegation_id or a nil granted_scope -- CreateDelegationResponse's
-	// own doc comment states granted_scope.tools is never empty on a response
-	// that reaches a caller either. A response that violates that invariant
-	// anyway is not safe to cache, whatever produced it.
-	if resp.GetDelegationId() == "" || resp.GetGrantedScope() == nil {
+	// empty delegation_id, a nil granted_scope, or an empty token --
+	// CreateDelegationResponse's own doc comment states granted_scope.tools
+	// is never empty on a response that reaches a caller, and that a
+	// delegation_id reaches a caller only paired with the token that names
+	// it (a signing failure fails the whole call). A response that violates
+	// either invariant anyway is not safe to cache, whatever produced it --
+	// and as of Phase 9 Task 4, an empty token is the one of these three that
+	// matters most: it is what every later hook/mcp call actually sends to
+	// Decide, so caching one anyway would not merely under-record this
+	// session, it would make every subsequent tool call deny for a reason
+	// this process could have caught right here instead.
+	if resp.GetDelegationId() == "" || resp.GetGrantedScope() == nil || resp.GetToken() == "" {
 		removeStaleSessionFile(cfg.SessionFilePath, stderr)
 		_, _ = fmt.Fprintln(stderr, "stratium-pep: PDP returned a malformed CreateDelegation response")
 		return 1

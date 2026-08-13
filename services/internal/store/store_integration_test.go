@@ -60,16 +60,32 @@
 // DecideRequest no longer carries a bare delegation_id at all — Decide now
 // authenticates a signed token and reads the delegation id it names from
 // the token's own claims (spec §4.7.1 K4). Every DecideRequest literal in
-// this file still sets a field named Token to a plain delegation id string,
-// unchanged from before this task, because minting a REAL token here is
-// Task 4's job (it is what moves the PEPs, and this file's own PEP-shaped
-// proofs, onto tokens) — this file only needed to keep compiling under
-// `go vet -tags integration ./...`, one of Task 3's own required-green
-// gates. Every proof that reaches a live PDP through one of these requests
-// is therefore now expected to observe a DENY for an unparseable token
-// where it used to observe whatever the delegation itself would have
-// produced — `make integration` failing is exactly this, named in the
-// phase brief, not a regression Task 3 introduced quietly.
+// this file set a field named Token to a plain delegation id string,
+// unchanged from before that task, because minting a REAL token here was
+// left for Task 4 (it is what moves the PEPs, and this file's own PEP-shaped
+// proofs, onto tokens) — Task 3 only needed this file to keep compiling
+// under `go vet -tags integration ./...`, one of its own required-green
+// gates, and every proof that reached a live PDP through one of these
+// requests observed a DENY for an unparseable token where it used to
+// observe whatever the delegation itself would have produced —
+// `make integration` failing was exactly this, named in the phase brief, not
+// a regression Task 3 introduced quietly.
+//
+// Extended again for Phase 9 Task 4
+// (docs/superpowers/sdd/2026-08-13-phase-9-tokens/task-4-brief.md): every
+// Token field in this file now carries a genuinely signed token, minted
+// through the real IssueToken RPC (mintToken, below) — the only way this
+// process can produce one the containerized PDP's own Verify will accept,
+// since its signing key is generated fresh at image build time and never
+// reaches this test process (see deploy/docker/docker-compose.yml's own
+// comment on STRATIUM_TOKEN_SIGNING_KEY_PATH). A delegation this file
+// already had in hand from a real CreateDelegation response reuses that
+// response's own Token field directly, at no extra cost; a delegation built
+// directly against Postgres (seedDelegation/twoHopChain/singleHopDelegation
+// — most of this file's fixtures, which have never gone through
+// CreateDelegation and so have no token of their own) calls mintToken, this
+// file's own test-side use of Phase 9 Task 4's production re-issuance path
+// (cmd/stratium-pep/reissue.go).
 //
 // Build-tagged so `go test ./...` and `golangci-lint run ./...` skip it by
 // default. `make integration` (repo root) is what runs it, against
@@ -442,6 +458,34 @@ func seedDelegation(t *testing.T, d *models.Delegation) *models.Delegation {
 		}
 	})
 	return d
+}
+
+// mintToken calls the real IssueToken RPC through client to obtain a
+// genuinely signed token naming delegationID — the only legitimate way any
+// proof in this file can produce a token the containerized PDP's own Verify
+// will accept. Its signing key is generated fresh at image build time
+// (deploy/docker/docker-compose.yml's own comment on
+// STRATIUM_TOKEN_SIGNING_KEY_PATH) and never reaches this test process, so
+// there is no way to sign one locally — this is Phase 9 Task 4's own
+// production re-issuance path (cmd/stratium-pep/reissue.go), exercised here
+// for the same delegations seedDelegation/twoHopChain/singleHopDelegation
+// already build directly against Postgres, which — unlike a delegation
+// CreateDelegation itself minted — have no token of their own to reuse.
+// ttlSeconds mirrors reissue.go's own reissueTTLSeconds: deliberately larger
+// than any fixture delegation's remaining lifetime, so IssueToken's own
+// clamp (internal/pdpgrpc/token.go's clampTokenExpiry) is always what
+// actually decides the token's expiry, not a duration this helper guessed.
+func mintToken(t *testing.T, client pdpgrpc.PDPServiceClient, delegationID uuid.UUID) string {
+	t.Helper()
+	const ttlSeconds = 10 * 365 * 24 * 60 * 60 // 10 years; always clamped down to the delegation's own remaining life
+	resp, err := client.IssueToken(t.Context(), &pdpgrpc.IssueTokenRequest{
+		DelegationId: delegationID.String(),
+		TtlSeconds:   ttlSeconds,
+	})
+	if err != nil {
+		t.Fatalf("mint token for delegation %s: %v", delegationID, err)
+	}
+	return resp.GetToken()
 }
 
 // twoHopChain builds a root delegation and one child narrowing it one level
@@ -1308,10 +1352,10 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 		regoPurposeCondition(purpose), "allow")
 
 	resp, err := narrowPdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-		Token: acting.ID.String(),
-		AgentId:      agentID.String(),
-		Subject:      "live-orphan-subject@example.com",
-		Tool:         "Bash",
+		Token:   mintToken(t, narrowPdpClient, acting.ID),
+		AgentId: agentID.String(),
+		Subject: "live-orphan-subject@example.com",
+		Tool:    "Bash",
 	})
 	if err != nil {
 		t.Fatalf("Decide() against pdp-narrow error = %v, want a decision", err)
@@ -1434,11 +1478,11 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	decide := func(t *testing.T, delegationID uuid.UUID, resource map[string]string) *pdpgrpc.DecideResponse {
 		t.Helper()
 		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: delegationID.String(),
-			AgentId:      agentID.String(),
-			Subject:      subject,
-			Tool:         "Read",
-			Resource:     resource,
+			Token:    mintToken(t, resourcePdpClient, delegationID),
+			AgentId:  agentID.String(),
+			Subject:  subject,
+			Tool:     "Read",
+			Resource: resource,
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -1695,11 +1739,11 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 	decide := func(t *testing.T, delegationID uuid.UUID, tool, rawInput string) *pdpgrpc.DecideResponse {
 		t.Helper()
 		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: delegationID.String(),
-			AgentId:      agentID.String(),
-			Subject:      subject,
-			Tool:         tool,
-			RawInput:     rawInput,
+			Token:    mintToken(t, resourcePdpClient, delegationID),
+			AgentId:  agentID.String(),
+			Subject:  subject,
+			Tool:     tool,
+			RawInput: rawInput,
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2093,6 +2137,16 @@ func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one", models.TrustTierUnverified)
 	_, acting := twoHopChain(t, configuredTenant, agentID)
+	// Minted once, up front, and reused by every subtest below that shares
+	// this outer `acting` (proof2, proof4, the two latency/concurrency
+	// measurements, and proof6): the two measurement subtests need a token
+	// already in hand so what they time is one Decide call, not a Decide
+	// call plus an extra IssueToken round trip, and
+	// measured_concurrent_decide_split_on_the_same_tail fires this from ten
+	// goroutines at once, where a fresh per-call mintToken (which calls
+	// t.Fatalf on failure) would be unsafe — testing.T's own contract
+	// requires FailNow to run only on the goroutine executing the test.
+	actingToken := mintToken(t, pdpClient, acting.ID)
 
 	// Set by single_decide_latency_baseline, read by
 	// measured_concurrent_decide_split_on_the_same_tail — both subtests run
@@ -2168,10 +2222,10 @@ func TestEndToEnd(t *testing.T) {
 
 	t.Run("proof2_decide_denies_at_principal_leg", func(t *testing.T) {
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: acting.ID.String(),
-			AgentId:      agentID.String(),
-			Subject:      "alice@example.com",
-			Tool:         "Bash",
+			Token:   actingToken,
+			AgentId: agentID.String(),
+			Subject: "alice@example.com",
+			Tool:    "Bash",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2313,14 +2367,24 @@ func TestEndToEnd(t *testing.T) {
 		otherAgentID := uuid.New()
 		seedAgent(t, secondTenantID, otherAgentID, "integration-agent-tenant-two", models.TrustTierUnverified)
 
-		// delegation_id need not resolve to anything real: LoadAgent runs
-		// before LoadChain in Decide (see pdpgrpc/server.go), so an unknown
-		// agent short-circuits before the delegation is ever looked up.
+		// The token need not name anything related to otherAgentID: as of
+		// Phase 9 Task 3, authentication (verifying the token and reading
+		// the delegation id it names) runs BEFORE LoadAgent in Decide (see
+		// pdpgrpc/server.go's own comment on that ordering) — the reverse of
+		// this proof's pre-Task-3 premise, when a bare, unverified
+		// delegation_id cost nothing to check and LoadAgent ran first. A
+		// well-formed, VALID token is now a prerequisite for reaching
+		// LoadAgent at all, so actingToken (this tenant's own, already
+		// proven-valid token, reused from proof2 — it is unrelated to
+		// otherAgentID and does not need to be) is what lets this call get
+		// far enough to hit the real assertion: an agent unknown to THIS
+		// tenant short-circuits at LoadAgent, before the delegation the
+		// token names is ever looked up.
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: uuid.New().String(),
-			AgentId:      otherAgentID.String(),
-			Subject:      "mallory@example.com",
-			Tool:         "Bash",
+			Token:   actingToken,
+			AgentId: otherAgentID.String(),
+			Subject: "mallory@example.com",
+			Tool:    "Bash",
 		})
 		if resp != nil {
 			t.Fatalf("Decide() response = %+v, want nil", resp)
@@ -2377,10 +2441,10 @@ func TestEndToEnd(t *testing.T) {
 			`permit(principal == User::"carol@example.com", action, resource);`, "allow")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: acting.ID.String(),
-			AgentId:      agentID.String(),
-			Subject:      "carol@example.com",
-			Tool:         "Bash",
+			Token:   mintToken(t, pdpClient, acting.ID),
+			AgentId: agentID.String(),
+			Subject: "carol@example.com",
+			Tool:    "Bash",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2476,10 +2540,10 @@ func TestEndToEnd(t *testing.T) {
 			`forbid(principal == User::"dave@example.com", action, resource);`, "deny")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: acting.ID.String(),
-			AgentId:      agentID.String(),
-			Subject:      "dave@example.com",
-			Tool:         "Bash",
+			Token:   mintToken(t, pdpClient, acting.ID),
+			AgentId: agentID.String(),
+			Subject: "dave@example.com",
+			Tool:    "Bash",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2535,10 +2599,10 @@ func TestEndToEnd(t *testing.T) {
 			`permit(principal == User::"erin@example.com", action, resource);`, "allow")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: acting.ID.String(),
-			AgentId:      agentID.String(),
-			Subject:      "erin@example.com",
-			Tool:         "Bash",
+			Token:   mintToken(t, pdpClient, acting.ID),
+			AgentId: agentID.String(),
+			Subject: "erin@example.com",
+			Tool:    "Bash",
 			// Bash carries no catalog entry (DefaultCatalog's own doc
 			// comment) and DecideRequest carries no verb field at all after
 			// spec §4.4.2 T3, so a destructive RawInput -- not a verb -- is
@@ -2604,10 +2668,10 @@ func TestEndToEnd(t *testing.T) {
 		// before this subtest rather than after it.
 		callStart := time.Now()
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: acting.ID.String(),
-			AgentId:      agentID.String(),
-			Subject:      "alice@example.com",
-			Tool:         "Bash",
+			Token:   actingToken,
+			AgentId: agentID.String(),
+			Subject: "alice@example.com",
+			Tool:    "Bash",
 		})
 		baselineLatency = time.Since(callStart)
 		if err != nil {
@@ -2635,10 +2699,10 @@ func TestEndToEnd(t *testing.T) {
 				defer wg.Done()
 				<-start
 				resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-					Token: acting.ID.String(),
-					AgentId:      agentID.String(),
-					Subject:      "alice@example.com",
-					Tool:         "Bash",
+					Token:   actingToken,
+					AgentId: agentID.String(),
+					Subject: "alice@example.com",
+					Tool:    "Bash",
 				})
 				switch {
 				case err == nil && resp != nil:
@@ -2849,10 +2913,10 @@ deny if {
 }`, subject), "deny")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: heidiActing.ID.String(),
-			AgentId:      heidiAgentID.String(),
-			Subject:      subject,
-			Tool:         "Bash",
+			Token:   mintToken(t, pdpClient, heidiActing.ID),
+			AgentId: heidiAgentID.String(),
+			Subject: subject,
+			Tool:    "Bash",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -2909,6 +2973,12 @@ deny if {
 	seedAgent(t, configuredTenant, ivanAgentID, "integration-agent-ivan", models.TrustTierUnverified)
 	const ivanPurpose = "four-engine end-to-end latency proof"
 	ivanActing := singleHopDelegation(t, configuredTenant, ivanAgentID, models.ActionTierInternalModify, ivanPurpose)
+	// Pre-minted, same reasoning as actingToken above: both subtests below
+	// share this token, one to keep the latency measurement to a single
+	// Decide call and the other because it fires from ten concurrent
+	// goroutines where a per-call mintToken (t.Fatalf on failure) would be
+	// unsafe.
+	ivanActingToken := mintToken(t, pdpClient, ivanActing.ID)
 	seedPolicyLang(t, configuredTenant, "ivan-cedar", "cedar", cedarPurposeCondition(ivanPurpose), "allow")
 	seedPolicyLang(t, configuredTenant, "ivan-rego", "rego", regoPurposeCondition(ivanPurpose), "allow")
 	seedPolicyLang(t, configuredTenant, "ivan-json", "json", jsonPurposeCondition(ivanPurpose), "allow")
@@ -2917,10 +2987,10 @@ deny if {
 	t.Run("decide_latency_with_all_four_engines_in_path", func(t *testing.T) {
 		callStart := time.Now()
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: ivanActing.ID.String(),
-			AgentId:      ivanAgentID.String(),
-			Subject:      "ivan@example.com",
-			Tool:         "Bash",
+			Token:   ivanActingToken,
+			AgentId: ivanAgentID.String(),
+			Subject: "ivan@example.com",
+			Tool:    "Bash",
 		})
 		fourEngineLatency = time.Since(callStart)
 		if err != nil {
@@ -2945,10 +3015,10 @@ deny if {
 				defer wg.Done()
 				<-start
 				_, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-					Token: ivanActing.ID.String(),
-					AgentId:      ivanAgentID.String(),
-					Subject:      "ivan@example.com",
-					Tool:         "Bash",
+					Token:   ivanActingToken,
+					AgentId: ivanAgentID.String(),
+					Subject: "ivan@example.com",
+					Tool:    "Bash",
 				})
 				switch {
 				case err == nil:
@@ -3130,10 +3200,10 @@ deny if {
 		}
 
 		atCeiling, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: delegationGateResp.GetDelegationId(),
-			AgentId:      delegationGateAgentID.String(),
-			Subject:      "frank@example.com",
-			Tool:         "Read",
+			Token:   delegationGateResp.GetToken(),
+			AgentId: delegationGateAgentID.String(),
+			Subject: "frank@example.com",
+			Tool:    "Read",
 			// Read is catalogued READ_ONLY (Phase 3c), so this sits UNDER the
 			// INTERNAL_MODIFY ceiling rather than exactly at it. DecideRequest
 			// carries no verb field at all after spec §4.4.2 T3, so there is
@@ -3152,10 +3222,10 @@ deny if {
 		}
 
 		aboveCeiling, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: delegationGateResp.GetDelegationId(),
-			AgentId:      delegationGateAgentID.String(),
-			Subject:      "frank@example.com",
-			Tool:         "Read",
+			Token:   delegationGateResp.GetToken(),
+			AgentId: delegationGateAgentID.String(),
+			Subject: "frank@example.com",
+			Tool:    "Read",
 			// The tier has to come from the input, not a verb -- which no
 			// longer exists on the wire at all (spec §4.4.2 T3): Read's
 			// catalog entry pins a catalogued tool's tier, and only a
@@ -3384,10 +3454,10 @@ allow if {
 		// creation-time probe and the principal leg must agree, now that
 		// both consult rego.
 		decideResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: resp.GetDelegationId(),
-			AgentId:      ginaAgentID.String(),
-			Subject:      subject,
-			Tool:         "Read",
+			Token:   resp.GetToken(),
+			AgentId: ginaAgentID.String(),
+			Subject: subject,
+			Tool:    "Read",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -3420,11 +3490,11 @@ allow if {
 		// attributable to ApprovedTools specifically, the same way it was
 		// before this task when a wire-supplied verb produced it instead.
 		bashResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: resp.GetDelegationId(),
-			AgentId:      ginaAgentID.String(),
-			Subject:      subject,
-			Tool:         "Bash",
-			RawInput:     "ls -la",
+			Token:    resp.GetToken(),
+			AgentId:  ginaAgentID.String(),
+			Subject:  subject,
+			Tool:     "Bash",
+			RawInput: "ls -la",
 		})
 		if err != nil {
 			t.Fatalf("Decide() error = %v, want a decision", err)
@@ -3611,10 +3681,10 @@ allow if {
 		}
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			Token: acting.ID.String(),
-			AgentId:      agentID.String(),
-			Subject:      "alice@example.com",
-			Tool:         "Bash",
+			Token:   actingToken,
+			AgentId: agentID.String(),
+			Subject: "alice@example.com",
+			Tool:    "Bash",
 		})
 		if resp != nil {
 			t.Fatalf("Decide() response = %+v, want nil: a decision must not escape a failed audit write", resp)

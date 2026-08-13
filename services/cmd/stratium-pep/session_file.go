@@ -5,12 +5,24 @@
 // because a session file is nothing more than a cached copy of what
 // CreateDelegation returned. Neither function trusts the other's side of
 // that contract blindly: writeSessionFile only ever receives an RPC
-// response already checked for a non-empty delegation_id and a non-nil
-// granted_scope (runSessionStart, session_start.go), and loadSessionFile
-// re-checks delegation_id itself on the way back in, because a session file
-// is not code this binary controls end to end -- a user could hand-edit it,
-// an old build could have written a different shape, or nothing may have
+// response already checked for a non-empty delegation_id, a non-nil
+// granted_scope, and (as of Phase 9 Task 4) a non-empty token
+// (runSessionStart, session_start.go), and loadSessionFile re-checks both
+// the token and delegation_id itself on the way back in, because a session
+// file is not code this binary controls end to end -- a user could hand-edit
+// it, an old build could have written a different shape, or nothing may have
 // ever written one at all.
+//
+// The token is what hook and mcp now send to Decide (spec §4.7.1 K4); the
+// delegation_id travels alongside it, unused on that path, for exactly one
+// other purpose -- reissue.go's reissueAndRetryDecide names it in an
+// IssueToken call when the cached token has expired. Reading a delegation id
+// back out of the token's own claims instead (it is the token's "sub")
+// would mean decoding the token client-side, which is precisely the local
+// inspection the phase's own constraints rule out for this binary -- see
+// hook.go's package doc. Caching both fields side by side, exactly as
+// CreateDelegation returned them, avoids that without adding a second RPC
+// shape or a second file.
 package main
 
 import (
@@ -30,9 +42,15 @@ import (
 const sessionFileMode = 0o600
 
 // writeSessionFile atomically replaces path with resp's JSON encoding --
-// delegation_id and granted_scope exactly as CreateDelegation returned them,
-// including granted_scope.removed, so a later denial is legible against what
-// this session actually holds rather than what it originally asked for.
+// delegation_id, granted_scope (including granted_scope.removed, so a later
+// denial is legible against what this session actually holds rather than
+// what it originally asked for), and token, exactly as CreateDelegation
+// returned them. As of Phase 9 Task 4, token is the field that matters most:
+// it is what hook and mcp now present to Decide, and everything path holds
+// is therefore live bearer authority, not merely a record of a grant --
+// anyone who can read this file can act as this session's agent until the
+// token expires. sessionFileMode below is the enforcement of that; see also
+// docs/pep.md for what it means for where this file may be written.
 //
 // "Atomically" is the mechanism behind two requirements at once: path is
 // never observed half-written (the encoding is built up in a temp file in
@@ -76,7 +94,7 @@ func writeSessionFile(path string, resp *pdpgrpc.CreateDelegationResponse) error
 
 // loadSessionFile reads and decodes the session file writeSessionFile wrote,
 // or reports why it could not: absent, malformed JSON, or structurally
-// invalid (empty delegation_id).
+// invalid (empty token or empty delegation_id).
 //
 // Every error here is a fail-closed reason, not a fatal one -- the caller
 // (runHook, hook.go) turns any non-nil error into a deny -- and each message
@@ -87,6 +105,14 @@ func writeSessionFile(path string, resp *pdpgrpc.CreateDelegationResponse) error
 // No session file (never started, or already ended) and a corrupt one
 // deliberately produce different text for exactly that reason, even though
 // both deny -- see hook.go's fail-closed test matrix.
+//
+// The token check runs before the delegation_id check, not after: as of
+// Phase 9 Task 4 the token is what a caller actually sends to Decide (K4),
+// so an empty one is the more fundamental defect -- a session file with a
+// token but no delegation_id can still authenticate every ordinary call and
+// only loses the ability to reissue; one with a delegation_id but no token
+// cannot even make the ordinary call. Checking token first means that more
+// serious failure is never masked by the second message.
 func loadSessionFile(path string) (*pdpgrpc.CreateDelegationResponse, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is operator configuration (STRATIUM_PEP_SESSION_FILE), not attacker-supplied request data -- the same trust level as internal/config.Config's own file/URL fields
 	if err != nil {
@@ -99,6 +125,9 @@ func loadSessionFile(path string) (*pdpgrpc.CreateDelegationResponse, error) {
 	var resp pdpgrpc.CreateDelegationResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("session file %s is malformed: %w", path, err)
+	}
+	if resp.GetToken() == "" {
+		return nil, fmt.Errorf("session file %s has no token -- run 'stratium-pep session-start' again", path)
 	}
 	if resp.GetDelegationId() == "" {
 		return nil, fmt.Errorf("session file %s does not name a delegation", path)

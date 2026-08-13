@@ -79,6 +79,7 @@ func TestRunSessionStart_Success_WritesIDAndGrantedScope(t *testing.T) {
 			MaxActionTier: int32(models.ActionTierReadOnly),
 			Tools:         []string{"Read"},
 		},
+		Token: "deleg-success-token",
 	}}
 	client := startFakePDP(t, fake)
 	cfg := testSessionStartCfg(t)
@@ -117,6 +118,44 @@ func TestRunSessionStart_Success_WritesIDAndGrantedScope(t *testing.T) {
 	}
 }
 
+// TestRunSessionStart_WritesToken_DistinctFromDelegationID is the task's own
+// required test, named for exactly the property it defends: as of Phase 9
+// Task 4, session-start caches the TOKEN CreateDelegation returned, not
+// merely a delegation id -- both fields are present in the file (the
+// delegation id survives for reissue.go's own IssueToken call), but it is
+// the token a caller now depends on. DelegationId and Token below share
+// nothing in common, so a bug that wrote one where the other belongs (or
+// left Token as a copy of DelegationId) fails this test's second assertion,
+// not just its first.
+func TestRunSessionStart_WritesToken_DistinctFromDelegationID(t *testing.T) {
+	const wantDelegationID = "deleg-token-proof"
+	const wantToken = "token-shares-nothing-with-the-delegation-id"
+	fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
+		DelegationId: wantDelegationID,
+		GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"}},
+		Token:        wantToken,
+	}}
+	client := startFakePDP(t, fake)
+	cfg := testSessionStartCfg(t)
+
+	if code := runSessionStart(client, cfg, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("runSessionStart() = %d, want 0", code)
+	}
+
+	got := readSessionFile(t, cfg.SessionFilePath)
+	if got.GetToken() != wantToken {
+		t.Errorf("token = %q, want %q", got.GetToken(), wantToken)
+	}
+	if got.GetToken() == got.GetDelegationId() {
+		t.Errorf("token = %q, equals delegation_id -- the file must cache the token CreateDelegation "+
+			"actually returned, not a copy of the delegation id", got.GetToken())
+	}
+	if got.GetDelegationId() != wantDelegationID {
+		t.Errorf("delegation_id = %q, want %q -- still cached, for reissue.go's own IssueToken call",
+			got.GetDelegationId(), wantDelegationID)
+	}
+}
+
 // The session file names a live delegation: a mode looser than 0600 would
 // make it group- or world-readable the instant it exists.
 func TestRunSessionStart_SessionFileMode0600(t *testing.T) {
@@ -126,6 +165,7 @@ func TestRunSessionStart_SessionFileMode0600(t *testing.T) {
 			MaxActionTier: int32(models.ActionTierReadOnly),
 			Tools:         []string{"Read"},
 		},
+		Token: "deleg-mode-token",
 	}}
 	client := startFakePDP(t, fake)
 	cfg := testSessionStartCfg(t)
@@ -160,6 +200,7 @@ func TestRunSessionStart_Clamped_WritesGrantedNotRequested(t *testing.T) {
 				{Dimension: "tool", Value: "Write", Reason: "denied"},
 			},
 		},
+		Token: "deleg-clamped-token",
 	}}
 	client := startFakePDP(t, fake)
 
@@ -214,6 +255,7 @@ func TestRunSessionStart_RequestCarriesConfiguredScope(t *testing.T) {
 	fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
 		DelegationId: "deleg-req-shape",
 		GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"}},
+		Token:        "deleg-req-shape-token",
 	}}
 	client := startFakePDP(t, fake)
 
@@ -268,6 +310,7 @@ func TestRunSessionStart_WriteFails_RemovesAnyExistingFile(t *testing.T) {
 	fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
 		DelegationId: "deleg-write-fails",
 		GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"}},
+		Token:        "deleg-write-fails-token",
 	}}
 	client := startFakePDP(t, fake)
 
@@ -357,6 +400,21 @@ func TestRunSessionStart_MalformedResponse_FailsClosedAndRemovesStale(t *testing
 		{
 			name: "nil granted scope",
 			resp: &pdpgrpc.CreateDelegationResponse{DelegationId: uuid.NewString()},
+		},
+		{
+			// Isolated from the other two: a valid delegation id and granted
+			// scope, only the token missing -- the one field Phase 9 Task 4
+			// added to this check. Without this subcase, a mutant that
+			// deleted only the "|| resp.GetToken() == \"\"" clause would
+			// still pass every other subcase here (each already fails for
+			// its own, different reason) and would only be caught, if at
+			// all, by a much later test exercising the session file it
+			// wrongly let through.
+			name: "empty token",
+			resp: &pdpgrpc.CreateDelegationResponse{
+				DelegationId: uuid.NewString(),
+				GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: 1, Tools: []string{"Read"}},
+			},
 		},
 		{
 			name: "entirely empty response",

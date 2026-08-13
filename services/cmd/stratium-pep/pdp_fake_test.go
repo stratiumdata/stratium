@@ -45,6 +45,16 @@ type fakePDP struct {
 	createResp *pdpgrpc.CreateDelegationResponse
 	createErr  error
 
+	// issueResp/issueErr script IssueToken the same way createResp/createErr
+	// script CreateDelegation -- one fixed response or error per fakePDP,
+	// which is enough for every reissue test in hook_test.go/
+	// mcp_authorize_test.go: none of them needs IssueToken to answer
+	// differently across calls, only Decide does (decideThenAllowClient/
+	// decideThenDenyClient, hook_test.go, wrap the client for that instead of
+	// growing fakePDP's own single-response shape a second way).
+	issueResp *pdpgrpc.IssueTokenResponse
+	issueErr  error
+
 	// getApprovalResponses is consumed in call order, one entry per
 	// GetApproval call; a call past the end of the slice repeats the last
 	// entry rather than panicking, so a test can script "pending, pending,
@@ -63,6 +73,8 @@ type fakePDP struct {
 	createCalls        int
 	lastGetApprovalReq *pdpgrpc.GetApprovalRequest
 	getApprovalCalls   int
+	lastIssueReq       *pdpgrpc.IssueTokenRequest
+	issueCalls         int
 }
 
 func (f *fakePDP) Decide(ctx context.Context, req *pdpgrpc.DecideRequest) (*pdpgrpc.DecideResponse, error) {
@@ -118,6 +130,34 @@ func (f *fakePDP) lastCreateRequest() *pdpgrpc.CreateDelegationRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastCreateReq
+}
+
+// IssueToken backs every reissue test's fixture (hook_test.go,
+// mcp_authorize_test.go): scripted like CreateDelegation above, one fixed
+// response or error, with its own call count and last-request capture so a
+// test can assert reissueAndRetryDecide called this exactly once -- the
+// mutation-testing anchor for "retry re-issuance more than once".
+func (f *fakePDP) IssueToken(_ context.Context, req *pdpgrpc.IssueTokenRequest) (*pdpgrpc.IssueTokenResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issueCalls++
+	f.lastIssueReq = req
+	if f.issueErr != nil {
+		return nil, f.issueErr
+	}
+	return f.issueResp, nil
+}
+
+func (f *fakePDP) issueRequestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.issueCalls
+}
+
+func (f *fakePDP) lastIssueRequest() *pdpgrpc.IssueTokenRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastIssueReq
 }
 
 func (f *fakePDP) GetApproval(_ context.Context, req *pdpgrpc.GetApprovalRequest) (*pdpgrpc.GetApprovalResponse, error) {
