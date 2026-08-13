@@ -322,10 +322,15 @@ func TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	if got.GetTool() != "Bash" {
 		t.Errorf("tool = %q, want %q", got.GetTool(), "Bash")
 	}
-	if got.GetAgentId() != cfg.AgentID || got.GetSubject() != cfg.Subject || got.GetDelegationId() != wantDelegationID {
-		t.Errorf("request identity = (agent=%q subject=%q delegation=%q), want (%q, %q, %q)",
-			got.GetAgentId(), got.GetSubject(), got.GetDelegationId(), cfg.AgentID, cfg.Subject, wantDelegationID)
+	if got.GetAgentId() != cfg.AgentID || got.GetSubject() != cfg.Subject {
+		t.Errorf("request identity = (agent=%q subject=%q), want (%q, %q)",
+			got.GetAgentId(), got.GetSubject(), cfg.AgentID, cfg.Subject)
 	}
+	// got.GetToken() is deliberately not asserted here -- see hook_test.go's
+	// identically-worded comment on its own version of this test for why
+	// (Phase 9 Task 3/Task 4 boundary). wantDelegationID above still names a
+	// real delegation for writeTestSessionFile to persist; it is simply no
+	// longer carried onto the wire from here.
 	if resc := got.GetResource(); len(resc) != 0 {
 		t.Errorf("resource = %v, want empty -- this file extracts nothing anymore, for any tool or arguments", resc)
 	}

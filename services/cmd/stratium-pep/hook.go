@@ -186,18 +186,27 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 	// "session-start never ran", "someone hand-edited the file", or "an old
 	// build wrote a different shape" denies here, before any network call:
 	// see loadSessionFile's own doc comment (session_file.go) for why each
-	// gets its own distinct reason.
-	session, err := loadSessionFile(cfg.SessionFilePath)
+	// gets its own distinct reason. The decoded value itself is discarded —
+	// see the request build below for why — but the call stays: it is still
+	// this binary's own local fail-closed gate on "a session was actually
+	// started," independent of whatever the PDP itself goes on to decide.
+	_, err = loadSessionFile(cfg.SessionFilePath)
 	if err != nil {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", err))
 	}
 
 	req := &pdpgrpc.DecideRequest{
-		DelegationId: session.GetDelegationId(),
-		AgentId:      cfg.AgentID,
-		Subject:      cfg.Subject,
-		Tool:         in.ToolName,
-		RawInput:     string(in.ToolInput),
+		AgentId:  cfg.AgentID,
+		Subject:  cfg.Subject,
+		Tool:     in.ToolName,
+		RawInput: string(in.ToolInput),
+		// Token: left unset. Phase 9 Task 3 replaced DecideRequest's bare
+		// delegation_id with a signed token (spec §4.7.1 K4) that this
+		// binary does not mint or carry yet — the session file this reads
+		// still holds a CreateDelegationResponse, whose token field Task 4
+		// is what starts persisting and forwarding here. Until then every
+		// call this file makes denies at the PDP for lacking one — expected
+		// breakage the phase plan calls out by name, not a bug in this file.
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
 		// (Verb, NormalizedInput) or are ever set here (Resource) anymore —
 		// see the package doc. DeclaredTier: deliberately never set, same doc.

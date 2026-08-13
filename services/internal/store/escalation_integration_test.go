@@ -67,11 +67,19 @@
 package store_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
+	"encoding/pem"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 
@@ -80,6 +88,7 @@ import (
 	"stratium/internal/policy"
 	"stratium/internal/policy/cedar"
 	"stratium/internal/store"
+	"stratium/internal/token"
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
 )
@@ -102,17 +111,84 @@ func escalationRegistry() policy.Registry {
 // Postgres (testDB), with escalationBlanketPermit seeded so the principal
 // leg always allows. See this file's own banner for why an in-process
 // server against a dedicated tenant is the right tool here, not pdpClient.
-func escalationServer(t *testing.T, tenant string) *pdpgrpc.Server {
+//
+// Also returns the *token.Signer it was built with: every proof in this
+// file calls Decide, which as of Phase 9 Task 3 authenticates a token on
+// EVERY call (spec K4) — unlike before that task, a nil signer here would
+// now panic on the first Decide call rather than sit safely unused (that
+// was true when this comment, and this function's signature, last changed:
+// Decide's own doc comment covers why there is no signer-optional path left
+// at all). Callers use the returned signer to mint the tokens
+// escalationDecideRequest needs.
+func escalationServer(t *testing.T, tenant string) (*pdpgrpc.Server, *token.Signer) {
 	t.Helper()
 	seedPolicy(t, tenant, "escalation-blanket-permit", escalationBlanketPermit, "allow")
 	repo := store.New(testDB, tenant)
 	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour}
-	// nil signer: every proof in this file calls Decide/GetApproval only
-	// (this file's own banner above), never CreateDelegation or IssueToken,
-	// so there is nothing here that would ever dereference it — the same
-	// reasoning internal/pdpgrpc.NewServer's own doc comment gives for its
-	// Decide-only unit tests.
-	return pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, nil)
+	// The SAME signer instance both signs (below, via NewServer) and is
+	// handed back to the caller to mint tokens with: two independently
+	// generated keys would mean every token escalationToken mints fails
+	// this exact server's own Verify, defeating the whole point of handing
+	// the signer back at all.
+	signer := escalationSigner(t)
+	return pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, signer), signer
+}
+
+// escalationSigner returns a real *token.Signer backed by a freshly
+// generated, current-only EC key. Fresh per call, never a package-level
+// shared key or fixture committed to the repo — the same discipline
+// internal/pdpgrpc/token_test.go's freshECKeyPEM documents for itself, and
+// for the same reason: a genuinely distinct key per test is what this
+// package's own no-committed-test-keys rule (Task 1's finding) requires,
+// and t.TempDir() gives each caller its own auto-cleaned key file with no
+// risk of one test's key leaking into another's.
+//
+// Duplicated here rather than imported from internal/pdpgrpc's own
+// equivalent (token_test.go's freshECKeyPEM): that helper is unexported,
+// belongs to a different package, and this file has no reason to depend on
+// pdpgrpc's own test internals just to generate a throwaway key.
+func escalationSigner(t *testing.T) *token.Signer {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate EC key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal EC key: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "key.pem")
+	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	signer, err := token.Load(path, "")
+	if err != nil {
+		t.Fatalf("token.Load() = %v, want success", err)
+	}
+	return signer
+}
+
+// escalationToken mints a token naming delegationID via signer: the minimal
+// claim set authenticateToken (internal/pdpgrpc/authenticate.go) actually
+// reads -- "sub", the delegation id -- plus "exp", which
+// internal/token.Verify requires present via jwt.WithExpirationRequired().
+// Built directly as jwt.MapClaims rather than through pdpgrpc's own
+// tokenClaims: that function is unexported, belongs to a different package,
+// and bakes in claims (tenant_id, iat, jti) this file's own proofs have no
+// need to assert on -- they are about escalation mechanics (resolveEscalation,
+// DelegationLeg, Approval.Verify), not about K3's exact claim shape, which
+// internal/pdpgrpc/token_test.go already pins on its own.
+func escalationToken(t *testing.T, signer *token.Signer, delegationID uuid.UUID) string {
+	t.Helper()
+	tok, err := signer.Sign(jwt.MapClaims{
+		"sub": delegationID.String(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign() error = %v, want success", err)
+	}
+	return tok
 }
 
 // escalationRawInput is a Bash command internal/authz's destructive-pattern
@@ -145,14 +221,19 @@ func escalatingRootDelegation(t *testing.T, tenant string, agentID uuid.UUID, ro
 // escalationDecideRequest builds the Bash "rm -rf" DecideRequest every proof
 // below sends, varying only what each proof needs to vary: approvalID is
 // nil on a fresh escalation, set (a pointer to the id string) on a retry.
-func escalationDecideRequest(delegationID, agentID uuid.UUID, subject string, approvalID *string) *pdpgrpc.DecideRequest {
+// Token is a genuine, freshly signed token naming delegationID
+// (escalationToken) — not delegationID's own string form — matching Phase 9
+// Task 3's removal of the bare delegation_id field this request type used
+// to carry (spec K4).
+func escalationDecideRequest(t *testing.T, signer *token.Signer, delegationID, agentID uuid.UUID, subject string, approvalID *string) *pdpgrpc.DecideRequest {
+	t.Helper()
 	return &pdpgrpc.DecideRequest{
-		DelegationId: delegationID.String(),
-		AgentId:      agentID.String(),
-		Subject:      subject,
-		Tool:         "Bash",
-		RawInput:     escalationRawInput,
-		ApprovalId:   approvalID,
+		Token:      escalationToken(t, signer, delegationID),
+		AgentId:    agentID.String(),
+		Subject:    subject,
+		Tool:       "Bash",
+		RawInput:   escalationRawInput,
+		ApprovalId: approvalID,
 	}
 }
 
@@ -212,14 +293,14 @@ func countApprovals(t *testing.T, tenant string) int {
 func TestIntegration_Escalation_InBandEscalatesWithApprovalAndRootPrincipalApprover(t *testing.T) {
 	const tenant = "tenant-escalation-inband-integration"
 	const rootPrincipal = "root-inband@example.com"
-	srv := escalationServer(t, tenant)
+	srv, signer := escalationServer(t, tenant)
 
 	agentID := uuid.New()
 	seedAgent(t, tenant, agentID, "escalation-inband-agent", models.TrustTierPlatformTrusted)
 	delegation := escalatingRootDelegation(t, tenant, agentID, rootPrincipal, models.ActionTierDestructive, "in-band escalation proof")
 
 	callStart := time.Now()
-	resp, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, nil))
+	resp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
 	escalatedLatency := time.Since(callStart)
 	if err != nil {
 		t.Fatalf("Decide() error = %v, want a response", err)
@@ -282,7 +363,7 @@ func TestIntegration_Escalation_InBandEscalatesWithApprovalAndRootPrincipalAppro
 func TestIntegration_Escalation_AboveCeilingDeniesNoApprovalCreated(t *testing.T) {
 	const tenant = "tenant-escalation-above-ceiling-integration"
 	const rootPrincipal = "root-above-ceiling@example.com"
-	srv := escalationServer(t, tenant)
+	srv, signer := escalationServer(t, tenant)
 
 	agentID := uuid.New()
 	seedAgent(t, tenant, agentID, "escalation-above-ceiling-agent", models.TrustTierPlatformTrusted)
@@ -293,7 +374,7 @@ func TestIntegration_Escalation_AboveCeilingDeniesNoApprovalCreated(t *testing.T
 	// that function's own doc comment, internal/authz/delegation.go).
 	delegation := escalatingRootDelegation(t, tenant, agentID, rootPrincipal, models.ActionTierInternalModify, "above-ceiling denial proof")
 
-	resp, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, nil))
+	resp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
 	if err != nil {
 		t.Fatalf("Decide() error = %v, want a response", err)
 	}
@@ -329,13 +410,13 @@ func TestIntegration_Escalation_AboveCeilingDeniesNoApprovalCreated(t *testing.T
 func TestIntegration_Escalation_ApprovedRetryAllowsAndAuditChainVerifies(t *testing.T) {
 	const tenant = "tenant-escalation-approved-retry-integration"
 	const rootPrincipal = "root-approved-retry@example.com"
-	srv := escalationServer(t, tenant)
+	srv, signer := escalationServer(t, tenant)
 
 	agentID := uuid.New()
 	seedAgent(t, tenant, agentID, "escalation-approved-retry-agent", models.TrustTierPlatformTrusted)
 	delegation := escalatingRootDelegation(t, tenant, agentID, rootPrincipal, models.ActionTierDestructive, "approved retry proof")
 
-	first, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, nil))
+	first, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
 	if err != nil {
 		t.Fatalf("first Decide() error = %v", err)
 	}
@@ -351,7 +432,7 @@ func TestIntegration_Escalation_ApprovedRetryAllowsAndAuditChainVerifies(t *test
 
 	approvalIDStr := first.GetApprovalId()
 	callStart := time.Now()
-	second, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, &approvalIDStr))
+	second, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, &approvalIDStr))
 	approvedRetryLatency := time.Since(callStart)
 	if err != nil {
 		t.Fatalf("second Decide() error = %v", err)
@@ -418,13 +499,13 @@ func TestIntegration_Escalation_ApprovedRetryAllowsAndAuditChainVerifies(t *test
 func TestIntegration_Escalation_ApprovedRetryStillEnforcesDelegationLeg(t *testing.T) {
 	const tenant = "tenant-escalation-not-a-bypass-integration"
 	const rootPrincipal = "root-not-a-bypass@example.com"
-	srv := escalationServer(t, tenant)
+	srv, signer := escalationServer(t, tenant)
 
 	agentID := uuid.New()
 	seedAgent(t, tenant, agentID, "escalation-not-a-bypass-agent", models.TrustTierPlatformTrusted)
 	delegation := escalatingRootDelegation(t, tenant, agentID, rootPrincipal, models.ActionTierDestructive, "approval is not a bypass proof")
 
-	first, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, nil))
+	first, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
 	if err != nil {
 		t.Fatalf("first Decide() error = %v", err)
 	}
@@ -447,7 +528,7 @@ func TestIntegration_Escalation_ApprovedRetryStillEnforcesDelegationLeg(t *testi
 	})
 
 	approvalIDStr := first.GetApprovalId()
-	second, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, &approvalIDStr))
+	second, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, &approvalIDStr))
 	if err != nil {
 		t.Fatalf("second Decide() error = %v", err)
 	}
@@ -479,13 +560,13 @@ func TestIntegration_Escalation_ApprovalDoesNotAuthorizeDifferentInput(t *testin
 	const tenant = "tenant-escalation-input-digest-integration"
 	const rootPrincipal = "root-input-digest@example.com"
 	const differentInput = "rm -rf / --no-preserve-root"
-	srv := escalationServer(t, tenant)
+	srv, signer := escalationServer(t, tenant)
 
 	agentID := uuid.New()
 	seedAgent(t, tenant, agentID, "escalation-input-digest-agent", models.TrustTierPlatformTrusted)
 	delegation := escalatingRootDelegation(t, tenant, agentID, rootPrincipal, models.ActionTierDestructive, "input_digest binding proof")
 
-	first, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, nil))
+	first, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
 	if err != nil {
 		t.Fatalf("first Decide() error = %v", err)
 	}
@@ -512,7 +593,7 @@ func TestIntegration_Escalation_ApprovalDoesNotAuthorizeDifferentInput(t *testin
 	approvalIDStr := first.GetApprovalId()
 
 	// Control: the ORIGINAL input, same approval id, must allow.
-	allowResp, err := srv.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, &approvalIDStr))
+	allowResp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, &approvalIDStr))
 	if err != nil {
 		t.Fatalf("same-input retry Decide() error = %v", err)
 	}
@@ -523,7 +604,7 @@ func TestIntegration_Escalation_ApprovalDoesNotAuthorizeDifferentInput(t *testin
 
 	// The actual proof: a DIFFERENT input, same approval id, same
 	// delegation/agent/subject/tool/verb — must deny.
-	differentInputReq := escalationDecideRequest(delegation.ID, agentID, rootPrincipal, &approvalIDStr)
+	differentInputReq := escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, &approvalIDStr)
 	differentInputReq.RawInput = differentInput
 	denyResp, err := srv.Decide(t.Context(), differentInputReq)
 	if err != nil {
@@ -557,7 +638,7 @@ func TestIntegration_Escalation_DepthTwoChainRoutesApprovalToRoot(t *testing.T) 
 	const tenant = "tenant-escalation-depth2-root-integration"
 	const rootPrincipal = "root-human-depth2@example.com"
 	const intermediatePrincipal = "intermediate-delegate-agent-identity"
-	srv := escalationServer(t, tenant)
+	srv, signer := escalationServer(t, tenant)
 
 	agentID := uuid.New()
 	seedAgent(t, tenant, agentID, "escalation-depth2-agent", models.TrustTierPlatformTrusted)
@@ -588,7 +669,7 @@ func TestIntegration_Escalation_DepthTwoChainRoutesApprovalToRoot(t *testing.T) 
 		ParentDelegationID: &intermediateID, RootDelegationID: rootID, Depth: 2, ChainAgentIDs: []uuid.UUID{agentID, agentID, agentID},
 	})
 
-	resp, err := srv.Decide(t.Context(), escalationDecideRequest(acting.ID, agentID, "requesting-subject@example.com", nil))
+	resp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, acting.ID, agentID, "requesting-subject@example.com", nil))
 	if err != nil {
 		t.Fatalf("Decide() error = %v, want a response", err)
 	}
@@ -630,13 +711,13 @@ func TestIntegration_Escalation_CrossTenantCannotReadOrApprove(t *testing.T) {
 	const tenantB = "tenant-escalation-cross-b-integration"
 	const rootPrincipal = "root-cross-tenant@example.com"
 
-	srvA := escalationServer(t, tenantA)
+	srvA, signer := escalationServer(t, tenantA)
 
 	agentID := uuid.New()
 	seedAgent(t, tenantA, agentID, "escalation-cross-tenant-agent", models.TrustTierPlatformTrusted)
 	delegation := escalatingRootDelegation(t, tenantA, agentID, rootPrincipal, models.ActionTierDestructive, "cross-tenant proof")
 
-	first, err := srvA.Decide(t.Context(), escalationDecideRequest(delegation.ID, agentID, rootPrincipal, nil))
+	first, err := srvA.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
 	if err != nil {
 		t.Fatalf("first Decide() error = %v", err)
 	}
@@ -652,8 +733,10 @@ func TestIntegration_Escalation_CrossTenantCannotReadOrApprove(t *testing.T) {
 	// policy needed since GetApproval never evaluates one) asked for tenant
 	// A's approval id.
 	repoB := store.New(testDB, tenantB)
-	// nil signer: this Server only ever calls GetApproval below (see
-	// escalationServer's own comment on why that is safe).
+	// nil signer, still safe here specifically: unlike escalationServer
+	// (which calls Decide and so needs a real one as of Task 3), this
+	// Server only ever calls GetApproval below — a plain read that never
+	// touches s.signer at all (GetApproval's own doc comment, approval.go).
 	srvB := pdpgrpc.NewServer(repoB, policy.NewMulti(repoB, escalationRegistry()),
 		config.Config{TenantID: tenantB, MaxDepth: 5, ApprovalTTL: time.Hour}, nil)
 	_, err = srvB.GetApproval(t.Context(), &pdpgrpc.GetApprovalRequest{ApprovalId: approvalID.String()})

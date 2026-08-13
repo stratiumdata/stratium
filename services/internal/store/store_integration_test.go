@@ -55,6 +55,22 @@
 // back to "cedar" — a real engine ran and decided something — exactly as
 // before.
 //
+// Extended again for Phase 9 Task 3
+// (docs/superpowers/sdd/2026-08-13-phase-9-tokens/task-3-brief.md):
+// DecideRequest no longer carries a bare delegation_id at all — Decide now
+// authenticates a signed token and reads the delegation id it names from
+// the token's own claims (spec §4.7.1 K4). Every DecideRequest literal in
+// this file still sets a field named Token to a plain delegation id string,
+// unchanged from before this task, because minting a REAL token here is
+// Task 4's job (it is what moves the PEPs, and this file's own PEP-shaped
+// proofs, onto tokens) — this file only needed to keep compiling under
+// `go vet -tags integration ./...`, one of Task 3's own required-green
+// gates. Every proof that reaches a live PDP through one of these requests
+// is therefore now expected to observe a DENY for an unparseable token
+// where it used to observe whatever the delegation itself would have
+// produced — `make integration` failing is exactly this, named in the
+// phase brief, not a regression Task 3 introduced quietly.
+//
 // Build-tagged so `go test ./...` and `golangci-lint run ./...` skip it by
 // default. `make integration` (repo root) is what runs it, against
 // deploy/docker/docker-compose.yml: bring the stack up on a fresh volume,
@@ -1292,7 +1308,7 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 		regoPurposeCondition(purpose), "allow")
 
 	resp, err := narrowPdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-		DelegationId: acting.ID.String(),
+		Token: acting.ID.String(),
 		AgentId:      agentID.String(),
 		Subject:      "live-orphan-subject@example.com",
 		Tool:         "Bash",
@@ -1418,7 +1434,7 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	decide := func(t *testing.T, delegationID uuid.UUID, resource map[string]string) *pdpgrpc.DecideResponse {
 		t.Helper()
 		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: delegationID.String(),
+			Token: delegationID.String(),
 			AgentId:      agentID.String(),
 			Subject:      subject,
 			Tool:         "Read",
@@ -1679,7 +1695,7 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 	decide := func(t *testing.T, delegationID uuid.UUID, tool, rawInput string) *pdpgrpc.DecideResponse {
 		t.Helper()
 		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: delegationID.String(),
+			Token: delegationID.String(),
 			AgentId:      agentID.String(),
 			Subject:      subject,
 			Tool:         tool,
@@ -2152,7 +2168,7 @@ func TestEndToEnd(t *testing.T) {
 
 	t.Run("proof2_decide_denies_at_principal_leg", func(t *testing.T) {
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: acting.ID.String(),
+			Token: acting.ID.String(),
 			AgentId:      agentID.String(),
 			Subject:      "alice@example.com",
 			Tool:         "Bash",
@@ -2301,7 +2317,7 @@ func TestEndToEnd(t *testing.T) {
 		// before LoadChain in Decide (see pdpgrpc/server.go), so an unknown
 		// agent short-circuits before the delegation is ever looked up.
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: uuid.New().String(),
+			Token: uuid.New().String(),
 			AgentId:      otherAgentID.String(),
 			Subject:      "mallory@example.com",
 			Tool:         "Bash",
@@ -2361,7 +2377,7 @@ func TestEndToEnd(t *testing.T) {
 			`permit(principal == User::"carol@example.com", action, resource);`, "allow")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: acting.ID.String(),
+			Token: acting.ID.String(),
 			AgentId:      agentID.String(),
 			Subject:      "carol@example.com",
 			Tool:         "Bash",
@@ -2460,7 +2476,7 @@ func TestEndToEnd(t *testing.T) {
 			`forbid(principal == User::"dave@example.com", action, resource);`, "deny")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: acting.ID.String(),
+			Token: acting.ID.String(),
 			AgentId:      agentID.String(),
 			Subject:      "dave@example.com",
 			Tool:         "Bash",
@@ -2519,7 +2535,7 @@ func TestEndToEnd(t *testing.T) {
 			`permit(principal == User::"erin@example.com", action, resource);`, "allow")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: acting.ID.String(),
+			Token: acting.ID.String(),
 			AgentId:      agentID.String(),
 			Subject:      "erin@example.com",
 			Tool:         "Bash",
@@ -2588,7 +2604,7 @@ func TestEndToEnd(t *testing.T) {
 		// before this subtest rather than after it.
 		callStart := time.Now()
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: acting.ID.String(),
+			Token: acting.ID.String(),
 			AgentId:      agentID.String(),
 			Subject:      "alice@example.com",
 			Tool:         "Bash",
@@ -2619,7 +2635,7 @@ func TestEndToEnd(t *testing.T) {
 				defer wg.Done()
 				<-start
 				resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-					DelegationId: acting.ID.String(),
+					Token: acting.ID.String(),
 					AgentId:      agentID.String(),
 					Subject:      "alice@example.com",
 					Tool:         "Bash",
@@ -2833,7 +2849,7 @@ deny if {
 }`, subject), "deny")
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: heidiActing.ID.String(),
+			Token: heidiActing.ID.String(),
 			AgentId:      heidiAgentID.String(),
 			Subject:      subject,
 			Tool:         "Bash",
@@ -2901,7 +2917,7 @@ deny if {
 	t.Run("decide_latency_with_all_four_engines_in_path", func(t *testing.T) {
 		callStart := time.Now()
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: ivanActing.ID.String(),
+			Token: ivanActing.ID.String(),
 			AgentId:      ivanAgentID.String(),
 			Subject:      "ivan@example.com",
 			Tool:         "Bash",
@@ -2929,7 +2945,7 @@ deny if {
 				defer wg.Done()
 				<-start
 				_, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-					DelegationId: ivanActing.ID.String(),
+					Token: ivanActing.ID.String(),
 					AgentId:      ivanAgentID.String(),
 					Subject:      "ivan@example.com",
 					Tool:         "Bash",
@@ -3114,7 +3130,7 @@ deny if {
 		}
 
 		atCeiling, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: delegationGateResp.GetDelegationId(),
+			Token: delegationGateResp.GetDelegationId(),
 			AgentId:      delegationGateAgentID.String(),
 			Subject:      "frank@example.com",
 			Tool:         "Read",
@@ -3136,7 +3152,7 @@ deny if {
 		}
 
 		aboveCeiling, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: delegationGateResp.GetDelegationId(),
+			Token: delegationGateResp.GetDelegationId(),
 			AgentId:      delegationGateAgentID.String(),
 			Subject:      "frank@example.com",
 			Tool:         "Read",
@@ -3368,7 +3384,7 @@ allow if {
 		// creation-time probe and the principal leg must agree, now that
 		// both consult rego.
 		decideResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: resp.GetDelegationId(),
+			Token: resp.GetDelegationId(),
 			AgentId:      ginaAgentID.String(),
 			Subject:      subject,
 			Tool:         "Read",
@@ -3404,7 +3420,7 @@ allow if {
 		// attributable to ApprovedTools specifically, the same way it was
 		// before this task when a wire-supplied verb produced it instead.
 		bashResp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: resp.GetDelegationId(),
+			Token: resp.GetDelegationId(),
 			AgentId:      ginaAgentID.String(),
 			Subject:      subject,
 			Tool:         "Bash",
@@ -3595,7 +3611,7 @@ allow if {
 		}
 
 		resp, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-			DelegationId: acting.ID.String(),
+			Token: acting.ID.String(),
 			AgentId:      agentID.String(),
 			Subject:      "alice@example.com",
 			Tool:         "Bash",

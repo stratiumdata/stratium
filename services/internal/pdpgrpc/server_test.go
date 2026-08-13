@@ -22,15 +22,29 @@ import (
 )
 
 // fakeSigner is a TokenSigner test double. Every CreateDelegation/IssueToken
-// test in this package needs SOME signer (both RPCs fail closed with no
-// signer at all — see NewServer's own doc comment on why a Decide-only test
-// passes nil instead), and no real EC key can be made to fail signing valid
-// claims on demand, so signErr is the only way to reach "a signing failure
-// fails the call" at all. lastClaims/calls let a test inspect exactly what
-// was handed to Sign without decoding a real JWT — used where that is the
-// more direct way to state a property (e.g. "Sign was called with a claim
-// set containing no scope field") than a full round trip through a real
-// Signer would be.
+// test in this package needs SOME signer for Sign (both RPCs fail closed
+// with no signer at all), and no real EC key can be made to fail signing
+// valid claims on demand, so signErr is the only way to reach "a signing
+// failure fails the call" at all. lastClaims/calls let a test inspect
+// exactly what was handed to Sign without decoding a real JWT — used where
+// that is the more direct way to state a property (e.g. "Sign was called
+// with a claim set containing no scope field") than a full round trip
+// through a real Signer would be.
+//
+// Every Decide test needs SOME signer too, as of Task 3 — NewServer's own
+// doc comment covers why there is no nil-signer-safe path left. Verify's
+// fake implementation (below) treats the token string AS the delegation id
+// it names: there is no real cryptography here to round-trip through, so
+// the simplest thing that lets a fixture's own known delegation id reach
+// Decide's authenticateToken unchanged is for the "token" to just be that
+// id, spelled out. This is deliberately NOT how a real token works (see
+// token.go's tokenClaims for that), and no test may use fakeSigner to prove
+// anything about signing or verifying actually working — that is what the
+// real *token.Signer, exercised directly in token_test.go and
+// authenticate_test.go, is for. fakeSigner exists so the business-logic
+// tests that make up most of this package (three-leg evaluation, catalog,
+// escalation, audit-field plumbing) do not each pay for a real ECDSA key
+// just to name a delegation.
 type fakeSigner struct {
 	signErr error
 
@@ -45,6 +59,21 @@ func (f *fakeSigner) Sign(claims jwt.MapClaims) (string, error) {
 		return "", f.signErr
 	}
 	return fmt.Sprintf("fake-token-%d", f.calls), nil
+}
+
+// Verify parses tokenString as a UUID and hands it back as the "sub" claim
+// — see fakeSigner's own doc comment for why that is the whole of what this
+// fake does. Any string that is not a UUID fails exactly as a real
+// malformed token would (authenticateToken never reaches Verify for an
+// empty token at all — see its own doc comment — so "" is covered the same
+// way), so a test that forgets to set req.Token to a real fixture id fails
+// loudly rather than silently verifying as some other delegation.
+func (f *fakeSigner) Verify(tokenString string) (jwt.MapClaims, error) {
+	id, err := uuid.Parse(tokenString)
+	if err != nil {
+		return nil, fmt.Errorf("fakeSigner: Verify: %q is not a fixture-minted token: %w", tokenString, err)
+	}
+	return jwt.MapClaims{subjectClaim: id.String()}, nil
 }
 
 const testTenant = "tenant-abc"
@@ -218,10 +247,16 @@ func wellFormedFixture() (*fakeStore, *DecideRequest) {
 
 	fs := &fakeStore{agent: agent, chain: []*models.Delegation{root}}
 	req := &DecideRequest{
-		DelegationId: delegationID.String(),
-		AgentId:      agentID.String(),
-		Subject:      "alice@example.com",
-		Tool:         "Bash",
+		// Token: the fixture's own delegation id, spelled out — see
+		// fakeSigner's Verify for why that is a valid "token" only for this
+		// fake, never for a real *token.Signer. Every caller of this fixture
+		// must construct its Server with a fakeSigner (or any TokenSigner
+		// whose Verify accepts this shape) for Decide to reach past
+		// authentication at all.
+		Token:   delegationID.String(),
+		AgentId: agentID.String(),
+		Subject: "alice@example.com",
+		Tool:    "Bash",
 	}
 	return fs, req
 }
@@ -291,7 +326,7 @@ func (nilVerdictSet) Evaluate(context.Context, policy.EvaluationInput) ([]authz.
 // would deny at "delegation" instead, failing the DeniedLeg assertion below.
 func TestDecide_WellFormedRequestReachesADecision(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -334,7 +369,7 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 	// specific, non-zero tier instead, restoring this test's ability to tell
 	// "really computed READ_ONLY" apart from "never set at all".
 	req.RawInput = "ls -la"
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -366,7 +401,7 @@ func TestDecide_PopulatesPerLegFields(t *testing.T) {
 // covers the ESCALATE-populates-it side).
 func TestDecide_ApprovalIDEmptyWhenNotEscalating(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -388,7 +423,7 @@ func TestDecide_CatalogDerivesReadOnlyForBareReadCall(t *testing.T) {
 	fs, req := wellFormedFixture()
 	req.Tool = "Read"
 	req.RawInput = "/tmp/notes.txt"
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -428,7 +463,7 @@ func TestDecide_NoCatalogRowsPassesWireResourceThroughUnchanged(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.chain[0].ResourceConstraints = map[string]string{"id": "wire-supplied-resource-id"}
 	req.Resource = map[string]string{"id": "wire-supplied-resource-id"}
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -457,7 +492,7 @@ func TestDecide_CatalogedToolReplacesWireResourceForDelegationLeg(t *testing.T) 
 	fs.chain[0].ResourceConstraints = map[string]string{"id": "/catalog/extracted/path"}
 	req.RawInput = `{"path":"/catalog/extracted/path"}`
 	req.Resource = map[string]string{"id": "/stale/wire/supplied/path"}
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -519,7 +554,7 @@ func TestDecide_CatalogedVerbReachesAudit(t *testing.T) {
 			fs, req := wellFormedFixture()
 			fs.catalog = tt.catalog
 			req.Tool = tt.toolName
-			srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+			srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 			if _, err := srv.Decide(context.Background(), req); err != nil {
 				t.Fatalf("Decide() error = %v", err)
@@ -550,7 +585,7 @@ func TestDecide_CatalogEntryCannotMaskDestructiveEvidence(t *testing.T) {
 	}}
 	req.Tool = "Read"
 	req.RawInput = `{"command":"rm -rf /","safe_summary":"ls"}`
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -572,7 +607,7 @@ func TestDecide_CatalogEntryCannotMaskDestructiveEvidence(t *testing.T) {
 func TestDecide_ToolCatalogLoadFailureDeniesAndAudits(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.catalogErr = errors.New("connection reset")
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -636,7 +671,7 @@ func TestDecide_PolicySeesEvidenceProtectedDerivedTier(t *testing.T) {
 	srv := NewServer(fs, policy.NewMulti(
 		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "p1", Language: fakeLanguage}}},
 		policy.Registry{fakeLanguage: fakePolicyEngine{set: capture}},
-	), testConfig(), nil)
+	), testConfig(), &fakeSigner{})
 
 	if _, err := srv.Decide(context.Background(), req); err != nil {
 		t.Fatalf("Decide() error = %v", err)
@@ -659,7 +694,7 @@ func TestDecide_PolicySeesEvidenceProtectedDerivedTier(t *testing.T) {
 func TestDecide_ProvenanceReflectsZeroPoliciesVerdict(t *testing.T) {
 	const wantReason = "principal: no policies configured for this tenant"
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -709,7 +744,7 @@ func TestDecide_ProvenanceReflectsZeroPoliciesVerdict(t *testing.T) {
 // PolicyID case above.
 func TestDecide_NoVerdictLeavesProvenanceUnset(t *testing.T) {
 	fs, req := wellFormedFixture()
-	srv := NewServer(fs, noOpinionPolicy(), testConfig(), nil)
+	srv := NewServer(fs, noOpinionPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -771,7 +806,7 @@ func TestDecide_UnevaluatedPolicyIDsReachAuditEntry(t *testing.T) {
 	srv := NewServer(fs, policy.NewMulti(
 		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "fake-policy-1", Language: fakeLanguage}}},
 		policy.Registry{fakeLanguage: fakePolicyEngine{set: orphanVerdictSet{ids: ids}}},
-	), testConfig(), nil)
+	), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err != nil {
@@ -792,7 +827,7 @@ func TestDecide_UnevaluatedPolicyIDsReachAuditEntry(t *testing.T) {
 func TestDecide_UnknownAgent_NotFound(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.agentErr = fmt.Errorf("%w: agent %s", store.ErrNotFound, req.GetAgentId())
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
@@ -801,33 +836,49 @@ func TestDecide_UnknownAgent_NotFound(t *testing.T) {
 	wantCode(t, err, codes.NotFound)
 }
 
-func TestDecide_UnknownDelegation_NotFound(t *testing.T) {
+// A token that verifies but names a delegation LoadChain cannot find for
+// THIS tenant — unknown outright, or genuinely real but belonging to another
+// tenant — is NotFound, via RLS, exactly like every other lookup in this
+// service (store.go's own package doc: the two are indistinguishable by
+// design). This is explicitly NOT a verification failure: the token itself
+// is fine, so this must not go through authenticateToken's own denied-and-
+// audited path at all — it is an RPC error, with no audit row, the same
+// shape TestDecide_UnknownAgent_NotFound just above already proves for the
+// agent side of this same rule.
+func TestDecide_TokenNamesUnknownOrCrossTenantDelegation_NotFound(t *testing.T) {
 	fs, req := wellFormedFixture()
-	fs.chainErr = fmt.Errorf("%w: delegation %s", store.ErrNotFound, req.GetDelegationId())
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	fs.chainErr = fmt.Errorf("%w: delegation %s", store.ErrNotFound, req.GetToken())
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {
 		t.Fatalf("Decide() response = %+v, want nil", resp)
 	}
 	wantCode(t, err, codes.NotFound)
+	if len(fs.appended) != 0 {
+		t.Errorf("audit entries appended = %d, want 0: NotFound-via-RLS is an RPC error, not an audited denial",
+			len(fs.appended))
+	}
 }
 
-// Invalid input must be rejected before any store call — malformed UUIDs,
-// the zero UUID (well-formed as a string, never a legitimate identifier),
+// Invalid input must be rejected before any store call — a malformed or
+// zero agent_id (well-formed as a string, never a legitimate identifier),
 // an empty subject, and an out-of-range declared_tier. calls == 0 after each
 // proves "do not proceed," not just that the response code happened to come
-// back InvalidArgument.
+// back InvalidArgument. delegation_id no longer has a case here at all — it
+// is not a request-shape field anymore (Task 3, K4): an absent or malformed
+// TOKEN is a verification failure, which fails closed to an audited DENY
+// decision instead of an InvalidArgument error — see authenticate_test.go
+// for that whole family, and TestDecide_NoToken_Denies specifically for the
+// direct analogue of what "zero/malformed delegation_id" used to cover here.
 func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 	outOfRange := int32(99)
 	malformedID := "not-a-uuid"
 	zeroID := uuid.Nil.String()
 	cases := map[string]func(*DecideRequest){
-		"malformed delegation_id": func(r *DecideRequest) { r.DelegationId = "not-a-uuid" },
-		"malformed agent_id":      func(r *DecideRequest) { r.AgentId = "not-a-uuid" },
-		"zero delegation_id":      func(r *DecideRequest) { r.DelegationId = uuid.Nil.String() },
-		"zero agent_id":           func(r *DecideRequest) { r.AgentId = uuid.Nil.String() },
-		"empty subject":           func(r *DecideRequest) { r.Subject = "" },
+		"malformed agent_id": func(r *DecideRequest) { r.AgentId = "not-a-uuid" },
+		"zero agent_id":      func(r *DecideRequest) { r.AgentId = uuid.Nil.String() },
+		"empty subject":      func(r *DecideRequest) { r.Subject = "" },
 		"declared_tier out of range": func(r *DecideRequest) {
 			r.DeclaredTier = &outOfRange
 		},
@@ -843,7 +894,7 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fs, req := wellFormedFixture()
 			mutate(req)
-			srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+			srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 			resp, err := srv.Decide(context.Background(), req)
 			if resp != nil {
@@ -868,7 +919,7 @@ func TestDecide_InvalidInput_InvalidArgument(t *testing.T) {
 func TestDecide_AuditWriteFailure_ReturnsErrorNotDecision(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.appendErr = errors.New("disk full")
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if err == nil {
@@ -902,7 +953,7 @@ func TestToProtoEffect(t *testing.T) {
 func TestDecide_ConcurrentAuditAppend_Aborted(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.appendErr = fmt.Errorf("wrapped: %w", store.ErrConcurrentAppend)
-	srv := NewServer(fs, denyAllPolicy(), testConfig(), nil)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	resp, err := srv.Decide(context.Background(), req)
 	if resp != nil {

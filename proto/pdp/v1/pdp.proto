@@ -47,9 +47,19 @@ enum Effect {
 //     defect as the tenant header, aimed at authorization instead of
 //     authentication.
 message DecideRequest {
-  // delegation_id is the acting delegation: the last hop in the chain, the
-  // one actually presented for this action. A UUID string.
-  string delegation_id = 1;
+  // delegation_id is retired (spec §4.7.1 K4, Phase 9 Task 3): a bare,
+  // caller-supplied delegation id authenticates nothing. Under A1/E7 the PDP
+  // verifies no caller identity at the transport layer, so accepting an id
+  // straight off the wire and trusting it is exactly as strong as accepting
+  // no credential at all -- an attacker (A10) simply omits whatever a token
+  // would have been and sends the id instead. token, below, replaced it.
+  // Reserved, not reused, for the same reason fields 5/9 below are: a caller
+  // still built against the old contract must fail to decode this field
+  // rather than have it silently reinterpreted as a token string -- field 1
+  // and field 11 (token) are both plain strings, so reusing the number here
+  // is the one substitution the wire format itself could not catch.
+  reserved 1;
+  reserved "delegation_id";
 
   // agent_id is the acting agent's registry ID. A UUID string.
   string agent_id = 2;
@@ -111,6 +121,27 @@ message DecideRequest {
   // silent reinterpretation as "no approval, evaluate fresh" — which would
   // hide that bug behind a second, unwanted pending approval instead.
   optional string approval_id = 10;
+
+  // token is a signed credential (internal/token.Signer, spec §4.7.1 K1)
+  // naming the acting delegation -- the caller's ONLY way to identify one,
+  // now that delegation_id is gone (K4). Decide verifies it (signature
+  // against the current or previous key, not expired, well-formed) and
+  // reads the delegation id it names from the token's own "sub" claim; it
+  // never reads a delegation id from anywhere else on this message.
+  //
+  // A token is an authenticated REFERENCE, never a capability (K3): it
+  // carries no scope of its own (see internal/pdpgrpc's tokenClaims, which
+  // deliberately excludes every scope field), so verifying one buys
+  // authentication only -- Decide still loads the delegation it names and
+  // evaluates all three legs exactly as it would have from a bare id,
+  // including denying a since-revoked or since-expired row. A plain,
+  // required string, not optional like approval_id above: unlike "the
+  // caller is retrying with an approval to offer," there is no legitimate
+  // "caller is asking fresh, no token needed" case for presence-tracking to
+  // distinguish from an explicitly-empty one -- both an absent and an
+  // empty token are simply invalid, and Decide denies either the same way,
+  // with no fallback (K4).
+  string token = 11;
 }
 
 // DecideResponse is the compound decision and each leg's individual

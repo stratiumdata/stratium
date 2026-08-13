@@ -805,10 +805,18 @@ func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	if req.GetTool() != "Bash" {
 		t.Errorf("tool = %q, want %q", req.GetTool(), "Bash")
 	}
-	if req.GetAgentId() != cfg.AgentID || req.GetSubject() != cfg.Subject || req.GetDelegationId() != wantDelegationID {
-		t.Errorf("request identity = (agent=%q subject=%q delegation=%q), want (%q, %q, %q)",
-			req.GetAgentId(), req.GetSubject(), req.GetDelegationId(), cfg.AgentID, cfg.Subject, wantDelegationID)
+	if req.GetAgentId() != cfg.AgentID || req.GetSubject() != cfg.Subject {
+		t.Errorf("request identity = (agent=%q subject=%q), want (%q, %q)",
+			req.GetAgentId(), req.GetSubject(), cfg.AgentID, cfg.Subject)
 	}
+	// req.GetToken() is deliberately not asserted here: DecideRequest carries
+	// a signed token instead of a bare delegation id as of Phase 9 Task 3
+	// (spec K4), and this binary does not mint or forward one yet -- see
+	// runHook's own comment on its request build (hook.go) and the phase's
+	// Task 4. wantDelegationID above still names a real delegation for
+	// writeTestSessionFile to persist -- loadSessionFile still requires a
+	// structurally valid session file -- it is simply no longer carried onto
+	// the wire from here.
 	if resc := req.GetResource(); len(resc) != 0 {
 		t.Errorf("resource = %v, want empty -- this file extracts nothing anymore, for any tool or input", resc)
 	}

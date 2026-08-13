@@ -73,22 +73,30 @@ type Store interface {
 	LoadDelegation(ctx context.Context, id uuid.UUID) (*models.Delegation, error)
 }
 
-// TokenSigner is what CreateDelegation and IssueToken (token.go) need from
-// internal/token to mint a bearer credential naming a delegation: sign a
-// claim set, get back a compact token. *token.Signer satisfies it; tests
-// substitute a fake that can be made to fail on demand, the same reason
-// Store above is a local interface rather than *store.Store directly —
-// exercising "a signing failure fails the call" needs a seam no real EC key
-// can be made to fail through.
+// TokenSigner is what this package needs from internal/token to both mint
+// and verify a bearer credential naming a delegation. *token.Signer
+// satisfies it; tests substitute a fake that can be made to fail on demand,
+// the same reason Store above is a local interface rather than *store.Store
+// directly — exercising "a signing failure fails the call" (CreateDelegation,
+// IssueToken, token.go) or "a verification failure denies" (Decide,
+// authenticate.go) needs a seam no real EC key can be made to fail through.
 //
 // Defined here, where it is consumed, rather than in package token, which
 // has no reason to know about its gRPC caller — the same layering Store
-// documents for itself just above. Deliberately one method, matching what
-// this package actually calls: internal/token.Signer also exposes Verify,
-// but nothing in this file needs it — verifying a caller-presented token is
-// Task 3's concern (Decide), not issuance's.
+// documents for itself just above. Two methods, not one, as of Task 3: Sign
+// backs CreateDelegation/IssueToken, Verify backs Decide — one interface
+// because both are the same underlying capability (internal/token.Signer
+// holding one key pair), not two, so a Server wired with a signer that can
+// only do one of these does not typecheck.
 type TokenSigner interface {
 	Sign(claims jwt.MapClaims) (string, error)
+
+	// Verify parses and validates tokenString, returning its claims.
+	// internal/token.Signer's own doc comment covers what "validates" means
+	// (signature against the current or previous key, algorithm restricted
+	// to ES256, expiry required and checked) — this interface adds nothing
+	// beyond naming the method Decide calls.
+	Verify(tokenString string) (jwt.MapClaims, error)
 }
 
 // eventTypeDecision is the audit_chain event_type recorded for every Decide
@@ -147,9 +155,12 @@ type Server struct {
 // matching every other dependency here (store, principalPolicy, cfg) having
 // no nil-means-something-sensible default. cmd/stratium-pdp/main.go builds
 // its signer via internal/token.Load at startup, before this constructor is
-// ever called; a Decide-only test that never calls CreateDelegation or
-// IssueToken passes nil explicitly, which is exactly as safe as it looks —
-// the signer is never dereferenced on Decide's own path.
+// ever called. There is no signer-optional path left to be safe about, as
+// there was before Task 3: Decide now calls signer.Verify on every request
+// (spec §4.7.1 K4), not only CreateDelegation/IssueToken's own signer.Sign
+// calls, so a nil signer here panics on a test's very first Decide call
+// rather than only on a CreateDelegation/IssueToken one — every test in this
+// package passes a real signer now.
 func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, signer TokenSigner) *Server {
 	return &Server{
 		store:  store,
@@ -161,22 +172,26 @@ func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, sig
 
 // Decide turns req into a decision.
 //
-// Order: parse and validate the request -> load the acting agent -> load the
-// delegation chain -> evaluate (tenant from cfg, principal decision from
-// policy, clock from time.Now — the one boundary where the ambient clock is
-// allowed, so internal/authz itself stays pure) -> resolve an escalation, if
-// any (escalation.go: create a pending approval, or verify one offered on a
-// retry — the one place approval verification happens, since it needs the
-// store and internal/authz must not) -> append the audit entry -> respond. A
-// failed audit append returns an error and no response: spec D3 says a
-// failed audit write denies the action, and the only way that holds for an
-// ALLOW is for this method to never hand one back once the append has
-// failed.
+// Order: parse and validate the request's shape -> authenticate the token
+// (authenticate.go: verify it and read the delegation id it names — spec
+// §4.7.1 K4, the PDP's only gate on who is calling) -> load the acting agent
+// -> load the delegation chain that id names -> evaluate (tenant from cfg,
+// principal decision from policy, clock from time.Now — the one boundary
+// where the ambient clock is allowed, so internal/authz itself stays pure)
+// -> resolve an escalation, if any (escalation.go: create a pending
+// approval, or verify one offered on a retry — the one place approval
+// verification happens, since it needs the store and internal/authz must
+// not) -> append the audit entry -> respond. A failed audit append returns
+// an error and no response: spec D3 says a failed audit write denies the
+// action, and the only way that holds for an ALLOW is for this method to
+// never hand one back once the append has failed.
+//
+// Authentication buys nothing past "which delegation" (K3). A token that
+// verifies is not trusted for anything about that delegation's own current
+// state — the load and all three legs below run exactly as they would have
+// from a bare id, so a revoked or expired delegation still denies there, at
+// the delegation leg, never at the token check above it.
 func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideResponse, error) {
-	delegationID, err := parseNonNilUUID(req.GetDelegationId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "delegation_id: %s", err)
-	}
 	agentID, err := parseNonNilUUID(req.GetAgentId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "agent_id: %s", err)
@@ -207,6 +222,40 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		approvalID = &id
 	}
 
+	now := time.Now()
+	// Verb and NormalizedInput start unset, deliberately: DecideRequest no
+	// longer carries either (spec §4.4.2 T3 retired both from the wire
+	// alongside the PEP's per-tool tables that used to compute them). Both
+	// are populated below, per tool, only when the tenant's own catalog
+	// names this one — authz.ApplyExtraction — never from a caller's claim.
+	// Built here, ahead of authentication, so a token failure below still
+	// has a Tool/RawInput to audit — an operator reading a row denied for a
+	// bad token still wants to know what the caller was trying to do.
+	action := authz.Action{
+		Tool:         req.GetTool(),
+		RawInput:     req.GetRawInput(),
+		DeclaredTier: declaredTier,
+	}
+
+	// Authenticate before anything else touches the store (spec §4.7.1 K4):
+	// a token is now the ONLY thing that identifies which delegation this
+	// call presents (authenticate.go's own doc comment covers the K3
+	// boundary this does not cross — authentication, never authorization).
+	// Checking this first means an invalid token costs one audit write,
+	// never an agent lookup or a chain load — the same cheapest-check-first
+	// discipline the InvalidArgument checks above already follow. Unlike
+	// those, a bad token still produces an audited DENY, not a bare RPC
+	// error: it is a fact about a presented credential, not a malformed
+	// request shape, and the audit trail is exactly where "someone tried
+	// and failed to authenticate" belongs. denyAndAudit is the same
+	// pre-decision-denial helper a catalog load failure and a DeriveTier
+	// failure already share below — see its own doc comment for why a
+	// third caller here does not risk the three drifting apart.
+	delegationID, err := s.authenticateToken(req.GetToken())
+	if err != nil {
+		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err)
+	}
+
 	agent, err := s.store.LoadAgent(ctx, agentID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -215,6 +264,13 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return nil, status.Errorf(codes.Internal, "load agent: %s", err)
 	}
 
+	// delegationID is what the token named, above — never a bare wire field
+	// (K4). A token naming a delegation that belongs to another tenant, or
+	// none at all, is NotFound here via RLS (store.go's own package doc),
+	// exactly like every other lookup in this service — not a verification
+	// failure, and not a special case: LoadChain does not know or care
+	// whether delegationID came from a token or, as it always did before
+	// this task, a bare field.
 	chain, err := s.store.LoadChain(ctx, delegationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -223,18 +279,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return nil, status.Errorf(codes.Internal, "load chain: %s", err)
 	}
 
-	now := time.Now()
 	principal := authz.Principal{Subject: req.GetSubject()}
-	// Verb and NormalizedInput start unset, deliberately: DecideRequest no
-	// longer carries either (spec §4.4.2 T3 retired both from the wire
-	// alongside the PEP's per-tool tables that used to compute them). Both
-	// are populated below, per tool, only when the tenant's own catalog
-	// names this one — authz.ApplyExtraction — never from a caller's claim.
-	action := authz.Action{
-		Tool:         req.GetTool(),
-		RawInput:     req.GetRawInput(),
-		DeclaredTier: declaredTier,
-	}
 	resource := req.GetResource()
 
 	// The tenant's own tool_catalog rows (spec §4.4.2 T1/T2), loaded fresh
@@ -365,7 +410,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 }
 
 // appendAudit builds the audit entry for one decision and appends it.
-// chain must be non-empty (LoadChain guarantees this on a nil error).
+// chain, and delegationID with it, is empty/uuid.Nil in exactly one case: a
+// token that failed authentication before Decide ever called LoadChain
+// (Decide's own call to authenticateToken; denyAndAudit's doc comment below
+// covers why that failure is routed through this same function rather than
+// its own copy). Every other caller reaches this only after LoadChain has
+// already succeeded — Decide's own success/escalation path, and
+// denyAndAudit's other two callers, a catalog load failure and a DeriveTier
+// failure — so for them chain is non-empty and delegationID is always
+// chain[len(chain)-1].ID by construction; LoadChain guarantees as much on a
+// nil error.
 //
 // PolicySource/PolicyID are populated from result.Deciding, guarded against
 // nil exactly as toResponse guards it: left at their zero value ("") for the
@@ -388,9 +442,6 @@ func (s *Server) appendAudit(
 	result authz.Result,
 	now time.Time,
 ) error {
-	acting := chain[len(chain)-1]
-	root := chain[0]
-
 	declaredTier := auditDeclaredTierAbsent
 	if action.DeclaredTier != nil {
 		declaredTier = int16(*action.DeclaredTier) //nolint:gosec // G115: ActionTier is range-checked to 0-4 by models.ParseActionTier before it ever reaches here
@@ -406,9 +457,6 @@ func (s *Server) appendAudit(
 		EventType:            eventTypeDecision,
 		Actor:                actor,
 		AgentID:              &agentID,
-		DelegationID:         &delegationID,
-		RootDelegationID:     &root.ID,
-		ChainDepth:           int16(acting.Depth), //nolint:gosec // G115: store.maxChainWalk bounds any chain walk to 64 hops, far under int16's range
 		ToolName:             action.Tool,
 		Action:               action.Verb,
 		DeclaredTier:         declaredTier,
@@ -420,6 +468,23 @@ func (s *Server) appendAudit(
 		UnevaluatedPolicyIDs: result.UnevaluatedPolicyIDs,
 		InputDigest:          digest,
 	}
+
+	// DelegationID/RootDelegationID/ChainDepth all derive from chain, and
+	// only make sense when it is non-empty (this function's own doc comment
+	// above). Left at nil/nil/0 otherwise — nil rather than pointing at the
+	// zero UUID, so a token-authentication failure's audit row is honest:
+	// this decision never identified a delegation at all, which is a
+	// different fact than "identified the zero UUID," and DelegationID/
+	// RootDelegationID are nullable columns for exactly this reason
+	// (migrations/000003_audit_chain).
+	if len(chain) > 0 {
+		acting := chain[len(chain)-1]
+		root := chain[0]
+		entry.DelegationID = &delegationID
+		entry.RootDelegationID = &root.ID
+		entry.ChainDepth = int16(acting.Depth) //nolint:gosec // G115: store.maxChainWalk bounds any chain walk to 64 hops, far under int16's range
+	}
+
 	if d := result.Deciding; d != nil {
 		entry.PolicySource = d.Source
 		entry.PolicyID = d.PolicyID
@@ -435,12 +500,32 @@ func (s *Server) appendAudit(
 }
 
 // denyAndAudit builds the DeriveTierDenial-shaped Result for err, appends
-// the audit entry, and returns the wire response. Two failures on Decide's
-// pre-decision path — a tool catalog that could not be loaded, and a
-// DeriveTier failure — resolve through this one function rather than each
-// inlining its own copy of "build the denial, audit it, respond," so they
-// are audited identically and cannot independently drift the way two
-// hand-written copies of the same three lines eventually would.
+// the audit entry, and returns the wire response. Three failures on
+// Decide's pre-decision path — a token that failed authentication, a tool
+// catalog that could not be loaded, and a DeriveTier failure — resolve
+// through this one function rather than each inlining its own copy of
+// "build the denial, audit it, respond," so they are audited identically
+// and cannot independently drift the way three hand-written copies of the
+// same lines eventually would.
+//
+// DeriveTierDenial attributes every one of these to the "delegation" leg,
+// including a token failure, which is not really about the delegation's own
+// state at all: "delegation" is the only bucket audit_chain's denied_leg
+// CHECK constraint offers a structural, pre-leg denial (migrations/000003;
+// denyForApproval, escalation.go, makes the identical choice for the same
+// reason, spelled out in its own doc comment). What tells a token failure
+// apart from an actually-revoked delegation, for an operator reading the
+// audit trail, is Reason's text, not DeniedLeg — see authenticateToken's
+// own errors (authenticate.go) and
+// TestDecide_TokenNamingRevokedDelegation_DeniesAtTheDelegationLeg
+// (authenticate_test.go), which exists specifically to prove the two stay
+// distinguishable and that a revoked delegation is denied by DelegationLeg's
+// own re-evaluation, never by this function standing in for it.
+//
+// delegationID/chain are uuid.Nil/nil on exactly one caller's path — a token
+// that failed authentication, before any delegation was ever loaded — and
+// appendAudit (above) is written to accept that shape; see its own doc
+// comment.
 func (s *Server) denyAndAudit(
 	ctx context.Context,
 	agentID, delegationID uuid.UUID,

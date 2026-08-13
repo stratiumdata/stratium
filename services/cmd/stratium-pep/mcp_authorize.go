@@ -153,19 +153,22 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	// process handling many tool calls over one session, not exec'd fresh per call the way hook is,
 	// which makes caching this across calls a MORE tempting shortcut here than it ever was for
 	// hook, not a less dangerous one -- a cached delegation reference would mean a revocation
-	// takes effect only after this process restarts rather than on the very next tool call.
-	session, err := loadSessionFile(a.cfg.SessionFilePath)
+	// takes effect only after this process restarts rather than on the very next tool call. The
+	// decoded value itself is discarded -- see the request build below for why -- but the call
+	// stays as this binary's own local fail-closed gate on "a session was actually started."
+	_, err := loadSessionFile(a.cfg.SessionFilePath)
 	if err != nil {
 		a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", err))
 		return
 	}
 
 	req := &pdpgrpc.DecideRequest{
-		DelegationId: session.GetDelegationId(),
-		AgentId:      a.cfg.AgentID,
-		Subject:      a.cfg.Subject,
-		Tool:         frame.Params.Name,
-		RawInput:     string(frame.Params.Arguments),
+		AgentId:  a.cfg.AgentID,
+		Subject:  a.cfg.Subject,
+		Tool:     frame.Params.Name,
+		RawInput: string(frame.Params.Arguments),
+		// Token: left unset -- see hook.go's identically-worded comment on
+		// its own request build for why (Phase 9 Task 3/Task 4 boundary).
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
 		// (Verb, NormalizedInput) or are ever set here (Resource) anymore --
 		// see this file's own package doc. DeclaredTier: deliberately never
