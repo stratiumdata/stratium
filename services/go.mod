@@ -10,6 +10,7 @@ require (
 
 require (
 	github.com/cedar-policy/cedar-go v1.8.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lib/pq v1.10.9
 	github.com/open-policy-agent/opa v1.19.0
 	google.golang.org/grpc v1.83.0

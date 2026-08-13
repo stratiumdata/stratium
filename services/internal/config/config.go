@@ -24,6 +24,23 @@ type Config struct {
 	MaxDepth             int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
 	DBTimeout            time.Duration // STRATIUM_DB_TIMEOUT, default 5s
 
+	// TokenSigningKeyPath is the filesystem path to a PEM-encoded EC private
+	// key: the PDP's current delegation-token signing key, which also
+	// verifies (STRATIUM_TOKEN_SIGNING_KEY_PATH, required). Spec §4.7.1 K1:
+	// the environment holds the path, never the key material, so a leaked
+	// environment dump or crash report never leaks a signing key — only
+	// internal/token.Load ever reads the file this names.
+	TokenSigningKeyPath string
+	// TokenPreviousKeyPath is the filesystem path to a PEM-encoded EC key
+	// retained for verification only (STRATIUM_TOKEN_PREVIOUS_KEY_PATH,
+	// optional). Left empty, no previous key is loaded — the steady-state
+	// case outside a rotation window. Set it to the outgoing current key
+	// during rotation so a token issued moments before the restart that
+	// swaps STRATIUM_TOKEN_SIGNING_KEY_PATH still verifies; see
+	// internal/token's own package doc for why a previous key can verify but
+	// is structurally unable to sign.
+	TokenPreviousKeyPath string
+
 	// ApprovalTTL is how long a freshly created pending approval remains
 	// valid before Approval.Verify's expiry check rejects it — the value
 	// CreateApproval's expires_at is computed from. Configurable, default
@@ -71,18 +88,47 @@ func Load() (Config, error) {
 	}
 	var err error
 
-	if c.DatabaseURL = os.Getenv("STRATIUM_DATABASE_URL"); c.DatabaseURL == "" {
-		return c, fmt.Errorf("STRATIUM_DATABASE_URL is required")
+	// Every required-with-no-default value is checked before any of them can
+	// return: a deployment missing both STRATIUM_DATABASE_URL and
+	// STRATIUM_TENANT_ID (say, a fresh environment with none of the PDP's
+	// variables set yet) learns both gaps from one run, not one restart per
+	// gap. This is the same "collect every missing variable" idiom
+	// cmd/stratium-pep/config.go's requiredEnv already uses for the PEP's own
+	// required set — applied here so the PDP's required config behaves the
+	// same way, not a different, weaker one.
+	var missing []string
+	c.DatabaseURL = os.Getenv("STRATIUM_DATABASE_URL")
+	if c.DatabaseURL == "" {
+		missing = append(missing, "STRATIUM_DATABASE_URL")
 	}
-	// No presence check: unset is a valid, deliberate choice (skip migrations),
-	// not a missing required value.
-	c.MigrationDatabaseURL = os.Getenv("STRATIUM_MIGRATION_DATABASE_URL")
 	// The tenant is configuration, never request input. See the plan's global
 	// constraints: the predecessor trusted a client-supplied header and that
 	// was a critical authentication bypass.
-	if c.TenantID = os.Getenv("STRATIUM_TENANT_ID"); c.TenantID == "" {
-		return c, fmt.Errorf("STRATIUM_TENANT_ID is required")
+	c.TenantID = os.Getenv("STRATIUM_TENANT_ID")
+	if c.TenantID == "" {
+		missing = append(missing, "STRATIUM_TENANT_ID")
 	}
+	// Presence only, matching DatabaseURL/TenantID's own treatment at this
+	// layer: this package validates that a value was configured, not that the
+	// file at the path is readable or holds a real EC key — that check needs
+	// the filesystem and crypto/ecdsa, which belong to internal/token.Load,
+	// same layering registry.go's own buildRegistry already uses for
+	// STRATIUM_POLICY_LANGUAGES (syntax here, semantics one level up).
+	c.TokenSigningKeyPath = os.Getenv("STRATIUM_TOKEN_SIGNING_KEY_PATH")
+	if c.TokenSigningKeyPath == "" {
+		missing = append(missing, "STRATIUM_TOKEN_SIGNING_KEY_PATH")
+	}
+	if len(missing) > 0 {
+		return c, fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
+	}
+
+	// No presence check: unset is a valid, deliberate choice (skip migrations),
+	// not a missing required value.
+	c.MigrationDatabaseURL = os.Getenv("STRATIUM_MIGRATION_DATABASE_URL")
+	// No presence check, for the same reason: unset means no previous key is
+	// loaded, a deliberate and common choice outside a rotation window, not a
+	// missing required value.
+	c.TokenPreviousKeyPath = os.Getenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH")
 	if v := os.Getenv("STRATIUM_MAX_DELEGATION_DEPTH"); v != "" {
 		if c.MaxDepth, err = strconv.Atoi(v); err != nil {
 			return c, fmt.Errorf("STRATIUM_MAX_DELEGATION_DEPTH: %w", err)

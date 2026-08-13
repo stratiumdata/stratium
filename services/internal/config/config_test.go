@@ -21,6 +21,12 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("STRATIUM_APPROVAL_TTL", "")
 	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "")
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "")
+	// A placeholder, not a real key file: this package checks presence only
+	// (see Load's own comment on TokenSigningKeyPath — opening and parsing
+	// the file is internal/token.Load's job, exercised by that package's own
+	// tests), so nothing here ever reads what this path names.
+	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/test/current-key.pem")
+	t.Setenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH", "")
 }
 
 // TestLoad_AllFieldsFromEnvironment compares field by field, not the whole
@@ -36,6 +42,8 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_APPROVAL_TTL", "48h")
 	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "postgres://migrate:pass@localhost:5432/stratium")
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "xacml,cedar")
+	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/keys/current.pem")
+	t.Setenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH", "/keys/previous.pem")
 
 	got, err := Load()
 	if err != nil {
@@ -49,6 +57,12 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	}
 	if got.TenantID != "tenant-abc" {
 		t.Errorf("TenantID = %q", got.TenantID)
+	}
+	if got.TokenSigningKeyPath != "/keys/current.pem" {
+		t.Errorf("TokenSigningKeyPath = %q", got.TokenSigningKeyPath)
+	}
+	if got.TokenPreviousKeyPath != "/keys/previous.pem" {
+		t.Errorf("TokenPreviousKeyPath = %q", got.TokenPreviousKeyPath)
 	}
 	if got.ListenAddr != ":9090" {
 		t.Errorf("ListenAddr = %q", got.ListenAddr)
@@ -144,14 +158,79 @@ func TestLoad_MissingTenantID(t *testing.T) {
 	}
 }
 
+// STRATIUM_TOKEN_SIGNING_KEY_PATH has no default, the same treatment as
+// STRATIUM_DATABASE_URL and STRATIUM_TENANT_ID above: a PDP that starts
+// without a configured signing key would go on to fail every decision it
+// makes once tokens are wired in, in a way indistinguishable from a policy
+// problem — that must be a startup failure instead.
+func TestLoad_MissingTokenSigningKeyPath(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with no STRATIUM_TOKEN_SIGNING_KEY_PATH: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "STRATIUM_TOKEN_SIGNING_KEY_PATH") {
+		t.Fatalf("error %q does not name the missing variable", err.Error())
+	}
+}
+
+// Leaving STRATIUM_TOKEN_PREVIOUS_KEY_PATH unset must not error, and must
+// leave the field empty: that is how internal/token.Load is told "no
+// previous key," the ordinary state outside a rotation window, not a
+// misconfiguration.
+func TestLoad_TokenPreviousKeyPathIsOptional(t *testing.T) {
+	setValidEnv(t)
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with no STRATIUM_TOKEN_PREVIOUS_KEY_PATH returned error: %v", err)
+	}
+	if got.TokenPreviousKeyPath != "" {
+		t.Errorf("TokenPreviousKeyPath = %q, want empty", got.TokenPreviousKeyPath)
+	}
+}
+
+// The property the brief is built around: a missing required value is
+// reported alongside every OTHER missing required value, not just the first
+// one Load happens to check. Three required variables unset at once (a
+// freshly cloned deployment with none of the PDP's environment configured
+// yet is exactly this case) must produce ONE error naming all three, so
+// fixing configuration takes one read of one error message, not three
+// restarts each revealing the next gap in turn.
+func TestLoad_MissingMultipleRequired_NamesAllAtOnce(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_DATABASE_URL", "")
+	t.Setenv("STRATIUM_TENANT_ID", "")
+	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with three required variables unset: want error, got nil")
+	}
+	for _, want := range []string{"STRATIUM_DATABASE_URL", "STRATIUM_TENANT_ID", "STRATIUM_TOKEN_SIGNING_KEY_PATH"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s alongside the other missing variables", err.Error(), want)
+		}
+	}
+}
+
 // The tenant must fail closed even when every other variable, including the
 // database URL, is present and valid. The tenant is startup configuration,
 // never a request field — the predecessor system trusted a client-supplied
 // x-user-id header instead, and that was a critical authentication bypass.
 // There is no default here, and none should ever be added.
+//
+// Sets every other required value explicitly (rather than calling
+// setValidEnv) so TenantID is the ONLY gap: with the "name every missing
+// variable at once" behavior Load now has, a test that left a second
+// required value unset too would still see a non-nil error and pass for the
+// wrong reason, never actually proving TenantID has no default.
 func TestLoad_TenantIDHasNoDefault(t *testing.T) {
 	t.Setenv("STRATIUM_DATABASE_URL", "postgres://localhost/stratium")
 	t.Setenv("STRATIUM_TENANT_ID", "")
+	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/test/current-key.pem")
 	t.Setenv("STRATIUM_LISTEN_ADDR", "")
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "")
@@ -161,6 +240,12 @@ func TestLoad_TenantIDHasNoDefault(t *testing.T) {
 	got, err := Load()
 	if err == nil {
 		t.Fatalf("Load() with no tenant: want error, got Config %+v", got)
+	}
+	if !strings.Contains(err.Error(), "STRATIUM_TENANT_ID") {
+		t.Fatalf("error %q does not name the missing variable", err.Error())
+	}
+	if strings.Contains(err.Error(), "STRATIUM_DATABASE_URL") || strings.Contains(err.Error(), "STRATIUM_TOKEN_SIGNING_KEY_PATH") {
+		t.Fatalf("error %q names a variable that WAS set; this test isolates TenantID alone", err.Error())
 	}
 }
 
