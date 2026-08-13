@@ -596,6 +596,63 @@ rule §4.3.1 states for every other dimension.
 
 ---
 
+### 4.4.2 The per-tenant tool catalog, and extraction moves server-side (2026-08-12)
+
+§4.4 resolves an action's tier by tenant override, then tool catalog, then the
+built-in classifier. The catalog has been a hardcoded map of **Claude Code's own
+tool names** since Phase 3c, whose plan said so explicitly and named a
+database-backed per-tenant catalog as the eventual home. That debt has now
+blocked three separate controls, all for third-party tools, all found by
+real-agent runs rather than by tests:
+
+- a `READ_ONLY` delegation denies every third-party MCP read, because
+  `read_file` has no catalog entry and falls through to the classifier's
+  `INTERNAL_MODIFY` default (Phase 6);
+- `Delegation.ResourceConstraints` cannot discriminate on the MCP surface at
+  all, because the PEP's `resourceIDFields` knows only Claude Code's tool names
+  (Phase 7);
+- and classification caps inherit the same gap, since they read the same
+  never-populated resource attributes.
+
+**T1 — the catalog is per-tenant, PDP-owned, and control-plane-written.** It
+slots in exactly where §4.4's resolution order already places a catalog:
+override, then catalog, then built-in. The built-in map remains as the fallback
+for a tenant with no rows, so no existing deployment changes behaviour until it
+adds one.
+
+The serving role gets `SELECT` and **not** `INSERT` or `UPDATE`. This is **E7**'s
+reasoning applied to a second table: the PDP authenticates no callers, so an
+endpoint that writes authorization configuration could not verify who was
+calling. The absent grant *is* the enforcement.
+
+**T2 — field extraction moves from the PEP to the PDP.** Phase 3b placed
+extraction at the edge, reasoning that *"the PEP knows its agent framework's
+schema and the PDP deliberately does not."* A per-tenant catalog makes that
+premise false: the PDP now knows the schema, per tenant, for every tool the
+tenant has catalogued. So the catalog names each tool's resource field and
+command field, and the PDP extracts them from the `raw_input` it already
+receives.
+
+**Phase 3b's safety argument survives untouched**, and is worth restating
+because it is the load-bearing half: raw input is always scanned, and a positive
+destructive-or-external pattern match on it is never lowered (§4.4.1). Moving
+extraction server-side only *strengthens* that — there is no longer an extracted
+field a PEP could under-report, because the PEP no longer extracts.
+
+**T3 — `normalized_input` is retired.** It existed so a PEP could hand the PDP a
+best-effort extraction. With T2 the PDP derives it, so the wire field, the
+PEP's `normalizedInputFields` and `resourceIDFields` tables, and its `toolVerbs`
+map all go. Three parallel per-tool tables that had to be edited together become
+one row per tool in one place.
+
+**What this does not fix.** A tool absent from a tenant's catalog is still
+unextracted and still takes the classifier's default — the failure is narrower
+and now has a remedy an operator can apply, rather than requiring a code change.
+Resource *labelling* remains the open gap §3.9 records: the catalog says which
+field holds the resource identity, never what that resource is classified as.
+
+---
+
 ### 4.4.1 Input evidence outranks every name-keyed lookup (2026-08-10)
 
 §4.4 resolves an action's tier by tenant override, then tool catalog, then the
