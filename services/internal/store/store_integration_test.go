@@ -134,6 +134,7 @@ import (
 
 	"stratium/internal/authz"
 	"stratium/internal/config"
+	"stratium/internal/grpctarget"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
 	"stratium/internal/policy/cedar"
@@ -229,6 +230,34 @@ var (
 	// drives every one of its six proofs against — an http.Client target,
 	// not a gRPC one, unlike every other package-level address here.
 	envoyAddr string
+
+	// proxyPdpClient and proxyTenant back proxy_integration_test.go (Phase
+	// 11 Task 4): a sixth, independently configured PDP
+	// (deploy/docker/docker-compose.yml's pdp-proxy service), its own
+	// tenant, touched by nothing else in this file -- the same reasoning
+	// narrowPdpClient, resourcePdpClient, and envoyPdpClient's own comments
+	// already give, restated a fourth time in that file's own package doc
+	// rather than here. Dialed directly like the other three: proxy_
+	// integration_test.go needs a host-reachable gRPC client to seed
+	// fixtures via mintToken (IssueToken), the same real re-issuance path
+	// every other live proof in this file uses.
+	proxyPdpClient pdpgrpc.PDPServiceClient
+	proxyTenant    string
+
+	// proxyTargetClient and directTargetClient both speak
+	// grpctarget.TargetServiceClient -- the real generated client for
+	// services/internal/grpctarget (proto/target/v1/target.proto) -- but
+	// dial two different addresses. proxyTargetClient is dialed at
+	// pep-proxy's own published port: every call through it is exactly what
+	// a real caller's "point an existing gRPC client at this process
+	// instead of the real target" (proxy.go's own package doc) looks like,
+	// authorized or not depending on what each proof seeds. directTargetClient
+	// is dialed straight at grpc-target's own published port, bypassing
+	// stratium-pep proxy entirely -- used only to read grpc-target's own
+	// call counter (CallCount), a side channel independent of anything the
+	// proxy or the PDP reports (proxy_integration_test.go's own package doc).
+	proxyTargetClient  grpctarget.TargetServiceClient
+	directTargetClient grpctarget.TargetServiceClient
 )
 
 func TestMain(m *testing.M) {
@@ -249,21 +278,28 @@ func runTestMain(m *testing.M) int {
 	envoyPdpAddr := os.Getenv("STRATIUM_IT_PDP_EXTAUTHZ_ADDR")
 	envoyTenant = os.Getenv("STRATIUM_IT_EXTAUTHZ_TENANT_ID")
 	envoyAddr = os.Getenv("STRATIUM_IT_ENVOY_ADDR")
+	pdpProxyAddr := os.Getenv("STRATIUM_IT_PDP_PROXY_ADDR")
+	proxyTenant = os.Getenv("STRATIUM_IT_PROXY_TENANT_ID")
+	grpcTargetAddr := os.Getenv("STRATIUM_IT_GRPC_TARGET_ADDR")
+	pepProxyAddr := os.Getenv("STRATIUM_IT_PEP_PROXY_ADDR")
 	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
-		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" {
+		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
+		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" {
 		fmt.Fprintln(os.Stderr,
 			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
 				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, "+
-				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, and "+
-				"STRATIUM_IT_ENVOY_ADDR must all be set — run via `make integration`, not `go test` directly")
+				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, "+
+				"STRATIUM_IT_ENVOY_ADDR, STRATIUM_IT_PDP_PROXY_ADDR, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_GRPC_TARGET_ADDR, "+
+				"and STRATIUM_IT_PEP_PROXY_ADDR must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
 	tenants := map[string]bool{
-		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true,
+		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true, proxyTenant: true,
 	}
-	if len(tenants) != 5 {
+	if len(tenants) != 6 {
 		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
-			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, and the test's hardcoded second tenant must all be distinct from one another")
+			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, and the test's hardcoded second tenant must "+
+			"all be distinct from one another")
 		return 1
 	}
 
@@ -336,6 +372,52 @@ func runTestMain(m *testing.M) int {
 	// listener are all up is the readiness signal instead.
 	if err := waitForEnvoy(ctx, envoyAddr); err != nil {
 		fmt.Fprintf(os.Stderr, "envoy: %v\n", err)
+		return 1
+	}
+
+	proxyPdpConn, closeProxyPdpConn, err := dialAndWaitForServing(ctx, pdpProxyAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-proxy: %v\n", err)
+		return 1
+	}
+	defer closeProxyPdpConn()
+	proxyPdpClient = proxyPdpConn
+
+	// grpc-target has no gRPC health service of its own (a deliberate
+	// omission matching pep-proxy's own, below, and pep-extauthz's before
+	// either -- Task 1's own report on that surface, "no health-check
+	// service registered") -- a real, answered RPC (CallCount) is the
+	// readiness signal instead, the same choice waitForEnvoy already makes
+	// for the analogous HTTP case.
+	grpcTargetConn, err := dialPlain(grpcTargetAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "grpc-target: %v\n", err)
+		return 1
+	}
+	defer func() { _ = grpcTargetConn.Close() }()
+	directTargetClient = grpctarget.NewTargetServiceClient(grpcTargetConn)
+	if err := waitForGRPCTarget(ctx, directTargetClient); err != nil {
+		fmt.Fprintf(os.Stderr, "grpc-target: %v\n", err)
+		return 1
+	}
+
+	// pep-proxy has no gRPC health service either (proxy.go's own design --
+	// a transparent proxy registers no services of its own, "PASSTHROUGH
+	// CODEC" section) -- an unauthenticated call always denies by
+	// construction (K4, no fallback) once pep-proxy and pdp-proxy are both
+	// up, which doubles as a first, cheap witness that the no-token deny
+	// path proof 3 later asserts in detail is already wired end to end --
+	// the identical reasoning waitForEnvoy already establishes for the
+	// analogous HTTP case.
+	pepProxyConn, err := dialPlain(pepProxyAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pep-proxy: %v\n", err)
+		return 1
+	}
+	defer func() { _ = pepProxyConn.Close() }()
+	proxyTargetClient = grpctarget.NewTargetServiceClient(pepProxyConn)
+	if err := waitForProxyReady(ctx, proxyTargetClient); err != nil {
+		fmt.Fprintf(os.Stderr, "pep-proxy: %v\n", err)
 		return 1
 	}
 
@@ -433,6 +515,64 @@ func waitForEnvoy(ctx context.Context, addr string) error {
 		resp, err := client.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// dialPlain dials addr the same insecure, lazy way dialAndWaitForServing
+// (above) does, but returns the bare connection instead of a
+// pdpgrpc-typed client: grpc-target and pep-proxy both speak
+// grpctarget.TargetServiceClient, not pdpgrpc.PDPServiceClient, so the
+// caller builds its own typed client from the connection this returns.
+func dialPlain(addr string) (*grpc.ClientConn, error) {
+	return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+}
+
+// waitForGRPCTarget polls grpc-target's own CallCount RPC directly (no
+// authorization concept exists at that layer, and this call bypasses
+// stratium-pep proxy entirely) until it succeeds -- see this function's
+// own call site in runTestMain for why a real RPC, not a health service,
+// is the readiness signal here.
+func waitForGRPCTarget(ctx context.Context, client grpctarget.TargetServiceClient) error {
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("last error: %w: %w", lastErr, ctx.Err())
+		default:
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := client.CallCount(callCtx, &grpctarget.CallCountRequest{})
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// waitForProxyReady polls pep-proxy's own listener with an
+// unauthenticated Fetch call until it returns ANY real gRPC response
+// (in practice codes.PermissionDenied, per K4 -- no token, no fallback)
+// rather than a transport-level connection failure -- see this
+// function's own call site in runTestMain for why that, and not a health
+// service, is the readiness signal here.
+func waitForProxyReady(ctx context.Context, client grpctarget.TargetServiceClient) error {
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("last error: %w: %w", lastErr, ctx.Err())
+		default:
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := client.Fetch(callCtx, &grpctarget.EchoRequest{Message: "readiness-probe"})
+		cancel()
+		if err != nil && status.Code(err) != codes.Unavailable {
 			return nil
 		}
 		lastErr = err

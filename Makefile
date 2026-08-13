@@ -34,7 +34,8 @@ proto: ## Generate Go code from proto/ (requires protoc, protoc-gen-go, protoc-g
 		--proto_path=$(PROTO_DIR) \
 		--go_out=$(GO_DIR) --go_opt=module=stratium \
 		--go-grpc_out=$(GO_DIR) --go-grpc_opt=module=stratium \
-		$(PROTO_DIR)/pdp/v1/pdp.proto
+		$(PROTO_DIR)/pdp/v1/pdp.proto \
+		$(PROTO_DIR)/target/v1/target.proto
 
 CONFORMANCE_PROPERTIES := 25
 
@@ -65,7 +66,10 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	pdp_resource_port=$$($(COMPOSE) port pdp-resource 50051 | sed -E 's/.*://'); \
 	pdp_extauthz_port=$$($(COMPOSE) port pdp-extauthz 50051 | sed -E 's/.*://'); \
 	envoy_port=$$($(COMPOSE) port envoy 10000 | sed -E 's/.*://'); \
-	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port"; \
+	pdp_proxy_port=$$($(COMPOSE) port pdp-proxy 50051 | sed -E 's/.*://'); \
+	grpc_target_port=$$($(COMPOSE) port grpc-target 50051 | sed -E 's/.*://'); \
+	pep_proxy_port=$$($(COMPOSE) port pep-proxy 9292 | sed -E 's/.*://'); \
+	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_SERVING_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PDP_ADDR="localhost:$$pdp_port" \
@@ -77,6 +81,10 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	STRATIUM_IT_PDP_EXTAUTHZ_ADDR="localhost:$$pdp_extauthz_port" \
 	STRATIUM_IT_EXTAUTHZ_TENANT_ID="tenant-extauthz-integration" \
 	STRATIUM_IT_ENVOY_ADDR="localhost:$$envoy_port" \
+	STRATIUM_IT_PDP_PROXY_ADDR="localhost:$$pdp_proxy_port" \
+	STRATIUM_IT_PROXY_TENANT_ID="tenant-proxy-integration" \
+	STRATIUM_IT_GRPC_TARGET_ADDR="localhost:$$grpc_target_port" \
+	STRATIUM_IT_PEP_PROXY_ADDR="localhost:$$pep_proxy_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
 .PHONY: help build test vet fmt lint proto conformance integration

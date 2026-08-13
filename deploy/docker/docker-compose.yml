@@ -279,5 +279,121 @@ services:
     ports:
       - "10000"
 
+  # Sixth PDP instance, wired for one purpose: Task 4's real-gRPC-service
+  # proxy proof (services/internal/store/proxy_integration_test.go) needs a
+  # PDP that is safe to seed cedar policies, delegations, tool_catalog rows,
+  # and approvals into from a live gRPC call routed through a live
+  # stratium-pep proxy -- exactly the same reason pdp-narrow, pdp-resource,
+  # and pdp-extauthz above each exist instead of reusing pdp's own
+  # tenant-one, restated a fourth time: tenant-one already carries
+  # TestEndToEnd's own cedar policies and its own order-dependent proofs, and
+  # none of pdp-narrow's, pdp-resource's, or pdp-extauthz's own tenants is
+  # touched by anything outside their own one test file either. A fifth
+  # tenant, touched by nothing but the proxy proof, is what makes that proof
+  # reachable without an ordering dependency on any other test.
+  #
+  # Shares the same postgres instance as the PDPs above (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart). Full default policy-language
+  # registry (STRATIUM_POLICY_LANGUAGES left unset), matching pdp,
+  # pdp-resource, and pdp-extauthz: the proxy proof only ever needs cedar.
+  pdp-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-proxy-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # See the "pdp" service's own comment on this variable above -- same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+    ports:
+      - "50051"
+
+  # The real gRPC service Task 4's proxy proof puts stratium-pep proxy in
+  # front of. Unlike echo-upstream (deploy/docker/echo-upstream/main.go,
+  # deliberately outside the "stratium" module -- see its own Dockerfile),
+  # this binary's source lives inside the module, at
+  # services/cmd/grpc-target/main.go, because it imports the generated
+  # internal/grpctarget package (proto/target/v1/target.proto) the
+  # integration test also imports -- both sides need to share the identical
+  # generated types. Built by Dockerfile.grpc-target, this directory.
+  # Analogous to echo-upstream's role for Phase 10's real Envoy proof, but
+  # genuinely typed gRPC end to end rather than plain HTTP -- see
+  # target.proto's own package doc.
+  #
+  # Port published, unlike echo-upstream: proof 2 ("a denied call does not
+  # reach the target") is checked against THIS service's own call counter
+  # (its CallCount RPC), dialled directly by the test, never through the
+  # proxy or the PDP -- the same "assert on the target's own counter, not
+  # just what the caller observed" discipline proxy_test.go's own
+  # contactCounter already established at the unit level (proxy.go's
+  # package doc, DENY BY DEFAULT).
+  grpc-target:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.grpc-target
+    ports:
+      - "50051"
+
+  # stratium-pep, running in proxy mode: Task 4's own real-gRPC-service
+  # proof. Built from Dockerfile.pep, the same image pep-extauthz already
+  # uses -- that Dockerfile builds the whole binary with no subcommand baked
+  # into the ENTRYPOINT, so which mode this container runs is this `command`
+  # line alone, the identical pattern pep-extauthz's own comment documents.
+  #
+  # Published to the host, UNLIKE pep-extauthz: extauthz answers Envoy's own
+  # ext_authz Check, one hop removed from any caller this test suite drives
+  # directly, but proxy IS the process an agent's own gRPC client dials
+  # AS ITS TARGET (proxy.go's own package doc: "transparent" means needing
+  # no agent change, which only means something if a real caller can reach
+  # this process the same way it would have reached grpc-target directly).
+  # proxy_integration_test.go connects to this port the same way a real
+  # caller would, not through a second hop the way extauthz's own proof goes
+  # through envoy.
+  #
+  # AgentID/Subject are fixed compose-time constants for the same reason
+  # pep-extauthz's own comment gives: proxy.go's own package doc (NO SESSION
+  # FILE) means the identity behind every Decide call this process makes is
+  # its own startup configuration, never read off a request -- so
+  # proxy_integration_test.go hardcodes the identical two values as Go
+  # constants, matching this file exactly, the same convention
+  # extauthz_integration_test.go's own extauthzAgentID/extauthzSubject
+  # already established. The agent id has no special meaning; it was
+  # generated once with no committed key or secret behind it.
+  #
+  # ApprovalPollInterval/ApprovalTimeout are proxy-only settings (proxyConfig,
+  # proxy.go) neither pdp-extauthz-fronting service needs: proxy, unlike
+  # extauthz, is a BLOCKING surface (spec §4.6) -- it holds a caller's own
+  # stream open across an escalation instead of degrading to a denial (see
+  # proxy.go's own package doc, ESCALATE BLOCKS). The poll interval is short
+  # and the timeout generous so proof 5's own out-of-band approval -- issued
+  # by the test itself, against real Postgres, while the call is still
+  # blocked -- has ample time to land before the timeout would otherwise
+  # fire and turn that proof into a flake.
+  pep-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.pep
+    command: ["proxy"]
+    depends_on:
+      - pdp-proxy
+      - grpc-target
+    environment:
+      STRATIUM_PEP_PROXY_LISTEN_ADDR: :9292
+      STRATIUM_PEP_PROXY_TARGET_ADDR: grpc-target:50051
+      STRATIUM_PEP_PDP_ADDR: pdp-proxy:50051
+      STRATIUM_PEP_AGENT_ID: 04ef809a-849f-404a-9a5c-015b7f73a014
+      STRATIUM_PEP_SUBJECT: proxy-integration@example.com
+      STRATIUM_PEP_CONNECT_TIMEOUT: 5s
+      STRATIUM_PEP_APPROVAL_POLL_INTERVAL: 200ms
+      STRATIUM_PEP_APPROVAL_TIMEOUT: 30s
+    ports:
+      - "9292"
+
 volumes:
   pgdata:

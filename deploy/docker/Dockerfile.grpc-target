@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+
+# Builds grpc-target (../../services/cmd/grpc-target): the real gRPC service
+# Task 4's proxy proof puts `stratium-pep proxy` in front of, analogous to
+# echo-upstream's role for Phase 10's real Envoy proof. Unlike
+# Dockerfile.echo-upstream's bare `go build main.go`, this imports
+# google.golang.org/grpc, google.golang.org/protobuf, and the generated
+# internal/grpctarget package the integration test also imports -- real
+# module dependencies, not stdlib alone -- so it needs the "stratium" module
+# itself to build, the same go.mod/go.sum/`go mod download` shape
+# Dockerfile.pep and this directory's own Dockerfile already use.
+#
+# Single-stage, golang:alpine, like Dockerfile.echo-upstream rather than
+# Dockerfile.pep or this directory's own Dockerfile: grpc-target is
+# `make integration`'s own test fixture -- it never ships anywhere -- so
+# there is no reason to pay for a distroless runtime stage for a component
+# that carries no secret and needs no minimal attack surface the way the two
+# binaries this repo actually ships do.
+FROM golang:1.25-alpine
+WORKDIR /src/services
+COPY services/go.mod services/go.sum ./
+RUN go mod download
+COPY services/ ./
+RUN go build -o /grpc-target ./cmd/grpc-target
+ENTRYPOINT ["/grpc-target"]

@@ -1,0 +1,81 @@
+// Package stratium.target.v1 is Task 4's own real backend (Phase 11,
+// services/internal/store/proxy_integration_test.go): a small, genuinely
+// typed gRPC service standing in for whatever business service an operator
+// actually points `stratium-pep proxy` at. Every other enforcement surface
+// in this binary was proven against the real thing it fronts -- hook and
+// mcp against a real claude session, extauthz against a real Envoy
+// (deploy/docker/envoy.yaml, echo-upstream) -- and proxy's own real thing is
+// an ordinary gRPC service with its own compiled request/response types, not
+// the hand-rolled raw-byte proxyFrame cmd/stratium-pep/proxy_test.go's own
+// unit tests construct directly. Deployed as deploy/docker/grpc-target
+// (own Dockerfile, own docker-compose.yml service), analogous to
+// echo-upstream's role for Phase 10's real Envoy proof.
+//
+// Two unary RPCs, not one, so a tenant's own policy can permit one and deny
+// the other without both proofs sharing a single, ambiguous tool identity
+// (the full method IS the tool identity on this surface -- proxy.go's own
+// package doc, P1): Fetch is this suite's permitted method, Purge its
+// denied one. Names read as an ordinary CRUD-ish service would name them,
+// not as "proof1"/"proof2" -- the tests decide which delegation ceiling
+// makes each ALLOW or DENY, this file does not know or care.
+syntax = "proto3";
+
+package stratium.target.v1;
+
+option go_package = "stratium/internal/grpctarget;grpctarget";
+
+message EchoRequest {
+  string message = 1;
+}
+
+// call_number is this server's own call counter's value at the moment it
+// answered -- an extra, per-call-specific signal (beyond the echoed
+// message) that the response which reached the caller really is THIS
+// call's own, not a stale or substituted one, and material for a
+// concrete, per-call trailer value (see TargetService.Fetch's own comment).
+message EchoResponse {
+  string message = 1;
+  int64 call_number = 2;
+}
+
+message ChatMessage {
+  string message = 1;
+}
+
+message CallCountRequest {}
+
+// count is every Fetch/Purge/Chat call this process has received since it
+// started, regardless of caller -- CallCountRequest carries nothing to
+// scope it further because nothing calling this RPC needs a narrower
+// answer (see TargetService.CallCount's own comment).
+message CallCountResponse {
+  int64 count = 1;
+}
+
+service TargetService {
+  // Fetch is the permitted method in every proof that needs one.
+  rpc Fetch(EchoRequest) returns (EchoResponse);
+
+  // Purge is the denied method in every proof that needs one -- a distinct
+  // tool identity from Fetch so a proof can seed one tenant's tool_catalog
+  // and delegation ceilings such that Fetch always allows and Purge always
+  // denies, simultaneously, without either seed contradicting the other.
+  rpc Purge(EchoRequest) returns (EchoResponse);
+
+  // Chat is a real bidirectional stream: each ChatMessage the caller sends
+  // is echoed back before the next is read, so a proof can interleave
+  // several sends and receives across one authorization decision (P4: a
+  // stream is authorized once, at open).
+  rpc Chat(stream ChatMessage) returns (stream ChatMessage);
+
+  // CallCount reports this process's own call counter. Dialled directly,
+  // bypassing stratium-pep proxy entirely -- the point of this RPC existing
+  // at all is a side channel independent of anything the proxy or the PDP
+  // reports, so a proof that a denied call never reached this service can
+  // check this service's own state rather than trusting the proxy's own
+  // response, mirroring cmd/stratium-pep/proxy_test.go's own contactCounter
+  // at the unit level (proxy.go's package doc, "DENY BY DEFAULT": a proxy
+  // that forwards and then errors has already leaked the request, which
+  // checking only the caller's own response would miss entirely).
+  rpc CallCount(CallCountRequest) returns (CallCountResponse);
+}
