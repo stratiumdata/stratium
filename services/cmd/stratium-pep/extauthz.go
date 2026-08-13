@@ -7,19 +7,20 @@
 // PEP sitting beside Envoy instead: Envoy calls Check, and this server
 // answers allow or deny.
 //
-// TASK 1 SCOPE. This file is the server, its dependency, and its
-// configuration -- nothing that reads a CheckRequest's contents and nothing
-// that calls the PDP. Check denies every request it receives,
-// unconditionally, regardless of what is in it: there is not yet a code
-// path that could produce an honest ALLOW, and a skeleton that allows by
-// default is an open proxy the moment it is reachable, not a placeholder to
-// tighten up later. See runExtauthzCmd's own doc comment for the
-// fail-closed half of the same rule at startup, and Check's own doc comment
-// for why denying unconditionally is the only answer a server with no
-// decision logic can give without lying about what it decided. Extracting a
-// CheckRequest's method/path/token and mapping a real PDP decision back to
-// a CheckResponse are Task 2 and Task 3's additions to this same file, not
-// this one's.
+// TASK 2 ADDITIONS. Task 1 left Check reading nothing: no code path could
+// produce an honest ALLOW yet, so the only answer that did not lie about
+// what was decided was an unconditional deny. This task adds the request
+// side of a real decision -- decideRequestFromCheck extracts the tool
+// identity, the bearer token, and a credential-stripped raw_input from a
+// CheckRequest (plan §§M1-M3) -- and Check now calls the PDP with whatever
+// that produces, when it produces anything at all: a request with no usable
+// credential denies before the PDP is ever dialed (M2, K4 -- see
+// decideRequestFromCheck's and extractBearerToken's own doc comments). Check
+// still never returns an honest ALLOW, on purpose: turning what the PDP
+// actually said into an OkResponse, a DENY carrying its reason, or an
+// ESCALATE degraded to a pending approval is Task 3's addition, not this
+// one's -- see Check's own doc comment for why this task's version denies
+// even after a successful PDP round trip that said yes.
 //
 // DEPENDENCY: github.com/envoyproxy/go-control-plane/envoy v1.37.0 as of
 // this writing (see go.mod) -- Envoy's own canonical, versioned source for
@@ -69,9 +70,8 @@
 // could not exist before Phase 9: presenting a caller-supplied token as
 // authority only works once the PDP verifies it cryptographically (spec
 // A10, K4) rather than trusting a bare id, and Decide only grew that
-// verification in Phase 9 Task 4. Reading that header is Task 2's addition
-// to this file, not this task's -- Check does not read the request at all
-// yet, see its own doc comment.
+// verification in Phase 9 Task 4. Reading that header is this task's own
+// addition -- see extractBearerToken, which is where it happens.
 //
 // FAIL CLOSED. Every constraint every other mode in this binary already
 // follows applies here with more force, not less: no default for any
@@ -89,20 +89,27 @@
 // whatever scheme the caller uses to identify themselves -- which is
 // strictly more than any surface in this binary has handled before now
 // (hook.go's own tool_input is one JSON blob; this is an entire HTTP
-// request). Task 1 does not parse a CheckRequest at all, so this rule costs
-// nothing yet, but it binds every task after this one exactly as hook.go's
-// package doc binds raw_input and mcp.go's binds frame contents: nothing
-// derived from a request this server receives may ever reach stderr, a log
-// line, or an error string. The one line this file does write to stderr
-// (runExtauthzCmd's startup line) is this process's own operator-supplied
-// configuration, never anything from a Check call.
+// request). This task is the first to parse a CheckRequest at all, which is
+// exactly where this rule starts binding, the same way hook.go's package
+// doc binds raw_input and mcp.go's binds frame contents: nothing derived
+// from a request this server receives may ever reach stderr, a log line, or
+// an error string. decideRequestFromCheck and extractBearerToken's own
+// deny reasons hold to this already -- "no authorization header" and
+// "authorization header is not a Bearer token" describe WHICH check failed,
+// never the header's own value or the token itself. The one line this file
+// writes to stderr unconditionally (runExtauthzCmd's startup line) is this
+// process's own operator-supplied configuration, never anything from a
+// Check call.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
@@ -110,13 +117,23 @@ import (
 	rpccode "google.golang.org/genproto/googleapis/rpc/code"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"stratium/internal/pdpgrpc"
 )
 
 // extauthzConfig is what runExtauthzCmd needs to serve Check: where to
-// listen, and -- unused by Task 1's Check, which calls nothing, but
-// required now rather than added when Task 2/3 first need it, so loading
-// this config never has to change shape again -- the PDP address, agent
-// identity, subject, and connect timeout every later Decide call will need.
+// listen, plus the PDP address, agent identity, subject, and connect
+// timeout every Decide call needs. The latter four sat unread by Task 1's
+// Check, which called nothing -- loaded then rather than added only once
+// Task 2 first needed them, so this config never had to change shape
+// between the two tasks. This task is what starts reading them: PDPAddr is
+// where runExtauthzCmd now dials the PDP client Check calls,
+// AgentID/Subject become DecideRequest.AgentId/Subject on every request
+// decideRequestFromCheck builds, and ConnectTimeout bounds that call the
+// same way it bounds every other surface's own Decide call (hook.go,
+// mcp_authorize.go).
+//
 // Every field is required, with no default, for the same reason hookConfig
 // gives none (hook.go): a listener bound to a guessed address, or a later
 // Decide call aimed at a guessed PDP, is worse than a process that refuses
@@ -194,6 +211,20 @@ func runExtauthzCmd(stderr io.Writer) int {
 		return 1
 	}
 
+	// grpc.NewClient dials lazily -- the same non-blocking choice hook.go's
+	// runHookCmd makes for the identical call -- so this succeeding proves
+	// only that cfg.PDPAddr parses as a target, not that a PDP is actually
+	// listening there yet. An unreachable PDP is a Check-time failure (every
+	// Decide call denies on it, per the package doc's FAIL CLOSED section),
+	// not a startup failure, the same way hook's own dial never blocks
+	// startup on the PDP being up.
+	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
+		return 1
+	}
+	defer func() { _ = conn.Close() }()
+
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not listen on %s: %s\n", cfg.ListenAddr, err)
@@ -201,17 +232,20 @@ func runExtauthzCmd(stderr io.Writer) int {
 	}
 
 	grpcServer := grpc.NewServer()
-	authv3.RegisterAuthorizationServer(grpcServer, &extauthzServer{})
+	authv3.RegisterAuthorizationServer(grpcServer, &extauthzServer{
+		client: pdpgrpc.NewPDPServiceClient(conn),
+		cfg:    cfg,
+	})
 
 	// This process's own startup configuration, not request data -- see the
 	// package doc's NEVER LOG REQUEST METADATA section, which this line does
 	// not touch. Logged once, the same way cmd/stratium-pdp/main.go logs
-	// cfg.TenantID and cfg.ListenAddr at startup. It also gives PDPAddr,
-	// AgentID, Subject, and ConnectTimeout -- all unread by Check until Task
-	// 2/3 -- a real production purpose in this task rather than sitting in
-	// extauthzConfig unused until then: an operator debugging a
-	// misconfigured fleet wants this line before those tasks land, not only
-	// after.
+	// cfg.TenantID and cfg.ListenAddr at startup. PDPAddr, AgentID, Subject,
+	// and ConnectTimeout are all live, read on every Check call as of this
+	// task (extauthzServer.cfg, above) -- this line gives an operator
+	// debugging a misconfigured fleet the same startup visibility hook and
+	// mcp already have into the identity and PDP address they enforce
+	// against.
 	_, _ = fmt.Fprintf(stderr, "stratium-pep: extauthz listening on %s (PDP %s, agent %s, subject %s, connect timeout %s)\n",
 		cfg.ListenAddr, cfg.PDPAddr, cfg.AgentID, cfg.Subject, cfg.ConnectTimeout)
 
@@ -222,51 +256,254 @@ func runExtauthzCmd(stderr io.Writer) int {
 	return 0
 }
 
-// extauthzServer implements authv3.AuthorizationServer. It holds nothing
-// yet: Task 1's Check needs no PDP client, no config, and no state, so
-// there is nothing here for Task 2/3 to find already stubbed out --
-// UnimplementedAuthorizationServer is embedded only for the forward
-// compatibility its own doc comment asks implementations to provide (a
-// future Authorization RPC this build does not know about fails clearly
-// rather than failing to compile), not because this task needs it for
-// anything Check itself does.
+// extauthzServer implements authv3.AuthorizationServer. client is the PDP
+// connection Check calls once decideRequestFromCheck has something worth
+// sending; cfg supplies the agent identity stamped onto every such request
+// (AgentID, Subject) and the timeout bounding the call (ConnectTimeout) --
+// the same three pieces of configuration hook.go's runHook and
+// mcp_authorize.go's mcpAuthorizer each thread through their own Decide
+// calls, read here from extauthzConfig instead of hookConfig only because
+// this surface has no session file to also carry (see the package doc's NO
+// SESSION FILE section). UnimplementedAuthorizationServer is embedded for
+// the forward compatibility its own doc comment asks implementations to
+// provide (a future Authorization RPC this build does not know about fails
+// clearly rather than failing to compile), unrelated to the two fields
+// below.
 type extauthzServer struct {
 	authv3.UnimplementedAuthorizationServer
+
+	client pdpgrpc.PDPServiceClient
+	cfg    extauthzConfig
 }
 
-// Check answers every request with the same unconditional deny. This is
-// Task 1's entire decision logic, and it is not a placeholder standing in
-// for "call the PDP" -- it is the one answer a server with no decision
-// logic at all can give without lying about what it decided. Returning OK
-// here, even temporarily, would make this server an open proxy from the
-// moment it is reachable: anything Envoy fronts would pass every request
-// through unconditionally until Task 2 and Task 3 land, and "ships for a
-// while as an open proxy" is not a phase this project's fail-closed rule
-// allows (see the package doc's FAIL CLOSED section).
+// requestMetadata is raw_input's JSON shape (plan §M3): the request's
+// method, path, and headers, with every credential-bearing header already
+// removed by extractBearerToken -- see that function's own doc comment for
+// which headers that is and why. Nothing in this binary ever decodes
+// raw_input again after decideRequestFromCheck builds it: the PDP receives
+// it, and reads it, as opaque bytes, exactly like hook.go's tool_input and
+// mcp_authorize.go's arguments (see the package doc). The json tags exist
+// so this shape round-trips predictably for a test (or an auditor's own
+// tooling reading the audit chain this ends up hashed into) -- not because
+// anything in this file reads them back.
+type requestMetadata struct {
+	Method  string            `json:"method"`
+	Path    string            `json:"path"`
+	Headers map[string]string `json:"headers"`
+}
+
+// bearerPrefix is the one authorization scheme extractBearerToken accepts,
+// matched exactly, case-sensitively: RFC 6750 spells the scheme "Bearer",
+// and plan §M2 writes the header the same way. This is a different axis
+// from the header NAME match below, which must fold case (HTTP header names
+// are case-insensitive per RFC 7230) -- the scheme token is not a header
+// name, no conformant client sends anything but this exact spelling, and no
+// test here asks for anything wider.
+const bearerPrefix = "Bearer "
+
+// credentialHeaderNames is every HTTP header extractBearerToken treats as
+// carrying live authority rather than descriptive request metadata, matched
+// against an incoming header's name case-insensitively -- see that
+// function's own doc comment for why case sensitivity here would be a strip
+// that silently fails. authorization is plan §M2's own credential, and the
+// value this function also reads to build DecideRequest.Token; cookie (RFC
+// 6265) and proxy-authorization (RFC 7235) carry the identical kind of
+// bearer authority by the same RFC-fixed meaning, just under a different
+// name -- a session cookie or a credential aimed at an upstream proxy is
+// exactly as dangerous sitting in raw_input as an Authorization value would
+// be. The list stops at headers whose credential-bearing meaning is fixed
+// by a standard: guessing further -- an X-Api-Key-shaped header, say --
+// would be this server deciding a deployment's own custom auth scheme is
+// security-relevant, which is a classification judgment, and Check has no
+// authority to classify anything (see the package doc's D1 rule).
+// TestCheck_RawInputPreservesNonCredentialHeaders defends the boundary this
+// stops at: a header that merely LOOKS auth-related (x-auth-context) must
+// still reach raw_input, not be swept up by an over-broad match.
+var credentialHeaderNames = map[string]bool{
+	"authorization":       true,
+	"cookie":              true,
+	"proxy-authorization": true,
+}
+
+// extractBearerToken reads headers (an AttributeContext_HttpRequest's own
+// Headers map) for a bearer token, and in the same pass builds the map that
+// becomes raw_input's own "headers" field with every credentialHeaderNames
+// entry removed -- one loop, one place in this file that decides which
+// headers count as a credential, rather than two lists (one for extraction,
+// one for stripping) that could drift apart and strip a different set than
+// the one actually read from.
 //
-// Nothing here reads req -- not its path, not its method, not any header,
-// which is what the blank identifier below enforces structurally rather
-// than merely by promise. There is no path allowlist, health-check
-// shortcut, or method-based shortcut in this function, and there must
-// never be one: any of those would be spec defect D1 (classifying a
-// request's meaning locally instead of asking the PDP) even before this
-// surface ever calls the PDP once. TestCheck_RequestShapeIsIrrelevant_StillDenies
-// (extauthz_test.go) proves a request shaped exactly like a health check
-// gets no special treatment.
+// Header names are matched via strings.ToLower, never a direct map lookup
+// on the key as sent: HTTP header names are case-insensitive (RFC 7230),
+// and Envoy's own contract documents that it normally lower-cases the
+// headers field's keys before this server ever sees them
+// (AttributeContext_HttpRequest's own field doc) -- but "normally" is a
+// property of Envoy's implementation, not a guarantee this function is
+// entitled to lean on, and every intermediary between a caller and this
+// server gets one chance to send a header this process must still
+// recognize regardless of how it capitalized the name.
+// TestExtractBearerToken_HeaderNameCaseDiffers_TokenStillFound and
+// TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing both send a
+// header this function would silently miss, or silently fail to strip, if
+// it ever trusted that guarantee instead.
+//
+// An error means there is no credential here worth sending to the PDP at
+// all: no authorization header, one that is not a Bearer challenge, or one
+// whose token is empty once the scheme is removed (an "authorization:
+// Bearer" header with nothing after it). token and stripped are both zero
+// values in every error case -- there is no partial result a careless
+// caller could mistake for a usable one.
+func extractBearerToken(headers map[string]string) (token string, stripped map[string]string, err error) {
+	stripped = make(map[string]string, len(headers))
+	var authValue string
+	found := false
+	for name, value := range headers {
+		lower := strings.ToLower(name)
+		if credentialHeaderNames[lower] {
+			if lower == "authorization" {
+				authValue, found = value, true
+			}
+			continue
+		}
+		stripped[name] = value
+	}
+
+	if !found {
+		return "", nil, errors.New("no authorization header")
+	}
+	if !strings.HasPrefix(authValue, bearerPrefix) {
+		return "", nil, errors.New("authorization header is not a Bearer token")
+	}
+	token = strings.TrimPrefix(authValue, bearerPrefix)
+	if token == "" {
+		return "", nil, errors.New("authorization header carries an empty Bearer token")
+	}
+	return token, stripped, nil
+}
+
+// decideRequestFromCheck maps req to the DecideRequest Check sends the PDP,
+// or an error naming why req cannot be mapped to one at all. The only two
+// ways this function fails are the two extractBearerToken itself can fail
+// with (no credential, or a malformed one): every other field req can carry
+// maps unconditionally, because req's own Get* accessors are nil-safe all
+// the way down -- a nil Attributes, Request, or Http yields "" for
+// method/path and a nil headers map, never a panic. A CheckRequest with no
+// HTTP attributes at all (Task 1's own TestCheck_NoDecisionLogicYet_
+// DeniesEveryRequestUnconditionally fixture, still exercised today) is
+// therefore not a third failure mode -- it is simply a request with an
+// empty path and no headers, which already fails the SAME "no authorization
+// header" check extractBearerToken applies to any other request.
+//
+// declared_tier is never set on the returned request, deliberately, the
+// same reasoning as hook.go's and mcp_authorize.go's identical omission
+// (see the package doc): this server has no real tier to declare, and a
+// guessed one only creates a chance to be wrong that the PDP's own
+// re-derivation (from tool and raw_input, against the tenant's catalog)
+// does not need. resource is left unset for the same reason those two
+// files leave it unset: nothing in this repo extracts it locally anymore
+// (spec §4.4.2 T3).
+func decideRequestFromCheck(req *authv3.CheckRequest, agentID, subject string) (*pdpgrpc.DecideRequest, error) {
+	httpReq := req.GetAttributes().GetRequest().GetHttp()
+
+	token, headers, err := extractBearerToken(httpReq.GetHeaders())
+	if err != nil {
+		return nil, err
+	}
+
+	rawInput, err := json.Marshal(requestMetadata{
+		Method:  httpReq.GetMethod(),
+		Path:    httpReq.GetPath(),
+		Headers: headers,
+	})
+	if err != nil {
+		// Method and path are plain strings and headers is a flat
+		// map[string]string with no cycles -- Marshal cannot fail for this
+		// shape in practice. Reported rather than assumed away, the same
+		// caution jsonrpcErrorFrame's own marshal takes in
+		// mcp_authorize.go for an equally can't-really-fail encode.
+		return nil, fmt.Errorf("could not serialize request metadata: %w", err)
+	}
+
+	return &pdpgrpc.DecideRequest{
+		AgentId:  agentID,
+		Subject:  subject,
+		Tool:     httpReq.GetPath(), // M1: the request path IS the tool identity.
+		RawInput: string(rawInput),
+		Token:    token,
+	}, nil
+}
+
+// Check maps req to a DecideRequest (decideRequestFromCheck, per plan
+// §§M1-M3) and, when that mapping succeeds, calls the PDP with it -- but it
+// still answers every request with a deny, exactly like Task 1's version,
+// regardless of what the PDP says or whether it could be reached at all.
+// That is deliberate, not an oversight left for later: turning
+// EFFECT_ALLOW into an OkResponse, EFFECT_DENY into a PERMISSION_DENIED
+// carrying the PDP's own reason, and EFFECT_ESCALATE into a degraded
+// deny-plus-pending-approval is Task 3's addition (see the package doc's
+// TASK 2 ADDITIONS section) -- this function's job ends at proving the
+// request this server builds and sends is correct, never at acting on what
+// comes back. Returning ALLOW from here, even once, for any reason, would
+// be exactly the open-proxy failure Task 1's own doc comment describes --
+// calling the PDP does not change that rule, it just means this task can
+// prove the call it makes is the right one.
+// TestCheck_ValidCredential_StillDeniesUntilTask3MapsTheResponse asserts
+// this even when the PDP itself answers EFFECT_ALLOW.
+//
+// The one branch that changes observable behavior from Task 1: a request
+// this server cannot extract a credential from -- no authorization header,
+// or one that is not a well-formed Bearer challenge -- denies WITHOUT ever
+// calling client.Decide (plan §M2, spec K4: there is no fallback credential
+// to try instead, so a PDP round trip could not answer anything a missing
+// credential does not already answer).
+// TestCheck_MissingAuthorizationHeader_DeniesWithoutContactingPDP and
+// TestCheck_MalformedAuthorizationHeader_DeniesWithoutContactingPDP both
+// assert this against the PDP's own received-call count, not merely
+// against Check's response -- a build that let a stray call through before
+// denying anyway would still pass a test that only inspected the
+// CheckResponse.
 //
 // Returning (resp, nil) rather than (nil, status.Error(codes.PermissionDenied, ...))
-// is deliberate, not incidental: ext_authz communicates a policy denial
-// through CheckResponse.Status (an application-level "the call succeeded,
-// and the answer is deny"), and reserves a returned Go error for the RPC
-// itself failing -- a distinction Envoy's own failure_mode_allow setting
-// treats very differently (a failed RPC can be configured to fail open; a
-// well-formed PERMISSION_DENIED response cannot). Task 1's Check cannot
-// fail -- it does no I/O, reads nothing -- so this is the only branch that
-// exists, but the shape it returns is the one every later task must keep:
-// a transport-level Go error here is reserved for a transport-level fault,
-// never for an ordinary denial.
-func (s *extauthzServer) Check(_ context.Context, _ *authv3.CheckRequest) (*authv3.CheckResponse, error) {
-	return denyCheckResponse("stratium-pep: extauthz has no authorization decision logic yet (Task 1 skeleton); denying unconditionally"), nil
+// for every outcome -- including a failed PDP call -- is the same
+// deliberate choice Task 1's version made, for the same reason: ext_authz
+// communicates a policy denial through CheckResponse.Status (an
+// application-level "the call succeeded, and the answer is deny"), and
+// reserves a returned Go error for the RPC itself failing -- a distinction
+// Envoy's own failure_mode_allow setting treats very differently (a failed
+// RPC can be configured to fail open; a well-formed PERMISSION_DENIED
+// response cannot). An unreachable PDP is folded into that SAME
+// ordinary-denial shape, exactly like a missing credential or a policy
+// DENY, never surfaced as a transport-level Go error -- doing the latter
+// would hand failure_mode_allow precisely the fail-open option this rule
+// exists to take away from it.
+func (s *extauthzServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
+	decideReq, err := decideRequestFromCheck(req, s.cfg.AgentID, s.cfg.Subject)
+	if err != nil {
+		return denyCheckResponse(fmt.Sprintf("stratium-pep: %s", err)), nil
+	}
+
+	// Derived from ctx, not context.Background(): unlike hook.go and
+	// mcp_authorize.go, which have no incoming RPC context to chain from
+	// (a CLI invocation, and a stdio relay, respectively), Check IS a gRPC
+	// handler with a real caller-supplied ctx already carrying Envoy's own
+	// deadline/cancellation. Bounding it further with ConnectTimeout keeps
+	// this call from outliving that budget; chaining from ctx instead of
+	// discarding it means a caller that hangs up mid-Check (Envoy itself
+	// timing out, a client disconnect) cancels the outbound Decide call
+	// too, rather than leaving it running for a response nothing is still
+	// waiting for.
+	callCtx, cancel := context.WithTimeout(ctx, s.cfg.ConnectTimeout)
+	defer cancel()
+	reason := "stratium-pep: extauthz has no response-mapping logic yet (Task 2 skeleton); denying unconditionally"
+	if _, decideErr := s.client.Decide(callCtx, decideReq); decideErr != nil {
+		// describeRPCError/agentOrDelegationUnknownMsg (hook.go) are shared
+		// across every surface that calls Decide with this same
+		// agent_id/subject/token shape, so an operator sees one
+		// vocabulary for "PDP unreachable" or "unknown agent/delegation"
+		// no matter which of hook, mcp, or extauthz hit it.
+		reason = fmt.Sprintf("stratium-pep: %s", describeRPCError(decideErr, agentOrDelegationUnknownMsg))
+	}
+	return denyCheckResponse(reason), nil
 }
 
 // denyCheckResponse builds an ext_authz denial carrying reason in both the
