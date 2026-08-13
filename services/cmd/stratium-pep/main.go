@@ -4,15 +4,19 @@
 // whatever it says.
 //
 // It is organized as subcommands, one per enforcement surface, because it
-// will grow more than one: "hook" (hook.go), wired to Claude Code's
-// PreToolUse hook, and "mcp" (mcp.go), an MCP proxy over stdio, exist today;
-// "proxy" and "extauthz" are later surfaces over the same PDP call.
-// Structuring the dispatch this way now means adding one of those later is a
-// new case in dispatch, not a restructuring of this binary. "session-start"
+// grows more than one: "hook" (hook.go), wired to Claude Code's PreToolUse
+// hook; "mcp" (mcp.go), an MCP proxy over stdio; and "extauthz"
+// (extauthz.go), a gRPC server answering Envoy's ext_authz Check for
+// requests Envoy fronts. "proxy" is a later surface over the same PDP call.
+// Structuring the dispatch this way means adding one of those later is a new
+// case in dispatch, not a restructuring of this binary. "session-start"
 // (session_start.go) is not itself an enforcement surface — it provisions
-// the delegation an enforcement surface later enforces, by calling
-// CreateDelegation once at session setup and caching what it returns for
-// hook (and mcp, and later proxy/extauthz) to read.
+// the delegation hook and mcp enforce, by calling CreateDelegation once at
+// session setup and caching what it returns for them to read. extauthz reads
+// no such cache: its token arrives fresh on every Check call, in the request
+// Envoy is itself forwarding, because the party being policed there is never
+// the process that ran session-start — see extauthz.go's own package doc for
+// why that makes it a different shape of surface, not a third copy of hook.
 //
 // "mcp" gates tools/call the same way hook gates a PreToolUse event — see
 // mcp.go's package doc, and mcp_authorize.go for the decision logic itself.
@@ -31,7 +35,10 @@
 // bypassable. See hook.go for where that boundary is drawn in code.
 // session-start holds the analogous line for its own RPC: it caches
 // whatever CreateDelegation actually granted, never what was requested —
-// see session_start.go.
+// see session_start.go. extauthz.go holds it too, in its strictest form yet:
+// as of its own Task 1 there is no PDP call to classify FOR, so Check denies
+// every request unconditionally rather than reading any part of one — see
+// extauthz.go's own package doc.
 package main
 
 import (
@@ -49,7 +56,7 @@ func main() {
 // stdin/stdout/stderr swapped for buffers.
 func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start|mcp> ...")
+		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start|mcp|extauthz> ...")
 		return 1
 	}
 
@@ -60,6 +67,8 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runSessionStartCmd(stderr)
 	case "mcp":
 		return runMCPCmd(stdin, stdout, stderr)
+	case "extauthz":
+		return runExtauthzCmd(stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: unknown subcommand %q\n", args[0])
 		return 1
