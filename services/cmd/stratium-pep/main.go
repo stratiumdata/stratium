@@ -5,11 +5,12 @@
 //
 // It is organized as subcommands, one per enforcement surface, because it
 // grows more than one: "hook" (hook.go), wired to Claude Code's PreToolUse
-// hook; "mcp" (mcp.go), an MCP proxy over stdio; and "extauthz"
-// (extauthz.go), a gRPC server answering Envoy's ext_authz Check for
-// requests Envoy fronts. "proxy" is a later surface over the same PDP call.
-// Structuring the dispatch this way means adding one of those later is a new
-// case in dispatch, not a restructuring of this binary. "session-start"
+// hook; "mcp" (mcp.go), an MCP proxy over stdio; "extauthz" (extauthz.go), a
+// gRPC server answering Envoy's ext_authz Check for requests Envoy fronts;
+// and "proxy" (proxy.go), a transparent gRPC proxy an agent points its own
+// gRPC client at directly, in place of the target it actually wants to
+// reach. Structuring the dispatch this way means adding one of those later
+// is a new case in dispatch, not a restructuring of this binary. "session-start"
 // (session_start.go) is not itself an enforcement surface — it provisions
 // the delegation hook and mcp enforce, by calling CreateDelegation once at
 // session setup and caching what it returns for them to read. extauthz reads
@@ -38,7 +39,11 @@
 // see session_start.go. extauthz.go holds it too, in its strictest form yet:
 // as of its own Task 1 there is no PDP call to classify FOR, so Check denies
 // every request unconditionally rather than reading any part of one — see
-// extauthz.go's own package doc.
+// extauthz.go's own package doc. proxy.go's own Task 1 repeats the identical
+// shape for a third transport: no PDP call yet, so every method this process
+// accepts is denied, unconditionally, by construction — see proxy.go's own
+// package doc for why a forwarding skeleton with nothing to decide with is
+// an open relay the moment it does anything else.
 package main
 
 import (
@@ -56,7 +61,7 @@ func main() {
 // stdin/stdout/stderr swapped for buffers.
 func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start|mcp|extauthz> ...")
+		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|session-start|mcp|extauthz|proxy> ...")
 		return 1
 	}
 
@@ -69,6 +74,8 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runMCPCmd(stdin, stdout, stderr)
 	case "extauthz":
 		return runExtauthzCmd(stderr)
+	case "proxy":
+		return runProxyCmd(stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: unknown subcommand %q\n", args[0])
 		return 1
