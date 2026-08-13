@@ -596,6 +596,56 @@ rule §4.3.1 states for every other dimension.
 
 ---
 
+### 4.7.1 Token issuance mechanics (2026-08-13)
+
+**A4** says the PDP decides and issues tokens as the sole signing-key holder;
+**A10** makes sender-constrained identity a prerequisite for `proxy` and
+`extauthz`. Four mechanics were open.
+
+**K1 — the signing key is a PEM file named by an environment variable.** The
+env holds the path, never the secret, so the key stays out of process
+environments, orchestrator manifests, and crash dumps. Rotation mounts a new
+file; a previous key stays loaded for verification only, so a token issued
+moments before a rotation still verifies.
+
+**K2 — the PEP forwards a token; the PDP verifies it.** This is **A1**: no
+decision logic outside the PDP. Verification is a decision about whether a
+credential is genuine, so it belongs where every other decision does. The
+consequence is that **JWKS is not on the enforcement path at all** — the PDP
+issues and verifies with the same key. **A5**'s assignment of JWKS to the PAP
+stands for when a PAP exists and a third party wants to verify independently;
+nothing in this phase needs it.
+
+**K3 — a token is an authenticated reference, never a capability.** It names a
+delegation; it does not carry one. The PDP still loads the delegation and all
+three legs still evaluate, exactly as they do for a bare id today. A token that
+outlives a revoked delegation is denied by the delegation leg, not by the token
+check. This is the same shape as **E7**'s approval: a fourth condition, never a
+bypass.
+
+**K4 — once tokens exist, the bare `delegation_id` path is removed.** This is
+the load-bearing consequence and it is not optional. If `Decide` continues to
+accept a bare delegation id, a token adds no security whatsoever against the
+attacker A10 describes: that attacker simply omits the token and sends the id.
+The PDP cannot distinguish a trusted local `hook` from a hostile network client,
+because under A1 and E7 it authenticates no callers at all.
+
+So **all four surfaces use tokens**, including `hook` and `mcp`, whose session
+file comes to hold a token instead of a delegation id. One authentication
+mechanism with no alternative is the only version of this that is worth
+building; two, where one is unauthenticated, is the weaker of the two
+everywhere.
+
+**What this does not close.** **C24** — an expired token denied even when a
+cache entry exists — still requires the PEP decision cache, which does not
+exist. It stays skipped with an accurate reason. **C25** requires DPoP, which is
+deferred to its own phase: a PDP-signed bearer token already satisfies A10's
+requirement that an agent cannot choose its own authority, since it cannot mint
+one; DPoP additionally resists replay of a stolen token, which is a different
+threat and needs a replay store.
+
+---
+
 ### 4.4.2 The per-tenant tool catalog, and extraction moves server-side (2026-08-12)
 
 §4.4 resolves an action's tier by tenant override, then tool catalog, then the
