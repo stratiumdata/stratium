@@ -258,12 +258,27 @@ type decideThenAllowClient struct {
 	first         *pdpgrpc.DecideResponse
 	calls         int
 	lastDecideReq *pdpgrpc.DecideRequest
+	// firstDecideReqToken is the FIRST call's own Token value, captured
+	// separately from lastDecideReq: reissueAndRetryDecide (reissue.go)
+	// mutates req.Token IN PLACE before the retry (req is reused, not
+	// rebuilt -- see that function's own doc comment on why), so once a
+	// second call has happened, lastDecideReq.GetToken() reflects the
+	// RETRY's token no matter what the first call carried -- a test
+	// asserting only lastDecideReq cannot tell "the first call's token was
+	// correct" from "it was wrong and got silently overwritten before
+	// anything looked at it." A plain string, not a second *DecideRequest
+	// pointer: req is a protobuf message carrying a sync.Mutex-shaped
+	// internal field (protoimpl.MessageState), and go vet's copylocks check
+	// correctly rejects snapshotting the whole struct -- the token string is
+	// the one field this type actually needs to remember past the retry.
+	firstDecideReqToken string
 }
 
 func (c *decideThenAllowClient) Decide(ctx context.Context, req *pdpgrpc.DecideRequest, opts ...grpc.CallOption) (*pdpgrpc.DecideResponse, error) {
 	c.calls++
 	c.lastDecideReq = req
 	if c.calls == 1 {
+		c.firstDecideReqToken = req.GetToken()
 		return c.first, nil
 	}
 	return &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Reason: "escalation approved"}, nil
@@ -777,9 +792,20 @@ func TestRunHook_NoCodePathSendsABareDelegationID(t *testing.T) {
 	}
 
 	// Call 1 (the original, denied Decide): Token must be the session
-	// file's own token, never the delegation id.
-	if got := wrapped.lastDecideReq; got == nil {
-		t.Fatal("Decide was never called")
+	// file's own token, never the delegation id. Checked against
+	// firstDecideReqToken specifically, captured BEFORE the retry -- checking
+	// only lastDecideReq here would pass even if the first call sent the
+	// delegation id, because the retry unconditionally overwrites req.Token
+	// before this test ever gets to look at it (this is not hypothetical:
+	// an earlier version of this test checked only lastDecideReq and did not
+	// actually catch that mutation -- see the task report).
+	if wrapped.firstDecideReqToken != wantSessionToken {
+		t.Errorf("first Decide's token = %q, want the session file's own token %q",
+			wrapped.firstDecideReqToken, wantSessionToken)
+	}
+	if wrapped.firstDecideReqToken == wantDelegationID {
+		t.Errorf("first Decide's token = the delegation id (%q) -- a bare delegation id must never be sent as a token",
+			wrapped.firstDecideReqToken)
 	}
 	// IssueToken is the one call that IS supposed to carry the delegation
 	// id -- confirming it arrived there, correctly, is what makes the
