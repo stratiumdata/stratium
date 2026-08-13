@@ -266,6 +266,87 @@ anything else about what it may or may not do under this system: a real,
 PDP-attributed denial reason, not a tool quietly missing from a list for
 reasons the agent was never told.
 
+## Seeding the tool catalog
+
+Neither `hook` nor `mcp` classifies a tool call anymore — see the package
+docs at the top of `hook.go` and `mcp_authorize.go`. The PDP derives a
+call's action tier and resource identity itself, server-side, from the
+tenant's own `tool_catalog` table (`services/migrations/000013_tool_catalog`,
+`000014_tool_catalog_nullable_tier`). **A tool with no catalog row still
+works** — it falls back to `internal/authz.DefaultCatalog`'s built-in
+tiers for Claude Code's own tool names, or, failing that, to the raw-input
+classifier — but a third-party tool (an MCP server's own tool names, which
+`DefaultCatalog` was never able to know about) gets no fallback at all: it
+derives `INTERNAL_MODIFY` by default, reads included, and a `READ_ONLY`
+delegation denies every single one of its calls. Catalog it to fix that.
+
+A row expresses one of three things:
+
+- **A fixed tier.** Most tools: the call always means the same thing,
+  regardless of its arguments (`Read` is always a read).
+- **No fixed tier, only a `command_field`.** Shell-shaped tools only —
+  `Bash`, and an MCP equivalent, if your server has one. The PDP extracts
+  that raw_input field and classifies the command itself (`rm -rf /` still
+  `DESTRUCTIVE`, `ls -la` still `READ_ONLY`). A row must supply one or the
+  other; the schema itself rejects a row with neither.
+- **No row at all.** The built-in/raw-input fallback above.
+
+Independently of tier, a row may also name a `resource_field`: the
+raw_input field (e.g. `"path"`) holding the call's resource identity. This
+is what lets a delegation's `ResourceConstraints` scope that tool at all —
+without it, the PDP has no way to know which argument identifies the
+resource being acted on, and any constraint on that tool just denies every
+call outright (the constrained key is never present). Most tools have no
+resource field (an array argument, a pattern, no arguments at all); leave
+it out rather than guessing.
+
+### Seed material for the two servers this project has run against
+
+`deploy/seed/tool-catalog-claude-code.sql` and
+`deploy/seed/tool-catalog-mcp-filesystem.sql` are data, not code: plain SQL,
+safe to re-run (`ON CONFLICT` upserts), one for Claude Code's own built-in
+tools and one for `@modelcontextprotocol/server-filesystem`. Read either
+file's own header comment before running it — in particular, both
+deliberately leave a few tools (`Glob`, `Grep`, `WebFetch`, `WebSearch`)
+with no `resource_field`, and say why.
+
+Run as `stratium_migrate` (the table owner — the serving role has `SELECT`
+only, by design; see `000013_tool_catalog`'s own `GRANT` comment: writing
+this table is always a control-plane action, never something the PDP does
+to itself):
+
+    psql "$STRATIUM_MIGRATION_DATABASE_URL" -v tenant_id='your-tenant-id' \
+        -f deploy/seed/tool-catalog-claude-code.sql
+    psql "$STRATIUM_MIGRATION_DATABASE_URL" -v tenant_id='your-tenant-id' \
+        -f deploy/seed/tool-catalog-mcp-filesystem.sql
+
+### Adding a tool of your own
+
+One row, following the same shape:
+
+    SELECT set_config('app.tenant_id', 'your-tenant-id', false);
+    INSERT INTO tool_catalog (tenant_id, tool_name, action_tier, verb, resource_field, command_field)
+    VALUES ('your-tenant-id', 'your_tool_name', 1, 'read', 'path', NULL)
+    ON CONFLICT (tenant_id, tool_name) DO UPDATE SET
+        action_tier = EXCLUDED.action_tier, verb = EXCLUDED.verb,
+        resource_field = EXCLUDED.resource_field, command_field = EXCLUDED.command_field;
+
+`action_tier`: `0` REASONING, `1` READ_ONLY, `2` INTERNAL_MODIFY,
+`3` EXTERNAL_COMMS, `4` DESTRUCTIVE — or `NULL`, paired with a
+`command_field`, for a shell-shaped tool (see above). `tool_name` is
+matched exactly and case-sensitively — `"read_file"` and `"Read_File"` are
+different rows, never merged or deduplicated case-insensitively.
+
+**The `set_config` line is not optional, and skipping it does not fail the
+same way twice.** `tool_catalog` has `FORCE ROW LEVEL SECURITY`
+(`000013_tool_catalog`), which applies even to the table's own owner. Skip
+it before an `INSERT` and the write fails loudly (`new row violates
+row-level security policy`) — annoying, but safe. Skip it before a `DELETE`
+or `UPDATE` and it fails silently: zero rows match `tenant_id =
+current_tenant()` (`NULL`), so the statement "succeeds" having touched
+nothing. A prior task lost time this way on exactly this table; set the
+tenant first, every time, for every write.
+
 ## Classification caps have no labelling source
 
 A delegation can carry a classification cap — for example `nato:

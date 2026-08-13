@@ -1607,6 +1607,253 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	})
 }
 
+// TestIntegration_Live_ToolCatalogEnforcement is Phase 8 Task 4's Part 2:
+// the five integration proofs the task brief asks for, against a live
+// stack. Runs against pdp-resource and resourceTenant -- the same service
+// and tenant TestIntegration_Live_ResourceIdentityEnforcement (Phase 7 Task
+// 4) already uses, for the same reason that test's own doc comment gives:
+// neither pdpClient's tenant nor narrowPdpClient's can host a new live
+// proof safely (see deploy/docker/docker-compose.yml's own comment on
+// pdp-resource). This test seeds its own agent, its own unconditional cedar
+// permit, and its own delegations -- not reused from the other test in this
+// file -- so it passes standalone (e.g. `go test -run
+// TestIntegration_Live_ToolCatalogEnforcement`) without depending on a
+// different top-level test function having run first in the same process;
+// the two tests share only the tenant.
+//
+// tool_catalog rows this test seeds ("read_file", "write_file") never
+// collide with anything TestIntegration_Live_ResourceIdentityEnforcement
+// uses (tool "Read" only, and no tool_catalog row at all) --
+// migrations/000013_tool_catalog's own UNIQUE(tenant_id, tool_name) is
+// case-sensitive and exact-match only.
+//
+// proof4 (the regression guard) is declared and runs FIRST, deliberately,
+// and depends on doing so: "a tenant with no catalog rows is unaffected"
+// can only be checked live at a moment this tenant genuinely has zero
+// tool_catalog rows, and every other subtest below seeds one. This is the
+// same ordered-subtest-state idiom
+// TestIntegration_Live_ResourceIdentityEnforcement's own proof1/proof2 pair
+// already uses in this file. Confirmed safe by grep, not merely assumed:
+// catalog_integration_test.go's three tests each seed into their own
+// dedicated tenant, none of them resourceTenant.
+//
+// Proof 5 ("the serving role cannot write the catalog") is not reproduced
+// here: TestIntegration_ToolCatalog_ServingRoleCannotWrite
+// (catalog_integration_test.go, Task 1) already proves it against a live
+// Postgres, in its own dedicated tenant, and this task's brief does not ask
+// for a second proof of a grant Task 1 already covered.
+func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
+	const subject = "tool-catalog-proof@example.com"
+
+	agentID := uuid.New()
+	// PLATFORM_TRUSTED, the ceiling: this test's proofs are about the
+	// delegation leg and the catalog's effect on the derived tier, not agent
+	// trust, so the agent leg must never itself be able to deny or confound
+	// a result -- the same reasoning proof9/proof12 (above, in this file)
+	// give their own agents, and Phase 6/7 Task 4's own real-agent runs give
+	// their own main agent.
+	seedAgent(t, resourceTenant, agentID, "integration-agent-tool-catalog", models.TrustTierPlatformTrusted)
+	seedPolicy(t, resourceTenant, "permit-tool-catalog-proof", `permit(principal, action, resource);`, "allow")
+
+	newDelegation := func(purpose string, maxTier models.ActionTier, constraints map[string]string) *models.Delegation {
+		id := uuid.New()
+		return seedDelegation(t, &models.Delegation{
+			ID: id, TenantID: resourceTenant, UserID: "integration-test-user", AgentID: agentID,
+			ApprovedTools: []string{}, MaxActionTier: maxTier,
+			ResourceConstraints: constraints,
+			Purpose:             purpose, ExpiresAt: time.Now().Add(time.Hour),
+			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+		})
+	}
+
+	// decide sends tool/rawInput and nothing else -- no wire Resource, no
+	// declared_tier -- exactly what a real hook/mcp PEP request carries
+	// (mcp_authorize.go's own decideAndRelay). This is the deliberate
+	// difference from TestIntegration_Live_ResourceIdentityEnforcement's own
+	// decide() helper, which sends Resource directly: that test proves the
+	// delegation leg's constraint CHECK; this one proves the catalog's
+	// server-side EXTRACTION feeding that same check from raw_input alone --
+	// Phase 7 Task 4's own Finding B, closed by this phase. Sending Resource
+	// directly here instead would silently test the old, pre-Phase-8
+	// mechanism this task exists to replace.
+	decide := func(t *testing.T, delegationID uuid.UUID, tool, rawInput string) *pdpgrpc.DecideResponse {
+		t.Helper()
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			DelegationId: delegationID.String(),
+			AgentId:      agentID.String(),
+			Subject:      subject,
+			Tool:         tool,
+			RawInput:     rawInput,
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		return resp
+	}
+
+	// readOnlyDelegation is shared by proof4, proof1, and proof2 -- the same
+	// delegation, decided against three times as its tool_catalog rows
+	// change underneath it, by design: proof4 proves what it does BEFORE any
+	// row exists, proof1 proves what changes once "read_file" is cataloged,
+	// and proof2 proves "write_file" still denies under the identical
+	// delegation once IT is cataloged too -- isolating the catalog row as
+	// the only thing that changed between each Decide() call.
+	var readOnlyDelegation *models.Delegation
+
+	t.Run("proof4_no_catalog_rows_unaffected_regression_guard", func(t *testing.T) {
+		got, err := store.New(testDB, resourceTenant).LoadToolCatalog(t.Context())
+		if err != nil {
+			t.Fatalf("LoadToolCatalog() error = %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("resourceTenant already has %d tool_catalog row(s) before this subtest seeds any -- "+
+				"this subtest must run first (see this test's own doc comment); got %+v", len(got), got)
+		}
+
+		readOnlyDelegation = newDelegation("proof1/2/4: read_file/write_file under a READ_ONLY delegation ceiling",
+			models.ActionTierReadOnly, nil)
+
+		// "read_file" is Phase 6's own negative 1's tool, with no catalog row
+		// -- reproducing exactly the pre-Phase-8 gap, live, as the
+		// counterfactual proof1 (below) closes: with no row to fix its tier,
+		// it falls to BuiltinTier's own "unrecognized -> assume it modifies"
+		// default (a JSON blob positively matches nothing), derives
+		// INTERNAL_MODIFY, and exceeds a READ_ONLY ceiling.
+		resp := decide(t, readOnlyDelegation.ID, "read_file", `{"path":"/tmp/tool-catalog-proof/notes.txt"}`)
+		t.Logf("Decide() for an uncataloged read_file -> effect=%s derived_tier=%d denied_leg=%q reason=%q",
+			resp.GetEffect(), resp.GetDerivedTier(), resp.GetDeniedLeg(), resp.GetReason())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY -- an uncataloged read_file must derive INTERNAL_MODIFY "+
+				"(BuiltinTier's own default) and exceed a READ_ONLY delegation ceiling, exactly as it did "+
+				"before this phase's tool_catalog existed at all", resp.GetEffect())
+		}
+		if resp.GetDerivedTier() != int32(models.ActionTierInternalModify) {
+			t.Errorf("DerivedTier = %d, want %d (INTERNAL_MODIFY)", resp.GetDerivedTier(), models.ActionTierInternalModify)
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if resp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW || resp.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect/AgentEffect = %v/%v, want ALLOW/ALLOW (isolating the delegation leg)",
+				resp.GetPrincipalEffect(), resp.GetAgentEffect())
+		}
+		if !strings.Contains(resp.GetReason(), "action tier INTERNAL_MODIFY exceeds delegation max_action_tier READ_ONLY") {
+			t.Errorf("Reason = %q, want it to name the tier-ceiling denial", resp.GetReason())
+		}
+	})
+
+	// proof1 is Phase 6's negative 1, closed: the identical delegation that
+	// just denied read_file (proof4, above) now permits it, once -- and
+	// only once -- a tool_catalog row exists for it.
+	t.Run("proof1_cataloged_read_file_permits_under_read_only_delegation", func(t *testing.T) {
+		if readOnlyDelegation == nil {
+			t.Fatal("proof4_no_catalog_rows_unaffected_regression_guard must run before this subtest")
+		}
+		resourceField := "path"
+		seedToolCatalogEntry(t, resourceTenant, "read_file", tierPtr(models.ActionTierReadOnly), "read", &resourceField, nil)
+
+		resp := decide(t, readOnlyDelegation.ID, "read_file", `{"path":"/tmp/tool-catalog-proof/notes.txt"}`)
+		t.Logf("Decide() for a READ_ONLY-cataloged read_file -> effect=%s derived_tier=%d",
+			resp.GetEffect(), resp.GetDerivedTier())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW -- read_file is now cataloged READ_ONLY, at the "+
+				"delegation's own ceiling; this is Phase 6 Task 4's negative 1, closed", resp.GetEffect())
+		}
+		if resp.GetDerivedTier() != int32(models.ActionTierReadOnly) {
+			t.Errorf("DerivedTier = %d, want %d (READ_ONLY)", resp.GetDerivedTier(), models.ActionTierReadOnly)
+		}
+		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW", resp.GetDelegationEffect())
+		}
+
+		// Persisted, not just the RPC response: the closed loop this proof
+		// claims should show up in the audit trail an operator would
+		// actually read.
+		rows := fetchAuditChain(t, resourceTenant)
+		if len(rows) == 0 || rows[len(rows)-1].Decision != "ALLOW" {
+			t.Fatalf("most recent audit row for resourceTenant, want Decision=ALLOW, got %+v", rows[len(rows)-1])
+		}
+	})
+
+	// proof2: the same delegation, still capped at READ_ONLY, denies
+	// write_file once it too is cataloged -- at INTERNAL_MODIFY, not
+	// READ_ONLY. This is what proves the catalog ROW is doing the work: a
+	// version of this phase that simply permitted every cataloged tool,
+	// without deriving ITS OWN tier per row, would still pass proof1 above.
+	t.Run("proof2_cataloged_write_file_denied_under_same_read_only_delegation", func(t *testing.T) {
+		if readOnlyDelegation == nil {
+			t.Fatal("proof4_no_catalog_rows_unaffected_regression_guard must run before this subtest")
+		}
+		resourceField := "path"
+		seedToolCatalogEntry(t, resourceTenant, "write_file", tierPtr(models.ActionTierInternalModify), "write", &resourceField, nil)
+
+		resp := decide(t, readOnlyDelegation.ID, "write_file", `{"path":"/tmp/tool-catalog-proof/report.txt","content":"hello"}`)
+		t.Logf("Decide() for an INTERNAL_MODIFY-cataloged write_file under a READ_ONLY delegation -> "+
+			"effect=%s derived_tier=%d reason=%q", resp.GetEffect(), resp.GetDerivedTier(), resp.GetReason())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY -- write_file is cataloged INTERNAL_MODIFY, above this "+
+				"delegation's READ_ONLY ceiling; an ALLOW here would mean cataloging permits everything "+
+				"regardless of its own declared tier", resp.GetEffect())
+		}
+		if resp.GetDerivedTier() != int32(models.ActionTierInternalModify) {
+			t.Errorf("DerivedTier = %d, want %d (INTERNAL_MODIFY)", resp.GetDerivedTier(), models.ActionTierInternalModify)
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if resp.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW || resp.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect/AgentEffect = %v/%v, want ALLOW/ALLOW (isolating the delegation leg)",
+				resp.GetPrincipalEffect(), resp.GetAgentEffect())
+		}
+		if !strings.Contains(resp.GetReason(), "action tier INTERNAL_MODIFY exceeds delegation max_action_tier READ_ONLY") {
+			t.Errorf("Reason = %q, want it to name the tier-ceiling denial", resp.GetReason())
+		}
+	})
+
+	// proof3 is Phase 7 Task 4's Finding B, closed: a resource constraint can
+	// now discriminate on the MCP surface at all, because "read_file"'s own
+	// catalog row (seeded in proof1, above) names resource_field "path" --
+	// the PDP extracts it from raw_input itself; nothing on the wire ever
+	// carries a caller-supplied Resource (see decide's own doc comment).
+	// Before this phase, mcp mode always sent an EMPTY resource map for a
+	// third-party tool (cmd/stratium-pep/resource.go's resourceIDFields knew
+	// only Claude Code's own tool names), so a ResourceConstraints entry
+	// could never distinguish one MCP call from another -- it would simply
+	// deny every one of them, unconditionally, on the constrained key's
+	// absence from an always-empty resource map.
+	t.Run("proof3_resource_constraint_discriminates_on_the_mcp_surface", func(t *testing.T) {
+		const allowed = "/tmp/tool-catalog-proof/allowed.txt"
+		const other = "/tmp/tool-catalog-proof/other.txt"
+		constrained := newDelegation("proof3: resource constraint scoped via read_file's own catalog resource_field",
+			models.ActionTierReadOnly, map[string]string{"id": allowed})
+
+		matching := decide(t, constrained.ID, "read_file", `{"path":"`+allowed+`"}`)
+		t.Logf("Decide() for read_file at its constrained path -> effect=%s", matching.GetEffect())
+		if matching.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v, want EFFECT_ALLOW (raw_input's own \"path\" matches the constraint)",
+				matching.GetEffect())
+		}
+
+		mismatched := decide(t, constrained.ID, "read_file", `{"path":"`+other+`"}`)
+		t.Logf("Decide() for read_file at a different path -> effect=%s denied_leg=%q reason=%q",
+			mismatched.GetEffect(), mismatched.GetDeniedLeg(), mismatched.GetReason())
+		if mismatched.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (raw_input's own \"path\" does not match the constraint)",
+				mismatched.GetEffect())
+		}
+		if mismatched.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", mismatched.GetDeniedLeg(), "delegation")
+		}
+		if mismatched.GetPrincipalEffect() != pdpgrpc.Effect_EFFECT_ALLOW || mismatched.GetAgentEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("PrincipalEffect/AgentEffect = %v/%v, want ALLOW/ALLOW (isolating the delegation leg)",
+				mismatched.GetPrincipalEffect(), mismatched.GetAgentEffect())
+		}
+		if !strings.Contains(mismatched.GetReason(), `does not match request value "`+other+`"`) {
+			t.Errorf("Reason = %q, want it to name the mismatched value extracted from raw_input", mismatched.GetReason())
+		}
+	})
+}
+
 // TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother is
 // proof 4: a malformed XACML policy alongside a valid Cedar forbid. XACML's
 // Prepare fails for the whole tenant (one malformed policy poisons that
