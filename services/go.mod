@@ -10,7 +10,9 @@ require (
 
 require (
 	github.com/cedar-policy/cedar-go v1.8.0
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lib/pq v1.10.9
 	github.com/open-policy-agent/opa v1.19.0
@@ -49,6 +51,7 @@ require (
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
 	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
