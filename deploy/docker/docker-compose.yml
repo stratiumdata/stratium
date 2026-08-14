@@ -314,6 +314,63 @@ services:
     ports:
       - "50051"
 
+  # Seventh PDP instance, wired for one purpose: Phase 12 Task 3's live-stack
+  # revocation-epoch proofs (services/internal/store/revocation_epoch_e2e_
+  # integration_test.go) need real Decide() and CreateDelegation() calls,
+  # over real gRPC, whose responses carry the epoch a future cache would
+  # validate against -- but none of the PDP instances above can serve that
+  # safely, for the identical reason pdp-resource's own comment already
+  # gives at length: `pdp`'s tenant (tenant-one) already carries
+  # TestEndToEnd's own cedar policies and its own order-dependent proofs,
+  # and TestEndToEnd's own last subtest permanently revokes the serving
+  # role's INSERT on audit_chain for the rest of that postgres instance's
+  # life -- role-level, not tenant-scoped, so every OTHER PDP instance
+  # sharing that role would go the same way the instant a live Decide() call
+  # here happened to run after it.
+  #
+  # An eighth tenant alone is not sufficient here, unlike pdp-narrow's and
+  # pdp-resource's own tenants (both consumed by tests declared INSIDE
+  # store_integration_test.go, before TestEndToEnd in that file's own
+  # declaration order, which protects them from the revoke without either
+  # of their own comments having to say so) -- confirmed live: an earlier
+  # version of the consuming test file used a dedicated tenant through THIS
+  # service but was itself named to sort alphabetically after store_
+  # integration_test.go (go test's cross-file order is filename order), and
+  # every live-RPC proof in it still failed with "permission denied for
+  # table audit_chain" once TestEndToEnd's own last subtest had already run.
+  # The dedicated tenant here and that file's own name -- chosen to sort
+  # BEFORE store_integration_test.go -- are both required together; this
+  # service alone only closes the "shared, order-dependent tenant" half of
+  # the problem pdp-resource's comment describes, not the "role-wide grant,
+  # revoked once, for the rest of the process" half. catalog_integration_
+  # test.go, escalation_integration_test.go, extauthz_integration_test.go,
+  # and proxy_integration_test.go all already sort before store_integration_
+  # test.go too, which is why none of their own PDP instances' comments
+  # needed to name this constraint before now.
+  #
+  # Shares the same postgres instance as the PDPs above (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart). Full default policy-language
+  # registry (STRATIUM_POLICY_LANGUAGES left unset), matching pdp,
+  # pdp-resource, pdp-extauthz, and pdp-proxy: these proofs only ever need
+  # cedar.
+  pdp-epoch:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-epoch-e2e-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # See the "pdp" service's own comment on this variable above -- same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+    ports:
+      - "50051"
+
   # The real gRPC service Task 4's proxy proof puts stratium-pep proxy in
   # front of. Unlike echo-upstream (deploy/docker/echo-upstream/main.go,
   # deliberately outside the "stratium" module -- see its own Dockerfile),

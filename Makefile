@@ -69,7 +69,8 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	pdp_proxy_port=$$($(COMPOSE) port pdp-proxy 50051 | sed -E 's/.*://'); \
 	grpc_target_port=$$($(COMPOSE) port grpc-target 50051 | sed -E 's/.*://'); \
 	pep_proxy_port=$$($(COMPOSE) port pep-proxy 9292 | sed -E 's/.*://'); \
-	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port"; \
+	pdp_epoch_port=$$($(COMPOSE) port pdp-epoch 50051 | sed -E 's/.*://'); \
+	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port   pdp-epoch -> localhost:$$pdp_epoch_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_SERVING_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PDP_ADDR="localhost:$$pdp_port" \
@@ -83,6 +84,8 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	STRATIUM_IT_ENVOY_ADDR="localhost:$$envoy_port" \
 	STRATIUM_IT_PDP_PROXY_ADDR="localhost:$$pdp_proxy_port" \
 	STRATIUM_IT_PROXY_TENANT_ID="tenant-proxy-integration" \
+	STRATIUM_IT_PDP_EPOCH_ADDR="localhost:$$pdp_epoch_port" \
+	STRATIUM_IT_EPOCH_TENANT_ID="tenant-epoch-e2e-integration" \
 	STRATIUM_IT_GRPC_TARGET_ADDR="localhost:$$grpc_target_port" \
 	STRATIUM_IT_PEP_PROXY_ADDR="localhost:$$pep_proxy_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...

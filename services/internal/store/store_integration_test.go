@@ -258,6 +258,20 @@ var (
 	// proxy or the PDP reports (proxy_integration_test.go's own package doc).
 	proxyTargetClient  grpctarget.TargetServiceClient
 	directTargetClient grpctarget.TargetServiceClient
+
+	// epochPdpClient and epochTenant back Phase 12 Task 3's live-stack
+	// revocation-epoch proofs (revocation_epoch_e2e_integration_test.go): a
+	// seventh, independently configured PDP (deploy/docker/docker-compose.yml's
+	// pdp-epoch service), its own tenant, touched by nothing else in this
+	// package — the same reasoning narrowPdpClient, resourcePdpClient,
+	// envoyPdpClient, and proxyPdpClient's own comments already give,
+	// restated a fifth time in that compose service's own comment rather
+	// than here. Dialed directly like the other four: those proofs need a
+	// host-reachable gRPC client to mint tokens (IssueToken) and to drive
+	// real Decide()/CreateDelegation() calls whose responses carry the
+	// epoch a future cache would validate against.
+	epochPdpClient pdpgrpc.PDPServiceClient
+	epochTenant    string
 )
 
 func TestMain(m *testing.M) {
@@ -282,24 +296,29 @@ func runTestMain(m *testing.M) int {
 	proxyTenant = os.Getenv("STRATIUM_IT_PROXY_TENANT_ID")
 	grpcTargetAddr := os.Getenv("STRATIUM_IT_GRPC_TARGET_ADDR")
 	pepProxyAddr := os.Getenv("STRATIUM_IT_PEP_PROXY_ADDR")
+	epochPdpAddr := os.Getenv("STRATIUM_IT_PDP_EPOCH_ADDR")
+	epochTenant = os.Getenv("STRATIUM_IT_EPOCH_TENANT_ID")
 	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
 		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
-		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" {
+		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" ||
+		epochPdpAddr == "" || epochTenant == "" {
 		fmt.Fprintln(os.Stderr,
 			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
 				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, "+
 				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, "+
 				"STRATIUM_IT_ENVOY_ADDR, STRATIUM_IT_PDP_PROXY_ADDR, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_GRPC_TARGET_ADDR, "+
-				"and STRATIUM_IT_PEP_PROXY_ADDR must all be set — run via `make integration`, not `go test` directly")
+				"STRATIUM_IT_PEP_PROXY_ADDR, STRATIUM_IT_PDP_EPOCH_ADDR, and STRATIUM_IT_EPOCH_TENANT_ID must all be set — "+
+				"run via `make integration`, not `go test` directly")
 		return 1
 	}
 	tenants := map[string]bool{
 		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true, proxyTenant: true,
+		epochTenant: true,
 	}
-	if len(tenants) != 6 {
+	if len(tenants) != 7 {
 		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
-			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, and the test's hardcoded second tenant must "+
-			"all be distinct from one another")
+			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_EPOCH_TENANT_ID, and the test's "+
+			"hardcoded second tenant must all be distinct from one another")
 		return 1
 	}
 
@@ -420,6 +439,14 @@ func runTestMain(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "pep-proxy: %v\n", err)
 		return 1
 	}
+
+	epochClient, closeEpochConn, err := dialAndWaitForServing(ctx, epochPdpAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-epoch: %v\n", err)
+		return 1
+	}
+	defer closeEpochConn()
+	epochPdpClient = epochClient
 
 	return m.Run()
 }
