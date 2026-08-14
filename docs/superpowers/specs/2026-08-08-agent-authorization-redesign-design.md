@@ -1074,6 +1074,51 @@ that the live path already honours.
 
 ---
 
+### 4.10.1 Granting requires identity; taking away requires only a role (2026-08-14)
+
+The admin plane performs three writes that look alike and are not. The epoch
+trigger already encodes the difference: it fires on `tool_catalog` and on
+`delegations` UPDATE/DELETE, and **deliberately not on `approvals`**, because an
+approval does not change what an existing decision would evaluate to.
+
+- **Tool catalog** — configuration; changes future decisions.
+- **Revocation** — **reduces** authority, cascading to every descendant.
+- **Approval** — **grants** authority, for one specific action.
+
+**N7 — an approval requires the operator's identity to equal the approval's
+`root_principal`. A role is necessary and never sufficient.**
+
+**C21** routes an escalation to the chain's *root* principal precisely so a
+chain cannot approve itself: at depth > 0 the immediate delegator is an agent,
+and approval must reach the human at the root. If an `admin` role were enough,
+that routing would be decorative, and an admin approving on another user's
+behalf is the privilege amplification this product positions against.
+
+Revocation carries no such requirement. **Taking authority away should require
+less than giving it**, so a role check suffices there — the worst outcome of a
+wrongly-scoped revocation is that something stops working, which fails closed.
+
+**There is no override.** An escalation whose approver is unavailable times out
+and denies, which is **C22**'s designed behaviour, not a gap. An override would
+make C21 advisory rather than structural, and an override that exists is used
+routinely rather than exceptionally.
+
+**N8 — the operator's principal subject comes from a configured OIDC claim, and
+when that claim is `email`, `email_verified` must be true.**
+
+`approvals.root_principal` is a free-text subject populated from
+`DecideRequest.Subject`, which a PEP sends from its own configuration — an email
+in practice. An IdP's `sub` is opaque and will not match it, so a claim must be
+nominated, exactly as roles are (**N2**).
+
+The `email_verified` requirement closes a specific and otherwise invisible path:
+some IdPs permit a self-asserted `email`, which would let an operator name
+themselves any root principal and approve their own escalations. The resulting
+audit row would look like a legitimate approval. One check, one config value,
+and an impersonation path that would never have surfaced as a failure.
+
+---
+
 ### 4.10 The admin plane (2026-08-14)
 
 **A3** names `stratium-pap` as one of three artifacts and **A5** makes it
