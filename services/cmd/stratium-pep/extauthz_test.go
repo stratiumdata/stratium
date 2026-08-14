@@ -408,6 +408,41 @@ func TestCheck_Allow_ReturnsOkResponse(t *testing.T) {
 	}
 }
 
+// TestCheck_RepeatedIdenticalRequests_AlwaysCallsPDP is spec §4.8.3 W6 as a
+// test, not a comment: this file never gains a decision cache (see
+// local_cache.go's own package doc for exactly where that boundary sits and
+// why -- extauthz's caller IS the party being policed, so a cache hit here
+// would mean serving a decision on the strength of a token this server never
+// verified). An identical request repeated must reach the PDP every single
+// time; a future edit that wired a cache into this file -- even innocently,
+// by copying hook.go's or mcp_authorize.go's own pattern -- would make the
+// second and later calls below short-circuit before ever reaching
+// fake.Decide, which is exactly what requestCount() catches: it would read
+// less than attempts, not equal to it.
+func TestCheck_RepeatedIdenticalRequests_AlwaysCallsPDP(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	const attempts = 5
+	for i := 0; i < attempts; i++ {
+		resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+			"authorization": "Bearer " + testBearerToken,
+		}))
+		if err != nil {
+			t.Fatalf("Check() attempt %d error = %v", i, err)
+		}
+		if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_OK); got != want {
+			t.Fatalf("attempt %d: Status.Code = %d, want %d (OK)", i, got, want)
+		}
+	}
+	if got := fake.requestCount(); got != attempts {
+		t.Errorf("PDP received %d Decide call(s) for %d identical requests, want exactly %d -- extauthz "+
+			"must never serve a repeat from a cache (spec W6): every request re-authenticates the "+
+			"caller's own token, which only the PDP can verify (K2)", got, attempts, attempts)
+	}
+}
+
 // TestCheck_UnreachablePDP_DeniesAsOrdinaryResponse_NotTransportError is the
 // test Check's own doc comment promises but nothing above actually
 // exercises: every other test scripts a fakePDP that answers (with ALLOW,

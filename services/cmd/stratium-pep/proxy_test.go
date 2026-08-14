@@ -892,6 +892,33 @@ func TestAuthorize_NeverSendsDeclaredTier(t *testing.T) {
 	}
 }
 
+// TestAuthorize_RepeatedIdenticalCalls_AlwaysCallsPDP is spec §4.8.3 W6 as a test, not a comment:
+// this file never gains a decision cache (see local_cache.go's own package doc for exactly where
+// that boundary sits and why -- proxy's caller IS the party being policed, so a cache hit here
+// would mean serving a decision on the strength of a token this server never verified). Calling
+// authorize repeatedly with the exact same method and token must reach the PDP every single time --
+// a future edit that wired a cache into this file would make the second and later calls below
+// short-circuit before ever reaching fake.Decide, which is exactly what requestCount() catches.
+func TestAuthorize_RepeatedIdenticalCalls_AlwaysCallsPDP(t *testing.T) {
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	const method = "/svc.Svc/Method"
+	const attempts = 5
+	for i := 0; i < attempts; i++ {
+		allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
+		if !allowed {
+			t.Fatalf("authorize() attempt %d denied (%s), want allowed", i, reason)
+		}
+	}
+	if got := fake.requestCount(); got != attempts {
+		t.Errorf("PDP received %d Decide call(s) for %d identical authorize() calls, want exactly %d -- "+
+			"proxy must never serve a repeat from a cache (spec W6): the caller here IS the policed "+
+			"party, and only the PDP can verify its own token (K2)", got, attempts, attempts)
+	}
+}
+
 // TestAuthorize_MissingToken_DeniesWithoutContactingPDP is the test the brief asks for by name:
 // K4 leaves no fallback credential, so a request with no authorization metadata at all must not
 // merely be denied -- it must never reach the PDP in the first place. Asserted against the fake's
