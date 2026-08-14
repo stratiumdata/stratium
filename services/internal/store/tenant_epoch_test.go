@@ -62,6 +62,18 @@ func TestStore_LoadTenantEpoch_Success(t *testing.T) {
 // A tenant with no tenant_epoch row is not an error: it reports
 // defaultTenantEpoch (1), the schema's own DEFAULT and the value Task 1's
 // migration documents every reader must already treat an absent row as.
+//
+// Asserted against BOTH the named constant and the literal 1, deliberately:
+// a comparison against defaultTenantEpoch alone is blind to defaultTenantEpoch
+// itself being wrong (mutation-tested — changing its declaration to 2, the
+// trigger's own first-bump value, left this assertion passing, tautologically,
+// against the very constant that had just been mutated). The literal is what
+// actually pins the value migrations/000015_tenant_epoch_trigger's own
+// comment depends on staying distinguishable from a fresh row's initial
+// bump — TestIntegration_TenantEpoch_LoadForUnseenTenantReturnsSchemaDefault
+// (tenant_epoch_integration_test.go) already asserts the same literal against
+// a real database, but a unit test should not depend on an integration test
+// to catch a defect this cheap to pin here too.
 func TestStore_LoadTenantEpoch_NoRowReturnsDefault(t *testing.T) {
 	s, mock := newMockStore(t)
 
@@ -77,6 +89,12 @@ func TestStore_LoadTenantEpoch_NoRowReturnsDefault(t *testing.T) {
 	}
 	if got != defaultTenantEpoch {
 		t.Errorf("LoadTenantEpoch() = %d, want %d (defaultTenantEpoch)", got, defaultTenantEpoch)
+	}
+	if got != 1 {
+		t.Errorf("LoadTenantEpoch() = %d, want 1: the schema's own DEFAULT (migrations/000001_baseline), "+
+			"and one less than the trigger's own first-bump value (migrations/000015_tenant_epoch_trigger) — "+
+			"the two must never collide, or a freshly-bumped tenant would be indistinguishable from one never "+
+			"written at all", got)
 	}
 
 	assertExpectationsMet(t, mock)
