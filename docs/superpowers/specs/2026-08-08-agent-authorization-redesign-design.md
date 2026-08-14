@@ -917,6 +917,65 @@ approval succeeds. One decision semantic, per-surface delivery.
 
 Escalation outcomes are never cached.
 
+### 4.8.2 Decision cache mechanics (2026-08-14)
+
+§4.8 establishes that caching buys **outage tolerance** first and speed second,
+and that the principal leg's hit rate is near zero because its key includes the
+resource instance. §4.8.1 built the epoch. Five mechanics remain.
+
+**W1 — whole decisions are cached, never individual legs.** §4.8's per-leg key
+table describes where hit rates *would* differ, not a caching unit. Caching legs
+separately would require the PEP to combine partial results into a verdict —
+decision logic outside the PDP, which is spec defect **D1**, the hole this
+system exists to close. The near-zero principal hit rate is accepted as the
+honest cost: this is an availability feature, not a latency one.
+
+**W2 — the key is (delegation id, tool, input digest).** The digest is
+`sha256(raw_input)`, the same value the audit chain already records, rather than
+a second notion of request identity. Keying on the **delegation id** and not the
+token is deliberate: a token rotates while the delegation persists, so keying on
+the token would discard the whole cache on every re-issue.
+
+Everything else a decision depends on — the agent, policies, catalog, tier
+overrides — is covered by the epoch. Everything time-dependent is covered by
+W3. Nothing else belongs in the key.
+
+**W3 — four independent validity conditions, all required.** A cached entry
+serves only if:
+
+1. its epoch equals the last epoch the PEP saw from the PDP — **C20**;
+2. the delegation has not expired, per the expiry recorded in the entry — the
+   time half of **C24**, and the reason §4.8.1 **V2** keeps expiry out of the
+   epoch;
+3. the caller's token is itself still valid — the credential half of **C24**. A
+   cache hit must never let an expired credential through, and a token can only
+   be refreshed by reaching the PDP, so during an outage an expired token
+   denies;
+4. it is within a configured staleness window since the last successful PDP
+   contact — **C19**'s bound. Required config with no default: an operator
+   states how long an unverifiable decision may keep working, because no default
+   is right for every deployment.
+
+**W4 — escalation outcomes are never cached.** §4.6 already says so; it is
+restated here because it is easy to miss when implementing and the failure is
+silent. An escalation is a decision about a moment, and a cached `ESCALATE` would
+either re-block a call already approved or serve an approval that was never
+granted.
+
+**W5 — on disk, beside the session file, with the same integrity posture.**
+The `hook` is a subprocess that exits after every tool call, so an in-memory
+cache is worthless on the surface most likely to be offline. Written
+`os.CreateTemp` + `os.Rename` at `0600` set at creation, matching
+`writeSessionFile` exactly, because tool calls run in parallel and a torn cache
+file is a corrupted authorization record.
+
+The cache holds decisions, not credentials — and an attacker who can write it
+can already write the session file, which holds a bearer token. **The cache
+therefore does not lower the security bar**, and its integrity requirement is
+the session file's, not a new one.
+
+---
+
 ### 4.8.1 Revocation epoch mechanics (2026-08-14)
 
 §4.8 describes a monotonic per-tenant counter that every cached decision records
