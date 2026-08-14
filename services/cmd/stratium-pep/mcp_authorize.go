@@ -225,7 +225,7 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		// one reissue and retry, mirroring hook.go's runHook one call site over. A failure here (the
 		// reissue call itself, or the retried Decide) denies; a success replaces resp with the
 		// retry's own response and falls through to the same switch below.
-		reissued, reissueErr := reissueAndRetryDecide(a.client, a.cfg, sess.GetDelegationId(), req)
+		reissued, reissueErr := reissueAndRetryDecide(a.client, a.cfg.ConnectTimeout, sess.GetDelegationId(), req)
 		if reissueErr != nil {
 			a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", reissueErr))
 			return

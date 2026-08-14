@@ -48,6 +48,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"stratium/internal/pdpgrpc"
 )
@@ -86,13 +87,31 @@ const reissueTTLSeconds int64 = 10 * 365 * 24 * 60 * 60 // 10 years; always clam
 // therefore polls and retries under the NEW token, not the stale one that
 // was just replaced, without either caller needing to thread it through
 // separately.
+//
+// connectTimeout is read by VALUE, not a cfg hookConfig struct: this
+// function has exactly one caller in hook.go (a genuine hookConfig) and one
+// in mcp_authorize.go's decideAndRelay (mcpAuthorizer.cfg, ALSO a
+// hookConfig, per that struct's own deliberate reuse -- see its doc
+// comment), but reads only this one field of either. A concrete hookConfig
+// parameter here would be the identical "lie wearing hookConfig's name"
+// escalation.go's own package doc already named and fixed for
+// resolveApproval, one function over, for the same reason: a signature
+// naming a caller-shaped type it mostly ignores reads as hook-specific to
+// anyone grepping for hookConfig usages, when this logic is not -- both of
+// its real callers already prove that -- and a future third caller with no
+// hookConfig of its own (proxy's authorize needed exactly this reshape for
+// resolveApproval, escalation.go's own doc comment) would hit the identical
+// wall resolveApproval already hit before this parameter existed. Stating
+// the one duration this function actually needs, directly, is the smaller
+// and more honest fix, applying the same lesson to this function that
+// resolveApproval's own history already paid for once.
 func reissueAndRetryDecide(
 	client pdpgrpc.PDPServiceClient,
-	cfg hookConfig,
+	connectTimeout time.Duration,
 	delegationID string,
 	req *pdpgrpc.DecideRequest,
 ) (*pdpgrpc.DecideResponse, error) {
-	issueCtx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
+	issueCtx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	issued, err := client.IssueToken(issueCtx, &pdpgrpc.IssueTokenRequest{
 		DelegationId: delegationID,
@@ -104,7 +123,7 @@ func reissueAndRetryDecide(
 
 	req.Token = issued.GetToken()
 
-	retryCtx, retryCancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer retryCancel()
 	resp, err := client.Decide(retryCtx, req)
 	if err != nil {

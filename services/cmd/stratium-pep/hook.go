@@ -273,7 +273,7 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		// Decide) denies; a success replaces resp with the retry's own
 		// response and falls through to the same switch below, which may
 		// then see ALLOW, ESCALATE, or a fresh DENY.
-		reissued, reissueErr := reissueAndRetryDecide(client, cfg, sess.GetDelegationId(), req)
+		reissued, reissueErr := reissueAndRetryDecide(client, cfg.ConnectTimeout, sess.GetDelegationId(), req)
 		if reissueErr != nil {
 			return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", reissueErr))
 		}
