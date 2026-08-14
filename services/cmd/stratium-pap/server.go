@@ -71,6 +71,29 @@ import (
 type Operator struct {
 	Role    Role
 	Subject string
+
+	// ApproverIdentity is the operator's identity for N7's comparison
+	// against an approval's root_principal (spec §4.10.1) — resolved from a
+	// SECOND, independently configured claim (N8, role.go's
+	// resolveApproverIdentity), never Subject's own "sub": root_principal is
+	// populated from a PEP's own DecideRequest.Subject configuration (an
+	// email, in most deployments), which an IdP's opaque "sub" claim was
+	// never going to match by coincidence.
+	//
+	// Resolved once per request, here in authorize, the same as Role and
+	// Subject — but unlike them, its being empty does not by itself refuse
+	// the request: nothing about a routine policy or agent write depends on
+	// this identity, so failing every route over a claim N7/N8 exist only to
+	// gate ONE of them on would refuse work those rulings were never written
+	// to touch. approvals.go's decideApproval is the one caller that
+	// requires a non-empty value, and it checks that itself, immediately,
+	// before ever reaching internal/store.
+	//
+	// Not tenant-carrying, so the package doc's "do not widen Operator"
+	// constraint (N1) does not apply to it: that constraint is specifically
+	// about a per-request TENANT, and this field names an operator, exactly
+	// as Subject already does.
+	ApproverIdentity string
 }
 
 // routeHandler is the only signature a PAP route handler may have -- see
@@ -111,6 +134,31 @@ type routeSpec struct {
 // and deletes (GET/POST/PUT/DELETE). Handlers live in policies.go,
 // agents.go, and tier_overrides.go respectively -- one file per resource,
 // matching internal/store's own per-table file split.
+//
+// Task 4 adds three more resources, each shaped differently on purpose (spec
+// §4.10.1 -- "the admin plane performs three writes that look alike and are
+// not"), so none of them reuses the five-route CRUD shape above uniformly:
+//
+//   - tool-catalog: list/create/get/update, viewer/editor as above, but no
+//     delete route -- migrations/000016_stratium_pap_role deliberately
+//     withholds DELETE on tool_catalog ("no delete caller in this phase"),
+//     and a route with no grant behind it would only ever answer
+//     insufficient_privilege.
+//   - approvals: two POST actions, not a PUT replace -- an approval has no
+//     sensible "full replace" (its request-identity columns are immutable
+//     once created), only a disposition. Gated at RoleAdmin, the same floor
+//     DELETE routes use elsewhere in this table, because N7 makes a role
+//     NECESSARY but never SUFFICIENT here: decideApproval (approvals.go)
+//     layers the operator-identity-equals-root-principal check on top,
+//     inside the handler, which is the part no role can stand in for. No
+//     list/get route: discovering a pending approval's id is Task 6's UI
+//     concern, out of this task's own scope (see approvals.go's package
+//     doc).
+//   - delegations: one POST action (revoke), also RoleAdmin -- matching
+//     this table's existing DELETE-tier operations, since revocation is
+//     this table's own sanctioned "delete" (revoked/revoked_at, not a row
+//     removal). Unlike approvals, there is no additional identity check:
+//     N7's own contrast rules that taking authority away needs only a role.
 var routeTable = []routeSpec{
 	{Pattern: "GET /v1/policies", MinRole: RoleViewer, Handler: listPolicies},
 	{Pattern: "POST /v1/policies", MinRole: RoleEditor, Handler: createPolicy},
@@ -129,6 +177,16 @@ var routeTable = []routeSpec{
 	{Pattern: "GET /v1/tier-overrides/{id}", MinRole: RoleViewer, Handler: getTierOverride},
 	{Pattern: "PUT /v1/tier-overrides/{id}", MinRole: RoleEditor, Handler: updateTierOverride},
 	{Pattern: "DELETE /v1/tier-overrides/{id}", MinRole: RoleAdmin, Handler: deleteTierOverride},
+
+	{Pattern: "GET /v1/tool-catalog", MinRole: RoleViewer, Handler: listToolCatalog},
+	{Pattern: "POST /v1/tool-catalog", MinRole: RoleEditor, Handler: createToolCatalogEntry},
+	{Pattern: "GET /v1/tool-catalog/{id}", MinRole: RoleViewer, Handler: getToolCatalogEntry},
+	{Pattern: "PUT /v1/tool-catalog/{id}", MinRole: RoleEditor, Handler: updateToolCatalogEntry},
+
+	{Pattern: "POST /v1/approvals/{id}/approve", MinRole: RoleAdmin, Handler: approveApproval},
+	{Pattern: "POST /v1/approvals/{id}/deny", MinRole: RoleAdmin, Handler: denyApproval},
+
+	{Pattern: "POST /v1/delegations/{id}/revoke", MinRole: RoleAdmin, Handler: revokeDelegation},
 }
 
 // Server is the PAP's HTTP server: identity verification and role gating
@@ -138,12 +196,13 @@ var routeTable = []routeSpec{
 // policy.NewMulti already applies to its own two required arguments (see
 // that function's own doc comment).
 type Server struct {
-	verify    *Verifier
-	roleClaim string
-	roles     RoleMapping
-	store     *store.Store
-	registry  policy.Registry
-	mux       *http.ServeMux
+	verify        *Verifier
+	roleClaim     string
+	approverClaim string
+	roles         RoleMapping
+	store         *store.Store
+	registry      policy.Registry
+	mux           *http.ServeMux
 }
 
 // NewServer wires routeTable behind authorize and returns a Server ready
@@ -153,8 +212,16 @@ type Server struct {
 // called once by main.go's run) and never re-scoped per request -- N1's
 // "the tenant is fixed at startup" holds all the way down to the
 // connection this Server ultimately writes through.
-func NewServer(verify *Verifier, roleClaim string, roles RoleMapping, st *store.Store, registry policy.Registry) *Server {
-	s := &Server{verify: verify, roleClaim: roleClaim, roles: roles, store: st, registry: registry, mux: http.NewServeMux()}
+//
+// approverClaim is Task 4's own addition (N8): the OIDC claim
+// resolveApproverIdentity reads to decide who may satisfy N7, a second and
+// independently configured claim from roleClaim -- see Operator.
+// ApproverIdentity's own doc comment for why the two must not be conflated.
+func NewServer(verify *Verifier, roleClaim, approverClaim string, roles RoleMapping, st *store.Store, registry policy.Registry) *Server {
+	s := &Server{
+		verify: verify, roleClaim: roleClaim, approverClaim: approverClaim,
+		roles: roles, store: st, registry: registry, mux: http.NewServeMux(),
+	}
 	for _, rt := range routeTable {
 		// Adapts rt.Handler (resourceHandler, needs *Server) into the
 		// routeHandler shape authorize requires, closing over s (this
@@ -213,7 +280,15 @@ func (s *Server) authorize(min Role, next routeHandler) http.HandlerFunc {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		next(w, r, Operator{Role: role, Subject: subject})
+		// resolveApproverIdentity is a pure, local computation over claims
+		// already decoded above -- no extra I/O -- so running it for every
+		// request costs nothing and needs no route-specific special case.
+		// Its result being empty does not refuse the request here; see
+		// Operator.ApproverIdentity's own doc comment for why that check is
+		// deferred to the one handler (decideApproval) that actually needs a
+		// non-empty value.
+		approverIdentity := resolveApproverIdentity(claims, s.approverClaim)
+		next(w, r, Operator{Role: role, Subject: subject, ApproverIdentity: approverIdentity})
 	}
 }
 

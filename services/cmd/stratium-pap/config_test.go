@@ -17,6 +17,7 @@ var requiredPAPEnvVars = []string{
 	"STRATIUM_PAP_OIDC_ISSUER",
 	"STRATIUM_PAP_OIDC_AUDIENCE",
 	"STRATIUM_PAP_ROLE_CLAIM",
+	"STRATIUM_PAP_APPROVER_CLAIM",
 	"STRATIUM_PAP_ADMIN_GROUPS",
 	"STRATIUM_PAP_EDITOR_GROUPS",
 	"STRATIUM_PAP_VIEWER_GROUPS",
@@ -36,14 +37,15 @@ func clearPAPEnv(t *testing.T) {
 func setAllPAPEnv(t *testing.T, overrides map[string]string) {
 	t.Helper()
 	values := map[string]string{
-		"STRATIUM_PAP_TENANT_ID":     "tenant-one",
-		"STRATIUM_PAP_OIDC_ISSUER":   "https://idp.example.com/",
-		"STRATIUM_PAP_OIDC_AUDIENCE": "stratium-pap",
-		"STRATIUM_PAP_ROLE_CLAIM":    "roles",
-		"STRATIUM_PAP_ADMIN_GROUPS":  "org-admins",
-		"STRATIUM_PAP_EDITOR_GROUPS": "org-editors",
-		"STRATIUM_PAP_VIEWER_GROUPS": "org-everyone",
-		"STRATIUM_PAP_DATABASE_URL":  "postgres://stratium_pap_login:secret@localhost:5432/stratium?sslmode=disable",
+		"STRATIUM_PAP_TENANT_ID":      "tenant-one",
+		"STRATIUM_PAP_OIDC_ISSUER":    "https://idp.example.com/",
+		"STRATIUM_PAP_OIDC_AUDIENCE":  "stratium-pap",
+		"STRATIUM_PAP_ROLE_CLAIM":     "roles",
+		"STRATIUM_PAP_APPROVER_CLAIM": "email",
+		"STRATIUM_PAP_ADMIN_GROUPS":   "org-admins",
+		"STRATIUM_PAP_EDITOR_GROUPS":  "org-editors",
+		"STRATIUM_PAP_VIEWER_GROUPS":  "org-everyone",
+		"STRATIUM_PAP_DATABASE_URL":   "postgres://stratium_pap_login:secret@localhost:5432/stratium?sslmode=disable",
 	}
 	for k, v := range overrides {
 		values[k] = v
@@ -73,6 +75,9 @@ func TestLoadConfig(t *testing.T) {
 		}
 		if cfg.RoleClaim != "roles" {
 			t.Errorf("RoleClaim = %q, want %q", cfg.RoleClaim, "roles")
+		}
+		if cfg.ApproverClaim != "email" {
+			t.Errorf("ApproverClaim = %q, want %q", cfg.ApproverClaim, "email")
 		}
 		wantRoles := RoleMapping{"org-admins": RoleAdmin, "org-editors": RoleEditor, "org-everyone": RoleViewer}
 		if len(cfg.Roles) != len(wantRoles) {

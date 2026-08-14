@@ -193,6 +193,86 @@ func TestResolveRole(t *testing.T) {
 	}
 }
 
+// --- resolveApproverIdentity (Task 4: N7/N8) ---
+
+// TestResolveApproverIdentity_AbsentClaim_ReturnsEmpty is
+// resolveSubject/resolveRole's own sibling shape, but resolveApproverIdentity
+// has no error return at all -- see that function's own doc comment for
+// why -- so this asserts the empty-string outcome directly.
+func TestResolveApproverIdentity_AbsentClaim_ReturnsEmpty(t *testing.T) {
+	claims := map[string]any{"sub": "operator-1"} // no configured claim at all
+	if got := resolveApproverIdentity(claims, "email"); got != "" {
+		t.Errorf("resolveApproverIdentity() = %q, want empty for an absent claim", got)
+	}
+}
+
+func TestResolveApproverIdentity(t *testing.T) {
+	tests := []struct {
+		name      string
+		claims    map[string]any
+		claimName string
+		want      string
+	}{
+		{
+			name:      "non-email claim resolves with no email_verified check at all",
+			claims:    map[string]any{"employee_id": "E-42"},
+			claimName: "employee_id",
+			want:      "E-42",
+		},
+		{
+			name:      "email claim with email_verified true resolves",
+			claims:    map[string]any{"email": "root@example.com", "email_verified": true},
+			claimName: "email",
+			want:      "root@example.com",
+		},
+		// --- N8's own required mutation target: "skip the email_verified
+		// check" -- each of these must return "" ---
+		{
+			name:      "email claim with email_verified false refuses",
+			claims:    map[string]any{"email": "root@example.com", "email_verified": false},
+			claimName: "email",
+			want:      "",
+		},
+		{
+			name:      "email claim with email_verified entirely absent refuses -- fail closed, not verified by default",
+			claims:    map[string]any{"email": "root@example.com"},
+			claimName: "email",
+			want:      "",
+		},
+		{
+			name:      "email claim with email_verified present but the wrong JSON type refuses rather than panicking",
+			claims:    map[string]any{"email": "root@example.com", "email_verified": "true"}, // a string, not a bool
+			claimName: "email",
+			want:      "",
+		},
+		{
+			name:      "empty string claim value refuses",
+			claims:    map[string]any{"email": "", "email_verified": true},
+			claimName: "email",
+			want:      "",
+		},
+		{
+			name:      "non-string claim value refuses rather than panicking",
+			claims:    map[string]any{"email": float64(42), "email_verified": true},
+			claimName: "email",
+			want:      "",
+		},
+		{
+			name:      "array claim value refuses -- this claim is never group-membership-shaped",
+			claims:    map[string]any{"email": []any{"root@example.com"}, "email_verified": true},
+			claimName: "email",
+			want:      "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveApproverIdentity(tt.claims, tt.claimName); got != tt.want {
+				t.Errorf("resolveApproverIdentity(%v, %q) = %q, want %q", tt.claims, tt.claimName, got, tt.want)
+			}
+		})
+	}
+}
+
 // containsAll reports whether s contains every substring in subs -- a small
 // local helper so the tests above can assert an error names several things
 // without a brittle exact-string match on wording that may still change.

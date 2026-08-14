@@ -390,3 +390,144 @@ func TestStore_CreateDelegation_InsertErrorRollsBack(t *testing.T) {
 
 	assertExpectationsMet(t, mock)
 }
+
+// --- RevokeDelegation (Task 4: V4, delegation revocation) ---
+
+// TestStore_RevokeDelegation_Success is V4's own write proof: revoked and
+// revoked_at are set, the write is audited in the same transaction (N4),
+// and the returned *models.Delegation reflects the change — reusing
+// scanDelegation and addDelegationRow (both already established by
+// LoadChain/LoadDelegation's own tests above) rather than a second,
+// parallel fixture shape for this method's own RETURNING clause.
+func TestStore_RevokeDelegation_Success(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID := uuid.New(), uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Not addDelegationRow (store_test.go): that fixture always sets
+	// revoked=false, the PRE-write state, and RETURNING hands back the row
+	// AFTER this UPDATE — addRevokedDelegationRow below is that post-write
+	// shape, revoked=true and revoked_at=now.
+	row := sqlmock.NewRows(delegationColumns())
+	addRevokedDelegationRow(row, id, agentID, now)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(revokeDelegationQuery)).
+		WithArgs(now, id.String()).
+		WillReturnRows(row)
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := s.RevokeDelegation(context.Background(), id, "operator-1", now)
+	if err != nil {
+		t.Fatalf("RevokeDelegation() error = %v", err)
+	}
+	if !got.Revoked {
+		t.Error("Revoked = false, want true")
+	}
+	if got.RevokedAt == nil || !got.RevokedAt.Equal(now) {
+		t.Errorf("RevokedAt = %v, want %v", got.RevokedAt, now)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// addRevokedDelegationRow appends one revokeDelegationQuery-shaped RETURNING
+// row: the same column order and fixed values addDelegationRow uses for
+// everything except revoked/revoked_at, which this UPDATE sets to true/now
+// — what a real RETURNING clause hands back after the write, not the
+// pre-write state addDelegationRow's own fixture describes.
+func addRevokedDelegationRow(rows *sqlmock.Rows, id, agentID uuid.UUID, revokedAt time.Time) *sqlmock.Rows {
+	now := time.Now().UTC().Truncate(time.Second)
+	return rows.AddRow(
+		id.String(), testTenant, "user-1", agentID.String(),
+		[]byte(`["Bash"]`), int64(1),
+		[]byte(`{}`), []byte(`{}`), nil, now.Add(time.Hour),
+		now, true, revokedAt, nil,
+		id.String(), int64(0), []byte(`[]`), nil,
+	)
+}
+
+// TestStore_RevokeDelegation_NotFound proves an unknown (or another
+// tenant's, indistinguishable by RLS) id refuses cleanly rather than
+// silently affecting zero rows with no error.
+func TestStore_RevokeDelegation_NotFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(revokeDelegationQuery)).
+		WithArgs(now, id.String()).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	if _, err := s.RevokeDelegation(context.Background(), id, "operator-1", now); !errors.Is(err, ErrNotFound) {
+		t.Errorf("RevokeDelegation() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_RevokeDelegation_AlreadyRevokedIsAcceptedAsANoOp is the
+// deliberate negative space: revoking an already-revoked delegation is not
+// refused (there is no "already happened" error the way DecideApproval has
+// for a non-pending approval — see RevokeDelegation's own doc comment for
+// why a monotonic, one-way flag with no un-revoke path has no equivalent
+// rule to enforce). If a well-meaning but wrong future change added an
+// ErrAlreadyRevoked-style refusal here, this test would catch it refusing a
+// write that must always succeed.
+func TestStore_RevokeDelegation_AlreadyRevokedIsAcceptedAsANoOp(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID := uuid.New(), uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	earlierRevocation := now.Add(-time.Hour)
+
+	row := sqlmock.NewRows(delegationColumns())
+	addRevokedDelegationRow(row, id, agentID, earlierRevocation)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(revokeDelegationQuery)).
+		WithArgs(now, id.String()).
+		WillReturnRows(row)
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if _, err := s.RevokeDelegation(context.Background(), id, "operator-1", now); err != nil {
+		t.Fatalf("RevokeDelegation() error = %v, want nil -- revoking an already-revoked delegation must succeed", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_RevokeDelegation_AuditFailureRollsBackWrite is N4's own proof
+// for this method — see policy_test.go's
+// TestStore_CreatePolicy_AuditFailureRollsBackWrite for the full reasoning.
+func TestStore_RevokeDelegation_AuditFailureRollsBackWrite(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID := uuid.New(), uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	lockErr := errors.New("connection reset mid-audit")
+
+	row := sqlmock.NewRows(delegationColumns())
+	addRevokedDelegationRow(row, id, agentID, now)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(revokeDelegationQuery)).WithArgs(now, id.String()).WillReturnRows(row)
+	mock.ExpectExec(regexp.QuoteMeta(advisoryLockQuery)).WillReturnError(lockErr)
+	mock.ExpectRollback()
+
+	if _, err := s.RevokeDelegation(context.Background(), id, "operator-1", now); err == nil {
+		t.Fatal("RevokeDelegation() error = nil, want the audit failure to propagate")
+	}
+
+	assertExpectationsMet(t, mock)
+}

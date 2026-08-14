@@ -55,7 +55,15 @@ func newTestServerFixture(t *testing.T) *testServerFixture {
 	// file is about identity and role gating, never about a specific
 	// policy's own language or content, so no case here needs a real
 	// engine wired -- see policies_test.go for the tests that do.
-	return &testServerFixture{idp: idp, server: NewServer(v, "roles", roles, repo, policy.Registry{}), mock: mock}
+	//
+	// approverClaim is fixed to "email" -- N8's own named example, and the
+	// one claim name that additionally exercises email_verified -- so
+	// approvals_test.go's fixture (built on this one) matches what a real
+	// deployment is likeliest to configure. No test in THIS file depends on
+	// it: f.token below never sets "email", so every route gated on Role/
+	// Subject alone behaves exactly as it did before Task 4 added this
+	// parameter.
+	return &testServerFixture{idp: idp, server: NewServer(v, "roles", "email", roles, repo, policy.Registry{}), mock: mock}
 }
 
 // token mints a validly signed, unexpired token for group (one of the
@@ -66,6 +74,22 @@ func (f *testServerFixture) token(t *testing.T, group string) string {
 	claims := f.idp.validClaims("stratium-pap")
 	if group != "" {
 		claims["roles"] = group
+	}
+	return mintToken(t, f.idp.signer, testKeyID, claims)
+}
+
+// tokenWithClaims mints a token like token(t, group) but layers extra
+// claims on top (overwriting any that collide) -- approvals_test.go's own
+// need to additionally control "email"/"email_verified" (N7/N8), which
+// token's own single-purpose "roles" parameter has no room for.
+func (f *testServerFixture) tokenWithClaims(t *testing.T, group string, extra map[string]any) string {
+	t.Helper()
+	claims := f.idp.validClaims("stratium-pap")
+	if group != "" {
+		claims["roles"] = group
+	}
+	for k, v := range extra {
+		claims[k] = v
 	}
 	return mintToken(t, f.idp.signer, testKeyID, claims)
 }
@@ -298,14 +322,32 @@ func TestRouteTable_NoPatternNamesATenant(t *testing.T) {
 // --- Role gating: "viewer reads; editor reads and writes; admin reads,
 // writes, and deletes" (task brief, phase plan Task 3) ------------------
 
+// actionRoutes names Task 4's three single-purpose action routes -- POST,
+// but gated at RoleAdmin rather than the blanket "POST/PUT -> editor" rule
+// every CRUD route below still follows: each is a single, consequential
+// action, not a create (approve/deny for the reason N7 requires a role to be
+// merely necessary, never sufficient, on top of; revoke because it is this
+// system's DELETE-equivalent for a delegation -- see routeTable's own
+// comment for the full reasoning). TestRouteTable_RoleGatingMatchesSpec and
+// TestRouteTable_CoversEveryCRUDRouteForEveryResource both consult this map
+// so the "admin, not editor" and "these routes exist" properties are stated
+// once, not duplicated between the two tests.
+var actionRoutes = map[string]bool{
+	"POST /v1/approvals/{id}/approve":  true,
+	"POST /v1/approvals/{id}/deny":     true,
+	"POST /v1/delegations/{id}/revoke": true,
+}
+
 // TestRouteTable_RoleGatingMatchesSpec checks the stated role mapping
-// structurally, against every one of the 15 registered routes at once,
-// rather than by firing 15 separate HTTP requests: GET -> viewer, POST/PUT
-// -> editor, DELETE -> admin. This is the direct target of two required
-// mutations at once -- "let viewer write" (any POST/PUT route's MinRole
-// weakened to RoleViewer) and "let editor delete" (any DELETE route's
-// MinRole weakened to RoleEditor) -- for whichever resource and route a
-// mutation happened to target, not only the one route
+// structurally, against every registered route at once, rather than by
+// firing one HTTP request per route: GET -> viewer, POST/PUT -> editor,
+// DELETE -> admin, EXCEPT actionRoutes above, which are POST but must still
+// be admin. This is the direct target of three required mutations at once --
+// "let viewer write" (any POST/PUT CRUD route's MinRole weakened to
+// RoleViewer), "let editor delete" (any DELETE route's MinRole weakened to
+// RoleEditor), and "let editor decide/revoke" (any actionRoutes entry
+// weakened to RoleEditor) -- for whichever resource and route a mutation
+// happened to target, not only the one route
 // TestServer_SufficientRole_ReachesHandler/TestServer_InsufficientRole_
 // Refused exercise live. Those two tests remain: this one proves the DATA
 // (routeTable's own MinRole values) is right; they prove the WIRING
@@ -313,6 +355,13 @@ func TestRouteTable_NoPatternNamesATenant(t *testing.T) {
 // alone proves both.
 func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 	for _, rt := range routeTable {
+		if actionRoutes[rt.Pattern] {
+			if rt.MinRole != RoleAdmin {
+				t.Errorf("route %q: MinRole = %s, want %s (a single consequential action, not CRUD -- N7 needs a role that is "+
+					"necessary but never sufficient on its own)", rt.Pattern, rt.MinRole, RoleAdmin)
+			}
+			continue
+		}
 		method, _, ok := strings.Cut(rt.Pattern, " ")
 		if !ok {
 			t.Fatalf("route pattern %q has no method prefix", rt.Pattern)
@@ -340,28 +389,41 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // /v1/agents/{id}, silently leaving that resource with no delete path at
 // all) would not fail it. This pins the count and the resource/verb
 // coverage directly: five routes (list, create, get, update, delete) for
-// each of the three resources A5 names, fifteen total.
+// each of the three resources A5 names, fifteen total (Task 3), plus Task
+// 4's own seven -- tool-catalog's four (list, create, get, update; no
+// delete -- migrations/000016_stratium_pap_role withholds that grant) and
+// actionRoutes' three (approve, deny, revoke) -- twenty-two total.
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	if len(routeTable) != 15 {
-		t.Fatalf("routeTable has %d routes, want 15 (5 CRUD routes x 3 resources)", len(routeTable))
+	const wantTotal = 15 + 4 + 3
+	if len(routeTable) != wantTotal {
+		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes)",
+			len(routeTable), wantTotal)
 	}
+
+	want := map[string]bool{}
 	for _, resource := range []string{"policies", "agents", "tier-overrides"} {
-		want := map[string]bool{
-			"GET /v1/" + resource:              false,
-			"POST /v1/" + resource:             false,
-			"GET /v1/" + resource + "/{id}":    false,
-			"PUT /v1/" + resource + "/{id}":    false,
-			"DELETE /v1/" + resource + "/{id}": false,
+		want["GET /v1/"+resource] = false
+		want["POST /v1/"+resource] = false
+		want["GET /v1/"+resource+"/{id}"] = false
+		want["PUT /v1/"+resource+"/{id}"] = false
+		want["DELETE /v1/"+resource+"/{id}"] = false
+	}
+	// tool-catalog: the same four verbs as above, minus delete.
+	for _, verb := range []string{"GET /v1/tool-catalog", "POST /v1/tool-catalog", "GET /v1/tool-catalog/{id}", "PUT /v1/tool-catalog/{id}"} {
+		want[verb] = false
+	}
+	for pattern := range actionRoutes {
+		want[pattern] = false
+	}
+
+	for _, rt := range routeTable {
+		if _, ok := want[rt.Pattern]; ok {
+			want[rt.Pattern] = true
 		}
-		for _, rt := range routeTable {
-			if _, ok := want[rt.Pattern]; ok {
-				want[rt.Pattern] = true
-			}
-		}
-		for pattern, found := range want {
-			if !found {
-				t.Errorf("routeTable is missing %q", pattern)
-			}
+	}
+	for pattern, found := range want {
+		if !found {
+			t.Errorf("routeTable is missing %q", pattern)
 		}
 	}
 }

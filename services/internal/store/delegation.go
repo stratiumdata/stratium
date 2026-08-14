@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
+
+	"stratium/pkg/audit"
 	"stratium/pkg/models"
 )
 
@@ -156,4 +160,92 @@ func (s *Store) CreateDelegation(ctx context.Context, d *models.Delegation) erro
 		return fmt.Errorf("store: commit: %w", err)
 	}
 	return nil
+}
+
+// --- PAP write (Task 4): V4, delegation revocation ---
+
+// eventTypeDelegationRevoked is the audit_chain.event_type value for this
+// table's one PAP write operation (N4).
+const eventTypeDelegationRevoked = "delegation_revoked"
+
+// revokeDelegationQuery sets exactly the two columns V4 names — revoked and
+// revoked_at — and returns every column loadDelegationQuery selects, in the
+// identical order, so its result can be handed straight to scanDelegation
+// (store.go) rather than a second, parallel scan function this file would
+// otherwise need to keep in sync with that one by hand. Column list
+// duplicated as a literal, not shared via a Go constant, matching this
+// package's own existing precedent for two queries against the same table
+// with different WHERE/SET clauses (e.g. policy.go's getPolicyQuery and
+// listPoliciesQuery both spell out the identical policies column list
+// separately).
+const revokeDelegationQuery = `UPDATE delegations SET revoked = true, revoked_at = $1 WHERE id = $2 RETURNING ` +
+	`id, tenant_id, user_id, agent_id, approved_tools, max_action_tier, ` +
+	`classification_caps, resource_constraints, purpose, expires_at, ` +
+	`created_at, revoked, revoked_at, parent_delegation_id, ` +
+	`root_delegation_id, depth, chain_agent_ids, escalate_at`
+
+// RevokeDelegation sets revoked and revoked_at on the id row and audits the
+// write, inside one transaction (N4) — V4's entire write surface. Nothing
+// here implements cascade denial: DelegationLeg (internal/authz/delegation.go)
+// already checks Revoked at every hop of a chain it is handed, on every
+// decision, so a descendant of the row this method revokes is denied the
+// next time its own chain is loaded and evaluated — this method only
+// supplies the write that flag was always missing (spec §4.8.1 V4: "nothing
+// SETS revoked, because setting it is a control-plane write under E7/T1, not
+// a PDP one").
+//
+// No identity check beyond the role gate cmd/stratium-pap/server.go's
+// routeTable applies (spec N7's own contrast, §4.10.1, "taking away requires
+// only a role"): revocation REDUCES authority, so — unlike DecideApproval,
+// which grants it — a role is sufficient here on its own. The worst outcome
+// of a wrongly-scoped revocation is that something stops working, which
+// fails closed; there is no equivalent worst case in the other direction for
+// this method to guard against.
+//
+// Revoking an already-revoked delegation is not refused: RETURNING still
+// finds the row regardless of its current revoked value, so a second revoke
+// is accepted as a harmless, idempotent no-op that still produces its own
+// audit entry — unlike DecideApproval's 'pending'-only rule, there is no
+// "already happened, refuse" state for a monotonic flag with no reversal
+// (this table has no un-revoke path at all).
+//
+// now sets BOTH revoked_at and the audit entry's OccurredAt, the same
+// single-clock-read discipline DecideApproval and UpdateTierOverride already
+// use.
+func (s *Store) RevokeDelegation(ctx context.Context, id uuid.UUID, actor string, now time.Time) (*models.Delegation, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	d, err := scanDelegation(tx.QueryRowContext(ctx, revokeDelegationQuery, now, id.String()))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: delegation %s", ErrNotFound, id)
+		}
+		return nil, fmt.Errorf("store: revoke delegation %s: %w", id, err)
+	}
+
+	entry := audit.Entry{
+		TenantID:         s.tenantID,
+		OccurredAt:       now,
+		EventType:        eventTypeDelegationRevoked,
+		Actor:            actor,
+		AgentID:          &d.AgentID,
+		DelegationID:     &d.ID,
+		RootDelegationID: &d.RootDelegationID,
+		ChainDepth:       int16(d.Depth), //nolint:gosec // G115: depth is schema-checked >= 0 and bounded by maxChainWalk (64)
+		Decision:         "ALLOW",
+		DeniedAtDepth:    noDenial,
+		Reason:           "delegation revoked",
+	}
+	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return d, nil
 }

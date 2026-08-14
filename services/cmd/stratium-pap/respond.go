@@ -85,7 +85,16 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, "not found", http.StatusNotFound)
-	case errors.Is(err, store.ErrAlreadyExists), errors.Is(err, store.ErrConflict):
+	case errors.Is(err, store.ErrAlreadyExists),
+		errors.Is(err, store.ErrConflict),
+		errors.Is(err, store.ErrApprovalNotPending):
+		// ErrApprovalNotPending joins ErrAlreadyExists/ErrConflict here, not
+		// the 400 group below: like them, it names what the row's OWN
+		// current state already is ("already approved/denied"), not
+		// anything wrong with the request as submitted -- the same
+		// distinction ErrConflict's own doc comment (internal/store/store.go)
+		// draws between "what already exists" and "what is wrong with the
+		// request."
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, store.ErrUnknownLanguage),
 		errors.Is(err, store.ErrInvalidEffect),
@@ -95,7 +104,26 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		errors.Is(err, store.ErrAllowedToolsRequired),
 		errors.Is(err, store.ErrInvalidRequest),
 		errors.Is(err, authz.ErrOverrideLowersTier):
+		// store.ErrInvalidRequest is also what CreateToolCatalogEntry/
+		// UpdateToolCatalogEntry wrap the database's own tool_catalog_tier_
+		// or_command_field CHECK violation with (isCheckViolation,
+		// internal/store/store.go) -- this is the one line that turns that
+		// CHECK into a clean 400 rather than letting it fall to the default
+		// 500 case below, the task brief's own explicit requirement ("the
+		// database CHECK should already refuse it -- confirm the API
+		// surfaces that rather than crashing").
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, store.ErrApproverNotRootPrincipal):
+		// N7 (spec §4.10.1): the operator's own identity is known (it is not
+		// an authentication failure -- authorize's own 401 already covers
+		// that case, earlier in the request), but it does not equal this
+		// approval's root_principal, so this is an authorization refusal,
+		// not "fix your request." The message names the same fact
+		// resolveEscalation (internal/pdpgrpc/escalation.go) reasons about
+		// at consumption time -- the approver is fixed to the chain's root
+		// principal -- without echoing operatorIdentity or root_principal
+		// themselves (err.Error() carries only the approval id).
+		http.Error(w, err.Error(), http.StatusForbidden)
 	default:
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}

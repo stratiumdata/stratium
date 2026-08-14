@@ -1,13 +1,14 @@
 //go:build integration
 
-// Task 1's real-Postgres proof for tool_catalog (migrations/000013_tool_catalog).
-// A separate file from store_integration_test.go, the same choice
-// escalation_integration_test.go's own doc comment already makes and
-// justifies at length: every package-level var and helper this file uses
-// (testDB, servingDB, withTenantTx, sqlStatePermissionDenied, ...) is
-// already shared across every *_test.go file in this one package without an
-// import, so there is no reason to grow the existing monolith to add one
-// more table's proof to it.
+// Task 1's real-Postgres proof for tool_catalog (migrations/000013_tool_catalog),
+// extended by Task 4 with the PAP's own CRUD write path
+// (TestIntegration_PAPCRUD_ToolCatalogRoundTrip). A separate file from
+// store_integration_test.go, the same choice escalation_integration_test.go's
+// own doc comment already makes and justifies at length: every package-level
+// var and helper this file uses (testDB, servingDB, papDB, withTenantTx,
+// sqlStatePermissionDenied, ...) is already shared across every *_test.go
+// file in this one package without an import, so there is no reason to grow
+// the existing monolith to add one more table's proof to it.
 package store_test
 
 import (
@@ -15,7 +16,9 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	"stratium/internal/store"
@@ -63,6 +66,53 @@ func seedToolCatalogEntry(
 // than via a bare value, since a nil *models.ActionTier means something
 // different and specific here (see seedToolCatalogEntry's own doc comment).
 func tierPtr(t models.ActionTier) *models.ActionTier { return &t }
+
+// cleanupToolCatalogRows returns a t.Cleanup func that deletes every
+// tool_catalog row for tenant. Any test in this package that can leave a
+// NULL-action_tier row behind (Task 4's own CreateToolCatalogEntry/
+// UpdateToolCatalogEntry, exercised in this file and in
+// pap_task4_integration_test.go, not only TestIntegration_ToolCatalog_
+// NullTierRoundTrips, this helper's original single caller) must register
+// this: a NULL action_tier is the one value migrations/000014_tool_catalog_
+// nullable_tier's own DOWN migration cannot coexist with anywhere in the
+// TABLE, not merely within one tenant's rows, and TestEndToEnd's
+// chain_verifies_across_the_migration_boundary subtest (store_integration_
+// test.go) walks every migration down and back up against this same shared
+// database later in the same run. Found live: an early version of this
+// task's own TestIntegration_PAPCRUD_ToolCatalogRoundTrip left exactly this
+// residue and broke that unrelated subtest, which then left the shared
+// database mid-downgrade for every test that ran after it — the actual
+// failure was several tests removed from its real cause.
+//
+// A bare testDB.ExecContext DELETE, with no app.tenant_id set first, would
+// silently delete nothing: tool_catalog is FORCE ROW LEVEL SECURITY
+// (migrations/000013_tool_catalog), which applies RLS even to the table
+// owner, so an unscoped session's current_tenant() is unset and
+// `tenant_id = current_tenant()` matches no row — no error, just a
+// no-op, exactly the silent-not-actually-cleaned-up failure this helper
+// exists to prevent. set_config first, the same way every write in this
+// file already does.
+func cleanupToolCatalogRows(t *testing.T, tenant string) func() {
+	return func() {
+		tx, err := testDB.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Errorf("cleanup: begin tx: %v", err)
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(context.Background(), `SELECT set_config('app.tenant_id', $1, true)`, tenant); err != nil {
+			t.Errorf("cleanup: set_config app.tenant_id: %v", err)
+			return
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM tool_catalog WHERE tenant_id = $1`, tenant); err != nil {
+			t.Errorf("cleanup: delete tool_catalog rows for tenant %s: %v", tenant, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			t.Errorf("cleanup: commit: %v", err)
+		}
+	}
+}
 
 // assertPermissionDenied fails t unless err is specifically a Postgres
 // insufficient_privilege error (SQLSTATE 42501) — not merely a non-nil
@@ -137,8 +187,14 @@ func TestIntegration_ToolCatalog_ServingRoleCannotWrite(t *testing.T) {
 	}
 
 	// The three write probes: same serving connection, same tenant, raw SQL
-	// rather than a Go store method — there is no CreateToolCatalogEntry or
-	// similar wrapper because T1 says none should ever exist. Each runs in
+	// rather than a Go store method — CreateToolCatalogEntry/
+	// UpdateToolCatalogEntry now exist (Task 4), but only for the PAP's own
+	// write role (stratium_pap, papDB); T1 says the SERVING role (stratium_app,
+	// servingDB, this test's own connection) must never gain that grant, so
+	// probing it through those methods would just be a roundabout way of
+	// running the identical INSERT/UPDATE this raw SQL already runs, against
+	// a connection neither method is ever legitimately called with in
+	// production. Each runs in
 	// its own subtest so a future accidental widening of exactly one grant
 	// (see the mutation-testing note in the task report) fails only that
 	// subtest, not the read proof above or the other two writes. Every
@@ -228,35 +284,11 @@ func TestIntegration_ToolCatalog_NullTierRoundTrips(t *testing.T) {
 	// (store_integration_test.go) walks every migration down and back up
 	// against this same shared database later in the same run, so this
 	// cleanup runs regardless of pass or fail, the same "always" guarantee
-	// t.Cleanup gives store_test.go's own db.Close().
-	//
-	// A bare testDB.ExecContext DELETE, with no app.tenant_id set first,
-	// would silently delete nothing: tool_catalog is FORCE ROW LEVEL
-	// SECURITY (migrations/000013_tool_catalog), which applies RLS even to
-	// the table owner, so an unscoped session's current_tenant() is unset
-	// and `tenant_id = current_tenant()` matches no row — no error, just a
-	// no-op, exactly the silent-not-actually-cleaned-up failure this
-	// comment exists to prevent a future edit from reintroducing. set_config
-	// first, the same way every write in this file already does.
-	t.Cleanup(func() {
-		tx, err := testDB.BeginTx(context.Background(), nil)
-		if err != nil {
-			t.Errorf("cleanup: begin tx: %v", err)
-			return
-		}
-		defer func() { _ = tx.Rollback() }()
-		if _, err := tx.ExecContext(context.Background(), `SELECT set_config('app.tenant_id', $1, true)`, tenant); err != nil {
-			t.Errorf("cleanup: set_config app.tenant_id: %v", err)
-			return
-		}
-		if _, err := tx.ExecContext(context.Background(), `DELETE FROM tool_catalog WHERE tenant_id = $1`, tenant); err != nil {
-			t.Errorf("cleanup: delete tool_catalog rows for tenant %s: %v", tenant, err)
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			t.Errorf("cleanup: commit: %v", err)
-		}
-	})
+	// t.Cleanup gives store_test.go's own db.Close(). See
+	// cleanupToolCatalogRows' own doc comment for why every OTHER test in
+	// this file (and pap_task4_integration_test.go) that can leave a
+	// NULL-tier row behind registers the identical cleanup.
+	t.Cleanup(cleanupToolCatalogRows(t, tenant))
 
 	got, err := store.New(testDB, tenant).LoadToolCatalog(t.Context())
 	if err != nil {
@@ -320,4 +352,129 @@ func TestIntegration_ToolCatalog_NullTierRequiresCommandField(t *testing.T) {
 		t.Fatalf("INSERT error = %v, want SQLSTATE %s (check_violation)", insertErr, sqlStateCheckViolation)
 	}
 	t.Logf("INSERT with NULL action_tier and NULL command_field correctly rejected: %v", insertErr)
+}
+
+// TestIntegration_PAPCRUD_ToolCatalogRoundTrip is Task 4's own T1 proof,
+// the tool_catalog instance of pap_crud_integration_test.go's own
+// *RoundTrip family: create/get/list/update through the real stratium_pap
+// connection (papDB), each of this table's three valid row states
+// persisting intact end to end, and every write bumping tenant_epoch via
+// the pre-existing trigger (migrations/000015_tenant_epoch_trigger already
+// names tool_catalog; this task is the first to exercise that path through
+// a real Go writer instead of raw SQL — see
+// TestIntegration_ToolCatalog_ServingRoleCannotWrite's own updated comment
+// on why ITS three write probes still use raw SQL regardless).
+func TestIntegration_PAPCRUD_ToolCatalogRoundTrip(t *testing.T) {
+	const tenant = "tenant-pap-crud-tool-catalog-integration"
+	repo := store.New(papDB, tenant)
+	before, _ := readTenantEpoch(t, tenant)
+	// This test both creates a NULL-tier row directly (the "Bash" case) and
+	// UPDATEs another one into the NULL-tier shape at the end -- either
+	// alone is exactly what cleanupToolCatalogRows' own doc comment warns
+	// must not outlive this test.
+	t.Cleanup(cleanupToolCatalogRows(t, tenant))
+
+	resourceField := "file_path"
+	commandField := "command"
+	tests := []struct {
+		name string
+		e    models.ToolCatalogEntry
+	}{
+		{"fixed tier alone", models.ToolCatalogEntry{ToolName: "Read", ActionTier: tierPtr(models.ActionTierReadOnly), Verb: "read", ResourceField: &resourceField}},
+		{"NULL tier with command_field -- Bash's own shape", models.ToolCatalogEntry{ToolName: "Bash", Verb: "execute", CommandField: &commandField}},
+		{"both a fixed tier and a command_field", models.ToolCatalogEntry{ToolName: "mcp__infra__run", ActionTier: tierPtr(models.ActionTierDestructive), Verb: "execute", CommandField: &commandField}},
+	}
+
+	var firstCreatedID uuid.UUID
+	for i, tt := range tests {
+		t.Run("create_"+tt.name, func(t *testing.T) {
+			created, err := repo.CreateToolCatalogEntry(t.Context(), tt.e, "integration-operator", time.Now())
+			if err != nil {
+				t.Fatalf("CreateToolCatalogEntry() error = %v", err)
+			}
+			if created.ID == uuid.Nil {
+				t.Fatal("CreateToolCatalogEntry() returned the zero UUID for id")
+			}
+			before = assertEpochBumped(t, tenant, before)
+			if i == 0 {
+				firstCreatedID = created.ID
+			}
+
+			got, err := repo.GetToolCatalogEntry(t.Context(), created.ID)
+			if err != nil {
+				t.Fatalf("GetToolCatalogEntry() error = %v", err)
+			}
+			if got.ToolName != tt.e.ToolName {
+				t.Fatalf("GetToolCatalogEntry().ToolName = %q, want %q", got.ToolName, tt.e.ToolName)
+			}
+			if (got.ActionTier == nil) != (tt.e.ActionTier == nil) {
+				t.Fatalf("ActionTier round-trip: got %v, want a %v value", got.ActionTier, tt.e.ActionTier)
+			}
+			if got.ActionTier != nil && *got.ActionTier != *tt.e.ActionTier {
+				t.Fatalf("ActionTier = %s, want %s", *got.ActionTier, *tt.e.ActionTier)
+			}
+			if (got.CommandField == nil) != (tt.e.CommandField == nil) {
+				t.Fatalf("CommandField round-trip: got %v, want a %v value", got.CommandField, tt.e.CommandField)
+			}
+		})
+	}
+
+	listed, err := repo.ListToolCatalogEntries(t.Context())
+	if err != nil {
+		t.Fatalf("ListToolCatalogEntries() error = %v", err)
+	}
+	if len(listed) != len(tests) {
+		t.Fatalf("ListToolCatalogEntries() returned %d entries, want %d", len(listed), len(tests))
+	}
+
+	// Update moves the first-created entry (fixed tier alone) into the
+	// NULL-tier shape -- a full-replace PUT must accept moving a row
+	// between any of this table's three valid states, not just persist
+	// whichever state it was first created in.
+	updated, err := repo.UpdateToolCatalogEntry(t.Context(), firstCreatedID,
+		models.ToolCatalogEntry{ToolName: "Read", Verb: "read", CommandField: &commandField}, "integration-operator", time.Now())
+	if err != nil {
+		t.Fatalf("UpdateToolCatalogEntry() error = %v", err)
+	}
+	if updated.ActionTier != nil {
+		t.Fatalf("UpdateToolCatalogEntry().ActionTier = %v, want nil after moving to the NULL-tier shape", updated.ActionTier)
+	}
+	assertEpochBumped(t, tenant, before)
+
+	assertAuditTrailMatches(t, tenant, "integration-operator",
+		"tool_catalog_created", "tool_catalog_created", "tool_catalog_created", "tool_catalog_updated")
+}
+
+// TestIntegration_CreateToolCatalogEntry_NeitherTierNorCommandField_LiveDefenseInDepth
+// is the required mutation "let a catalog row with neither a tier nor a
+// command_field through," proven the way the task brief itself frames it:
+// against a REAL database, through the REAL CreateToolCatalogEntry call —
+// not a unit test asserting the Go-side validateToolCatalogFields check
+// alone (internal/store/catalog_test.go's own TestStore_
+// CreateToolCatalogEntry_MissingTierAndCommandFieldRefusedBeforePersisting),
+// which would keep passing even if the DATABASE's own CHECK constraint
+// (tool_catalog_tier_or_command_field, migrations/000014_tool_catalog_
+// nullable_tier) were somehow ALSO broken, so long as the Go check alone
+// still caught it. This test cannot make that mistake: it asserts only the
+// OUTCOME (ErrInvalidRequest, not a crash) through the full stack, so it
+// passes for the same reason regardless of which of the two layers
+// (validateToolCatalogFields, or isCheckViolation catching the database's
+// own refusal) is the one actually doing the catching today — confirmed by
+// running it with validateToolCatalogFields's own check temporarily deleted
+// during this task's own mutation-testing pass: it kept passing, because
+// the database CHECK constraint is what actually holds the line.
+func TestIntegration_CreateToolCatalogEntry_NeitherTierNorCommandField_LiveDefenseInDepth(t *testing.T) {
+	const tenant = "tenant-tool-catalog-neither-tier-nor-command-live-integration"
+	repo := store.New(papDB, tenant)
+
+	_, err := repo.CreateToolCatalogEntry(t.Context(),
+		models.ToolCatalogEntry{ToolName: "mystery-tool", Verb: "run"}, // no ActionTier, no CommandField
+		"integration-operator", time.Now())
+	if err == nil {
+		t.Fatal("CreateToolCatalogEntry() error = nil, want a refusal for a row with neither a tier nor a command_field")
+	}
+	if !errors.Is(err, store.ErrInvalidRequest) {
+		t.Fatalf("CreateToolCatalogEntry() error = %v, want errors.Is(_, store.ErrInvalidRequest) -- "+
+			"the task brief's own requirement is that this surfaces as a clean 400, never an unrecognized crash", err)
+	}
 }

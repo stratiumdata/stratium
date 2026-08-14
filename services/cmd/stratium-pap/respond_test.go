@@ -80,3 +80,37 @@ func TestWriteStoreError_Conflict_NamesTheBlockerWithoutEchoingPostgres(t *testi
 		t.Errorf("body = %q, must not carry raw Postgres constraint/SQLSTATE detail", body)
 	}
 }
+
+// TestWriteStoreError_ApproverNotRootPrincipal_Returns403 is N7's own
+// mapping proof: store.ErrApproverNotRootPrincipal is an authorization
+// refusal (the operator's identity is known, just not entitled to decide
+// THIS approval), not a request-shape problem, so it must land on 403, not
+// 400 or the unrecognized-error 500 path.
+func TestWriteStoreError_ApproverNotRootPrincipal_Returns403(t *testing.T) {
+	id := uuid.New()
+	err := fmt.Errorf("%w: approval %s", store.ErrApproverNotRootPrincipal, id)
+
+	rec := httptest.NewRecorder()
+	writeStoreError(rec, err)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+// TestWriteStoreError_ApprovalNotPending_Returns409 is the sibling proof for
+// store.ErrApprovalNotPending: it names what the row's own current state
+// already is (already decided), the same "what else exists" shape
+// ErrAlreadyExists/ErrConflict get, so it must land on 409 alongside them,
+// not the 400-producing "what is wrong with THIS request" group.
+func TestWriteStoreError_ApprovalNotPending_Returns409(t *testing.T) {
+	id := uuid.New()
+	err := fmt.Errorf("%w: approval %s is already %q", store.ErrApprovalNotPending, id, "approved")
+
+	rec := httptest.NewRecorder()
+	writeStoreError(rec, err)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}

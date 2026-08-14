@@ -166,3 +166,42 @@ func resolveSubject(claims map[string]any) (string, error) {
 	}
 	return sub, nil
 }
+
+// resolveApproverIdentity reads claimName out of a verified token's claims
+// and returns the value N7 compares against an approval's root_principal —
+// spec N8's own, deliberately SECOND identity, distinct from resolveSubject's
+// "sub" above: approvals.root_principal is populated from a PEP's own
+// DecideRequest.Subject configuration (an email, in practice — see
+// migrations/000012_approvals.up.sql's own comment), and an IdP's opaque
+// "sub" claim was never going to match that by coincidence, so a second
+// claim has to be nominated, exactly as RoleClaim is (N2).
+//
+// Returns "" — not an error — when the claim is absent, empty, not a
+// string, or (N8's own requirement) present but naming an unverified
+// "email": some IdPs let a caller self-assert "email" with no verification
+// step behind it, which would otherwise let an operator name themselves any
+// root principal and approve their own escalations, with an audit row that
+// looks entirely legitimate (spec §4.10.1's own framing). email_verified is
+// read as a bool with the zero value on any type mismatch or absence, so a
+// missing or malformed claim fails closed to "not verified," never to
+// "verified by default."
+//
+// No error return: every caller today treats every one of these cases
+// identically (refuse), so a second return value nothing consumes
+// differently would only be plumbing — see Operator.ApproverIdentity's own
+// doc comment (server.go) for why THAT refusal happens where it is used
+// (decideApproval), not universally in authorize the way an absent Role or
+// Subject claim does.
+func resolveApproverIdentity(claims map[string]any, claimName string) string {
+	v, ok := claims[claimName].(string)
+	if !ok || v == "" {
+		return ""
+	}
+	if claimName == "email" {
+		verified, _ := claims["email_verified"].(bool)
+		if !verified {
+			return ""
+		}
+	}
+	return v
+}

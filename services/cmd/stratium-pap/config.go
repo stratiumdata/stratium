@@ -54,6 +54,19 @@ type Config struct {
 	// from a working deployment nobody has been granted a role on yet.
 	RoleClaim string // STRATIUM_PAP_ROLE_CLAIM (required)
 
+	// ApproverClaim names the OIDC claim role.go's resolveApproverIdentity
+	// reads to satisfy N7/N8 (spec §4.10.1) -- a second, independently
+	// configured claim from RoleClaim above, since it answers a different
+	// question ("is this operator the chain's root principal," never "what
+	// may this operator do"). No default, the same "a wrong guess fails
+	// silently, not loudly" reasoning RoleClaim's own comment gives:
+	// approvals.root_principal is populated from a PEP's own
+	// DecideRequest.Subject configuration (an email, in practice), and
+	// guessing the wrong claim name here would not error, it would just
+	// make every approval attempt fail N7's comparison, indistinguishable
+	// from an operator who genuinely is not the root principal.
+	ApproverClaim string // STRATIUM_PAP_APPROVER_CLAIM (required)
+
 	// Roles maps a customer's own claim values (group names, typically) to
 	// the three fixed roles -- see newRoleMapping (role.go) for how the
 	// three *_GROUPS variables below combine into this and why a value
@@ -111,6 +124,7 @@ func loadConfig() (Config, error) {
 	cfg.OIDCIssuer = requiredEnv("STRATIUM_PAP_OIDC_ISSUER", &missing)
 	cfg.OIDCAudience = requiredEnv("STRATIUM_PAP_OIDC_AUDIENCE", &missing)
 	cfg.RoleClaim = requiredEnv("STRATIUM_PAP_ROLE_CLAIM", &missing)
+	cfg.ApproverClaim = requiredEnv("STRATIUM_PAP_APPROVER_CLAIM", &missing)
 	adminGroupsRaw := requiredEnv("STRATIUM_PAP_ADMIN_GROUPS", &missing)
 	editorGroupsRaw := requiredEnv("STRATIUM_PAP_EDITOR_GROUPS", &missing)
 	viewerGroupsRaw := requiredEnv("STRATIUM_PAP_VIEWER_GROUPS", &missing)

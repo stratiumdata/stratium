@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
+	"stratium/pkg/audit"
 	"stratium/pkg/models"
 )
 
@@ -332,6 +335,338 @@ func TestStore_LoadApproval_DerivedTierOutOfRangeFails(t *testing.T) {
 		t.Errorf("LoadApproval() = %+v, want nil on decode failure", got)
 	}
 
+	assertExpectationsMet(t, mock)
+}
+
+// --- DecideApproval (Task 4: E7, the approve action itself) ---
+
+// pendingApprovalRow returns one loadApprovalForUpdateQuery-shaped row for a
+// still-pending approval naming rootPrincipal — the fixture every
+// DecideApproval test below starts from, since each test exercises a
+// DIFFERENT check DecideApproval makes against this same row shape.
+func pendingApprovalRow(id, agentID, delegationID, rootDelegationID uuid.UUID, rootPrincipal string) (*sqlmock.Rows, [32]byte, time.Time) {
+	digest := sha256.Sum256([]byte("decide-approval fixture"))
+	requestedAt := time.Now().UTC().Truncate(time.Second)
+	rows := sqlmock.NewRows(approvalColumns()).AddRow(
+		id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
+		"requesting-subject", rootPrincipal, "Bash", "execute", int64(models.ActionTierExternalComms),
+		digest[:], "pending", requestedAt, requestedAt.Add(time.Hour), nil, nil,
+	)
+	return rows, digest, requestedAt
+}
+
+// TestLoadApprovalForUpdateQuery_LocksTheRow pins loadApprovalForUpdateQuery's
+// own shape directly, independent of the mock plumbing below: it must lock
+// the row (FOR UPDATE — see that query's own doc comment for the race it
+// closes) and must be loadApprovalQuery's own text extended, not a second,
+// independently maintained copy of that column list that could drift out
+// of sync with it.
+func TestLoadApprovalForUpdateQuery_LocksTheRow(t *testing.T) {
+	if !strings.Contains(loadApprovalForUpdateQuery, "FOR UPDATE") {
+		t.Errorf("loadApprovalForUpdateQuery = %q, want it to lock the row with FOR UPDATE", loadApprovalForUpdateQuery)
+	}
+	if !strings.HasPrefix(loadApprovalForUpdateQuery, loadApprovalQuery) {
+		t.Errorf("loadApprovalForUpdateQuery must extend loadApprovalQuery verbatim so both stay in sync with the same column list")
+	}
+}
+
+// TestStore_DecideApproval_ApproveSuccess is N7's positive case: an operator
+// whose identity equals the loaded approval's own root_principal may
+// approve. approved_by is asserted to be written as the row's OWN
+// root_principal (not a second copy of operatorIdentity), matching
+// DecideApproval's own doc comment on why that specific value is chosen.
+func TestStore_DecideApproval_ApproveSuccess(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID, delegationID, rootDelegationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	const rootPrincipal = "root-principal@example.com"
+	now := time.Now().UTC().Truncate(time.Second)
+	rows, digest, _ := pendingApprovalRow(id, agentID, delegationID, rootDelegationID, rootPrincipal)
+
+	// The exact audit.Entry DecideApproval must build for an approval --
+	// pinned via insertArgsFor (audit_test.go's own helper, also used by
+	// TestStore_DeletePolicy_Success) rather than only checking that SOME
+	// audit insert happened. This catches a field dropped, reordered, or
+	// swapped with a neighbor (e.g. AgentID/DelegationID transposed) --
+	// exactly what a bare "an insert happened" check would miss.
+	//
+	// What it does NOT catch, and cannot: a typo inside eventTypeApprovalApproved's
+	// own string literal. wantEntry.EventType reads that same symbol, so a
+	// mutation to its definition moves both sides together -- the identical
+	// blind spot TestIntegration_PAPCRUD_DeniedAtDepthMatchesTheEstablishedSentinel's
+	// own doc comment already documents for noDenial, and already accepts as
+	// this codebase's standing trade-off: the unit layer proves argument
+	// shape and order; TestIntegration_DecideApproval_RoundTrip (pap_task4_
+	// integration_test.go), which compares against the HARDCODED literal
+	// "approval_approved" via assertAuditTrailMatches, is what actually
+	// holds the line on the constant's own value -- confirmed live, the
+	// same way, during this task's own bonus mutation pass: retyping the
+	// constant to "approval_aproved" left every test in this file green
+	// and was caught only by that integration test.
+	wantEntry := audit.Entry{
+		TenantID: testTenant, OccurredAt: now, EventType: eventTypeApprovalApproved, Actor: "operator-actor",
+		AgentID: &agentID, DelegationID: &delegationID, RootDelegationID: &rootDelegationID,
+		ToolName: "Bash", Action: "execute", DerivedTier: int16(models.ActionTierExternalComms),
+		Decision: "ALLOW", DeniedAtDepth: noDenial, Reason: "escalation approved", InputDigest: digest,
+	}
+	wantLinked := audit.Link(nil, wantEntry)
+	wantHash := wantLinked.Hash()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).WithArgs(id.String()).WillReturnRows(rows)
+	mock.ExpectExec(regexp.QuoteMeta(updateApprovalDecisionQuery)).
+		WithArgs("approved", rootPrincipal, now, id.String()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(insertArgsFor(wantLinked, wantHash)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := s.DecideApproval(context.Background(), id, true, rootPrincipal, "operator-actor", now)
+	if err != nil {
+		t.Fatalf("DecideApproval() error = %v", err)
+	}
+	if got.Status != "approved" {
+		t.Errorf("Status = %q, want %q", got.Status, "approved")
+	}
+	if got.ApprovedBy == nil || *got.ApprovedBy != rootPrincipal {
+		t.Errorf("ApprovedBy = %v, want %q", got.ApprovedBy, rootPrincipal)
+	}
+	if got.ApprovedAt == nil || !got.ApprovedAt.Equal(now) {
+		t.Errorf("ApprovedAt = %v, want %v", got.ApprovedAt, now)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_DecideApproval_DenySuccess is ApproveSuccess's own counterpart
+// for an explicit deny: the schema allows 'denied' and an approver
+// rejecting immediately beats making an agent wait for a timeout (task
+// brief). approved_by/approved_at are still set on a deny — see
+// DecideApproval's own doc comment on why both columns mean "who decided,
+// and when," not strictly "who approved."
+func TestStore_DecideApproval_DenySuccess(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID, delegationID, rootDelegationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	const rootPrincipal = "root-principal@example.com"
+	now := time.Now().UTC().Truncate(time.Second)
+	rows, digest, _ := pendingApprovalRow(id, agentID, delegationID, rootDelegationID, rootPrincipal)
+
+	// Pinned via insertArgsFor -- see ApproveSuccess's own comment on what
+	// this does and does not protect against (the identical limitation
+	// applies here to eventTypeApprovalDenied and Decision="DENY").
+	wantEntry := audit.Entry{
+		TenantID: testTenant, OccurredAt: now, EventType: eventTypeApprovalDenied, Actor: "operator-actor",
+		AgentID: &agentID, DelegationID: &delegationID, RootDelegationID: &rootDelegationID,
+		ToolName: "Bash", Action: "execute", DerivedTier: int16(models.ActionTierExternalComms),
+		Decision: "DENY", DeniedAtDepth: noDenial, Reason: "escalation denied", InputDigest: digest,
+	}
+	wantLinked := audit.Link(nil, wantEntry)
+	wantHash := wantLinked.Hash()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).WithArgs(id.String()).WillReturnRows(rows)
+	mock.ExpectExec(regexp.QuoteMeta(updateApprovalDecisionQuery)).
+		WithArgs("denied", rootPrincipal, now, id.String()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(insertArgsFor(wantLinked, wantHash)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := s.DecideApproval(context.Background(), id, false, rootPrincipal, "operator-actor", now)
+	if err != nil {
+		t.Fatalf("DecideApproval() error = %v", err)
+	}
+	if got.Status != "denied" {
+		t.Errorf("Status = %q, want %q", got.Status, "denied")
+	}
+	if got.ApprovedBy == nil || *got.ApprovedBy != rootPrincipal {
+		t.Errorf("ApprovedBy = %v, want %q (who decided, not merely who approved)", got.ApprovedBy, rootPrincipal)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_DecideApproval_WrongApproverRefused is N7's own required test
+// (task brief: "one whose identity does not [match] is refused... that is
+// N7 and it needs its own test"): an operator whose identity does not equal
+// the loaded row's root_principal is refused with ErrApproverNotRootPrincipal
+// — proven with NO updateApprovalDecisionQuery or audit expectation
+// registered at all, so a mutant that dropped or weakened this comparison
+// would instead reach the (absent) UPDATE expectation and fail with
+// sqlmock's own "was not expected" error, not this specific errors.Is
+// check. This is the store-layer twin of
+// cmd/stratium-pap/approvals_test.go's own HTTP-level proof that this holds
+// even when the operator's ROLE is admin — role and identity are two
+// different gates, and this test is about the second one alone.
+func TestStore_DecideApproval_WrongApproverRefused(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID, delegationID, rootDelegationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	rows, _, _ := pendingApprovalRow(id, agentID, delegationID, rootDelegationID, "the-real-root-principal@example.com")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).WithArgs(id.String()).WillReturnRows(rows)
+	mock.ExpectRollback()
+
+	_, err := s.DecideApproval(context.Background(), id, true, "an-impostor@example.com", "operator-actor", time.Now())
+	if !errors.Is(err, ErrApproverNotRootPrincipal) {
+		t.Errorf("DecideApproval() error = %v, want errors.Is(_, ErrApproverNotRootPrincipal)", err)
+	}
+
+	assertExpectationsMet(t, mock) // no UPDATE, no audit insert: nothing was decided
+}
+
+// TestStore_DecideApproval_AlreadyDecidedRefused proves a second decision on
+// an already-resolved approval is refused, not a silent overwrite of the
+// first disposition — checked AFTER the N7 comparison above (see
+// DecideApproval's own doc comment for why that order is deliberate: an
+// operator N7 has already ruled out must not learn anything about the row's
+// current status from which error comes back).
+func TestStore_DecideApproval_AlreadyDecidedRefused(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID, delegationID, rootDelegationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	const rootPrincipal = "root-principal@example.com"
+	digest := sha256.Sum256([]byte("already decided fixture"))
+	requestedAt := time.Now().UTC().Truncate(time.Second)
+	approvedAt := requestedAt.Add(time.Minute)
+	rows := sqlmock.NewRows(approvalColumns()).AddRow(
+		id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
+		"requesting-subject", rootPrincipal, "Bash", "execute", int64(models.ActionTierExternalComms),
+		digest[:], "approved", requestedAt, requestedAt.Add(time.Hour), rootPrincipal, approvedAt,
+	)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).WithArgs(id.String()).WillReturnRows(rows)
+	mock.ExpectRollback()
+
+	_, err := s.DecideApproval(context.Background(), id, false, rootPrincipal, "operator-actor", time.Now())
+	if !errors.Is(err, ErrApprovalNotPending) {
+		t.Errorf("DecideApproval() error = %v, want errors.Is(_, ErrApprovalNotPending)", err)
+	}
+
+	assertExpectationsMet(t, mock) // no UPDATE, no audit insert: the first disposition survives untouched
+}
+
+func TestStore_DecideApproval_NotFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).
+		WithArgs(id.String()).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, err := s.DecideApproval(context.Background(), id, true, "someone@example.com", "operator-actor", time.Now())
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("DecideApproval() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_DecideApproval_AuditFailureRollsBackWrite is N4's own proof for
+// this method — see policy_test.go's
+// TestStore_CreatePolicy_AuditFailureRollsBackWrite for the full reasoning:
+// the UPDATE succeeds, but the audit append's own advisory-lock step fails,
+// and because both share one transaction, only ExpectRollback remains
+// registered.
+func TestStore_DecideApproval_AuditFailureRollsBackWrite(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID, delegationID, rootDelegationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	const rootPrincipal = "root-principal@example.com"
+	now := time.Now().UTC().Truncate(time.Second)
+	rows, _, _ := pendingApprovalRow(id, agentID, delegationID, rootDelegationID, rootPrincipal)
+	lockErr := errors.New("connection reset mid-audit")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).WithArgs(id.String()).WillReturnRows(rows)
+	mock.ExpectExec(regexp.QuoteMeta(updateApprovalDecisionQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(advisoryLockQuery)).WillReturnError(lockErr)
+	mock.ExpectRollback()
+
+	if _, err := s.DecideApproval(context.Background(), id, true, rootPrincipal, "operator-actor", now); err == nil {
+		t.Fatal("DecideApproval() error = nil, want the audit failure to propagate")
+	}
+
+	// No live-Postgres counterpart: pap_crud_integration_test.go's own
+	// package doc explains why Task 3 already made this call for the
+	// identical property on CreatePolicy/CreateAgent/CreateTierOverride, and
+	// this method inherits the same reasoning rather than a fresh one --
+	// reproducing an audit-insert failure deterministically against a live
+	// connection would be far more fragile than what it would prove beyond
+	// this sqlmock-level proof, which injects the failure at the exact
+	// instant the property needs it.
+	assertExpectationsMet(t, mock)
+}
+
+// idAbsentArg is a sqlmock.Argument matcher: it fails the match if v is a
+// string containing forbidden, and accepts any other value (including a
+// non-string driver.Value such as a []byte hash, a time.Time, or an int16
+// tier, none of which could carry a UUID's canonical string form) — see
+// TestStore_DecideApproval_AuditEntryNeverNamesTheApprovalID, its only
+// caller, for why every argument is checked this way rather than just the
+// one (Reason) most likely to carry it.
+type idAbsentArg struct{ forbidden string }
+
+func (m idAbsentArg) Match(v driver.Value) bool {
+	s, ok := v.(string)
+	if !ok {
+		return true
+	}
+	return !strings.Contains(s, m.forbidden)
+}
+
+// TestStore_DecideApproval_AuditEntryNeverNamesTheApprovalID guards this
+// phase's own logging rule ("never log... an approval id") at the one place
+// DecideApproval builds an audit.Entry. Every one of insertAuditQuery's 22
+// positional arguments is matched against idAbsentArg{id.String()} — not
+// merely Reason, the field most likely to carry a stray id — so if a future
+// edit added the approval's own id ANYWHERE on this entry, sqlmock would
+// refuse the match and fail this test for an unexpected argument, rather
+// than this test only ever checking the one field its author remembered to
+// suspect. WHICH escalation was decided is already fully identifiable from
+// AgentID/DelegationID/RootDelegationID/ToolName/Action/DerivedTier/
+// InputDigest (all copied from the approval, per DecideApproval's own doc
+// comment), so there is no reason this row's own primary key would ever
+// legitimately need to appear here, and audit_chain has no column for it
+// regardless.
+func TestStore_DecideApproval_AuditEntryNeverNamesTheApprovalID(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, agentID, delegationID, rootDelegationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	const rootPrincipal = "root-principal@example.com"
+	now := time.Now().UTC().Truncate(time.Second)
+	rows, _, _ := pendingApprovalRow(id, agentID, delegationID, rootDelegationID, rootPrincipal)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadApprovalForUpdateQuery)).WithArgs(id.String()).WillReturnRows(rows)
+	mock.ExpectExec(regexp.QuoteMeta(updateApprovalDecisionQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+
+	const insertAuditQueryArgCount = 22 // tenant_id..input_digest — see insertAuditQuery's own doc comment (audit.go)
+	forbid := idAbsentArg{forbidden: id.String()}
+	args := make([]driver.Value, insertAuditQueryArgCount)
+	for i := range args {
+		args[i] = forbid
+	}
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WithArgs(args...).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if _, err := s.DecideApproval(context.Background(), id, true, rootPrincipal, "operator-actor", now); err != nil {
+		t.Fatalf("DecideApproval() error = %v, want nil -- and, per idAbsentArg above, want no argument to have carried the approval's own id", err)
+	}
 	assertExpectationsMet(t, mock)
 }
 

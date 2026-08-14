@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
+	"stratium/pkg/audit"
 	"stratium/pkg/models"
 )
 
@@ -158,4 +160,164 @@ func scanApproval(row *sql.Row) (*models.Approval, error) {
 	}
 
 	return &a, nil
+}
+
+// --- PAP write (Task 4): E7, the approve action itself ---
+//
+// Everything below is the control-plane half of E7 that CreateApproval/
+// LoadApproval (above, Task 3) deliberately left absent: the ONLY path by
+// which approvals.status ever leaves 'pending'. migrations/000012_approvals'
+// own GRANT line withholds UPDATE from stratium_app entirely — the PDP has
+// no path to either 'approved' or 'denied', by construction, not by
+// convention — so DecideApproval exists on this Store at all only because a
+// Store constructed with stratium_pap's own connection (papDB in the
+// integration suite; STRATIUM_PAP_DATABASE_URL in the real binary) is the
+// one identity that GRANT actually permits it for. See migrations/000016_
+// stratium_pap_role's own comment for the grant this method depends on.
+
+// loadApprovalForUpdateQuery is loadApprovalQuery plus FOR UPDATE:
+// DecideApproval reads this exact row and then writes it, inside one
+// transaction, and without the row lock two concurrent decisions on the SAME
+// approval could both read status = 'pending', both pass N7 and the pending
+// check below, and the second write would silently overwrite the first's
+// outcome instead of being refused as ErrApprovalNotPending. FOR UPDATE
+// blocks the second transaction's SELECT until the first commits (or rolls
+// back); by the time it proceeds, the row it sees is already 'approved' or
+// 'denied', so the second decision is correctly refused rather than racing
+// the first to the UPDATE.
+const loadApprovalForUpdateQuery = loadApprovalQuery + ` FOR UPDATE`
+
+// updateApprovalDecisionQuery writes exactly the three columns E7 names —
+// status, approved_by, approved_at — leaving every other column (including
+// requested_at, expires_at, and the six request-identity columns
+// models.Approval.Verify later compares against) untouched: a decision
+// disposes of a pending request, it does not redefine what was asked.
+const updateApprovalDecisionQuery = `UPDATE approvals SET status = $1, approved_by = $2, approved_at = $3 WHERE id = $4`
+
+// ErrApprovalNotPending indicates a Decide call targeted an approval whose
+// status is already 'approved' or 'denied'. Without this, a second decision
+// on the same row would be an ordinary overwrite — not a security hole (N7
+// still gates who may issue it), but a silent, unaudited-as-a-refusal loss
+// of the first disposition's own meaning, and (paired with
+// loadApprovalForUpdateQuery's row lock) what makes two concurrent decisions
+// on one approval resolve to "one wins, one is refused" rather than
+// "whichever commits last wins."
+var ErrApprovalNotPending = errors.New("store: approval is not pending")
+
+// ErrApproverNotRootPrincipal is N7's own sentinel (spec §4.10.1): "an
+// approval requires the operator's identity to equal the approval's
+// root_principal. A role is necessary and never sufficient." operatorIdentity
+// is compared against the row THIS TRANSACTION just loaded and locked, never
+// against anything the HTTP request itself supplied claiming to be the
+// approver (cmd/stratium-pap/approvals.go's decideApproval passes only
+// op.ApproverIdentity, resolved from the operator's own verified token — see
+// that field's own doc comment, server.go) — the same "load and compare
+// against the stored value, never trust the request to name it" discipline
+// this store package already holds ValidateChain-adjacent checks to
+// elsewhere (e.g. CreateDelegation loading the parent fresh rather than
+// trusting a caller-supplied root_delegation_id/depth).
+var ErrApproverNotRootPrincipal = errors.New("store: operator is not this approval's root principal")
+
+// eventTypeApprovalApproved and eventTypeApprovalDenied are
+// audit_chain.event_type values for this table's one write operation's two
+// outcomes (N4) — one constant per distinct kind of write, matching every
+// other CRUD file in this package.
+const (
+	eventTypeApprovalApproved = "approval_approved"
+	eventTypeApprovalDenied   = "approval_denied"
+)
+
+// DecideApproval sets an approval's disposition — 'approved' if approve,
+// 'denied' otherwise — plus approved_by and approved_at, and audits the
+// write, inside one transaction (N4). This is E7's entire write surface: the
+// PDP only ever reads this table (LoadApproval) or creates a pending row
+// (CreateApproval); nothing else in this codebase ever changes 'pending' to
+// anything else.
+//
+// Order of checks matters and is deliberate: N7 (operatorIdentity must equal
+// the loaded row's own RootPrincipal) is checked BEFORE the pending check,
+// so an operator who is not this approval's root principal is refused
+// identically whether the row is still pending or was already decided —
+// ErrApproverNotRootPrincipal never leaks "was this already decided" to
+// someone N7 has already ruled out, which ErrApprovalNotPending would.
+//
+// approved_by is written as a.RootPrincipal — the row's OWN, already-loaded
+// value — not operatorIdentity: by the time that line runs the two are
+// proven equal, and echoing the canonical stored value back rather than a
+// second, separately-sourced copy of the "same" string is what keeps
+// approved_by provably equal to root_principal by construction, not by
+// coincidence of two code paths agreeing today.
+//
+// now sets BOTH approved_at and the audit entry's OccurredAt — the same
+// single-clock-read discipline UpdateTierOverride established for a write
+// with no other row-level timestamp its own audit entry could instead reuse
+// via RETURNING.
+func (s *Store) DecideApproval(
+	ctx context.Context, id uuid.UUID, approve bool, operatorIdentity, actor string, now time.Time,
+) (*models.Approval, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	a, err := scanApproval(tx.QueryRowContext(ctx, loadApprovalForUpdateQuery, id.String()))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: approval %s", ErrNotFound, id)
+		}
+		return nil, fmt.Errorf("store: load approval %s: %w", id, err)
+	}
+
+	if a.RootPrincipal != operatorIdentity {
+		return nil, fmt.Errorf("%w: approval %s", ErrApproverNotRootPrincipal, id)
+	}
+	if a.Status != "pending" {
+		return nil, fmt.Errorf("%w: approval %s is already %q", ErrApprovalNotPending, id, a.Status)
+	}
+
+	status, eventType, decision := "denied", eventTypeApprovalDenied, "DENY"
+	if approve {
+		status, eventType, decision = "approved", eventTypeApprovalApproved, "ALLOW"
+	}
+
+	if _, err := tx.ExecContext(ctx, updateApprovalDecisionQuery, status, a.RootPrincipal, now, id.String()); err != nil {
+		return nil, fmt.Errorf("store: decide approval %s: %w", id, err)
+	}
+	a.Status = status
+	approvedBy := a.RootPrincipal
+	a.ApprovedBy = &approvedBy
+	a.ApprovedAt = &now
+
+	// AgentID/DelegationID/RootDelegationID/ToolName/Action/DerivedTier/
+	// InputDigest are copied from the approval this decision concerns —
+	// together they fully identify WHICH escalation was decided — never the
+	// approval's own id: this phase's "never log... an approval id" rule
+	// (task brief), honored here by construction rather than by remembering
+	// not to reach for a's ID field below. Reason names the outcome, not the
+	// row.
+	entry := audit.Entry{
+		TenantID:         s.tenantID,
+		OccurredAt:       now,
+		EventType:        eventType,
+		Actor:            actor,
+		AgentID:          &a.AgentID,
+		DelegationID:     &a.DelegationID,
+		RootDelegationID: &a.RootDelegationID,
+		ToolName:         a.ToolName,
+		Action:           a.Action,
+		DerivedTier:      int16(a.DerivedTier), //nolint:gosec // G115: ActionTier is range-checked to 0-4 by models.ParseActionTier
+		Decision:         decision,
+		DeniedAtDepth:    noDenial,
+		Reason:           "escalation " + status,
+		InputDigest:      a.InputDigest,
+	}
+	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return a, nil
 }

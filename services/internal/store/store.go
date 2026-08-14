@@ -103,6 +103,21 @@ func isForeignKeyViolation(err error) bool {
 	return errors.As(err, &pqErr) && pqErr.Code == sqlStateForeignKeyViolation
 }
 
+// isCheckViolation reports whether err is a Postgres check_violation
+// (SQLSTATE 23514) — isUniqueViolation/isForeignKeyViolation's sibling for a
+// CHECK constraint rejecting the row outright. catalog.go's
+// CreateToolCatalogEntry/UpdateToolCatalogEntry are this package's only
+// callers today: tool_catalog_tier_or_command_field (migrations/000014_
+// tool_catalog_nullable_tier) is the one CHECK this codebase asks the Go
+// layer to translate into a clean 400 rather than let fall through
+// writeStoreError's default 500 case, per Task 4's own brief — "the database
+// CHECK should already refuse it — confirm the API surfaces that rather than
+// crashing."
+func isCheckViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == sqlStateCheckViolation
+}
+
 // rowScanner is satisfied by both *sql.Row and *sql.Rows: their Scan methods
 // share an identical signature, so a single scan* helper can serve both a
 // single-row Get and a multi-row List for the same table without duplicating

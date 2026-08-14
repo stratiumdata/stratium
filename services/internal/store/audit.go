@@ -96,6 +96,19 @@ const sqlStateUniqueViolation = "23505"
 // join rather than a choice between two existing precedents.
 const sqlStateForeignKeyViolation = "23503"
 
+// sqlStateCheckViolation is PostgreSQL's SQLSTATE class for check_violation
+// — isCheckViolation's own check (store.go), the third and, for now, last
+// member of this file's small SQLSTATE set (see sqlStateForeignKeyViolation's
+// own comment on why they live together). tool_catalog_tier_or_command_field
+// (migrations/000014_tool_catalog_nullable_tier) is what CreateToolCatalogEntry/
+// UpdateToolCatalogEntry (catalog.go) map through this: the task brief's own
+// instruction is "the database CHECK should already refuse it — confirm the
+// API surfaces that rather than crashing," which is exactly the
+// unrecognized-error-falls-through-to-500 failure this mapping exists to
+// prevent (cmd/stratium-pap/respond.go's writeStoreError never echoes a
+// default-case error's own text).
+const sqlStateCheckViolation = "23514"
+
 // ErrConcurrentAppend indicates two writers raced on the same tenant's
 // chain tail: both read the same predecessor and both tried to link a new
 // entry onto it. UNIQUE (tenant_id, prev_hash) lets exactly one of them
