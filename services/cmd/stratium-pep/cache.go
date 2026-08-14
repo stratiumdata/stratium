@@ -1,14 +1,15 @@
 // cache.go is the on-disk store for the PEP's decision cache (spec §4.8,
-// §4.8.2 W1-W5; Phase 13 Task 1). It stores and retrieves bytes only -- no
-// validity rule lives here. Whether an entry this file returns is still
-// USABLE (epoch match, delegation not expired, token still valid, within
-// the staleness window -- W3) is Task 2's job, layered on top of cacheGet;
-// whether any of the four PEP surfaces ever calls cacheGet or cachePut at
-// all is Task 3's. This file never imports internal/authz and never
-// inspects Decision beyond storing and returning whatever value it was
-// given -- the PEP classifies nothing and decides nothing (this phase's own
-// global constraint), and a storage layer that peeked at the verdict to
-// make a choice would already be halfway to violating it.
+// §4.8.2 W1-W5; Phase 13 Tasks 1-2), plus -- layered on top of the store --
+// whether a retrieved entry is still USABLE (epoch match, delegation not
+// expired, token still valid, within the staleness window -- W3) and W4's
+// rule that an ESCALATE is never cached or served (see "Validity" below).
+// Whether any of the four PEP surfaces ever calls cacheGetValid or cachePut
+// at all is Task 3's, not this file's. This file never imports
+// internal/authz, and the only thing it inspects Decision for is refusing
+// to store or serve an ESCALATE -- it never inspects one to CLASSIFY or
+// COMBINE anything (this phase's own global constraint): replaying a
+// verdict the PDP already produced, or declining to, is not the same act as
+// deriving one.
 //
 // Key and stored fields (W2): an entry is keyed by (delegation id, tool,
 // input digest) -- keyed on the DELEGATION rather than the token because a
@@ -74,15 +75,79 @@
 // WHICH entries an over-cap Put evicts (oldest CachedAt first --
 // evictOldest below), just not WHEN eviction triggers. The two mechanisms
 // compose cleanly once Task 2 lands: nothing here needs to change.
+//
+// Task 2 has since introduced that window (cacheConfig.StalenessWindow,
+// "Validity" below) -- as predicted, evictOldest did not change at all.
+//
+// # Validity
+//
+// W3 is four independent conditions, ALL required, each closing a
+// different conformance property: epochCurrent (C20), delegationNotExpired
+// (C24's time half), tokenNotExpired (C24's credential half), and
+// withinStalenessWindow (C19). cacheEntryUsable combines the four -- plus
+// W4's rule below -- and cacheGetValid applies the combination on top of
+// cacheGet, so a caller never sees "a hit that turned out to be unusable"
+// as a distinct outcome from an ordinary miss; fail closed means the two
+// are indistinguishable on purpose.
+//
+// withinStalenessWindow's clock runs from the ENTRY'S OWN CachedAt, not
+// from the most recent successful PDP contact of any kind -- the choice
+// this task was asked to make and justify. Both are defensible, and they
+// differ sharply during an outage that starts right after a busy period:
+// "any kind" would let one call's success silently vouch for every OTHER
+// entry's freshness too, so the whole cache would read as fresh right up
+// until staleness-window after that last unrelated call, then go stale all
+// at once. Per-entry CachedAt instead lets each entry age out on its own
+// schedule, on the strength of only its own evidence. Chosen because: (1)
+// it needs no new state -- no shared "last contact" clock that all four of
+// Task 3's surfaces, separate processes with no shared memory (W5), would
+// each have to remember to update on every successful call and get right,
+// with nothing to catch the one that forgot; (2) it is the strictly more
+// conservative reading, matching this phase's own fail-closed bias -- an
+// entry never gets to borrow freshness from a call it was not itself part
+// of; and (3) it gives an operator's staleness-window setting one bound
+// that means the same thing for every decision: no cached verdict is EVER
+// served more than that long after the PDP actually computed it, a
+// per-decision guarantee rather than one that quietly depends on how much
+// unrelated traffic the cache happened to be seeing. The cost an operator
+// should expect in exchange: during that same outage, calls whose entries
+// happen to be older start denying sooner than calls whose entries are
+// newer, even though the PDP went unreachable for both at the same moment
+// -- the cache empties out over the course of the window rather than
+// holding together and then dropping all at once.
+//
+// tokenNotExpired decodes the caller's presented token's own "exp" claim
+// without verifying its signature, deliberately: internal/token's own
+// package doc makes the PDP the ONLY verifier (spec K2 -- no JWKS document
+// distributes a key anyone else could check a signature against), so the
+// PEP has never held the means to verify a token on ANY path, cached or
+// forwarded to Decide. What this condition narrows is specifically "has
+// the claimed expiry passed" -- the same claim, the same trust boundary,
+// DelegationExpiresAt is itself sourced from (decode the token's "exp"
+// claim; pdp.proto's CreateDelegationResponse.token comment), not a new
+// capability this task invents.
+//
+// W4 (an ESCALATE is never cached, spec §4.6) is guarded twice, on
+// purpose: cachePut refuses to WRITE one, and cacheEntryUsable refuses to
+// SERVE one even if it reached the file another way (a hand-edited file, or
+// a future cachePut that lost the guard). The failure is silent if missed
+// -- a served ESCALATE either re-blocks a call a human already approved or
+// fabricates an approval nobody granted -- so it gets defended at both the
+// only door it can be written through and the only door it can be read
+// back out of, rather than trusting the first to make the second
+// redundant.
 package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"stratium/internal/pdpgrpc"
 )
@@ -125,8 +190,9 @@ type cacheKey struct {
 }
 
 // cacheEntry is one cached PDP decision. Decision, Epoch, and
-// DelegationExpiresAt are exactly what W3 (Task 2) will need to judge
-// whether a hit is still valid; CachedAt is when this process wrote it.
+// DelegationExpiresAt are exactly what W3 (cacheEntryUsable, below) needs
+// to judge whether a hit is still valid; CachedAt is when this process
+// wrote it.
 // Deliberately not pdpgrpc.DecideResponse or authz.Result: this cache
 // replays a verdict, not the machinery that produced it, and embedding
 // either wire/decision type would let an unrelated future change to those
@@ -207,8 +273,8 @@ func writeCacheEntries(path string, entries []cacheEntry) error {
 // mishandle into anything but a miss.
 //
 // Does not check Decision, Epoch, DelegationExpiresAt, or staleness --
-// whether a returned entry is still VALID is W3, Task 2's layer on top of
-// this one, not this function's job.
+// whether a returned entry is still VALID is W3, layered on top of this
+// function by cacheGetValid below, not this function's own job.
 func cacheGet(path string, key cacheKey) (cacheEntry, bool) {
 	entries, ok := loadCacheEntries(path)
 	if !ok {
@@ -222,9 +288,22 @@ func cacheGet(path string, key cacheKey) (cacheEntry, bool) {
 	return cacheEntry{}, false
 }
 
+// errEscalationNotCacheable is cachePut's refusal for an ESCALATE decision
+// -- spec W4, §4.6: an escalation is a human decision left pending, not a
+// verdict the PDP produced, so there is nothing here yet to replay. See the
+// package doc's "Validity" section for why this is guarded a second time on
+// the read side too (cacheEntryUsable), not trusted to this check alone.
+var errEscalationNotCacheable = errors.New("cache: ESCALATE decisions are never cached (spec W4)")
+
 // cachePut upserts entry into the cache file at path -- replacing any
 // existing entry with the same key -- and evicts the oldest entries first
 // if that leaves more than maxCacheEntries (evictOldest).
+//
+// Refuses outright, before touching the file at all, if entry.Decision is
+// ESCALATE (W4, errEscalationNotCacheable) -- the one case where this file
+// inspects Decision for a reason other than storing and returning it
+// unchanged; see the package doc for why that single exception does not
+// widen into classifying or combining anything.
 //
 // A read failure from loadCacheEntries here (missing or corrupt file) is
 // treated as an empty starting set and silently overwritten, not returned
@@ -238,6 +317,9 @@ func cacheGet(path string, key cacheKey) (cacheEntry, bool) {
 // bug, and why it can never corrupt the file for a third, uninvolved
 // reader regardless.
 func cachePut(path string, entry cacheEntry) error {
+	if entry.Decision == pdpgrpc.Effect_EFFECT_ESCALATE {
+		return errEscalationNotCacheable
+	}
 	entries, _ := loadCacheEntries(path)
 
 	found := false
@@ -267,4 +349,165 @@ func evictOldest(entries []cacheEntry, maxEntries int) []cacheEntry {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].CachedAt.Before(entries[j].CachedAt) })
 	return entries[len(entries)-maxEntries:]
+}
+
+// cacheStalenessWindowEnv is condition 4's one new piece of required
+// configuration (spec C19): how long a cached decision may keep being
+// served without a fresh PDP round trip re-confirming it. No default -- an
+// operator states how long an unverifiable decision may keep working, and
+// no single value is right for every deployment: too long is too
+// permissive (an outage-tolerance feature that quietly becomes a
+// revocation-tolerance one), too short is useless (an "outage tolerance"
+// that cannot outlast a network blip).
+const cacheStalenessWindowEnv = "STRATIUM_PEP_CACHE_STALENESS_WINDOW"
+
+// cacheConfig is this task's one addition to this binary's configuration
+// surface. A separate small struct and loader, not a new field folded into
+// hookConfig/sessionStartConfig/mcpConfig/extauthzConfig/proxyConfig
+// (hook.go/session_start.go/mcp.go/extauthz.go/proxy.go): this file's own
+// scope does not extend to those, and each already has its own independent
+// loader for exactly this reason -- mcpConfig's own loader doc comment
+// makes the same call for its one required value ("moot here with only one
+// required variable, but consistent... rather than a special case"). How
+// this composes with each surface's own config is Task 3's decision, the
+// same way combineConfigErrors (mcp.go) already composes mcpConfig's loader
+// with hookConfig's.
+type cacheConfig struct {
+	StalenessWindow time.Duration
+}
+
+// loadCacheConfigFromEnv reads cacheConfig from the environment via the
+// same requiredEnv/requiredDuration/missingConfigError machinery
+// (config.go) every other loader in this binary uses: no default, and a
+// missing or non-positive value fails with a message naming it, never a
+// guess.
+func loadCacheConfigFromEnv() (cacheConfig, error) {
+	var missing []string
+	raw := requiredEnv(cacheStalenessWindowEnv, &missing)
+	if len(missing) > 0 {
+		return cacheConfig{}, missingConfigError(missing)
+	}
+	window, err := requiredDuration(cacheStalenessWindowEnv, raw)
+	if err != nil {
+		return cacheConfig{}, err
+	}
+	return cacheConfig{StalenessWindow: window}, nil
+}
+
+// epochCurrent is W3's first condition (C20): the epoch entry was computed
+// under must equal the last epoch this PEP has itself observed from the
+// PDP. lastKnownEpoch is supplied by the caller, not read or tracked here
+// -- this file stores decisions, not PEP-wide session state, and each of
+// Task 3's four surfaces already holds a natural source for it (the epoch
+// on its own most recent Decide/CreateDelegation/IssueToken response; see
+// pdp.proto's own comment on why all three RPCs return one).
+//
+// Equality, not >=: a cached epoch NEWER than what this call site currently
+// believes would mean this process itself is behind, which is exactly as
+// untrustworthy as being behind the other way around -- W3 asks for the two
+// to agree, not merely for the entry to be no older.
+func epochCurrent(entry cacheEntry, lastKnownEpoch int64) bool {
+	return entry.Epoch == lastKnownEpoch
+}
+
+// delegationNotExpired is W3's second condition (C24's time half):
+// entry.DelegationExpiresAt, recorded when the entry was cached, must still
+// be in the future as of now. This is the reason spec §4.8.1 V2 keeps a
+// delegation's own time-based expiry OUT of the revocation epoch:
+// expiring is a state change nobody writes -- no row update, no trigger,
+// nothing that could ever bump the epoch -- it simply becomes true the
+// instant a clock crosses a value nobody had to act on. epochCurrent can
+// therefore never catch this on its own; it needs this separate,
+// independent time comparison.
+func delegationNotExpired(entry cacheEntry, now time.Time) bool {
+	return now.Before(entry.DelegationExpiresAt)
+}
+
+// tokenNotExpired is W3's third condition (C24's credential half): the
+// CALLER's own presented token -- not anything the entry recorded -- must
+// not have passed its own "exp" claim as of now. Deliberately independent
+// of entry: a hit replays a decision about a delegation, but the credential
+// presenting it can have expired on its own schedule since, and only a live
+// PDP call can mint a replacement (reissue.go) -- so during an outage an
+// expired token must deny even against an otherwise perfect hit, exactly
+// the "a cache hit must not extend a credential's life" rule this phase
+// states as a global constraint.
+//
+// Reads the claim, does not verify the signature: jwt.Parser.ParseUnverified's
+// own doc warns this is safe only "in cases where you know the signature is
+// valid... since it has already been... checked elsewhere in the stack" --
+// exactly this system's shape. internal/token's own package doc makes the
+// PDP the only verifier (spec K2: no JWKS document, so verification is
+// never on the enforcement path for anyone else), so the PEP has never held
+// a key to check a signature with, on this path or the ordinary
+// forwarded-to-Decide one either. What this narrows is specifically "has
+// the claimed expiry passed" -- the same claim, the same trust boundary,
+// DelegationExpiresAt is itself sourced from.
+//
+// Fails closed on anything unreadable: a token that does not even parse,
+// and -- easy to miss, see TestTokenNotExpired_MissingExpClaimDenies -- a
+// token that parses fine but carries no "exp" claim at all, which
+// jwt.MapClaims.GetExpirationTime reports as (nil, nil), NOT an error. A
+// check that only looked at the error would treat an unsigned token with no
+// expiry as valid forever; checking exp == nil explicitly is what the
+// binding "an unparseable expiry... is a miss" rule actually requires here.
+func tokenNotExpired(token string, now time.Time) bool {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(token, claims); err != nil {
+		return false
+	}
+	exp, err := claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		return false
+	}
+	return now.Before(exp.Time)
+}
+
+// withinStalenessWindow is W3's fourth condition (C19's bound): now must be
+// no later than entry.CachedAt plus staleness. Runs from the entry's OWN
+// CachedAt rather than the most recent successful PDP contact of any kind
+// -- see the package doc's "Validity" section for the choice and its
+// justification.
+func withinStalenessWindow(entry cacheEntry, now time.Time, staleness time.Duration) bool {
+	return !now.After(entry.CachedAt.Add(staleness))
+}
+
+// cacheEntryUsable is spec §4.8.2 W3 (all four conditions, all required)
+// plus W4 (an ESCALATE is never served, even if one somehow reached the
+// file) -- the one place a caller learns whether a looked-up entry may
+// actually be replayed. Go's && already fails closed on the first false the
+// same way a hand-written all() would: a single missing or unparseable
+// input anywhere in the chain (a zero-value CachedAt, an unparseable token,
+// an epoch the caller never actually learned) can only ever push the result
+// toward false, never true.
+func cacheEntryUsable(entry cacheEntry, lastKnownEpoch int64, token string, now time.Time, staleness time.Duration) bool {
+	if entry.Decision == pdpgrpc.Effect_EFFECT_ESCALATE {
+		// W4, read side. cachePut already refuses to write one; this is the
+		// second half of that same guarantee, for a file this process did
+		// not itself write (hand-edited, or written by some future cachePut
+		// that lost the guard). The failure is silent if missed, so it gets
+		// its own line rather than trusting the write-side guard alone.
+		return false
+	}
+	return epochCurrent(entry, lastKnownEpoch) &&
+		delegationNotExpired(entry, now) &&
+		tokenNotExpired(token, now) &&
+		withinStalenessWindow(entry, now, staleness)
+}
+
+// cacheGetValid is cacheGet plus cacheEntryUsable layered on top -- the
+// single call Task 3's four surfaces need. A hit that fails any condition
+// is indistinguishable from an outright miss, on purpose: fail closed means
+// an invalid entry is not a distinct outcome a caller could handle
+// specially, it is a miss like any other, and the caller falls back to the
+// PDP (or denies) exactly as it would for a key that was never cached at
+// all.
+func cacheGetValid(
+	path string, key cacheKey, lastKnownEpoch int64, token string, now time.Time, staleness time.Duration,
+) (cacheEntry, bool) {
+	entry, ok := cacheGet(path, key)
+	if !ok || !cacheEntryUsable(entry, lastKnownEpoch, token, now, staleness) {
+		return cacheEntry{}, false
+	}
+	return entry, true
 }
