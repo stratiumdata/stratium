@@ -238,6 +238,25 @@ func (Engine) Validate(_ context.Context, text string) error {
 	return nil
 }
 
+// DeclaredEffect reports text's own top-level "effect" key, unmodified —
+// this schema's grammar makes the declared effect a literal field of the
+// text itself (see the package doc's schema), not something to infer or
+// evaluate, the simplest possible case of the property internal/store's own
+// write path needs from a language where "does policies.effect agree with
+// the text" is a well-formed question at all (policy.go's effectDeclarer,
+// satisfied here structurally rather than through an addition to the
+// PolicyEngine interface — see that package's own doc comment for the two
+// languages, Rego and XACML, where the question has no single answer).
+// Reuses parseDoc rather than a second decode: this must never accept
+// anything Validate would reject.
+func (Engine) DeclaredEffect(text string) (string, error) {
+	d, err := parseDoc(text)
+	if err != nil {
+		return "", fmt.Errorf("json: declared effect: %w", err)
+	}
+	return d.Effect, nil
+}
+
 // effectOf converts a parseDoc-validated effect string into authz.Effect.
 // parseDoc has already rejected every value except effectAllow and
 // effectDeny by the time Prepare calls this, so the fallthrough to

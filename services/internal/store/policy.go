@@ -28,16 +28,20 @@ import (
 //
 // policies.effect is deliberately not selected. Phase 4a Task 4 dropped it
 // from StoredPolicy: no engine reads it — all four derive effect from the
-// policy text — and it can actively disagree with that text (a row stored
-// effect='deny' whose text says permit(...) still evaluates to ALLOW), so
-// trusting this column at read time would let a PAP screen listing policies
-// by policies.effect show the opposite of what the policy actually does. The
-// database column itself stays: a future PAP write path may populate it. If
-// one ever does, that write path must validate the value agrees with the
-// policy text it is attached to before persisting, rather than this query
-// trusting whatever was last written — the same discipline every engine's
-// own Prepare already applies today by ignoring the column and parsing the
-// text instead.
+// policy text — so trusting this column at DECISION time would let a
+// decision depend on a value no engine's own Prepare/Evaluate has ever
+// verified. The database column itself stays, and Phase 14 Task 3's CRUD
+// write path (CreatePolicy/UpdatePolicy, below) now populates it — validated
+// at write time by validateEffectAgreement against cedar/json's own declared
+// effect (refusing a mismatch outright) and constrained to a fixed, provably
+// uninformative sentinel for rego/xacml, whose stored policies are not
+// single-valued at all (see that function's own doc comment for the
+// language-by-language basis). That write-time discipline is what makes the
+// column SAFE for a display-only read path (GetPolicy/ListPolicies' own
+// scanFullPolicy, which do select it, for an admin screen) — this decision
+// path still does not select it, and must not start to: no engine has
+// changed how it derives effect, only how honestly the column now describes
+// what they already do.
 const loadAllPoliciesQuery = `SELECT id, name, language, policy_content, priority, version ` +
 	`FROM policies WHERE enabled = true ORDER BY id`
 
@@ -134,6 +138,161 @@ var ErrUnknownLanguage = errors.New("store: no policy engine registered for this
 // checked here so a bad value is refused with a clear message before ever
 // reaching Postgres, rather than surfacing as an opaque constraint violation.
 var ErrInvalidEffect = errors.New("store: policy effect must be \"allow\" or \"deny\"")
+
+// effectDeclarer is implemented by a policy.PolicyEngine whose language
+// makes a stored policy's effect single-valued and mechanically derivable
+// from its own text — cedar.Engine and jsonpolicy.Engine both implement it;
+// rego.Engine and xacml.Engine do not, because a single stored policy in
+// either language can itself define rules of BOTH effects, resolved only
+// once real request data is known (see validateEffectAgreement's own doc
+// comment for the empirical, language-by-language basis).
+//
+// Declared here, as a small interface satisfied structurally via a type
+// assertion, rather than added as a method on policy.PolicyEngine itself:
+// Prepare and Evaluate never need this, so forcing rego.Engine and
+// xacml.Engine to grow a method they could only implement dishonestly
+// (picking an arbitrary one of the two effects, or always erroring) would
+// spread this package's own write-path concern into every engine's public
+// surface for no reader of Prepare/Evaluate to ever call — the same "define
+// the interface where it is used, not where it is implemented" call this
+// codebase already makes for its other small interfaces.
+type effectDeclarer interface {
+	// DeclaredEffect parses text — already known to pass Validate by the
+	// time this is called — and returns the single "allow"/"deny" value it
+	// unconditionally declares.
+	DeclaredEffect(text string) (string, error)
+}
+
+// multiValuedLanguageEffect is the one value policies.effect may hold for a
+// language whose engine does not implement effectDeclarer (today: rego,
+// xacml) — see validateEffectAgreement's own doc comment for why no
+// operator-supplied value can be trusted there at all. "deny" specifically,
+// not "allow": the same safe-direction default authz.Effect's own zero value
+// already establishes for "no real information here" ("a leg that is never
+// evaluated must deny rather than silently permit"), and jsonpolicy's and
+// xacml's own effectOf fallbacks already pick it for the identical reason. A
+// reader who ignores this doc comment and trusts the column anyway for one
+// of these two languages is misled in the safe direction — believing a
+// policy denies more than it actually does, never less.
+const multiValuedLanguageEffect = "deny"
+
+// ErrEffectMismatch indicates policies.effect disagrees with what the
+// policy's own text unconditionally declares, for a language where that
+// comparison is well-defined (see validateEffectAgreement). A stored policy
+// whose declared column contradicts its text is exactly what let a PAP
+// screen "show the opposite of what the policy actually does"
+// (LoadAllPolicies' own doc comment) — refusing the write at the one place
+// a human still has to agree with the machine is cheaper than ever
+// discovering the disagreement downstream, on a screen an operator trusts.
+var ErrEffectMismatch = errors.New("store: policy effect does not agree with policy text")
+
+// ErrEffectNotDeclarable indicates a Create/Update call supplied an effect
+// other than multiValuedLanguageEffect for a language whose engine does not
+// implement effectDeclarer. Refusing anything else, rather than silently
+// overwriting it with the sentinel, is deliberate: an operator who typed
+// "allow" for a Rego or XACML policy believing it means something is told
+// so immediately, at the one moment they can act on it — the same "say it
+// explicitly, don't get a default for free" discipline
+// ErrAllowedToolsRequired (agent.go) already holds a different field to,
+// rather than this package quietly discarding input the caller believed
+// was recorded.
+var ErrEffectNotDeclarable = errors.New("store: policy language cannot declare a single effect from its text")
+
+// validateEffectAgreement is Issue 1's write-time check: policies.effect
+// must never be able to say something the policy text contradicts, for the
+// reason LoadAllPolicies' own doc comment already gives for not trusting it
+// at read time — except read-time silence cannot undo a bad row that
+// already exists, and this refuses one before it is ever written.
+//
+// Determined empirically, by reading each engine's own Prepare/Evaluate (see
+// this phase's own task report for the full per-language walkthrough), not
+// assumed: a stored policy's effect is single-valued — one text, one
+// effect, true for every request that ever matches it — in exactly two of
+// the four languages this package validates against.
+//
+//   - Cedar: parseOne (cedar/engine.go) already requires text to be exactly
+//     one policy STATEMENT, and Cedar's grammar begins every statement with
+//     exactly one of the two mutually exclusive keywords "permit"/"forbid".
+//     No Cedar text exists for which that keyword could read one way against
+//     one request and the other way against a different one.
+//   - JSON: the schema's own top-level "effect" key IS the declared value,
+//     literally — see jsonpolicy's own package doc for the schema in full.
+//   - Rego: a single module can define an "allow" rule and a "deny" rule as
+//     two INDEPENDENT rules, each conditioned however its author wrote it —
+//     rego/evaluate.go's own decision() reads both keys off one Eval call's
+//     result, and that package's own doc comment states plainly that "a
+//     policy defining both allow and deny as true resolves to a deny
+//     verdict" PER REQUEST. Nothing about the text alone fixes which rule
+//     fires for a request not yet known.
+//   - XACML: a single <Policy> (one stored policy) may contain more than one
+//     <Rule>, and each Rule carries its OWN Effect attribute independently,
+//     combined only by deny-overrides when more than one actually matches
+//     the SAME request (xacml/evaluate.go's compiledPolicy.evaluate) — a
+//     Policy with one Permit-effect Rule scoped to one Target and one
+//     Deny-effect Rule scoped to a different Target legitimately produces
+//     Allow for some requests and Deny for others, from the identical
+//     stored row.
+//
+// For the two single-valued languages, effect must equal exactly what the
+// text declares (via effectDeclarer), or the write is refused
+// (ErrEffectMismatch) — the column can no longer lie, because it is checked
+// against the one thing it could ever disagree with.
+//
+// For the two that are not, the column cannot be a claim about that policy
+// at all: no operator-supplied value could ever be validated against a text
+// with no one true effect to compare it to, and silently accepting one
+// anyway would leave exactly the "PAP screen shows the opposite of what the
+// policy does" risk this function exists to close, just unenforced for two
+// of four languages instead of all four. Rather than accept-and-trust (this
+// package's own established treatment for values it cannot check further,
+// e.g. Name), this rejects anything except the fixed sentinel
+// multiValuedLanguageEffect (ErrEffectNotDeclarable) — see that constant's
+// own doc comment for why "deny," and this function's own doc comment above
+// for why refuse rather than silently overwrite. A future PAP screen
+// (Task 6) must read this column as fact ONLY for cedar/json rows; for
+// rego/xacml rows it is a constant placeholder, provably uninformative
+// (every rego/xacml row's effect is, by construction, the identical value),
+// and must never be displayed as that row's real behavior.
+func validateEffectAgreement(registry policy.Registry, language, effect, text string) error {
+	engine, ok := registry[language]
+	if !ok {
+		// validatePolicyText — called earlier by every caller of this
+		// function, against the same (registry, language) pair — already
+		// turns an unregistered language into ErrUnknownLanguage before this
+		// is ever reached in practice. Returning nil rather than re-deriving
+		// that same error here keeps this function's own contract to
+		// exactly one question, "does effect agree with text," rather than
+		// a second, independently-worded unknown-language check whose
+		// message would need to be kept in sync with validatePolicyText's.
+		return nil
+	}
+
+	declarer, ok := engine.(effectDeclarer)
+	if !ok {
+		if effect != multiValuedLanguageEffect {
+			return fmt.Errorf(
+				"%w: %s policies cannot declare a single effect (one stored policy can itself produce both allow and deny outcomes, depending on the request) — pass %q, the fixed placeholder a display screen must never read as this policy's actual behavior",
+				ErrEffectNotDeclarable, language, multiValuedLanguageEffect)
+		}
+		return nil
+	}
+
+	declared, err := declarer.DeclaredEffect(text)
+	if err != nil {
+		// validatePolicyText already confirmed text passes this same
+		// engine's Validate; a DeclaredEffect failure here would mean the
+		// two disagree about what text is well-formed, which should be
+		// unreachable in practice for either engine that implements this
+		// interface today. Wrapped and returned, not ignored: silently
+		// treating an error as "agreement confirmed" would be the exact
+		// fail-open this whole function exists to refuse.
+		return fmt.Errorf("store: determine declared effect: %w", err)
+	}
+	if declared != effect {
+		return fmt.Errorf("%w: policy text declares %q, request says %q", ErrEffectMismatch, declared, effect)
+	}
+	return nil
+}
 
 // ErrPolicyInvalid wraps every error validatePolicyText's own engine.
 // Validate call returns — a syntax error, or the exact "syntactically
@@ -284,6 +443,9 @@ func (s *Store) CreatePolicy(ctx context.Context, registry policy.Registry, p mo
 	if err := validatePolicyText(ctx, registry, p.Language, p.Text); err != nil {
 		return models.Policy{}, err
 	}
+	if err := validateEffectAgreement(registry, p.Language, p.Effect, p.Text); err != nil {
+		return models.Policy{}, err
+	}
 
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
@@ -417,6 +579,9 @@ func (s *Store) UpdatePolicy(
 		return models.Policy{}, err
 	}
 	if err := validatePolicyText(ctx, registry, p.Language, p.Text); err != nil {
+		return models.Policy{}, err
+	}
+	if err := validateEffectAgreement(registry, p.Language, p.Effect, p.Text); err != nil {
 		return models.Policy{}, err
 	}
 

@@ -86,6 +86,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, store.ErrUnknownLanguage),
 		errors.Is(err, store.ErrInvalidEffect),
+		errors.Is(err, store.ErrEffectMismatch),
+		errors.Is(err, store.ErrEffectNotDeclarable),
 		errors.Is(err, store.ErrPolicyInvalid),
 		errors.Is(err, store.ErrAllowedToolsRequired),
 		errors.Is(err, store.ErrInvalidRequest),

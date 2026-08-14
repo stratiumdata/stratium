@@ -388,12 +388,18 @@ func TestPrepare_RejectsTextWithoutExactlyOneStatement(t *testing.T) {
 var sensitiveCedarCalls = []string{"NewPolicyListFromBytes", "checkDeadForms"}
 
 // allowedEntryPoints are the only functions permitted to (transitively)
-// reach a sensitiveCedarCalls target: Prepare, the compile-once step, and
+// reach a sensitiveCedarCalls target: Prepare, the compile-once step;
 // Validate, the PAP's authoring-time check, which compiles and analyses
-// text the same way but is never called on a per-decision path.
+// text the same way but is never called on a per-decision path; and
+// DeclaredEffect, internal/store's own write-time effect-agreement check
+// (policy.go's validateEffectAgreement) — a third authoring-time-only
+// caller, never reachable from Evaluate either, that parses text via the
+// identical parseOne this package already trusts Prepare/Validate to call
+// for the same reason.
 var allowedEntryPoints = map[string]bool{
-	"Prepare":  true,
-	"Validate": true,
+	"Prepare":        true,
+	"Validate":       true,
+	"DeclaredEffect": true,
 }
 
 // buildCallGraph parses every non-test .go file in this package and returns

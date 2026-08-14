@@ -84,6 +84,28 @@ func TestCreatePolicy_InvalidPolicyRefused_NothingPersisted(t *testing.T) {
 	assertExpectationsMet(t, f.mock) // zero expectations: nothing reached the database
 }
 
+// TestCreatePolicy_EffectMismatch_Refused_NothingPersisted is Issue 1's
+// HTTP-level instance, the same shape as InvalidPolicyRefused_
+// NothingPersisted just above but for effect/text disagreement rather than
+// a dead policy: a Cedar permit(...) statement declares "allow"; this
+// request claims "deny". Must be refused with 400 (a request the operator
+// can fix), never reach the database, and never a mismatch story an
+// operator has to reverse-engineer from a generic error.
+func TestCreatePolicy_EffectMismatch_Refused_NothingPersisted(t *testing.T) {
+	f := newPolicyTestFixture(t)
+
+	body := models.Policy{
+		Name: "contradicts-its-own-text", Language: "cedar",
+		Text: `permit(principal, action, resource);`, Effect: "deny",
+	}
+	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/policies", f.token(t, "org-admins"), body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock) // zero expectations: nothing reached the database
+}
+
 func TestGetPolicy_NotFound(t *testing.T) {
 	f := newPolicyTestFixture(t)
 	id := uuid.New()
@@ -116,7 +138,7 @@ func TestUpdatePolicy_Success(t *testing.T) {
 	expectWriteAndAudit(f.mock, "UPDATE policies",
 		sqlmock.NewRows([]string{"version", "created_at", "updated_at"}).AddRow(int64(2), now, now))
 
-	body := models.Policy{Name: "renamed", Language: "cedar", Text: `permit(principal, action, resource);`, Effect: "deny", Enabled: false}
+	body := models.Policy{Name: "renamed", Language: "cedar", Text: `permit(principal, action, resource);`, Effect: "allow", Enabled: false}
 	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/policies/"+id.String(), f.token(t, "org-admins"), body)
 
 	if rec.Code != http.StatusOK {

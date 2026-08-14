@@ -85,10 +85,16 @@ func TestEngine_Language(t *testing.T) {
 // parseDoc helper (see parseDoc's own doc comment for why that sharing is
 // correct), so parseDoc is itself a legitimate call site the scan must
 // allow, not merely a producer of decode calls to attribute elsewhere.
+// DeclaredEffect is the same shape as Prepare/Validate one level further
+// down: internal/store's own write-time effect-agreement check
+// (policy.go's validateEffectAgreement) calls it, and it is never reachable
+// from Evaluate — an authoring-time-only caller of parseDoc, not a
+// per-decision one.
 var allowedToDecode = map[string]bool{
-	"Prepare":  true,
-	"Validate": true,
-	"parseDoc": true,
+	"Prepare":        true,
+	"Validate":       true,
+	"parseDoc":       true,
+	"DeclaredEffect": true,
 }
 
 // TestDecodeOnlyCalledFromParseDoc guards spec defect D5 by name: an engine

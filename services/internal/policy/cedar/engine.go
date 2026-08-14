@@ -133,6 +133,44 @@ func (Engine) Validate(_ context.Context, text string) error {
 	return nil
 }
 
+// DeclaredEffect reports the single "allow"/"deny" value text unconditionally
+// declares — Cedar's own grammar makes this well-defined for every text
+// Validate accepts: parseOne already requires text to be exactly one policy
+// STATEMENT, and a Cedar statement begins with exactly one of the two
+// mutually exclusive keywords "permit"/"forbid". There is no Cedar text for
+// which that keyword reads one way against one request and the other way
+// against a different one — a `when`/`unless` clause changes only whether the
+// policy matches at all, never which effect it has if it does — so unlike
+// Evaluate (evaluate.go), this needs no EvaluationInput and cannot itself
+// produce anything but a fixed answer for a given text.
+//
+// This is internal/store's own hook (policy.go's effectDeclarer, satisfied
+// here structurally rather than through an addition to the PolicyEngine
+// interface): its write path calls this to decide whether policies.effect
+// agrees with p.Text for a language where "agrees" is a well-formed question
+// at all — see that package's own doc comment for the two languages (Rego,
+// XACML) where it is not.
+//
+// Does not run checkDeadForms: a dead-form rejection is Validate's own job,
+// already run on every write path before this is ever reached, and this
+// method's contract is narrower — the declared effect of text already known
+// syntactically valid, not whether it can ever fire.
+func (Engine) DeclaredEffect(text string) (string, error) {
+	parsed, err := parseOne("declared-effect", text)
+	if err != nil {
+		return "", fmt.Errorf("cedar: declared effect: %w", err)
+	}
+	// cedarlib.Effect (permit/forbid, a policy's own fixed intent) and
+	// cedarlib.Decision (allow/deny, evaluate.go's per-request authorization
+	// RESULT) are deliberately distinct bool-based types in cedar-go, not
+	// interchangeable spellings of the same thing — Effect is what this
+	// method reports.
+	if parsed.Effect() == cedarlib.Permit {
+		return "allow", nil
+	}
+	return "deny", nil
+}
+
 // parseOne parses text as exactly one Cedar policy statement. A Stratium
 // StoredPolicy is one policy; text that parses to zero or several Cedar
 // statements has nowhere to attribute a StoredPolicy.ID to and is treated as

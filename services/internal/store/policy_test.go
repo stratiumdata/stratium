@@ -295,16 +295,28 @@ func policyRowColumns() []string {
 // auditing" -- absent that write below, ExpectCommit would be the next
 // registered expectation and sqlmock would fail this test the moment the
 // real code asked for something else instead).
+//
+// effect is per-language, not a single "allow" reused for all four, since
+// Issue 1's validateEffectAgreement now checks it: cedar/json must equal
+// what their own fixture text actually declares (validCedarPolicy is a
+// permit(...) statement; validJSONPolicy's own "effect" key is "allow"),
+// and rego/xacml -- not single-valued, see that function's own doc comment
+// -- must be multiValuedLanguageEffect regardless of what their fixture
+// text's rules happen to look like. TestStore_CreatePolicy_EffectAgreement*
+// below are this property's own dedicated, per-behavior tests; this table
+// only needs each case to be INTERNALLY consistent so the create itself
+// still succeeds.
 func TestStore_CreatePolicy_ValidPolicyPersistsForEveryLanguage(t *testing.T) {
 	registry := testRegistry()
 	tests := []struct {
 		language string
 		text     string
+		effect   string
 	}{
-		{"cedar", validCedarPolicy},
-		{"rego", validRegoPolicy},
-		{"json", validJSONPolicy},
-		{"xacml", validXACMLPolicy},
+		{"cedar", validCedarPolicy, "allow"},
+		{"rego", validRegoPolicy, multiValuedLanguageEffect},
+		{"json", validJSONPolicy, "allow"},
+		{"xacml", validXACMLPolicy, multiValuedLanguageEffect},
 	}
 	for _, tt := range tests {
 		t.Run(tt.language, func(t *testing.T) {
@@ -315,7 +327,7 @@ func TestStore_CreatePolicy_ValidPolicyPersistsForEveryLanguage(t *testing.T) {
 			mock.ExpectBegin()
 			expectSetTenant(mock)
 			mock.ExpectQuery(regexp.QuoteMeta(insertPolicyQuery)).
-				WithArgs(testTenant, "a-policy", "", tt.language, tt.text, "allow", true).
+				WithArgs(testTenant, "a-policy", "", tt.language, tt.text, tt.effect, true).
 				WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 					AddRow(id.String(), now, now))
 			expectAdvisoryLock(mock)
@@ -323,7 +335,7 @@ func TestStore_CreatePolicy_ValidPolicyPersistsForEveryLanguage(t *testing.T) {
 			mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectCommit()
 
-			p := models.Policy{Name: "a-policy", Language: tt.language, Text: tt.text, Effect: "allow", Enabled: true}
+			p := models.Policy{Name: "a-policy", Language: tt.language, Text: tt.text, Effect: tt.effect, Enabled: true}
 			got, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
 			if err != nil {
 				t.Fatalf("CreatePolicy() error = %v, want nil for a well-formed %s policy", err, tt.language)
@@ -336,6 +348,156 @@ func TestStore_CreatePolicy_ValidPolicyPersistsForEveryLanguage(t *testing.T) {
 			}
 			if got.Version != 1 {
 				t.Errorf("Version = %d, want 1 for a freshly created policy", got.Version)
+			}
+
+			assertExpectationsMet(t, mock)
+		})
+	}
+}
+
+// --- Issue 1: policies.effect must agree with policy text (Phase 14 Task 3) ---
+
+// TestStore_CreatePolicy_EffectAgreement_MismatchRefused is the direct proof
+// for the required mutation "skip the effect-agreement check": for the two
+// languages where a stored policy's effect is single-valued and derivable
+// from its own text (see validateEffectAgreement's own doc comment), a
+// declared effect that contradicts the text is refused with
+// ErrEffectMismatch, and nothing is persisted (the mock below registers
+// zero expectations, so any reach into beginTenantTx fails the test).
+func TestStore_CreatePolicy_EffectAgreement_MismatchRefused(t *testing.T) {
+	registry := testRegistry()
+	tests := []struct {
+		language string
+		text     string
+		effect   string
+	}{
+		// permit(...) declares "allow"; the request claims "deny".
+		{"cedar", validCedarPolicy, "deny"},
+		// The JSON text's own "effect" key is "allow"; the request claims "deny".
+		{"json", validJSONPolicy, "deny"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.language, func(t *testing.T) {
+			s, mock := newMockStore(t) // no expectations registered at all
+
+			p := models.Policy{Name: "contradicts-its-own-text", Language: tt.language, Text: tt.text, Effect: tt.effect, Enabled: true}
+			_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+			if !errors.Is(err, ErrEffectMismatch) {
+				t.Errorf("CreatePolicy() error = %v, want errors.Is(_, ErrEffectMismatch)", err)
+			}
+
+			assertExpectationsMet(t, mock) // nothing reached the database
+		})
+	}
+}
+
+// TestStore_CreatePolicy_EffectAgreement_AgreesAccepted is the mismatch
+// test's positive counterpart, named for the same property from the other
+// side: a declared effect that DOES agree with what cedar/json's own text
+// says is accepted and persisted, proven by letting the mock's write
+// expectation actually be consumed (a stricter proof than merely checking
+// err == nil, which a mutant returning nil without ever calling
+// beginTenantTx would also satisfy).
+func TestStore_CreatePolicy_EffectAgreement_AgreesAccepted(t *testing.T) {
+	registry := testRegistry()
+	tests := []struct {
+		language string
+		text     string
+		effect   string
+	}{
+		{"cedar", validCedarPolicy, "allow"},
+		{"json", validJSONPolicy, "allow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.language, func(t *testing.T) {
+			s, mock := newMockStore(t)
+			now := time.Now().UTC().Truncate(time.Second)
+
+			mock.ExpectBegin()
+			expectSetTenant(mock)
+			mock.ExpectQuery(regexp.QuoteMeta(insertPolicyQuery)).
+				WithArgs(testTenant, "agrees-with-its-own-text", "", tt.language, tt.text, tt.effect, true).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+					AddRow(uuid.New().String(), now, now))
+			expectAdvisoryLock(mock)
+			mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+			mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectCommit()
+
+			p := models.Policy{Name: "agrees-with-its-own-text", Language: tt.language, Text: tt.text, Effect: tt.effect, Enabled: true}
+			if _, err := s.CreatePolicy(context.Background(), registry, p, "operator-1"); err != nil {
+				t.Fatalf("CreatePolicy() error = %v, want nil when effect agrees with text", err)
+			}
+
+			assertExpectationsMet(t, mock)
+		})
+	}
+}
+
+// TestStore_CreatePolicy_NotSingleValued_NonSentinelEffectRefused pins the
+// decision this task made for rego/xacml (see validateEffectAgreement's own
+// doc comment for the justification): a stored policy in either language
+// can itself produce both an allow and a deny outcome depending on the
+// request, so the column cannot be a claim about that policy at all, and
+// this package refuses any operator-supplied value other than the fixed
+// sentinel rather than accepting one it cannot check.
+func TestStore_CreatePolicy_NotSingleValued_NonSentinelEffectRefused(t *testing.T) {
+	registry := testRegistry()
+	tests := []struct {
+		language string
+		text     string
+	}{
+		{"rego", validRegoPolicy},
+		{"xacml", validXACMLPolicy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.language, func(t *testing.T) {
+			s, mock := newMockStore(t) // no expectations registered at all
+
+			p := models.Policy{Name: "claims-a-single-effect", Language: tt.language, Text: tt.text, Effect: "allow", Enabled: true}
+			_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+			if !errors.Is(err, ErrEffectNotDeclarable) {
+				t.Errorf("CreatePolicy() error = %v, want errors.Is(_, ErrEffectNotDeclarable)", err)
+			}
+
+			assertExpectationsMet(t, mock) // nothing reached the database
+		})
+	}
+}
+
+// TestStore_CreatePolicy_NotSingleValued_SentinelAccepted is
+// NonSentinelEffectRefused's positive counterpart: the ONE value this
+// package accepts for rego/xacml -- multiValuedLanguageEffect -- is
+// accepted and persisted, proven the same stricter way (a consumed write
+// expectation, not merely err == nil).
+func TestStore_CreatePolicy_NotSingleValued_SentinelAccepted(t *testing.T) {
+	registry := testRegistry()
+	tests := []struct {
+		language string
+		text     string
+	}{
+		{"rego", validRegoPolicy},
+		{"xacml", validXACMLPolicy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.language, func(t *testing.T) {
+			s, mock := newMockStore(t)
+			now := time.Now().UTC().Truncate(time.Second)
+
+			mock.ExpectBegin()
+			expectSetTenant(mock)
+			mock.ExpectQuery(regexp.QuoteMeta(insertPolicyQuery)).
+				WithArgs(testTenant, "uses-the-sentinel", "", tt.language, tt.text, multiValuedLanguageEffect, true).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+					AddRow(uuid.New().String(), now, now))
+			expectAdvisoryLock(mock)
+			mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+			mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectCommit()
+
+			p := models.Policy{Name: "uses-the-sentinel", Language: tt.language, Text: tt.text, Effect: multiValuedLanguageEffect, Enabled: true}
+			if _, err := s.CreatePolicy(context.Background(), registry, p, "operator-1"); err != nil {
+				t.Fatalf("CreatePolicy() error = %v, want nil for the sentinel effect", err)
 			}
 
 			assertExpectationsMet(t, mock)
@@ -655,6 +817,25 @@ func TestStore_UpdatePolicy_RevalidatesText(t *testing.T) {
 	}
 
 	assertExpectationsMet(t, mock)
+}
+
+// TestStore_UpdatePolicy_RevalidatesEffectAgreement is
+// RevalidatesText's own sibling for Issue 1: re-checking policies.effect
+// against the text is not skipped on the update path either -- a second,
+// independent anchor for the "skip the effect-agreement check" mutation, at
+// CreatePolicy's own TestStore_CreatePolicy_EffectAgreement_MismatchRefused.
+func TestStore_UpdatePolicy_RevalidatesEffectAgreement(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+
+	// permit(...) declares "allow"; the request claims "deny".
+	p := models.Policy{Name: "p1", Language: "cedar", Text: validCedarPolicy, Effect: "deny"}
+	_, err := s.UpdatePolicy(context.Background(), registry, uuid.New(), p, "operator-1")
+	if !errors.Is(err, ErrEffectMismatch) {
+		t.Errorf("UpdatePolicy() error = %v, want errors.Is(_, ErrEffectMismatch)", err)
+	}
+
+	assertExpectationsMet(t, mock) // nothing reached the database
 }
 
 func TestStore_UpdatePolicy_NotFound(t *testing.T) {

@@ -33,22 +33,28 @@ type Policy struct {
 	// spelling for the identical column in this codebase.
 	Text string `json:"policy_content" db:"policy_content"`
 
-	// Effect is policies.effect ('allow'/'deny'). internal/store/policy.go's
-	// own doc comment on LoadAllPolicies records why no engine reads this
-	// column back — every engine derives effect from the policy text itself,
-	// so a stored value here can disagree with what the text actually does —
-	// and flags that a write path populating it "must validate the value
-	// agrees with the policy text it is attached to before persisting, rather
-	// than trusting whatever was last written." This package's CreatePolicy/
-	// UpdatePolicy do not attempt that cross-validation: doing so correctly
-	// would mean parsing each of four policy languages' native effect syntax
-	// (Cedar permit/forbid, Rego's own allow/deny rule head, XACML's Effect
-	// attribute, JSON's own effect key) independently of Validate, which
-	// checks syntax and semantic liveness, not this specific cross-check —
-	// a materially larger undertaking than this task's three load-bearing
-	// properties call for. Effect is treated as operator-declared provenance,
-	// like Name, checked only against the schema's own CHECK ('allow' or
-	// 'deny') — a known, documented limitation, not a silently missed one.
+	// Effect is policies.effect ('allow'/'deny'). No engine reads this
+	// column back for a real decision — every engine derives effect from
+	// the policy text itself (internal/store/policy.go's own doc comment on
+	// LoadAllPolicies) — but internal/store's CreatePolicy/UpdatePolicy
+	// validate it at write time via validateEffectAgreement, so the column
+	// itself cannot lie once written:
+	//
+	//   - Cedar and JSON: a stored policy's effect is single-valued and
+	//     mechanically derivable from its own text (Cedar's fixed
+	//     permit/forbid head keyword; JSON's own literal "effect" key), so
+	//     this field must agree with what the text declares, or the write
+	//     is refused (store.ErrEffectMismatch).
+	//   - Rego and XACML: a single stored policy can itself define rules of
+	//     BOTH effects (a Rego module's independent allow/deny rules; an
+	//     XACML Policy's several independently-scoped Rules), resolved only
+	//     once real request data is known — there is no single text-derived
+	//     value this field could ever agree OR disagree with. This field
+	//     must equal the fixed sentinel "deny" for these two languages
+	//     (store.ErrEffectNotDeclarable otherwise): a constant, provably
+	//     uninformative placeholder, never this row's real behavior. A
+	//     display screen must not read this field as fact for a rego/xacml
+	//     row — only for cedar/json ones.
 	Effect string `json:"effect" db:"effect"`
 
 	// Version increments by one on every UpdatePolicy call — never

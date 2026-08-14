@@ -99,8 +99,13 @@ func TestIntegration_PAPCRUD_PolicyRoundTrip(t *testing.T) {
 	updated, err := repo.UpdatePolicy(t.Context(), fullRegistry(), created.ID,
 		models.Policy{
 			Name: "crud-roundtrip-policy-renamed", Language: "rego",
-			Text:   "package stratium.policy\n\nallow if {\n\tinput.principal.subject == \"alice\"\n}",
-			Effect: "allow", Enabled: false,
+			Text: "package stratium.policy\n\nallow if {\n\tinput.principal.subject == \"alice\"\n}",
+			// Rego is not single-valued (Issue 1, store.validateEffectAgreement's
+			// own doc comment): a stored policy in this language can itself
+			// produce both an allow and a deny outcome depending on the request,
+			// so this field must be store.multiValuedLanguageEffect ("deny"),
+			// never an operator's own claim.
+			Effect: "deny", Enabled: false,
 		},
 		"integration-operator")
 	if err != nil {
@@ -344,6 +349,50 @@ func TestIntegration_PAPCRUD_InvalidPolicyNeverPersisted(t *testing.T) {
 	after, existsAfter := readTenantEpoch(t, tenant)
 	if existedBefore != existsAfter || (existedBefore && after != before) {
 		t.Errorf("tenant_epoch changed (existed=%v epoch=%d before, existed=%v epoch=%d after) though every write was refused",
+			existedBefore, before, existsAfter, after)
+	}
+}
+
+// TestIntegration_PAPCRUD_EffectMismatchNeverPersisted is Issue 1's own live
+// proof, the same shape as InvalidPolicyNeverPersisted just above: a Cedar
+// policy whose declared effect contradicts what its own text says (permit
+// declares "allow"; the request claims "deny") is refused by
+// validateEffectAgreement against a real database connection, and — checked
+// directly against papDB, not inferred from the error alone — no row and no
+// epoch bump resulted. "Fail closed: a failed validation persists nothing"
+// is one of this task's own binding constraints; this is that constraint's
+// live proof for the property Issue 1 adds, not only the unit-level one
+// (internal/store/policy_test.go's TestStore_CreatePolicy_EffectAgreement_
+// MismatchRefused) sqlmock already gives it.
+func TestIntegration_PAPCRUD_EffectMismatchNeverPersisted(t *testing.T) {
+	const tenant = "tenant-pap-crud-effect-mismatch-integration"
+	repo := store.New(papDB, tenant)
+	before, existedBefore := readTenantEpoch(t, tenant)
+
+	const name = "contradicts-its-own-text"
+	_, err := repo.CreatePolicy(t.Context(), fullRegistry(),
+		models.Policy{Name: name, Language: "cedar", Text: `permit(principal, action, resource);`, Effect: "deny", Enabled: true},
+		"integration-operator")
+	if err == nil {
+		t.Fatal("CreatePolicy() error = nil, want a refusal for effect/text disagreement")
+	}
+	if !errors.Is(err, store.ErrEffectMismatch) {
+		t.Errorf("CreatePolicy() error = %v, want it to wrap store.ErrEffectMismatch", err)
+	}
+
+	var count int
+	withPAPTenantTx(t, tenant, func(tx *sql.Tx) {
+		if scanErr := tx.QueryRowContext(t.Context(), `SELECT count(*) FROM policies WHERE name = $1`, name).Scan(&count); scanErr != nil {
+			t.Fatalf("count policies named %s: %v", name, scanErr)
+		}
+	})
+	if count != 0 {
+		t.Errorf("%d rows named %q exist after a refused CreatePolicy, want 0", count, name)
+	}
+
+	after, existsAfter := readTenantEpoch(t, tenant)
+	if existedBefore != existsAfter || (existedBefore && after != before) {
+		t.Errorf("tenant_epoch changed (existed=%v epoch=%d before, existed=%v epoch=%d after) though the write was refused",
 			existedBefore, before, existsAfter, after)
 	}
 }
