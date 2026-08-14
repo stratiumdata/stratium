@@ -122,14 +122,25 @@ individually; cache an escalation; make the window run from the wrong instant.
 
 ---
 
-## Task 3 — Wire all four surfaces
+## Task 3 — Wire the two locally-invoked surfaces
 
 **Files:** `services/cmd/stratium-pep/` — `hook.go`, `mcp_authorize.go`,
 `extauthz.go`, `proxy.go` — and tests.
 
-Consult the cache before calling the PDP; store the result after. **All four
-surfaces**, because **C19** asserts *every* surface denies when there is no
-valid entry, and three of four would leave the property unproven.
+Consult the cache before calling the PDP; store the result after — on `hook`
+and `mcp` **only** (spec §4.8.3 **W6**). `extauthz` and `proxy` always call the
+PDP and get no cache.
+
+**Why, because it will look like an omission otherwise.** A cache hit is defined
+by not calling the PDP, and the PDP is the only component that verifies a
+token's signature (**K2**) — the PEP reads it with `ParseUnverified`. On a
+network surface the caller *is* the policed party, so a forged token naming a
+known delegation would satisfy all four **W3** conditions and be served a cached
+ALLOW with the PDP never contacted. On the local surfaces the caller already
+holds the session file containing a real token, so the cache grants nothing new.
+
+**C19 still closes**: "every surface denies when there is no valid entry" is
+trivially true of a surface with no cache.
 
 **The surfaces differ in a way that matters.** `hook` is a short-lived
 subprocess that must read and write the file every call. The other three are

@@ -976,6 +976,49 @@ the session file's, not a new one.
 
 ---
 
+### 4.8.3 The cache serves only locally-invoked surfaces (2026-08-14)
+
+**W6.** The decision cache is consulted by `hook` and `mcp` only. `extauthz` and
+`proxy` always call the PDP.
+
+**Why, and it is not a performance judgement.** A cache hit is defined by *not*
+calling the PDP — and the PDP is the only component that verifies a token's
+signature (**K2**). The PEP holds no verification key and reads the token with
+`ParseUnverified`, which is sound precisely while the signature "has already
+been checked elsewhere in the stack". A hit removes the only place it was ever
+checked.
+
+On a network surface the caller **is** the party being policed. A forged token —
+arbitrary signature bytes, claims naming a known delegation and a far-future
+expiry — would decode cleanly, build a cache key, satisfy all four **W3**
+conditions, and be served a cached ALLOW without the PDP ever being contacted.
+The attacker needs a delegation id, a tool, and the matching input, all
+observable or guessable for routine operations.
+
+`hook` and `mcp` are not exposed to this: the caller is local and already holds
+the session file, which contains a real token. Reading it is strictly easier
+than forging one, so the cache grants an attacker nothing they did not have.
+
+**This is the A10 split again, one layer down.** A10 divided the surfaces by
+whether a delegation reference arrives from a party the PEP can trust; W6
+divides them by whether a decision may be replayed without re-authenticating
+that party. Same boundary, same reason.
+
+**C19 still closes.** "Every surface denies when there is no valid cache entry"
+is trivially satisfied by a surface that has no cache: it always calls the PDP,
+and an unreachable PDP already denies on all four surfaces.
+
+**The consequence to document rather than hide:** outage tolerance exists only
+on the locally-invoked surfaces. That is also where it is worth most — a laptop
+losing connectivity — and least needed on a sidecar colocated with the PDP. An
+operator must not infer from §4.8 that all four surfaces ride out an outage.
+
+Reopening this needs the PEP to verify signatures itself, which means
+distributing the public key and revisiting **K2**'s sole-verifier ruling
+deliberately, not by omission.
+
+---
+
 ### 4.8.1 Revocation epoch mechanics (2026-08-14)
 
 §4.8 describes a monotonic per-tenant counter that every cached decision records
