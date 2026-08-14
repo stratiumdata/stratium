@@ -71,6 +71,13 @@ type Store interface {
 	// covers why this is a deliberately smaller operation than LoadChain,
 	// not a redundant one.
 	LoadDelegation(ctx context.Context, id uuid.UUID) (*models.Delegation, error)
+
+	// LoadTenantEpoch reads the tenant's current revocation epoch (spec
+	// §4.8.1 V3). loadEpochOrDeny (below) is this interface's only caller,
+	// and it calls this method first, before any other method on this
+	// interface, on every RPC that reads it — see that method's own doc
+	// comment for why that ordering is the entire point.
+	LoadTenantEpoch(ctx context.Context) (int64, error)
 }
 
 // TokenSigner is what this package needs from internal/token to both mint
@@ -170,14 +177,59 @@ func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, sig
 	}
 }
 
+// loadEpochOrDeny reads the tenant's current revocation epoch and is the
+// only way any RPC in this package does — Decide, CreateDelegation, and
+// IssueToken (server.go, delegation.go, token.go) all call this, and none
+// of them call s.store.LoadTenantEpoch directly.
+//
+// Every one of those three callers invokes this FIRST, before any other
+// store method: Decide before LoadAgent, CreateDelegation before LoadAgent,
+// IssueToken before LoadDelegation. This is spec §4.8.1 V3, and getting it
+// backwards is unsafe in a specific, non-obvious direction:
+//
+//	read policies at N -> bump to N+1 (a revocation) -> read epoch = N+1
+//	   => the decision ignored the revocation but is labelled current. UNSAFE.
+//
+// Reading first means whatever this call goes on to compute can only ever
+// be labelled with an epoch OLDER than or equal to the state it actually
+// reflects, never newer — a consumer that later compares this value against
+// a fresher one invalidates at least as eagerly as it should, conservative
+// in the safe direction. Reading last (or anywhere but first) risks the
+// opposite: a response that looks current but was computed against
+// already-stale state, which is precisely the class of bug a cache built on
+// this value would exist to prevent and would instead reintroduce.
+//
+// A read failure denies outright — codes.Internal, no response at all, the
+// same bare-RPC-error shape LoadAgent/LoadChain failures already take in
+// Decide (never denyAndAudit's audited-DENY shape, since by construction
+// nothing else has been read yet for an audit row to usefully add beyond
+// the status code). There is no fallback value on a failure: an epoch
+// reported too LOW would let a consumer accept a decision as current when
+// it is not — the dangerous direction — while one reported too HIGH only
+// invalidates needlessly, so the only safe move on a read this system
+// cannot perform is to report nothing and refuse the call, never to guess
+// low by substituting zero or any other default.
+func (s *Server) loadEpochOrDeny(ctx context.Context) (int64, error) {
+	epoch, err := s.store.LoadTenantEpoch(ctx)
+	if err != nil {
+		return 0, status.Errorf(codes.Internal, "load tenant epoch: %s", err)
+	}
+	return epoch, nil
+}
+
 // Decide turns req into a decision.
 //
 // Order: parse and validate the request's shape -> authenticate the token
 // (authenticate.go: verify it and read the delegation id it names — spec
-// §4.7.1 K4, the PDP's only gate on who is calling) -> load the acting agent
-// -> load the delegation chain that id names -> evaluate (tenant from cfg,
-// principal decision from policy, clock from time.Now — the one boundary
-// where the ambient clock is allowed, so internal/authz itself stays pure)
+// §4.7.1 K4, the PDP's only gate on who is calling) -> read the tenant's
+// revocation epoch (loadEpochOrDeny, spec §4.8.1 V3 — the first store read
+// on this path, ahead of the agent, the chain, and the policies, so a
+// revocation racing this call can only make the response look older than
+// it actually is, never newer; see loadEpochOrDeny's own doc comment for
+// why) -> load the acting agent -> load the delegation chain that id names
+// -> evaluate (tenant from cfg, principal decision from policy, clock from
+// time.Now — the one boundary where the ambient clock is allowed, so
+// internal/authz itself stays pure)
 // -> resolve an escalation, if any (escalation.go: create a pending
 // approval, or verify one offered on a retry — the one place approval
 // verification happens, since it needs the store and internal/authz must
@@ -253,7 +305,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// third caller here does not risk the three drifting apart.
 	delegationID, err := s.authenticateToken(req.GetToken())
 	if err != nil {
-		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err)
+		// No epoch to report: loadEpochOrDeny has not run yet on this path,
+		// and there is no legitimate value to substitute for "never read" —
+		// see toResponse's own doc comment on why nil, not zero, is what a
+		// genuinely-never-read epoch must produce on the wire.
+		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, nil)
+	}
+
+	epoch, err := s.loadEpochOrDeny(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	agent, err := s.store.LoadAgent(ctx, agentID)
@@ -295,7 +356,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	catalogEntries, err := s.store.LoadToolCatalog(ctx)
 	if err != nil {
 		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
-			fmt.Errorf("load tool catalog: %w", err))
+			fmt.Errorf("load tool catalog: %w", err), &epoch)
 	}
 
 	// Extraction happens before tiers is even built, and touches only
@@ -330,7 +391,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// identical failure differently.
 	derivedTier, err := authz.DeriveTier(tiers, action)
 	if err != nil {
-		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now, err)
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now, err, &epoch)
 	}
 
 	// acting is the delegation the agent is presenting — the last hop.
@@ -404,7 +465,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// ESCALATE, so newApprovalID stays "" on every other path, matching
 	// approval_id's own doc comment in the proto (populated only when
 	// effect is EFFECT_ESCALATE).
-	resp := toResponse(result)
+	resp := toResponse(result, &epoch)
 	resp.ApprovalId = newApprovalID
 	return resp, nil
 }
@@ -526,6 +587,14 @@ func (s *Server) appendAudit(
 // that failed authentication, before any delegation was ever loaded — and
 // appendAudit (above) is written to accept that shape; see its own doc
 // comment.
+//
+// epoch is nil on that same one path (Decide's own call site passes nil for
+// exactly this reason: loadEpochOrDeny has not run yet when authentication
+// fails) and non-nil on this function's other two callers, both of which
+// run after a successful epoch read. Forwarded straight to toResponse
+// rather than re-decided here — this function has no opinion of its own on
+// whether an epoch is available, only on how to audit and respond once
+// that has already been decided by the caller.
 func (s *Server) denyAndAudit(
 	ctx context.Context,
 	agentID, delegationID uuid.UUID,
@@ -534,12 +603,13 @@ func (s *Server) denyAndAudit(
 	subject string,
 	now time.Time,
 	err error,
+	epoch *int64,
 ) (*DecideResponse, error) {
 	result := authz.DeriveTierDenial(err)
 	if auditErr := s.appendAudit(ctx, agentID, delegationID, chain, action, subject, result, now); auditErr != nil {
 		return nil, auditErr
 	}
-	return toResponse(result), nil
+	return toResponse(result, epoch), nil
 }
 
 // parseNonNilUUID parses s as a UUID and rejects the zero value.
@@ -567,7 +637,20 @@ func parseNonNilUUID(s string) (uuid.UUID, error) {
 // a verdict that did decide the outcome and whose Source/PolicyID happen to
 // be empty. Both fields are proto3 optional for exactly that reason, the
 // same presence-vs-zero-value pattern DecideRequest.declared_tier uses.
-func toResponse(result authz.Result) *DecideResponse {
+//
+// epoch gets the identical presence-vs-zero-value treatment for the
+// identical reason: nil means "never read" (Decide's one path that denies
+// during authentication, before loadEpochOrDeny ever runs), which must stay
+// distinguishable from a genuinely read value — including a real epoch that
+// happens to equal some sentinel a lazier design might have reached for
+// instead. result carries no epoch of its own (internal/authz stays pure —
+// no store access, no ambient revocation state — so Result has nothing to
+// name here); the caller reads it separately, via loadEpochOrDeny, and
+// passes it in exactly as it already assembles everything else in resp
+// from values authz.Decide alone could not have produced (DerivedTier's own
+// int32 cast just below is the same shape: authz's value, converted at this
+// one boundary).
+func toResponse(result authz.Result, epoch *int64) *DecideResponse {
 	resp := &DecideResponse{
 		Effect:           toProtoEffect(result.Effect),
 		DerivedTier:      int32(result.DerivedTier), //nolint:gosec // G115: models.ActionTier is a 0-4 enum
@@ -580,6 +663,7 @@ func toResponse(result authz.Result) *DecideResponse {
 		DeniedLeg:        result.DeniedLeg,
 		DeniedAtDepth:    int32(result.DeniedAtDepth), //nolint:gosec // G115: -1 sentinel or a chain depth bounded well under int32's range
 		Reason:           result.Reason,
+		Epoch:            epoch,
 	}
 
 	if d := result.Deciding; d != nil {

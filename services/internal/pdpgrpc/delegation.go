@@ -34,17 +34,19 @@ const noDenial int16 = -1
 // CreateDelegation mints a new delegation: a root grant from a principal, or
 // (with parent_delegation_id set) a child narrowing an existing one.
 //
-// Order: validate the request, including the two rejections below -> load
-// the target agent -> load the parent chain if any -> probe the principal's
-// own policy grants and clamp the request to them (internal/authz.Clamp) ->
-// reject if every requested tool was clamped away -> build the delegation ->
-// persist (models.ScopeNarrows runs inside store.CreateDelegation for a
-// child) -> audit -> respond. A failed audit write fails the call and no
-// delegation id is ever returned — spec D3's sibling rule for creation, the
-// same discipline Decide applies to an unrecorded ALLOW (see server.go's
-// Decide doc comment): the row may exist, but nothing that reaches a caller
-// says so, which is what "a delegation created without a record did not
-// happen" means here.
+// Order: validate the request, including the two rejections below -> read
+// the tenant's revocation epoch (loadEpochOrDeny; server.go's own doc
+// comment covers why every RPC in this package reads it first, ahead of
+// every other store call) -> load the target agent -> load the parent chain
+// if any -> probe the principal's own policy grants and clamp the request
+// to them (internal/authz.Clamp) -> reject if every requested tool was
+// clamped away -> build the delegation -> persist (models.ScopeNarrows runs
+// inside store.CreateDelegation for a child) -> audit -> respond. A failed
+// audit write fails the call and no delegation id is ever returned — spec
+// D3's sibling rule for creation, the same discipline Decide applies to an
+// unrecorded ALLOW (see server.go's Decide doc comment): the row may exist,
+// but nothing that reaches a caller says so, which is what "a delegation
+// created without a record did not happen" means here.
 //
 // Two rejections are the reason this method exists rather than a thin
 // pass-through to Clamp. Everywhere else in this system an empty tool list
@@ -97,6 +99,11 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	}
 	if req.GetTtlSeconds() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl_seconds must be positive")
+	}
+
+	epoch, err := s.loadEpochOrDeny(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	if _, err := s.store.LoadAgent(ctx, agentID); err != nil {
@@ -229,6 +236,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		DelegationId: d.ID.String(),
 		GrantedScope: toProtoGrantedScope(granted),
 		Token:        tok,
+		Epoch:        epoch,
 	}, nil
 }
 

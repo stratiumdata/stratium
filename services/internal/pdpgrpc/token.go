@@ -112,16 +112,17 @@ func (s *Server) mintToken(
 // scope was already decided once, by CreateDelegation, and this method
 // touches none of it.
 //
-// Order: validate the request -> load the delegation FRESH from this
-// tenant -> refuse if it is revoked or expired -> mint. The load is not
-// optional and not a formality: it is the one thing that makes re-issuance
-// different from a caller minting its own token. A version of this method
-// that trusted delegation_id and skipped the load would let a revoked or
-// expired delegation's holder mint itself an unlimited stream of fresh,
-// perfectly valid-looking tokens forever — exactly the bare-id trust spec
-// K4 removes from Decide, reintroduced one RPC over. Loading it fresh, on
-// this call, from this tenant's own row (RLS — no WHERE tenant_id, see the
-// package doc) is what re-earns the check CreateDelegation's own audit
+// Order: validate the request -> read the tenant's revocation epoch
+// (loadEpochOrDeny; server.go's own doc comment) -> load the delegation
+// FRESH from this tenant -> refuse if it is revoked or expired -> mint. The
+// load is not optional and not a formality: it is the one thing that makes
+// re-issuance different from a caller minting its own token. A version of
+// this method that trusted delegation_id and skipped the load would let a
+// revoked or expired delegation's holder mint itself an unlimited stream of
+// fresh, perfectly valid-looking tokens forever — exactly the bare-id trust
+// spec K4 removes from Decide, reintroduced one RPC over. Loading it fresh,
+// on this call, from this tenant's own row (RLS — no WHERE tenant_id, see
+// the package doc) is what re-earns the check CreateDelegation's own audit
 // already recorded once and IssueToken cannot simply assume still holds.
 func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*IssueTokenResponse, error) {
 	id, err := parseNonNilUUID(req.GetDelegationId())
@@ -130,6 +131,11 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 	}
 	if req.GetTtlSeconds() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl_seconds must be positive")
+	}
+
+	epoch, err := s.loadEpochOrDeny(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	d, err := s.store.LoadDelegation(ctx, id)
@@ -172,5 +178,6 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 		Token:                     tok,
 		ExpiresAt:                 timestamppb.New(expiry),
 		ClampedToDelegationExpiry: clamped,
+		Epoch:                     epoch,
 	}, nil
 }

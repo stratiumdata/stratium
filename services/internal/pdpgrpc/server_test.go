@@ -137,11 +137,44 @@ type fakeStore struct {
 	delegation    *models.Delegation
 	delegationErr error
 
+	// epoch/epochErr back LoadTenantEpoch. epoch's zero value (0) is never a
+	// real tenant_epoch value (the schema DEFAULT is 1 — see store.
+	// defaultTenantEpoch), but every pre-epoch test in this package leaves
+	// it unset and does not care: nothing before this task asserted
+	// anything about a response's Epoch field, so 0 landing there by
+	// default breaks nothing. A test that cares sets epoch explicitly, the
+	// same convention catalog/delegation/loadApproval above already use for
+	// their own single-value stubs.
+	epoch    int64
+	epochErr error
+
+	// bumpOnAgentLoad, if set, runs once at the very start of LoadAgent —
+	// the first store method every real call site in this package invokes
+	// immediately after loadEpochOrDeny succeeds (Decide: epoch, then
+	// agent). Tests use it to simulate a governed write racing the epoch
+	// read: a real revocation landing anywhere between the epoch read and
+	// the very next read Decide makes is the interleaving spec §4.8.1 V3
+	// exists to survive (server.go's loadEpochOrDeny doc comment). This is
+	// a hook, not a goroutine plus a real database, because it forces that
+	// interleaving deterministically — on every run, with no timing window
+	// to miss — where a real concurrent bump would only sometimes land
+	// where a test needed it to. See
+	// TestDecide_EpochReflectsStateBeforeAConcurrentBump (epoch_test.go)
+	// for what this proves.
+	bumpOnAgentLoad func()
+
 	calls int
 }
 
 func (f *fakeStore) LoadAgent(context.Context, uuid.UUID) (authz.AgentInfo, error) {
 	f.calls++
+	// Fires before the error check below, and before the fixture's own
+	// agent is returned: a real bump racing this call would land in the
+	// database regardless of what this read itself goes on to answer, so
+	// the hook must not be short-circuited by either.
+	if f.bumpOnAgentLoad != nil {
+		f.bumpOnAgentLoad()
+	}
 	if f.agentErr != nil {
 		return authz.AgentInfo{}, f.agentErr
 	}
@@ -205,6 +238,14 @@ func (f *fakeStore) LoadDelegation(context.Context, uuid.UUID) (*models.Delegati
 		return nil, f.delegationErr
 	}
 	return f.delegation, nil
+}
+
+func (f *fakeStore) LoadTenantEpoch(context.Context) (int64, error) {
+	f.calls++
+	if f.epochErr != nil {
+		return 0, f.epochErr
+	}
+	return f.epoch, nil
 }
 
 // testConfig's ApprovalTTL is a real, positive duration — matching every

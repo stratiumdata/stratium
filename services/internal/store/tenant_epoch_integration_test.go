@@ -15,6 +15,19 @@
 //
 // tenant_epoch has existed since the baseline migration (000001) and, until
 // migrations/000015, nothing ever wrote it -- the gap this whole file closes.
+//
+// Extended for Task 2
+// (.superpowers/sdd/2026-08-14-phase-12-revocation-epoch/task-2-brief.md):
+// TestIntegration_TenantEpoch_LoadForUnseenTenantReturnsSchemaDefault and
+// TestIntegration_TenantEpoch_LoadReflectsARealBump close the reader half
+// Task 1's own package doc (store.go) left as future work -- store.
+// LoadTenantEpoch, proven against this file's same real trigger, not just
+// against sqlmock (tenant_epoch_test.go covers that side). Kept in this
+// file rather than a new one: they exercise the same table, the same
+// trigger, and the same shared fixtures (testDB, seedPolicy, withTenantTx)
+// every other test above already depends on -- this package's own
+// convention is one file per table/feature, not one per task (see
+// catalog_integration_test.go, escalation_integration_test.go).
 package store_test
 
 import (
@@ -29,6 +42,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
+	"stratium/internal/store"
 	"stratium/pkg/models"
 )
 
@@ -744,5 +758,71 @@ func TestIntegration_TenantEpoch_BumpsAreMonotonicAcrossManyWrites(t *testing.T)
 				"a bump must never reuse or lower the epoch", next, i, last)
 		}
 		last = next
+	}
+}
+
+// TestIntegration_TenantEpoch_LoadForUnseenTenantReturnsSchemaDefault is
+// Task 2's own real-Postgres proof, complementing every readTenantEpoch-based
+// fixture above with the actual reader a future PEP cache will call:
+// store.LoadTenantEpoch, not a raw SELECT this package's own test helper
+// happens to run. A tenant nothing has ever written for reports 1 -- the
+// schema's own DEFAULT (migrations/000001_baseline) and the value
+// TestIntegration_TenantEpoch_CreatesRowOnDemandForUnseenTenant already
+// establishes as what "no row" must read back as -- never an error, and
+// never 0, which this column cannot hold (BIGINT NOT NULL DEFAULT 1) and
+// would be indistinguishable from a tenant genuinely observed at that
+// (nonexistent) epoch by anything that forgot to check LoadTenantEpoch's
+// error return first.
+func TestIntegration_TenantEpoch_LoadForUnseenTenantReturnsSchemaDefault(t *testing.T) {
+	const tenant = "tenant-epoch-load-unseen-integration"
+
+	if _, exists := readTenantEpoch(t, tenant); exists {
+		t.Fatalf("tenant_epoch row for %s already exists before this test's first read -- "+
+			"pick a tenant no other test in this package touches", tenant)
+	}
+
+	got, err := store.New(testDB, tenant).LoadTenantEpoch(t.Context())
+	if err != nil {
+		t.Fatalf("LoadTenantEpoch() error = %v, want nil for a tenant with no row", err)
+	}
+	if got != 1 {
+		t.Fatalf("LoadTenantEpoch() = %d, want 1 (the schema's own DEFAULT)", got)
+	}
+}
+
+// TestIntegration_TenantEpoch_LoadReflectsARealBump closes the loop Task 1's
+// own package doc (store.go) left open: store.LoadTenantEpoch, called
+// against the real trigger's own output, reports exactly what the trigger
+// wrote -- not a value this package caches or derives independently. Two
+// bumps, not one: a reader that only happened to see the right value once
+// (a caching bug LoadAllPolicies/LoadToolCatalog's own "called fresh every
+// time" convention already rules out for every other per-tenant read) would
+// still pass a single-bump check by coincidence but fails the second.
+func TestIntegration_TenantEpoch_LoadReflectsARealBump(t *testing.T) {
+	const tenant = "tenant-epoch-load-real-bump-integration"
+	repo := store.New(testDB, tenant)
+
+	id := seedPolicy(t, tenant, "load-real-bump-policy", "permit(principal, action, resource);", "allow")
+	first, err := repo.LoadTenantEpoch(t.Context())
+	if err != nil {
+		t.Fatalf("LoadTenantEpoch() error = %v", err)
+	}
+	if first != 2 {
+		t.Fatalf("LoadTenantEpoch() after the first governed write = %d, want 2 (migrations/000015's own first-bump value)", first)
+	}
+
+	withTenantTx(t, tenant, func(tx *sql.Tx) {
+		if _, err := tx.ExecContext(t.Context(), `UPDATE policies SET description = $1 WHERE id = $2`,
+			"bumped-for-load-test", id); err != nil {
+			t.Fatalf("UPDATE policies: %v", err)
+		}
+	})
+
+	second, err := repo.LoadTenantEpoch(t.Context())
+	if err != nil {
+		t.Fatalf("LoadTenantEpoch() error = %v", err)
+	}
+	if second != 3 {
+		t.Fatalf("LoadTenantEpoch() after a second governed write = %d, want 3", second)
 	}
 }

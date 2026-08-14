@@ -195,6 +195,25 @@ message DecideResponse {
   // there is no "populated but blank" case here for presence-tracking to
   // distinguish from "not applicable."
   string approval_id = 14;
+
+  // epoch is the tenant's revocation epoch (spec §4.8.1; tenant_epoch,
+  // migrations/000001_baseline, bumped by migrations/000015_tenant_epoch_
+  // trigger) as of the FIRST read this call made — read before the agent,
+  // the delegation chain, or the tenant's policies, so a revocation that
+  // bumps it mid-call can only ever make this response look OLDER than the
+  // state it actually reflects, never newer (internal/pdpgrpc's
+  // loadEpochOrDeny doc comment covers the hazard the reverse order would
+  // create). A future PEP cache validates against this instead of paying a
+  // second round trip to ask.
+  //
+  // Optional for the same presence-vs-zero-value reason decided_source/
+  // decided_policy_id are: unset means the epoch was never read at all — the
+  // call denied during authentication, before loadEpochOrDeny ever ran — and
+  // that must stay distinguishable from a legitimately read value. Never
+  // populated with 0 or any other fallback on a read failure: a read that
+  // fails denies the call outright (internal/pdpgrpc.loadEpochOrDeny), it
+  // does not reach a response for this field to be zeroed on.
+  optional int64 epoch = 15;
 }
 
 // RequestedScope is what a caller asks a new delegation to hold: an action-
@@ -307,6 +326,23 @@ message CreateDelegationResponse {
   // comment for why the same rule applies there) — a delegation_id ever
   // reaches a caller here only paired with a token that names it.
   string token = 3;
+
+  // epoch is the tenant's revocation epoch (spec §4.8.1) as of the first
+  // read this call made, the same field DecideResponse.epoch documents at
+  // length — read before the agent, the parent chain, or the tenant's
+  // policies this call probes to clamp the request. Not optional here,
+  // unlike DecideResponse.epoch: every failure this RPC can hit, including
+  // the epoch read itself, returns before any CreateDelegationResponse is
+  // ever constructed (see CreateDelegation's own doc comment), so unlike
+  // Decide there is no successful response on this message that was ever at
+  // risk of not having one.
+  //
+  // Carried here, and on IssueTokenResponse below, so a PEP that has just
+  // started a session or just refreshed its token holds an epoch baseline
+  // immediately — without this, it would hold none at all until its first
+  // Decide call, the one gap a cache keyed on this value would otherwise
+  // have from the moment credentials are minted.
+  int64 epoch = 4;
 }
 
 // IssueTokenRequest asks for a fresh token naming an existing delegation —
@@ -358,6 +394,16 @@ message IssueTokenResponse {
   // the gap between "asked for" and "got" explicit instead of something a
   // caller must infer by comparing two timestamps itself.
   bool clamped_to_delegation_expiry = 3;
+
+  // epoch is the tenant's revocation epoch (spec §4.8.1), read before the
+  // delegation this call re-issues a token for — see
+  // CreateDelegationResponse.epoch's doc comment for why this RPC carries it
+  // too (a re-issued token is exactly the other moment a PEP would otherwise
+  // hold no epoch baseline) and DecideResponse.epoch's for the field's full
+  // rationale. Not optional, for the same reason CreateDelegationResponse.epoch
+  // is not: every failure IssueToken can hit returns before a response is
+  // ever constructed.
+  int64 epoch = 4;
 }
 
 // GetApprovalRequest asks for one approval's current disposition by id.

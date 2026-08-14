@@ -21,12 +21,13 @@
 // package or anywhere else in Go: every INSERT/UPDATE/DELETE on policies,
 // agents, tool_catalog, or tier_overrides, and every UPDATE/DELETE (not
 // INSERT) on delegations, bumps the affected tenant's epoch in the same
-// transaction as the write. Nothing here writes tenant_epoch directly, and
-// nothing here should ever be changed to: a PDP that bumped its own
-// cache-invalidation counter would be a PDP writing authorization
-// configuration, which E7 and T1 exist to prevent (spec §4.8.1 V1). A
-// future LoadTenantEpoch belongs in this package, reading like every other
-// method here; a WriteTenantEpoch or BumpTenantEpoch does not, ever.
+// transaction as the write. LoadTenantEpoch (tenant_epoch.go) reads it, the
+// same way every other method here reads its own table. Nothing here writes
+// tenant_epoch directly, and nothing here should ever be changed to: a PDP
+// that bumped its own cache-invalidation counter would be a PDP writing
+// authorization configuration, which E7 and T1 exist to prevent (spec
+// §4.8.1 V1). A WriteTenantEpoch or BumpTenantEpoch does not belong in this
+// package, ever.
 package store
 
 import (
