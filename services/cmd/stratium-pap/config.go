@@ -66,10 +66,28 @@ type Config struct {
 	// assumed to terminate upstream (ingress or a reverse proxy), a
 	// deployment-topology choice out of scope for this task.
 	ListenAddr string // STRATIUM_PAP_LISTEN_ADDR, default ":8080"
+
+	// DatabaseURL is required with no default, the same "guessing is unsafe"
+	// treatment TenantID/OIDCIssuer get above and internal/config.Config
+	// gives the PDP's own STRATIUM_DATABASE_URL: Task 3 is this binary's
+	// first task with any database access at all (server.go's own package
+	// doc, written in Task 1, names this exact call as the one this task
+	// would add). This process authenticates as stratium_pap_login
+	// (migrations/000016_stratium_pap_role) — the write role Task 2 built —
+	// never stratium_app; a URL naming the wrong role would fail closed on
+	// the first write, not silently reuse the PDP's own read-only grants.
+	DatabaseURL string // STRATIUM_PAP_DATABASE_URL (required)
+
+	// DBTimeout has a default, unlike DatabaseURL: an operator who wants a
+	// non-default connect timeout can set one, but there is no unsafe value
+	// to guess by leaving it unset, the same "operational tunable, not an
+	// unsafe guess" reasoning ListenAddr and OIDCTimeout above already carry.
+	DBTimeout time.Duration // STRATIUM_PAP_DB_TIMEOUT, default 5s
 }
 
 const defaultListenAddr = ":8080"
 const defaultOIDCTimeout = 5 * time.Second
+const defaultDBTimeout = 5 * time.Second
 
 // loadConfig reads Config from the environment. It is the only config
 // loader this binary has -- one Config struct, one function, one missing
@@ -86,6 +104,7 @@ func loadConfig() (Config, error) {
 	cfg := Config{
 		ListenAddr:  defaultListenAddr,
 		OIDCTimeout: defaultOIDCTimeout,
+		DBTimeout:   defaultDBTimeout,
 	}
 
 	cfg.TenantID = requiredEnv("STRATIUM_PAP_TENANT_ID", &missing)
@@ -95,6 +114,7 @@ func loadConfig() (Config, error) {
 	adminGroupsRaw := requiredEnv("STRATIUM_PAP_ADMIN_GROUPS", &missing)
 	editorGroupsRaw := requiredEnv("STRATIUM_PAP_EDITOR_GROUPS", &missing)
 	viewerGroupsRaw := requiredEnv("STRATIUM_PAP_VIEWER_GROUPS", &missing)
+	cfg.DatabaseURL = requiredEnv("STRATIUM_PAP_DATABASE_URL", &missing)
 
 	if len(missing) > 0 {
 		return Config{}, missingConfigError(missing)
@@ -134,6 +154,22 @@ func loadConfig() (Config, error) {
 		// and the resulting error would misdescribe a config mistake as an
 		// unreachable IdP.
 		return Config{}, fmt.Errorf("STRATIUM_PAP_OIDC_TIMEOUT must be positive, got %s", cfg.OIDCTimeout)
+	}
+
+	if v := os.Getenv("STRATIUM_PAP_DB_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("STRATIUM_PAP_DB_TIMEOUT: %w", err)
+		}
+		cfg.DBTimeout = d
+	}
+	if cfg.DBTimeout <= 0 {
+		// Same reasoning as the OIDCTimeout check above, applied to the
+		// database connect/ping deadline main.go's run() uses: a zero or
+		// negative value makes context.WithTimeout treat the deadline as
+		// already expired, misdescribing a config mistake as an unreachable
+		// database.
+		return Config{}, fmt.Errorf("STRATIUM_PAP_DB_TIMEOUT must be positive, got %s", cfg.DBTimeout)
 	}
 
 	return cfg, nil

@@ -38,6 +38,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"stratium/internal/authz"
 	"stratium/pkg/models"
@@ -47,6 +48,48 @@ import (
 // Row-level security makes "belongs to another tenant" and "does not exist"
 // indistinguishable by design, so both surface identically here.
 var ErrNotFound = errors.New("not found")
+
+// ErrAlreadyExists indicates a write violated a tenant-scoped UNIQUE
+// constraint — policies and agents each have UNIQUE (tenant_id, name),
+// tier_overrides has UNIQUE (tenant_id, tool_or_verb). Distinguished from a
+// generic write failure so an HTTP caller can answer 409 Conflict instead of
+// 500: the write was refused because of what already exists, not because
+// anything is broken.
+var ErrAlreadyExists = errors.New("store: already exists")
+
+// ErrInvalidRequest indicates a Create/Update call's input failed a plain
+// structural check this package performs itself — a required field left
+// empty (policy.go's validatePolicyName, agent.go's validateAgentFields,
+// tier_override.go's tool_or_verb check), or a value outside its allowed
+// range (agent.go's trust_tier check) — as opposed to ErrNotFound/
+// ErrAlreadyExists (about which row) or a specific domain rule an HTTP
+// caller may want to distinguish by name (ErrUnknownLanguage,
+// ErrInvalidEffect, ErrAllowedToolsRequired, authz.ErrOverrideLowersTier).
+// Every plain "required" check in this package wraps this sentinel so a
+// caller has one thing to test for "this is a 400, not a 500" without
+// enumerating each field's own message — cmd/stratium-pap/respond.go's
+// writeStoreError does exactly that.
+var ErrInvalidRequest = errors.New("store: invalid request")
+
+// isUniqueViolation reports whether err is a Postgres unique_violation
+// (SQLSTATE 23505) — shared by every CRUD file in this package that writes
+// into a UNIQUE-constrained column (policy.go, agent.go, tier_override.go),
+// so the SQLSTATE check audit.go's own ErrConcurrentAppend handling already
+// established is written once, not once per file.
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == sqlStateUniqueViolation
+}
+
+// rowScanner is satisfied by both *sql.Row and *sql.Rows: their Scan methods
+// share an identical signature, so a single scan* helper can serve both a
+// single-row Get and a multi-row List for the same table without duplicating
+// the column list and decode logic between them. Every PAP CRUD file in this
+// package (policy.go, agent.go, tier_override.go) uses this for exactly that
+// pairing.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
 
 // maxChainWalk bounds LoadChain's upward walk through parent_delegation_id.
 // A cycle introduced by a bad write must produce an error, not hang the PDP.

@@ -1,6 +1,10 @@
 package models
 
-import "github.com/google/uuid"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // Agent is a registered non-person entity that acts on a principal's behalf.
 type Agent struct {
@@ -16,6 +20,16 @@ type Agent struct {
 	Suspended bool           `json:"suspended"  db:"suspended"`
 
 	AllowedTools []string `json:"allowed_tools" db:"allowed_tools"`
+
+	// CreatedAt/UpdatedAt were absent from this type before internal/store's
+	// PAP CRUD (Task 3) added them: LoadAgent (internal/store/store.go), the
+	// only reader before that task, reduces to authz.AgentInfo and never
+	// needed either column. The PAP's admin screen does, the same
+	// full-fidelity requirement Policy and TierOverride (pkg/models) state in
+	// their own doc comments, so both are added here rather than carried
+	// only in a store-local type.
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // HasTool reports whether a tool is within the agent's allowlist. An empty

@@ -2,14 +2,24 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"stratium/internal/policy"
+	"stratium/internal/policy/cedar"
+	"stratium/internal/policy/jsonpolicy"
+	"stratium/internal/policy/rego"
+	"stratium/internal/policy/xacml"
+	"stratium/pkg/audit"
+	"stratium/pkg/models"
 )
 
 func policyColumns() []string {
@@ -212,6 +222,523 @@ func TestStore_LoadAllPolicies_RowsIterationErrorPropagates(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("LoadAllPolicies() = %v, want nil when row iteration fails partway through", got)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// --- PAP CRUD (Task 3) ---
+
+// testRegistry wires all four real engines -- the same set
+// cmd/stratium-pap/registry.go's newPolicyRegistry builds for the actual
+// binary -- so validatePolicyText's own tests run against the genuine
+// Validate implementations, never a stub that could accept something the
+// real engines would reject.
+func testRegistry() policy.Registry {
+	return policy.Registry{
+		"cedar": cedar.New(),
+		"json":  jsonpolicy.New(),
+		"rego":  rego.New(),
+		"xacml": xacml.New(),
+	}
+}
+
+// Fixtures below are chosen, not invented: each valid text is copied from
+// (or is the identical shape of) that engine's own bench_test.go fixture,
+// already proven to compile; each invalid text is the exact scenario the
+// task brief names by name -- a Rego module with a typo'd package, a JSON
+// "in": [], an XACML document naming an out-of-vocabulary tier -- plus a
+// Cedar case (`in []` on an empty set, jsonpolicy's own "in": [] defect one
+// language over) since the brief's own three examples do not cover all
+// four engines this property must hold for.
+const (
+	validCedarPolicy   = `permit(principal == User::"alice", action, resource);`
+	invalidCedarPolicy = `permit(principal, action, resource) when { resource in [] };`
+
+	validRegoPolicy   = "package stratium.policy\n\nallow if {\n\tinput.principal.subject == \"alice\"\n}"
+	invalidRegoPolicy = "package stratium.polic\n\nallow if {\n\tinput.principal.subject == \"alice\"\n}"
+
+	validJSONPolicy   = `{"effect": "allow", "match": {}}`
+	invalidJSONPolicy = `{"effect": "allow", "match": {"tool": {"in": []}}}`
+
+	validXACMLPolicy = `<Policy PolicyId="p1" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  <Target><AnyOf><AllOf>
+    <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
+      <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">DESTRUCTIVE</AttributeValue>
+      <AttributeDesignator AttributeId="derived-tier" DataType="http://www.w3.org/2001/XMLSchema#string" Category="urn:oasis:names:tc:xacml:3.0:attribute-category:environment"/>
+    </Match>
+  </AllOf></AnyOf></Target>
+  <Rule RuleId="r1" Effect="Permit"/>
+</Policy>`
+	invalidXACMLPolicy = `<Policy PolicyId="p1" RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:deny-overrides">
+  <Target><AnyOf><AllOf>
+    <Match MatchId="urn:oasis:names:tc:xacml:1.0:function:string-equal">
+      <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#string">ULTRA_DESTRUCTIVE</AttributeValue>
+      <AttributeDesignator AttributeId="derived-tier" DataType="http://www.w3.org/2001/XMLSchema#string" Category="urn:oasis:names:tc:xacml:3.0:attribute-category:environment"/>
+    </Match>
+  </AllOf></AnyOf></Target>
+  <Rule RuleId="r1" Effect="Permit"/>
+</Policy>`
+)
+
+func policyRowColumns() []string {
+	return []string{"id", "tenant_id", "name", "description", "language",
+		"policy_content", "effect", "version", "enabled", "created_at", "updated_at"}
+}
+
+// --- CreatePolicy ---
+
+// TestStore_CreatePolicy_ValidPolicyPersistsForEveryLanguage is Property 2's
+// positive case, run against all four real engines: a well-formed policy in
+// each language passes Validate and is inserted, with the audit chain
+// written in the same transaction (mutation target: "persist without
+// auditing" -- absent that write below, ExpectCommit would be the next
+// registered expectation and sqlmock would fail this test the moment the
+// real code asked for something else instead).
+func TestStore_CreatePolicy_ValidPolicyPersistsForEveryLanguage(t *testing.T) {
+	registry := testRegistry()
+	tests := []struct {
+		language string
+		text     string
+	}{
+		{"cedar", validCedarPolicy},
+		{"rego", validRegoPolicy},
+		{"json", validJSONPolicy},
+		{"xacml", validXACMLPolicy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.language, func(t *testing.T) {
+			s, mock := newMockStore(t)
+			id := uuid.New()
+			now := time.Now().UTC().Truncate(time.Second)
+
+			mock.ExpectBegin()
+			expectSetTenant(mock)
+			mock.ExpectQuery(regexp.QuoteMeta(insertPolicyQuery)).
+				WithArgs(testTenant, "a-policy", "", tt.language, tt.text, "allow", true).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+					AddRow(id.String(), now, now))
+			expectAdvisoryLock(mock)
+			mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+			mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectCommit()
+
+			p := models.Policy{Name: "a-policy", Language: tt.language, Text: tt.text, Effect: "allow", Enabled: true}
+			got, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+			if err != nil {
+				t.Fatalf("CreatePolicy() error = %v, want nil for a well-formed %s policy", err, tt.language)
+			}
+			if got.ID != id {
+				t.Errorf("ID = %s, want %s (the RETURNING value)", got.ID, id)
+			}
+			if got.TenantID != testTenant {
+				t.Errorf("TenantID = %q, want %q (caller-supplied TenantID must be ignored)", got.TenantID, testTenant)
+			}
+			if got.Version != 1 {
+				t.Errorf("Version = %d, want 1 for a freshly created policy", got.Version)
+			}
+
+			assertExpectationsMet(t, mock)
+		})
+	}
+}
+
+// TestStore_CreatePolicy_InvalidPolicyTextRefusedBeforePersisting is
+// Property 2's negative case and the direct proof for the required mutation
+// "skip Validate": each fixture is syntactically well-formed in its own
+// language but semantically dead, so a mutant that removed the
+// validatePolicyText call would sail past it straight into beginTenantTx --
+// which would immediately fail against this test's deliberately EMPTY mock
+// (zero expectations registered) with a distinctive "was not expected"
+// error, never containing the engine's own "<language>: validate:" prefix
+// this test asserts on. That is what makes this assertion catch the
+// mutation rather than merely detect "some error happened."
+func TestStore_CreatePolicy_InvalidPolicyTextRefusedBeforePersisting(t *testing.T) {
+	registry := testRegistry()
+	tests := []struct {
+		language   string
+		text       string
+		wantSubstr string
+	}{
+		{"cedar", invalidCedarPolicy, "cedar: validate"},
+		{"rego", invalidRegoPolicy, "rego: validate"},
+		{"json", invalidJSONPolicy, "json: validate"},
+		{"xacml", invalidXACMLPolicy, "xacml: validate"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.language, func(t *testing.T) {
+			s, mock := newMockStore(t) // no expectations registered at all
+
+			p := models.Policy{Name: "dead-on-arrival", Language: tt.language, Text: tt.text, Effect: "allow"}
+			_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+			if err == nil {
+				t.Fatal("CreatePolicy() error = nil, want a validation error for a semantically dead policy")
+			}
+			if !strings.Contains(err.Error(), tt.wantSubstr) {
+				t.Errorf("CreatePolicy() error = %q, want it to contain %q (proving the real engine rejected it, "+
+					"not a database call that should never have happened)", err.Error(), tt.wantSubstr)
+			}
+
+			// Nothing was persisted: not one query or exec reached the
+			// (empty) mock. If it had, the assertion above would already
+			// have failed on the mismatched error text.
+			assertExpectationsMet(t, mock)
+		})
+	}
+}
+
+func TestStore_CreatePolicy_EmptyNameRefusedBeforePersisting(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+
+	p := models.Policy{Name: "", Language: "cedar", Text: validCedarPolicy, Effect: "allow"}
+	_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("CreatePolicy() error = %v, want ErrInvalidRequest", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_CreatePolicy_InvalidEffectRefusedBeforePersisting(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+
+	p := models.Policy{Name: "p1", Language: "cedar", Text: validCedarPolicy, Effect: "maybe"}
+	_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+	if !errors.Is(err, ErrInvalidEffect) {
+		t.Errorf("CreatePolicy() error = %v, want ErrInvalidEffect", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_CreatePolicy_UnknownLanguageRefusedBeforePersisting(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+
+	p := models.Policy{Name: "p1", Language: "cobol", Text: "PROGRAM-ID. ALLOW.", Effect: "allow"}
+	_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+	if !errors.Is(err, ErrUnknownLanguage) {
+		t.Errorf("CreatePolicy() error = %v, want ErrUnknownLanguage", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_CreatePolicy_DuplicateNameIsAlreadyExists(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(insertPolicyQuery)).
+		WillReturnError(&pq.Error{Code: sqlStateUniqueViolation, Message: `duplicate key value violates unique constraint "policies_tenant_id_name_key"`})
+	mock.ExpectRollback()
+
+	p := models.Policy{Name: "dup", Language: "cedar", Text: validCedarPolicy, Effect: "allow"}
+	_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Errorf("CreatePolicy() error = %v, want ErrAlreadyExists", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_CreatePolicy_AuditFailureRollsBackWrite is N4's own proof and
+// the direct target of the required mutation "audit outside the write's
+// transaction": the policy INSERT succeeds, but the audit append's own
+// advisory-lock step (the first statement appendAuditTx issues) fails.
+// Because both run against the same tx, that failure must abort the
+// transaction as a whole -- ExpectRollback is the next (and only remaining)
+// registered expectation, never ExpectCommit, so a mutant that moved the
+// audit call to AFTER tx.Commit() (or to a second, separate transaction via
+// AppendAudit instead of appendAuditTx) would either commit the policy row
+// before ever reaching this failure, or open a second, unexpected
+// transaction against this same single-transaction mock -- either way,
+// sqlmock's ordered matching fails this test.
+func TestStore_CreatePolicy_AuditFailureRollsBackWrite(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+	lockErr := errors.New("connection reset mid-audit")
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(insertPolicyQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+			AddRow(uuid.New().String(), time.Now(), time.Now()))
+	mock.ExpectExec(regexp.QuoteMeta(advisoryLockQuery)).WillReturnError(lockErr)
+	mock.ExpectRollback()
+
+	p := models.Policy{Name: "p1", Language: "cedar", Text: validCedarPolicy, Effect: "allow", Enabled: true}
+	_, err := s.CreatePolicy(context.Background(), registry, p, "operator-1")
+	if err == nil {
+		t.Fatal("CreatePolicy() error = nil, want the audit failure to propagate")
+	}
+
+	// The row the INSERT produced must not survive: this mock never
+	// registered a Commit expectation, so if the real code tried to call
+	// one, assertExpectationsMet below would report it as unmet-vs-extra
+	// rather than silently passing. A separate, live-Postgres version of
+	// this exact property (a genuinely rolled-back row, not just an
+	// un-called Commit) is TestIntegration_PAPCRUD_AuditFailureRollsBack
+	// WriteEndToEnd (pap_crud_integration_test.go).
+	assertExpectationsMet(t, mock)
+}
+
+// --- GetPolicy ---
+
+func TestStore_GetPolicy_Success(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(getPolicyQuery)).
+		WithArgs(id.String()).
+		WillReturnRows(sqlmock.NewRows(policyRowColumns()).
+			AddRow(id.String(), testTenant, "p1", "a description", "cedar", validCedarPolicy, "allow", int64(3), true, now, now))
+	mock.ExpectCommit()
+
+	got, err := s.GetPolicy(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetPolicy() error = %v", err)
+	}
+	if got.Name != "p1" || got.Description != "a description" || got.Version != 3 {
+		t.Errorf("GetPolicy() = %+v, want Name=p1 Description=%q Version=3", got, "a description")
+	}
+}
+
+// A NULL description (a row predating any PAP write, or one that never set
+// it) must decode to "", not error and not panic.
+func TestStore_GetPolicy_NullDescriptionDecodesAsEmptyString(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(getPolicyQuery)).
+		WithArgs(id.String()).
+		WillReturnRows(sqlmock.NewRows(policyRowColumns()).
+			AddRow(id.String(), testTenant, "p1", nil, "cedar", validCedarPolicy, "allow", int64(1), true, now, now))
+	mock.ExpectCommit()
+
+	got, err := s.GetPolicy(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetPolicy() error = %v", err)
+	}
+	if got.Description != "" {
+		t.Errorf("Description = %q, want empty string for a NULL column", got.Description)
+	}
+}
+
+func TestStore_GetPolicy_NotFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(getPolicyQuery)).
+		WithArgs(id.String()).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, err := s.GetPolicy(context.Background(), id)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetPolicy() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// --- ListPolicies ---
+
+// TestStore_ListPolicies_IncludesDisabled is what distinguishes this method
+// from LoadAllPolicies above: an admin screen must be able to see (and
+// re-enable) a disabled policy, so this list is never filtered by enabled.
+func TestStore_ListPolicies_IncludesDisabled(t *testing.T) {
+	s, mock := newMockStore(t)
+	now := time.Now()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listPoliciesQuery)).
+		WillReturnRows(sqlmock.NewRows(policyRowColumns()).
+			AddRow(uuid.New().String(), testTenant, "enabled-one", "", "cedar", validCedarPolicy, "allow", int64(1), true, now, now).
+			AddRow(uuid.New().String(), testTenant, "disabled-one", "", "rego", validRegoPolicy, "deny", int64(2), false, now, now))
+	mock.ExpectCommit()
+
+	got, err := s.ListPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("ListPolicies() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListPolicies() returned %d policies, want 2", len(got))
+	}
+	if got[1].Enabled {
+		t.Errorf("ListPolicies()[1].Enabled = true, want false -- the disabled row must still be returned")
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_ListPolicies_EmptyIsNotAnError(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listPoliciesQuery)).WillReturnRows(sqlmock.NewRows(policyRowColumns()))
+	mock.ExpectCommit()
+
+	got, err := s.ListPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("ListPolicies() error = %v, want nil", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("ListPolicies() = %v, want a non-nil empty slice", got)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// --- UpdatePolicy ---
+
+func TestStore_UpdatePolicy_Success(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(updatePolicyQuery)).
+		WithArgs("renamed", "new description", "rego", validRegoPolicy, "deny", false, id.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "created_at", "updated_at"}).
+			AddRow(int64(2), now, now))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	p := models.Policy{Name: "renamed", Description: "new description", Language: "rego", Text: validRegoPolicy, Effect: "deny", Enabled: false}
+	got, err := s.UpdatePolicy(context.Background(), registry, id, p, "operator-2")
+	if err != nil {
+		t.Fatalf("UpdatePolicy() error = %v", err)
+	}
+	if got.Version != 2 {
+		t.Errorf("Version = %d, want 2 (RETURNING value after version = version + 1)", got.Version)
+	}
+	if got.ID != id {
+		t.Errorf("ID = %s, want %s", got.ID, id)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_UpdatePolicy_RevalidatesText proves re-validation is not
+// skipped on the update path -- a second, independent anchor for the "skip
+// Validate" mutation, at the sibling method CreatePolicy's own test
+// already covers.
+func TestStore_UpdatePolicy_RevalidatesText(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+
+	p := models.Policy{Name: "p1", Language: "json", Text: invalidJSONPolicy, Effect: "allow"}
+	_, err := s.UpdatePolicy(context.Background(), registry, uuid.New(), p, "operator-1")
+	if err == nil {
+		t.Fatal("UpdatePolicy() error = nil, want a validation error")
+	}
+	if !strings.Contains(err.Error(), "json: validate") {
+		t.Errorf("UpdatePolicy() error = %q, want it to contain %q", err.Error(), "json: validate")
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_UpdatePolicy_NotFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	registry := testRegistry()
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(updatePolicyQuery)).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	p := models.Policy{Name: "p1", Language: "cedar", Text: validCedarPolicy, Effect: "allow"}
+	_, err := s.UpdatePolicy(context.Background(), registry, id, p, "operator-1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("UpdatePolicy() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// --- DeletePolicy ---
+
+// TestStore_DeletePolicy_Success asserts the FULL audit insert argument
+// list, via the same insertArgsFor helper audit_test.go's own AppendAudit
+// tests use — not a hand-typed 22-value list of this test's own, which
+// would only prove "the args I re-derived by hand from insertAuditQuery's
+// column order happen to match," a weaker and more error-prone claim. Both
+// the RETURNING-supplied name (captured for Reason) and DeletePolicy's own
+// EventType/PolicyID/Actor/OccurredAt mapping are pinned by constructing
+// the exact audit.Entry DeletePolicy should build and letting audit.Link/
+// insertArgsFor (production code this package already trusts, per
+// audit_test.go) derive what the INSERT must look like from it.
+func TestStore_DeletePolicy_Success(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	wantEntry := audit.Entry{
+		TenantID:      testTenant,
+		OccurredAt:    now,
+		EventType:     eventTypePolicyDeleted,
+		Actor:         "operator-3",
+		PolicyID:      id.String(),
+		Decision:      "ALLOW",
+		DeniedAtDepth: noDenial,
+		Reason:        "doomed-policy",
+	}
+	wantLinked := audit.Link(nil, wantEntry)
+	wantHash := wantLinked.Hash()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(deletePolicyQuery)).
+		WithArgs(id.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("doomed-policy"))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(insertArgsFor(wantLinked, wantHash)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.DeletePolicy(context.Background(), id, "operator-3", now); err != nil {
+		t.Fatalf("DeletePolicy() error = %v", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_DeletePolicy_NotFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(deletePolicyQuery)).
+		WithArgs(id.String()).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	if err := s.DeletePolicy(context.Background(), id, "operator-1", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeletePolicy() error = %v, want ErrNotFound", err)
 	}
 
 	assertExpectationsMet(t, mock)

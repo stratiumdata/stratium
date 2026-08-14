@@ -1,8 +1,11 @@
-// server.go is the PAP's HTTP surface for Task 1: every route refuses an
-// unverified or under-privileged caller, then returns "not implemented" to
-// everyone else. Task 3 onward replaces notImplemented per route with real
-// behavior; nothing about how a route reaches that behavior changes then,
-// only what routeTable's Handler field points to.
+// server.go is the PAP's HTTP surface. Task 1 built the security foundation
+// -- every route refuses an unverified or under-privileged caller before
+// reaching a handler -- behind stub handlers that all returned "not
+// implemented." Task 3 replaces those stubs with the real CRUD handlers
+// (policies.go, agents.go, tier_overrides.go) for policies, agents, and
+// tier_overrides; nothing about how a route reaches its handler changed to
+// do that, only routeTable's own Handler field per route -- exactly as
+// Task 1's own doc comment here anticipated.
 //
 // N1's "no request may carry a tenant" is enforced here, structurally
 // rather than by convention, in three ways this file's own tests
@@ -42,23 +45,52 @@ package main
 import (
 	"net/http"
 	"strings"
+
+	"stratium/internal/policy"
+	"stratium/internal/store"
 )
 
 // Operator is a verified operator's identity as it reaches a route
-// handler: a resolved Role and nothing else. No tenant field -- see the
-// package doc above -- and no raw claims or subject either: a handler
-// that logged this value could not violate "never log ... an operator's
-// claims" even by accident, because there is nothing on this type capable
-// of it. Task 3/4 will extend this with whatever the audit chain needs to
-// attribute a write to an operator (N4); Task 1 has no writes, so nothing
-// speculative is added ahead of that need.
+// handler: a resolved Role, plus (Task 3) the Subject from the verified
+// token's "sub" claim -- N4's own attribution requirement, "who did what,"
+// needs a genuine identity to write into audit_chain.actor and, for tier
+// overrides, tier_overrides.created_by. No tenant field -- see the package
+// doc above; Subject does not change that, since it names an operator, not
+// a tenant, and there remains no field here (or anywhere upstream of it)
+// capable of carrying one.
+//
+// Subject is not "an operator's claims" in the sense the phase's own
+// logging rule forbids: that rule is about never writing a bearer token or
+// arbitrary claim values into an application log (see oidc.go's Verify,
+// which swallows go-oidc's own claim-echoing error text for exactly this
+// reason), not about the audit chain itself -- audit_chain.actor exists
+// specifically to record who performed a write, durably, by design, the
+// same way pdpgrpc's own decision and delegation-creation audit entries
+// already record req.Subject there. Nothing in this file ever passes
+// Operator to a logger.
 type Operator struct {
-	Role Role
+	Role    Role
+	Subject string
 }
 
 // routeHandler is the only signature a PAP route handler may have -- see
-// the package doc's point 1.
+// the package doc's point 1. Unchanged since Task 1, byte for byte: this is
+// exactly the type TestRouteHandlerSignature_HasNoTenantParameter reflects
+// on, and it is what authorize (below) still requires of next.
 type routeHandler func(w http.ResponseWriter, r *http.Request, op Operator)
+
+// resourceHandler is a route handler shaped with an explicit *Server
+// receiver as its first parameter -- routeTable's own Handler field type,
+// deliberately NOT routeHandler itself. routeTable is a package-level var,
+// built at init time, before any *Server exists for a bound method value
+// to close over; NewServer's own wiring loop below supplies the receiver,
+// once per route, and adapts each entry into the routeHandler shape
+// authorize actually requires. This keeps routeHandler's own definition
+// exactly as Task 1 left it -- "do not widen routeHandler" -- while still
+// giving every CRUD handler (policies.go, agents.go, tier_overrides.go)
+// what none of Task 1's stub handlers ever needed: access to s.store and
+// s.registry.
+type resourceHandler func(s *Server, w http.ResponseWriter, r *http.Request, op Operator)
 
 // routeSpec pairs one route pattern (net/http's Go 1.22+
 // "METHOD /path/{wildcard}" syntax) with the minimum Role required to
@@ -66,49 +98,72 @@ type routeHandler func(w http.ResponseWriter, r *http.Request, op Operator)
 type routeSpec struct {
 	Pattern string
 	MinRole Role
-	Handler routeHandler
+	Handler resourceHandler
 }
 
 // routeTable is the single source of truth routes are registered from --
-// (*Server).routes below loops over exactly this, and server_test.go
-// inspects exactly this, so there is no second list either could fall out
-// of sync with. It previews Task 3's own "viewer reads, editor writes,
-// admin writes and deletes" rule (phase plan, Task 3) on the resource CRUD
-// starts with, policies, so the role-gating mechanism is proven across all
-// three tiers now rather than only against one made-up route. Every
-// handler is notImplemented today; Task 3 changes a route's Handler field,
-// never the authorize wrapping that reaches it.
+// NewServer below loops over exactly this, and server_test.go inspects
+// exactly this, so there is no second list either could fall out of sync
+// with. Five routes per resource (list, create, get, update,
+// delete) across the three tables Task 3 covers -- A5's own CRUD scope --
+// each gated at the role spec §4.10/the phase plan state by name: viewer
+// reads (GET), editor reads and writes (GET/POST/PUT), admin reads, writes,
+// and deletes (GET/POST/PUT/DELETE). Handlers live in policies.go,
+// agents.go, and tier_overrides.go respectively -- one file per resource,
+// matching internal/store's own per-table file split.
 var routeTable = []routeSpec{
-	{Pattern: "GET /v1/policies", MinRole: RoleViewer, Handler: notImplemented},
-	{Pattern: "POST /v1/policies", MinRole: RoleEditor, Handler: notImplemented},
-	{Pattern: "DELETE /v1/policies/{id}", MinRole: RoleAdmin, Handler: notImplemented},
+	{Pattern: "GET /v1/policies", MinRole: RoleViewer, Handler: listPolicies},
+	{Pattern: "POST /v1/policies", MinRole: RoleEditor, Handler: createPolicy},
+	{Pattern: "GET /v1/policies/{id}", MinRole: RoleViewer, Handler: getPolicy},
+	{Pattern: "PUT /v1/policies/{id}", MinRole: RoleEditor, Handler: updatePolicy},
+	{Pattern: "DELETE /v1/policies/{id}", MinRole: RoleAdmin, Handler: deletePolicy},
+
+	{Pattern: "GET /v1/agents", MinRole: RoleViewer, Handler: listAgents},
+	{Pattern: "POST /v1/agents", MinRole: RoleEditor, Handler: createAgent},
+	{Pattern: "GET /v1/agents/{id}", MinRole: RoleViewer, Handler: getAgent},
+	{Pattern: "PUT /v1/agents/{id}", MinRole: RoleEditor, Handler: updateAgent},
+	{Pattern: "DELETE /v1/agents/{id}", MinRole: RoleAdmin, Handler: deleteAgent},
+
+	{Pattern: "GET /v1/tier-overrides", MinRole: RoleViewer, Handler: listTierOverrides},
+	{Pattern: "POST /v1/tier-overrides", MinRole: RoleEditor, Handler: createTierOverride},
+	{Pattern: "GET /v1/tier-overrides/{id}", MinRole: RoleViewer, Handler: getTierOverride},
+	{Pattern: "PUT /v1/tier-overrides/{id}", MinRole: RoleEditor, Handler: updateTierOverride},
+	{Pattern: "DELETE /v1/tier-overrides/{id}", MinRole: RoleAdmin, Handler: deleteTierOverride},
 }
 
-// notImplemented is routeTable's only handler for this task -- the phase
-// brief's "every route returns not implemented until Task 3." Reaching it
-// at all already proves authorize let the request through, which is what
-// every TestServer_SufficientRole_ReachesHandler case checks for.
-func notImplemented(w http.ResponseWriter, _ *http.Request, _ Operator) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
-}
-
-// Server is the PAP's HTTP server for Task 1: identity verification and
-// role gating in front of routeTable's stub handlers.
+// Server is the PAP's HTTP server: identity verification and role gating
+// (Task 1) in front of the CRUD handlers (Task 3) routeTable wires up.
+// store and registry are both nil-checked nowhere in this file -- NewServer
+// requires both, the same "no zero-configuration construction" discipline
+// policy.NewMulti already applies to its own two required arguments (see
+// that function's own doc comment).
 type Server struct {
 	verify    *Verifier
 	roleClaim string
 	roles     RoleMapping
+	store     *store.Store
+	registry  policy.Registry
 	mux       *http.ServeMux
 }
 
 // NewServer wires routeTable behind authorize and returns a Server ready
-// to serve. verify, roleClaim, and roles are all fixed here, from startup
-// configuration, exactly once -- the same treatment Verifier itself gives
-// issuer/audience.
-func NewServer(verify *Verifier, roleClaim string, roles RoleMapping) *Server {
-	s := &Server{verify: verify, roleClaim: roleClaim, roles: roles, mux: http.NewServeMux()}
+// to serve. Every argument is fixed here, from startup configuration,
+// exactly once -- the same treatment Verifier itself gives issuer/audience.
+// store is tenant-scoped at its own construction (internal/store.New,
+// called once by main.go's run) and never re-scoped per request -- N1's
+// "the tenant is fixed at startup" holds all the way down to the
+// connection this Server ultimately writes through.
+func NewServer(verify *Verifier, roleClaim string, roles RoleMapping, st *store.Store, registry policy.Registry) *Server {
+	s := &Server{verify: verify, roleClaim: roleClaim, roles: roles, store: st, registry: registry, mux: http.NewServeMux()}
 	for _, rt := range routeTable {
-		s.mux.HandleFunc(rt.Pattern, s.authorize(rt.MinRole, rt.Handler))
+		// Adapts rt.Handler (resourceHandler, needs *Server) into the
+		// routeHandler shape authorize requires, closing over s (this
+		// Server) and rt.Handler (this route's specific handler) once per
+		// route -- Go 1.22+ gives each loop iteration its own rt, so no
+		// per-iteration copy is needed to close over it safely.
+		s.mux.HandleFunc(rt.Pattern, s.authorize(rt.MinRole, func(w http.ResponseWriter, r *http.Request, op Operator) {
+			rt.Handler(s, w, r, op)
+		}))
 	}
 	return s
 }
@@ -119,18 +174,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorize wraps next so it is reached only by a request bearing a token
-// that verifies AND resolves to a role meeting min -- the security
-// foundation this task exists to prove before anything can depend on it.
-// Every failure path writes a response and returns, never falling through
-// to next: a missing or malformed Authorization header and a token that
-// fails Verify both refuse with 401 (an identity problem -- who is this);
-// a token that verifies but carries no usable role, or a role that does
-// not meet min, both refuse with 403 (an authorization problem -- this
+// that verifies, names a usable subject, AND resolves to a role meeting
+// min -- the security foundation this task exists to prove before anything
+// can depend on it. Every failure path writes a response and returns,
+// never falling through to next: a missing or malformed Authorization
+// header, a token that fails Verify, or a verified token with no usable
+// "sub" claim all refuse with 401 (an identity problem -- who is this); a
+// token that verifies but carries no usable role, or a role that does not
+// meet min, both refuse with 403 (an authorization problem -- this
 // identity is known and not permitted here). N2 draws no distinction
 // between "no role claim" and "role claim names an unconfigured group";
 // neither does this function -- resolveRole's error is enough on its own
 // to refuse, without this code caring which of its two named errors it
-// was.
+// was, and the identical treatment applies to resolveSubject's one error.
 func (s *Server) authorize(min Role, next routeHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r)
@@ -139,6 +195,11 @@ func (s *Server) authorize(min Role, next routeHandler) http.HandlerFunc {
 			return
 		}
 		claims, err := s.verify.Verify(r.Context(), token)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		subject, err := resolveSubject(claims)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -152,7 +213,7 @@ func (s *Server) authorize(min Role, next routeHandler) http.HandlerFunc {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		next(w, r, Operator{Role: role})
+		next(w, r, Operator{Role: role, Subject: subject})
 	}
 }
 

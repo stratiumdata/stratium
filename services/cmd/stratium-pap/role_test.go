@@ -204,3 +204,56 @@ func containsAll(s string, subs ...string) bool {
 	}
 	return true
 }
+
+// TestResolveSubject_AbsentClaim_Refuses is resolveRole's own
+// TestResolveRole_AbsentClaim_Refuses, mirrored for the subject claim N4
+// needs to attribute a write: claims with nothing under "sub" at all must
+// return errSubjectClaimAbsent and the zero string -- never a fabricated
+// or blank identity standing in for one.
+func TestResolveSubject_AbsentClaim_Refuses(t *testing.T) {
+	claims := map[string]any{"roles": "org-admins"} // no "sub" key at all
+
+	subject, err := resolveSubject(claims)
+
+	if !errors.Is(err, errSubjectClaimAbsent) {
+		t.Errorf("err = %v, want errSubjectClaimAbsent", err)
+	}
+	if subject != "" {
+		t.Errorf("subject = %q, want the zero value on refusal", subject)
+	}
+}
+
+func TestResolveSubject(t *testing.T) {
+	tests := []struct {
+		name      string
+		claims    map[string]any
+		wantOK    bool
+		wantValue string
+	}{
+		{"valid string subject resolves", map[string]any{"sub": "operator-1"}, true, "operator-1"},
+		{"empty string subject refuses", map[string]any{"sub": ""}, false, ""},
+		{"non-string subject refuses rather than panicking", map[string]any{"sub": float64(42)}, false, ""},
+		{"array subject refuses -- sub is never a group-membership-shaped claim", map[string]any{"sub": []any{"operator-1"}}, false, ""},
+		{"nil subject value refuses", map[string]any{"sub": nil}, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subject, err := resolveSubject(tt.claims)
+			if tt.wantOK {
+				if err != nil {
+					t.Fatalf("resolveSubject() error = %v, want nil", err)
+				}
+				if subject != tt.wantValue {
+					t.Errorf("subject = %q, want %q", subject, tt.wantValue)
+				}
+				return
+			}
+			if !errors.Is(err, errSubjectClaimAbsent) {
+				t.Errorf("err = %v, want errSubjectClaimAbsent", err)
+			}
+			if subject != "" {
+				t.Errorf("subject = %q, want the zero value alongside a refusal", subject)
+			}
+		})
+	}
+}

@@ -20,6 +20,7 @@ var requiredPAPEnvVars = []string{
 	"STRATIUM_PAP_ADMIN_GROUPS",
 	"STRATIUM_PAP_EDITOR_GROUPS",
 	"STRATIUM_PAP_VIEWER_GROUPS",
+	"STRATIUM_PAP_DATABASE_URL",
 }
 
 func clearPAPEnv(t *testing.T) {
@@ -29,6 +30,7 @@ func clearPAPEnv(t *testing.T) {
 	}
 	t.Setenv("STRATIUM_PAP_LISTEN_ADDR", "")
 	t.Setenv("STRATIUM_PAP_OIDC_TIMEOUT", "")
+	t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "")
 }
 
 func setAllPAPEnv(t *testing.T, overrides map[string]string) {
@@ -41,6 +43,7 @@ func setAllPAPEnv(t *testing.T, overrides map[string]string) {
 		"STRATIUM_PAP_ADMIN_GROUPS":  "org-admins",
 		"STRATIUM_PAP_EDITOR_GROUPS": "org-editors",
 		"STRATIUM_PAP_VIEWER_GROUPS": "org-everyone",
+		"STRATIUM_PAP_DATABASE_URL":  "postgres://stratium_pap_login:secret@localhost:5432/stratium?sslmode=disable",
 	}
 	for k, v := range overrides {
 		values[k] = v
@@ -86,13 +89,20 @@ func TestLoadConfig(t *testing.T) {
 		if cfg.OIDCTimeout != 5*time.Second {
 			t.Errorf("OIDCTimeout = %v, want default %v", cfg.OIDCTimeout, 5*time.Second)
 		}
+		if cfg.DatabaseURL != "postgres://stratium_pap_login:secret@localhost:5432/stratium?sslmode=disable" {
+			t.Errorf("DatabaseURL = %q, want the configured value", cfg.DatabaseURL)
+		}
+		if cfg.DBTimeout != 5*time.Second {
+			t.Errorf("DBTimeout = %v, want default %v", cfg.DBTimeout, 5*time.Second)
+		}
 	})
 
-	t.Run("listen addr and oidc timeout are configurable", func(t *testing.T) {
+	t.Run("listen addr, oidc timeout, and db timeout are configurable", func(t *testing.T) {
 		clearPAPEnv(t)
 		setAllPAPEnv(t, nil)
 		t.Setenv("STRATIUM_PAP_LISTEN_ADDR", ":9443")
 		t.Setenv("STRATIUM_PAP_OIDC_TIMEOUT", "2s")
+		t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "3s")
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -103,6 +113,9 @@ func TestLoadConfig(t *testing.T) {
 		}
 		if cfg.OIDCTimeout != 2*time.Second {
 			t.Errorf("OIDCTimeout = %v, want %v", cfg.OIDCTimeout, 2*time.Second)
+		}
+		if cfg.DBTimeout != 3*time.Second {
+			t.Errorf("DBTimeout = %v, want %v", cfg.DBTimeout, 3*time.Second)
 		}
 	})
 
@@ -209,6 +222,28 @@ func TestLoadConfig(t *testing.T) {
 		_, err := loadConfig()
 		if err == nil {
 			t.Fatal("loadConfig() error = nil, want an error on the unparseable duration")
+		}
+	})
+
+	t.Run("a non-positive db timeout fails startup", func(t *testing.T) {
+		clearPAPEnv(t)
+		setAllPAPEnv(t, nil)
+		t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "0s")
+
+		_, err := loadConfig()
+		if err == nil {
+			t.Fatal("loadConfig() error = nil, want an error rejecting a non-positive db timeout")
+		}
+	})
+
+	t.Run("an unparseable db timeout fails startup", func(t *testing.T) {
+		clearPAPEnv(t)
+		setAllPAPEnv(t, nil)
+		t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "not-a-duration")
+
+		_, err := loadConfig()
+		if err == nil {
+			t.Fatal("loadConfig() error = nil, want an error on the unparseable db timeout duration")
 		}
 	})
 }

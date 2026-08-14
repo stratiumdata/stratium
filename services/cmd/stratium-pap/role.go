@@ -142,3 +142,27 @@ func resolveRole(claims map[string]any, claimName string, mapping RoleMapping) (
 		return "", errRoleClaimUnrecognized
 	}
 }
+
+// errSubjectClaimAbsent indicates a verified token carries no usable "sub"
+// claim. The OIDC core spec requires every ID token to carry one, so a
+// conformant IdP always sends it -- this is Stratium's own requirement on
+// top of that, checked because N4 needs a genuine identity to attribute a
+// write to, and there is no safe default to fall back to (unlike an absent
+// role claim, there is no "least-privileged subject" the way RoleViewer
+// would be a least-privileged role -- a fabricated or blank subject would
+// misattribute every write it touches, not merely under-privilege it).
+var errSubjectClaimAbsent = errors.New("subject claim absent or not a string")
+
+// resolveSubject reads the standard OIDC "sub" claim out of a verified
+// token's claims. It returns a non-empty string only alongside a nil error
+// -- the same "never guess, only ever refuse" discipline resolveRole
+// applies to an absent or unrecognised role claim, applied here to the
+// identity N4 attributes a write to rather than to the role that gates
+// access to it.
+func resolveSubject(claims map[string]any) (string, error) {
+	sub, ok := claims["sub"].(string)
+	if !ok || sub == "" {
+		return "", errSubjectClaimAbsent
+	}
+	return sub, nil
+}

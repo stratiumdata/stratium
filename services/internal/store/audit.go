@@ -98,12 +98,33 @@ const sqlStateUniqueViolation = "23505"
 // slice does not resolve the race itself.
 var ErrConcurrentAppend = errors.New("store: concurrent audit append collided on the chain tail")
 
-// AppendAudit appends e to the tenant's hash chain. It reads the current
-// tail, links e onto it with audit.Link, computes the linked entry's hash,
-// and inserts — all inside one transaction, so no other writer can insert
-// between the read and the write and link onto the same predecessor
-// undetected. UNIQUE (tenant_id, prev_hash) is the backstop for the case
-// where one still does (see ErrConcurrentAppend).
+// noDenial is the DeniedAtDepth sentinel for an audit entry that records no
+// denial. Every PAP CRUD write (policy.go, agent.go, tier_override.go) uses
+// this: those writes only ever reach an audit call after every refusal path
+// — a failed engine Validate, a lowering ValidateOverride, a missing
+// required field — has already returned, so Decision is unconditionally
+// "ALLOW" and there is no denial to record, the identical shape
+// pdpgrpc/delegation.go's own appendDelegationAudit already documents for
+// CreateDelegation's success-only audit call. Chain depth 0 is a real,
+// meaningful value (a root delegation), so leaving DeniedAtDepth at its Go
+// zero value here would misrepresent "not applicable" as "denied at the
+// root" to anything scanning audit_chain across event types. Duplicated
+// (not imported) from pdpgrpc/delegation.go's own identical constant:
+// internal/store must not import internal/pdpgrpc (the dependency runs the
+// other way — pdpgrpc imports store), and a two-line int16 constant is not
+// worth restructuring either package's import graph to share.
+const noDenial int16 = -1
+
+// AppendAudit appends e to the tenant's hash chain in its own,
+// single-purpose transaction: begin, set the tenant, then appendAuditTx.
+// Callers with no accompanying row write to share a transaction with use
+// this directly — pdpgrpc's own decision and delegation-creation audit
+// entries, today's only callers outside this package. A caller that IS also
+// writing a governed row in the same call (every PAP CRUD method in this
+// package) must not use this: it opens and commits its own transaction, so
+// a governed write and its audit entry would land in two separate
+// transactions, exactly the gap N4 exists to close. Those callers open their
+// own beginTenantTx and call appendAuditTx directly, inside it, instead.
 func (s *Store) AppendAudit(ctx context.Context, e audit.Entry) error {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
@@ -111,6 +132,36 @@ func (s *Store) AppendAudit(ctx context.Context, e audit.Entry) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := s.appendAuditTx(ctx, tx, e); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit: %w", err)
+	}
+	return nil
+}
+
+// appendAuditTx performs AppendAudit's exact steps — acquire the per-tenant
+// advisory lock, read the current chain tail, link e onto it, insert —
+// against tx, a transaction the caller already opened (via beginTenantTx)
+// and owns: the caller commits or rolls back, never this method. This is
+// what makes N4 ("every write audited in the same transaction as the write
+// it records") true by construction rather than by convention: a PAP CRUD
+// method calls this between its own governed-row write and its own
+// tx.Commit, so a failure here — same as a failure on the write itself —
+// is caught by the caller's already-deferred tx.Rollback(), and a success
+// here lands in the identical commit as the write. AppendAudit (above) is
+// this same logic wrapped in its own transaction for a caller with nothing
+// else to share one with.
+//
+// Extracted from AppendAudit itself (this method's entire body, byte for
+// byte, is what AppendAudit's inline code used to be) specifically so this
+// one implementation serves both shapes of caller — a lock taken here and a
+// second one taken independently by some future "PAP audit" helper would
+// serialize against each other, not together, and two writers computing
+// PrevHash from two separately-read tails is exactly how a chain forks.
+func (s *Store) appendAuditTx(ctx context.Context, tx *sql.Tx, e audit.Entry) error {
 	// Serialize appends per tenant. Two writers that read the same chain tail
 	// both link to it, and UNIQUE (tenant_id, prev_hash) then rejects one — which
 	// D3 turns into a denied action. Measured at 30-70% denials for a single
@@ -168,9 +219,6 @@ func (s *Store) AppendAudit(ctx context.Context, e audit.Entry) error {
 		return fmt.Errorf("store: insert audit entry: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit: %w", err)
-	}
 	return nil
 }
 
