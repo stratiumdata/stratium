@@ -15,6 +15,18 @@
 // startup configuration (config.Config.TenantID). The predecessor took an
 // equivalent value from a client-supplied header, and that was a critical
 // authentication bypass.
+//
+// tenant_epoch.epoch (migrations/000001_baseline) is bumped by a database
+// trigger (migrations/000015_tenant_epoch_trigger), not by any code in this
+// package or anywhere else in Go: every INSERT/UPDATE/DELETE on policies,
+// agents, tool_catalog, or tier_overrides, and every UPDATE/DELETE (not
+// INSERT) on delegations, bumps the affected tenant's epoch in the same
+// transaction as the write. Nothing here writes tenant_epoch directly, and
+// nothing here should ever be changed to: a PDP that bumped its own
+// cache-invalidation counter would be a PDP writing authorization
+// configuration, which E7 and T1 exist to prevent (spec §4.8.1 V1). A
+// future LoadTenantEpoch belongs in this package, reading like every other
+// method here; a WriteTenantEpoch or BumpTenantEpoch does not, ever.
 package store
 
 import (
