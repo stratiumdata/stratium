@@ -917,6 +917,61 @@ approval succeeds. One decision semantic, per-surface delivery.
 
 Escalation outcomes are never cached.
 
+### 4.8.1 Revocation epoch mechanics (2026-08-14)
+
+§4.8 describes a monotonic per-tenant counter that every cached decision records
+and validates against. **`tenant_epoch` has existed as a table since the
+baseline migration and nothing has ever read or bumped it** — the invalidation
+story the caching design rests on was never built. Four mechanics are settled
+here, ahead of the cache that consumes them.
+
+**V1 — the bump is a database trigger, not application code.** Any write to
+`policies`, `agents`, `delegations`, `tool_catalog`, or `tier_overrides` bumps
+that tenant's epoch **in the same transaction**.
+
+Application-level bumping is the wrong layer here for a specific reason: under
+**E7** and **T1** the control plane writes authorization configuration and the
+PDP only reads it. So the bump would have to live in a component that does not
+exist yet, and could be omitted by any future writer, any migration, or any
+manual `UPDATE`. A trigger makes it atomic by construction and unforgettable —
+the same move already made with `UNIQUE (tenant_id, tool_name)` and with
+`GRANT`-as-enforcement. The cost is that it is invisible to a reader of Go, so
+it is documented where a Go reader will look.
+
+**V2 — expiry is deliberately not an epoch bump.** §4.8 lists a "delegation
+expiry sweep" among the bump events. A delegation expiring is a state change
+nobody writes: there is no event for a trigger to fire on, and adding a sweep
+purely to manufacture one is machinery in service of the mechanism rather than
+the goal.
+
+Expiry is predictable from data a cache entry already holds, so it is checked
+against the clock at serve time. **The split is what C24 tests**: the epoch
+handles unpredictable *writes*, the recorded expiry handles predictable *time*.
+Two kinds of invalidation, two mechanisms, neither pretending to be the other.
+
+**V3 — `Decide` reads the epoch first, before any other read.** This is a
+correctness property and it is easy to get backwards:
+
+```
+read policies at N -> bump to N+1 (a revocation) -> read epoch = N+1
+   => the decision ignored the revocation but is labelled current.  UNSAFE.
+```
+
+Reading the epoch first means a decision can only ever be labelled **older**
+than the state it reflects, so a consumer invalidates at least as eagerly as it
+should and never less. Conservative in the safe direction.
+
+**V4 — revocation enforcement already exists; only the write path is absent,
+and that is by design.** `delegations.revoked` and `revoked_at` date from the
+baseline migration, `idx_delegations_active` indexes on them, `DelegationLeg`
+checks `Revoked` at every hop of the chain — so cascade revocation is already
+literally true — and `IssueToken` refuses a revoked delegation. Nothing *sets*
+`revoked`, because setting it is a control-plane write under **E7**/**T1**, not
+a PDP one. The epoch's job is to make **cached** decisions honour a revocation
+that the live path already honours.
+
+---
+
 ### 4.8 Caching and revocation
 
 Cache-key granularity differs sharply by leg:
