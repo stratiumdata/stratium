@@ -88,6 +88,14 @@ const insertAuditQuery = `INSERT INTO audit_chain (` +
 // when two writers race on the same chain tail — see ErrConcurrentAppend.
 const sqlStateUniqueViolation = "23505"
 
+// sqlStateForeignKeyViolation is PostgreSQL's SQLSTATE class for
+// foreign_key_violation — isForeignKeyViolation's own check (store.go),
+// named alongside sqlStateUniqueViolation rather than in agent.go, its only
+// current caller: both are this package's complete, small set of SQLSTATE
+// literals, kept in one place so a future third one has an obvious spot to
+// join rather than a choice between two existing precedents.
+const sqlStateForeignKeyViolation = "23503"
+
 // ErrConcurrentAppend indicates two writers raced on the same tenant's
 // chain tail: both read the same predecessor and both tried to link a new
 // entry onto it. UNIQUE (tenant_id, prev_hash) lets exactly one of them

@@ -296,11 +296,19 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 //
 // migrations/000001_baseline.up.sql's delegations.agent_id and
 // migrations/000012_approvals.up.sql's approvals.agent_id are both
-// ON DELETE RESTRICT, so this DELETE itself fails closed (a Postgres
-// foreign_key_violation, surfaced as an ordinary error here, never silently
-// ignored) if any delegation or approval still names this agent — this
-// method does not need its own check for that, the schema already refuses
-// it.
+// ON DELETE RESTRICT, so this DELETE itself fails closed at the database
+// level if any delegation or approval still names this agent — this method
+// does not need its own check for that, the schema already refuses it. The
+// resulting Postgres foreign_key_violation is mapped to ErrConflict (see
+// isForeignKeyViolation, store.go), not left as an ordinary error: an
+// unmapped error falls through cmd/stratium-pap/respond.go's writeStoreError
+// to its default 500, and a legitimate conflict — an agent still in active
+// use — is not a server fault an operator can do anything about; it is a
+// refusal they need to see and act on (409), with the message naming what
+// blocks the delete rather than echoing Postgres's own constraint text (see
+// writeStoreError's own doc comment on why the default case never echoes,
+// a discipline this message preserves by construction — it is built here,
+// not derived from err.Error()).
 func (s *Store) DeleteAgent(ctx context.Context, id uuid.UUID, actor string, now time.Time) error {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
@@ -312,6 +320,9 @@ func (s *Store) DeleteAgent(ctx context.Context, id uuid.UUID, actor string, now
 	if err := tx.QueryRowContext(ctx, deleteAgentQuery, id.String()).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: agent %s", ErrNotFound, id)
+		}
+		if isForeignKeyViolation(err) {
+			return fmt.Errorf("%w: agent %s is still referenced by a delegation or approval", ErrConflict, id)
 		}
 		return fmt.Errorf("store: delete agent %s: %w", id, err)
 	}

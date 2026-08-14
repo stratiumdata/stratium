@@ -7,11 +7,13 @@ package main
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"stratium/pkg/models"
 )
@@ -95,6 +97,39 @@ func TestDeleteAgent_Success(t *testing.T) {
 	rec := doRequest(t, f.server, http.MethodDelete, "/v1/agents/"+id.String(), f.token(t, "org-admins"))
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	assertExpectationsMet(t, f.mock)
+}
+
+// TestDeleteAgent_StillReferenced_ReturnsConflict is Issue 2's HTTP-level
+// proof: an agent a live delegation or approval still names must answer 409
+// Conflict, naming the blocker -- never the 500 an unrecognized error would
+// have produced before store.ErrConflict existed, and never the underlying
+// Postgres constraint text either.
+func TestDeleteAgent_StillReferenced_ReturnsConflict(t *testing.T) {
+	f := newTestServerFixture(t)
+	id := uuid.New()
+
+	f.mock.ExpectBegin()
+	f.mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("DELETE FROM agents").WillReturnError(&pq.Error{
+		Code:    "23503",
+		Message: `update or delete on table "agents" violates foreign key constraint "delegations_agent_id_fkey" on table "delegations"`,
+		Detail:  `Key (id)=(deadbeef-0000-0000-0000-000000000000) is still referenced from table "delegations".`,
+	})
+	f.mock.ExpectRollback()
+
+	rec := doRequest(t, f.server, http.MethodDelete, "/v1/agents/"+id.String(), f.token(t, "org-admins"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "delegation") && !strings.Contains(body, "approval") {
+		t.Errorf("body = %q, want it to name what blocks the delete (a delegation or approval)", body)
+	}
+	if strings.Contains(body, "delegations_agent_id_fkey") || strings.Contains(body, "still referenced from table") {
+		t.Errorf("body = %q, must not echo the underlying Postgres constraint/detail text", body)
 	}
 
 	assertExpectationsMet(t, f.mock)

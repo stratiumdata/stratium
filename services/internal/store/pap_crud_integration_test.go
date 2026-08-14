@@ -397,6 +397,44 @@ func TestIntegration_PAPCRUD_EffectMismatchNeverPersisted(t *testing.T) {
 	}
 }
 
+// TestIntegration_PAPCRUD_DeleteAgent_StillReferencedReturnsConflict is
+// Issue 2's own live proof: against the REAL ON DELETE RESTRICT constraint
+// (migrations/000001_baseline.up.sql's delegations.agent_id) — not a
+// hand-built pq.Error fixture (internal/store/agent_test.go's own sqlmock
+// proof of the MAPPING) — deleting an agent a live delegation still names
+// is refused as store.ErrConflict, and the agent is left in place. This is
+// what confirms isForeignKeyViolation's assumed SQLSTATE (23503) is what
+// this exact schema actually raises for this exact shape of conflict, not
+// merely what the unit test was told to return.
+func TestIntegration_PAPCRUD_DeleteAgent_StillReferencedReturnsConflict(t *testing.T) {
+	const tenant = "tenant-pap-crud-agent-fk-conflict-integration"
+	repo := store.New(papDB, tenant)
+
+	created, err := repo.CreateAgent(t.Context(),
+		models.Agent{
+			Name: "blocked-by-a-live-delegation", Provider: "anthropic", TrustTier: models.TrustTierCertified,
+			Enabled: true, AllowedTools: []string{"Read"},
+		},
+		"integration-operator")
+	if err != nil {
+		t.Fatalf("CreateAgent() error = %v", err)
+	}
+
+	// Seeded directly (store_integration_test.go's own helper, bypassing
+	// CreateDelegation) -- a real delegations row naming created.ID is the
+	// live reference the schema's own RESTRICT refuses to orphan.
+	singleHopDelegation(t, tenant, created.ID, models.ActionTierReadOnly, "blocks agent deletion")
+
+	err = repo.DeleteAgent(t.Context(), created.ID, "integration-operator", time.Now())
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("DeleteAgent() error = %v, want errors.Is(_, store.ErrConflict)", err)
+	}
+
+	if _, getErr := repo.GetAgent(t.Context(), created.ID); getErr != nil {
+		t.Fatalf("GetAgent() after a refused delete: error = %v, want the agent to still exist", getErr)
+	}
+}
+
 // TestIntegration_PAPCRUD_ConcurrentCreatesShareTheAdvisoryLock is a bonus
 // mutation nobody asked for, run as a real test rather than only reasoned
 // about: Task 3's own refactor (audit.go's appendAuditTx, extracted from

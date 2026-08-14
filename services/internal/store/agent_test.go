@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -441,6 +442,45 @@ func TestStore_DeleteAgent_NotFound(t *testing.T) {
 
 	if err := s.DeleteAgent(context.Background(), id, "operator-1", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteAgent() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_DeleteAgent_ForeignKeyViolationIsConflict is Issue 2's direct
+// proof for the required mutation "map the FK violation back to 500": a
+// Postgres foreign_key_violation from the DELETE (a delegation or approval
+// still naming this agent, per agents.id's ON DELETE RESTRICT) must be
+// mapped to ErrConflict, not left as an unrecognized error that
+// cmd/stratium-pap/respond.go's writeStoreError would fall through to its
+// default 500 case.
+func TestStore_DeleteAgent_ForeignKeyViolationIsConflict(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(deleteAgentQuery)).
+		WithArgs(id.String()).
+		WillReturnError(&pq.Error{
+			Code:    sqlStateForeignKeyViolation,
+			Message: `update or delete on table "agents" violates foreign key constraint "delegations_agent_id_fkey" on table "delegations"`,
+			Detail:  `Key (id)=(deadbeef-0000-0000-0000-000000000000) is still referenced from table "delegations".`,
+		})
+	mock.ExpectRollback()
+
+	err := s.DeleteAgent(context.Background(), id, "operator-1", time.Now())
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeleteAgent() error = %v, want errors.Is(_, ErrConflict)", err)
+	}
+	// The required mutation this test also catches, from the OTHER
+	// direction: a fix that maps the violation to ErrConflict but does so by
+	// echoing the raw Postgres error text (e.g. wrapping err.Error() instead
+	// of building a fixed message) would leak schema/constraint detail no
+	// operator needs — this message is built from id and a fixed string,
+	// never from the underlying pq.Error's own Message/Detail.
+	if strings.Contains(err.Error(), "delegations_agent_id_fkey") || strings.Contains(err.Error(), "still referenced from table") {
+		t.Errorf("DeleteAgent() error = %q, must not echo the underlying Postgres constraint/detail text", err.Error())
 	}
 
 	assertExpectationsMet(t, mock)

@@ -63,13 +63,16 @@ func pathID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 // writeStoreError maps an error internal/store's CRUD methods (or
 // internal/authz.ValidateOverride, called from within them) can return to
 // an HTTP status. The response body is the error's own message: every
-// sentinel case below describes what is wrong with the REQUEST the calling
-// operator themselves submitted (their policy failed its engine's Validate,
-// their override would lower a tier, their chosen name collides with an
-// existing row) -- not a secret, and not what the phase's "never log a
-// bearer token, an operator's claims, or policy text" rule is about, which
-// governs this process's own logs (see oidc.go's Verify for where that rule
-// actually bites). Nothing here calls a logger with any of this text.
+// sentinel case below describes either what is wrong with the REQUEST the
+// calling operator themselves submitted (their policy failed its engine's
+// Validate, their override would lower a tier, their chosen name collides
+// with an existing row) or -- store.ErrConflict's own case -- what ELSE
+// currently exists that the request conflicts with (an agent a live
+// delegation or approval still names) -- not a secret either way, and not
+// what the phase's "never log a bearer token, an operator's claims, or
+// policy text" rule is about, which governs this process's own logs (see
+// oidc.go's Verify for where that rule actually bites). Nothing here calls
+// a logger with any of this text.
 //
 // default (StatusInternalServerError) intentionally does NOT echo err's own
 // text to the client: unlike every named case above it, a fall-through here
@@ -82,7 +85,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, "not found", http.StatusNotFound)
-	case errors.Is(err, store.ErrAlreadyExists):
+	case errors.Is(err, store.ErrAlreadyExists), errors.Is(err, store.ErrConflict):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, store.ErrUnknownLanguage),
 		errors.Is(err, store.ErrInvalidEffect),

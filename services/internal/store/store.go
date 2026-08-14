@@ -57,6 +57,18 @@ var ErrNotFound = errors.New("not found")
 // anything is broken.
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrConflict indicates a write was refused because of something ELSE that
+// currently exists and depends on the row being changed — distinct from
+// ErrAlreadyExists, which is about a naming collision on the row being
+// written ITSELF. Today's only source is DeleteAgent (agent.go), refused by
+// agents.id's own ON DELETE RESTRICT (migrations/000001_baseline,
+// migrations/000012_approvals) when a delegation or approval still names
+// the agent. Both map to 409 Conflict in cmd/stratium-pap/respond.go's
+// writeStoreError, for the identical reason: an operator needs "this
+// conflicts with something that already exists," never "something is
+// broken" (500).
+var ErrConflict = errors.New("store: conflict")
+
 // ErrInvalidRequest indicates a Create/Update call's input failed a plain
 // structural check this package performs itself — a required field left
 // empty (policy.go's validatePolicyName, agent.go's validateAgentFields,
@@ -79,6 +91,16 @@ var ErrInvalidRequest = errors.New("store: invalid request")
 func isUniqueViolation(err error) bool {
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && pqErr.Code == sqlStateUniqueViolation
+}
+
+// isForeignKeyViolation reports whether err is a Postgres foreign_key_violation
+// (SQLSTATE 23503) — isUniqueViolation's own counterpart for the opposite
+// direction of integrity-constraint conflict. DeleteAgent (agent.go) hits
+// this one, not unique_violation, when a delegation or approval still names
+// the agent being deleted (agents.id's ON DELETE RESTRICT).
+func isForeignKeyViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == sqlStateForeignKeyViolation
 }
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows: their Scan methods
