@@ -180,6 +180,16 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 		{"C23", "internal/store", []string{
 			"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds",
 		}},
+		{"C19", "internal/store", []string{
+			"TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies",
+			"TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing",
+		}},
+		{"C20", "internal/store", []string{
+			"TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry",
+		}},
+		{"C24", "internal/store", []string{
+			"TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry",
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

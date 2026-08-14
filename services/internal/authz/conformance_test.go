@@ -335,82 +335,109 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 }
 
 // C19 reads "with the PDP unreachable and no valid cache entry, every
-// surface denies." Its reason has been corrected twice before this: from
-// "Phase 3: requires the PEP client" to naming what was left after Phase
-// 4+ (hook alone, of four surfaces), then to name three of four once mcp
-// and extauthz landed — flagged stale a third time by Phase 11 Tasks 1-3's
-// own reports (proxy still unbuilt) and left for Task 4 to settle for good.
-// Phase 11 Task 4 is what closes the FIRST of the property's two axes:
+// surface denies." Its reason has been corrected three times before this:
+// from "Phase 3: requires the PEP client" to naming what was left after
+// Phase 4+ (hook alone, of four surfaces), then to name three of four once
+// mcp and extauthz landed, then — Phase 11 Task 4 — to close the "every
+// surface" axis in full while leaving the second axis explicitly open:
 //
-//   - "every surface": spec §3.2 (A2) commits to four first-class surfaces —
-//     hook, mcp, extauthz, proxy. All four now exist and are each proven
-//     against the real thing they enforce: hook and mcp against a real
-//     claude session, extauthz against a real Envoy
-//     (services/internal/store/extauthz_integration_test.go, Phase 10 Task
-//     4), and proxy — as of this task — against a real gRPC service
-//     (services/internal/store/proxy_integration_test.go). This axis is
-//     genuinely closed: there is no fifth surface spec §3.2 names that
+//   - "every surface" (closed by Phase 11 Task 4): spec §3.2 (A2) commits to
+//     four first-class surfaces — hook, mcp, extauthz, proxy. All four exist
+//     and are each proven against the real thing they enforce: hook and mcp
+//     against a real claude session, extauthz against a real Envoy
+//     (services/internal/store/extauthz_integration_test.go), and proxy
+//     against a real gRPC service (services/internal/store/proxy_
+//     integration_test.go). There is no fifth surface spec §3.2 names that
 //     remains unbuilt.
-//   - "no valid cache entry": this presupposes a cache with entries that can
-//     be valid or not. No PEP decision cache exists yet anywhere in this
-//     tree — the same absence that keeps C20 (the sibling property about a
-//     stale cache entry) skipped below, and that keeps C24 skipped for an
-//     analogous reason. Nothing built in this phase touches it, and the
-//     phase plan does not ask it to.
+//   - "no valid cache entry" (closed by Phase 13 Task 4, this correction):
+//     the PEP decision cache now exists (Phase 13 Tasks 1-3, spec §4.8) and
+//     is wired into exactly two of the four surfaces — hook and mcp — by a
+//     deliberate ruling (spec §4.8.3 W6, cache.go's own package doc): a
+//     cache hit is defined by NOT calling the PDP, and the PDP is the only
+//     component that ever verifies a token's signature (K2); on extauthz and
+//     proxy the caller IS the party being policed, so a forged token would
+//     satisfy every cache condition and be served without ever being
+//     checked. That ruling is exactly what keeps "every surface" literally
+//     true for all four, not just the two with a cache: on extauthz and
+//     proxy, "no valid cache entry" is unconditionally true — there is no
+//     code path on either that could ever populate one — so an unreachable
+//     PDP already denies by the SAME mechanism their own pre-existing live
+//     proofs establish (TestIntegration_Envoy_NoTokenDeniedNoFallback and
+//     TestIntegration_Proxy_NoTokenDeniesNoFallback, both internal/store,
+//     both unconditional denials with no fallback of any kind — proven
+//     before this phase existed, unaffected by anything it added). For hook
+//     and mcp the property is no longer vacuous:
+//     cache_e2e_integration_test.go (internal/store) proves it against a
+//     REAL, containerized PDP that is actually stopped (docker compose
+//     stop, never a bad address standing in for one) — once with no cache
+//     entry at all (TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies),
+//     and once with an entry present but past the required staleness
+//     window (TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing —
+//     cache.go's own doc comment ties withinStalenessWindow to this exact
+//     property, "required config, NO default"). Both deny, driven through
+//     the real "hook" subcommand exec'd as a subprocess exactly as Claude
+//     Code would run it, not runHook called in-process against a fake PDP.
 //
-// THE JUDGEMENT CALL. With the first axis now closed, the only question
-// left is whether a system with NO cache at all trivially satisfies "no
-// valid cache entry" (zero entries can never include a valid one) or
-// whether the clause is untestable without a cache to exercise. Both
-// readings are internally consistent; this file picks the second,
-// deliberately, for a reason specific to what a conformance PROPERTY is for
-// in this suite: C19 is not a claim about the ABSENCE of a caching bug, it
-// is a claim about a caching layer's own behaviour under a specific
-// condition ("PDP unreachable, and the cache currently holds nothing valid
-// to serve instead") — the same condition C20 exists to test the OTHER half
-// of (a stale, invalid entry that IS present must not be served either). A
-// build with no cache subsystem at all cannot exhibit the bug either
-// property exists to catch — not because it was tested and found absent,
-// but because there is no code path capable of having it. Treating that as
-// a pass would be indistinguishable, from outside this file, from an
-// operator who never implemented a cache correctly noticing their own
-// system trivially "passes" C19 forever. That is precisely the shape of
-// claim conformance_pointer_test.go's machine-checked pointers exist to
-// stop for provenElsewhere; the identical discipline applies here even
-// though notBuilt has no pointer to verify — a judgement call substitutes
-// for one, stated plainly rather than left implicit. C20 and C24 already
-// make the identical call for the identical missing subsystem; letting C19
-// alone read the vacuous case as a pass would contradict both without
-// either's own reasoning having changed.
+// mcp is not independently re-proven live here: consultCache/
+// storeCacheResult (cmd/stratium-pep/local_cache.go) are the ONLY cache
+// read and the ONLY cache write this binary ever performs, called
+// identically by runHook and decideAndRelay (mcp_authorize.go) — Task 3's
+// own report states decideAndRelay "mirrors runHook's consult/store wiring"
+// and every mutation applied to that shared logic was caught identically on
+// both surfaces' own unit tests. A live proof of the mechanism through one
+// of its two identical callers is a live proof of the mechanism itself;
+// repeating the identical container-stop choreography a second time through
+// mcp's own JSON-RPC transport would exercise the exact same consultCache/
+// cacheGetValid code path a second time, not a different one.
 //
-// Classified NOT BUILT, not proven elsewhere and not a pass: provenElsewhere
-// requires the property to hold, in full, somewhere this package cannot
-// reach — but the property, on the reading above, does not yet hold
-// anywhere at all, including there, because there is nowhere a cache's
-// actual behaviour under this condition could be exercised. Each of the
-// four surfaces has its own real, live-stack proof of "PDP unreachable or
-// no credential denies" (hook, mcp, extauthz, and now proxy), which is a
-// genuine, narrower fact worth recording — but it is not what C19 itself
-// states, which is a compound claim naming a cache this tree does not yet
-// have. Converting this to a pass on the strength of the surfaces alone
-// would be forcing it exactly the way the task brief warns against.
+// Classified PROVEN ELSEWHERE, not a pass: this is a live-stack property —
+// a real subprocess, a real session file and cache file on disk, a real
+// containerized PDP actually stopped — none of which internal/authz's pure
+// Decide function has any way to exercise even in principle (this
+// package's own doc comment, types.go: "no database handles, no network
+// clients, no ambient clock"). Same shape as C16/C18/C21/C22/C23 above: the
+// property is real and now proven, just never provable at this layer.
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	notBuilt(t, 19, "Phase 11 Task 4: all four surfaces C19 says 'every surface' now exist and are each "+
-		"proven against a live stack — hook (cmd/stratium-pep/hook_test.go: TestRunHook_UnreachablePDP_ExitsTwo), "+
-		"mcp, extauthz (internal/store/extauthz_integration_test.go: TestIntegration_Envoy_NoTokenDeniedNoFallback "+
-		"and its sibling proofs, against a real Envoy), and proxy (internal/store/proxy_integration_test.go: "+
-		"TestIntegration_Proxy_NoTokenDeniesNoFallback and its sibling proofs, against a real gRPC service). "+
-		"That axis is closed. What remains is the cache axis alone: no PEP decision cache exists yet anywhere "+
-		"in this tree (same blocker as C20/C24), and this file's own judgement (see the doc comment above) is "+
-		"that 'no valid cache entry' is a claim about a cache's own behaviour, not a condition a system with no "+
-		"cache at all can be said to have been tested against, however trivially the words might otherwise read. "+
-		"Requires the decision cache.")
+	provenElsewhere(t, 19, "internal/store",
+		"TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies",
+		"TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing")
 }
 
+// TestC20_StaleEpochCacheEntryNotServed is C20: an entry cached before a
+// revocation epoch bump is not served after it. Skipped from Phase 3 onward
+// for the obvious reason — no PEP decision cache existed anywhere in this
+// tree to hold a stale entry in the first place — until Phase 13 built one
+// (Tasks 1-3, spec §4.8) with epochCurrent (cache.go) as exactly this
+// condition's own enforcement: a cached decision's own Epoch must equal
+// lastKnownEpoch, the highest epoch already recorded among this PEP's own
+// cache file (local_cache.go's maxCacheEpoch — corrected mid-phase from an
+// earlier, session-file-frozen source that this very property would have
+// caught immediately had a live proof existed at the time; see
+// local_cache.go's own "WHERE THE EPOCH COMES FROM" for the full account).
+//
+// Phase 13 Task 4 is that live proof:
+// TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry
+// (internal/store/cache_e2e_integration_test.go) caches a real ALLOW under
+// a real delegation, revokes that SAME delegation with a raw SQL UPDATE —
+// the only way a real revocation happens in this system today, the same
+// technique revocation_epoch_e2e_integration_test.go's own proof1 uses to
+// bump the epoch in the first place (Phase 12) — and shows the very next
+// hook call for that exact request denies, not the stale ALLOW. The revoke
+// is deliberately what also flips the request's own real answer, so the
+// discriminator is the decision itself (exit code 0 vs. 2), not merely a
+// reason string a bug could coincidentally still get right.
+//
+// Classified PROVEN ELSEWHERE, not a pass, for the identical reason C19
+// above is: a real cache file on disk, a real epoch read from a real
+// Postgres trigger (Phase 12), and a real subprocess are three things
+// internal/authz's pure Decide function has no way to touch, by design
+// (types.go's own package doc: "no database handles, no network clients, no
+// ambient clock"). The property is real and now proven, just never provable
+// at this layer.
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 	markRan(20)
-	notBuilt(t, 20, "Phase 3: requires the PEP decision cache")
+	provenElsewhere(t, 20, "internal/store", "TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry")
 }
 
 // C21 reads "escalation routes to the root principal, not an intermediate
@@ -554,16 +581,42 @@ func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 		"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds")
 }
 
+// TestC24_ExpiredDelegationDenied is C24: an expired TOKEN is denied even
+// when a live CACHE entry exists. As of Phase 9 the token half was already
+// real — an expired, signed token denies on its own, with no cache in the
+// picture at all (TestDecide_ExpiredToken_Denies, internal/pdpgrpc/
+// authenticate_test.go) — but what C24 actually names, a cache entry to
+// override, stayed unbuilt until Phase 13 (Tasks 1-3, spec §4.8): W3's
+// third condition, tokenNotExpired (cache.go), decodes the CALLER's own
+// currently-presented token — not anything the cache entry itself recorded
+// — so a credential that has since expired denies even against an
+// otherwise-perfect hit, deliberately independent of delegationNotExpired
+// (W3's second condition, "C24's time half" per cache.go's own W3 table).
+//
+// Phase 13 Task 4 is the live proof:
+// TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry
+// (internal/store/cache_e2e_integration_test.go) mints a real, short-lived
+// signed token (a real TTL, not a tampered claim), lets it actually pass its
+// own "exp" in wall-clock time, and shows the SAME request that cached a
+// live ALLOW moments earlier now denies. pdp-cache is stopped before that
+// second call specifically so reissueAndRetryDecide (cmd/stratium-pep/
+// reissue.go) cannot mint a fresh token and rescue the call on the fallback
+// path — without that, a miss would still reach a live PDP and could come
+// back ALLOWED again, proving nothing about the cache's own token check.
+//
+// Delegation expiry alone (the row itself, independent of any token or
+// cache) is covered separately by TestDelegationLeg_DeniesExpiredHop.
+//
+// Classified PROVEN ELSEWHERE, not a pass, for the identical reason C19 and
+// C20 above are: a real signed token actually expiring in wall-clock time,
+// a real cache file, and a real stopped container are not things
+// internal/authz's pure Decide function has any way to produce or observe
+// (types.go's own package doc: "no database handles, no network clients, no
+// ambient clock"). The property is real and now proven, just never provable
+// at this layer.
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	markRan(24)
-	notBuilt(t, 24, "Phase 3: the property is an expired TOKEN denied even when a live CACHE entry "+
-		"exists. As of Phase 9, the token half is no longer missing — real, expiring, signed tokens "+
-		"exist, and an expired one already denies on its own, with no cache in the picture at all "+
-		"(TestDecide_ExpiredToken_Denies, internal/pdpgrpc/authenticate_test.go). What C24 actually "+
-		"asks is still unbuilt: no PEP decision cache exists anywhere in this tree, so there is nothing "+
-		"for an expired token to override, and this property stays unprovable until one does. "+
-		"Delegation expiry alone (the row itself, independent of any token or cache) is covered "+
-		"separately by TestDelegationLeg_DeniesExpiredHop.")
+	provenElsewhere(t, 24, "internal/store", "TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry")
 }
 
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
