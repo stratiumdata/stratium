@@ -54,6 +54,7 @@ polls, so it has no use for either):
 |---|---|
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | How often to re-check a pending escalation, e.g. `2s`. |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | How long to wait for a human to resolve an escalation before failing closed, e.g. `5m`. Bounds the *whole* wait, independent of `STRATIUM_PEP_CONNECT_TIMEOUT`, which bounds only one RPC round trip. |
+| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | How long a decision may be served from the local cache without a fresh PDP round trip re-confirming it, e.g. `30s`. See "Choosing a decision cache staleness window" below before picking a value — there is no default. |
 
 `session-start` only, in addition to the five shared above:
 
@@ -194,6 +195,45 @@ as it bounds `Read`. Grant the ones the agent's task actually needs:
 If a scope must stay narrow enough to exclude discovery, expect to name every
 resource up front, and treat "the agent did nothing" as the predicted outcome
 rather than a bug.
+
+## Choosing a decision cache staleness window
+
+`hook` and `mcp` both keep a small local cache of recent PDP decisions, so a
+repeated tool call can be answered without a fresh round trip — this is an
+*outage-tolerance* feature, not a latency optimization (spec §4.8): most
+tool calls are not repeats of one already seen, so the cache's real job is
+letting a session keep working through a brief PDP outage, not making
+individual calls faster. `STRATIUM_PEP_CACHE_STALENESS_WINDOW` is what
+bounds that tolerance, and it is required config with **no default, on
+purpose** — no single value is right for every deployment, and getting it
+wrong is not a startup-time inconvenience but an ongoing, silent cost:
+
+- **Too long**, and the cache quietly becomes a revocation-tolerance
+  feature instead of an outage-tolerance one: a policy change or a revoked
+  delegation that should deny the very next tool call can instead keep
+  being served the OLD, now-wrong verdict for as long as the window
+  allows, on top of however long the PDP was already unreachable.
+- **Too short**, and the cache is barely worth having: an outage shorter
+  than the window is the only kind it will ever cover, so most of what the
+  cache exists to buy is lost before it can matter.
+
+Pick a window against how long an outage this deployment actually needs to
+tolerate, and how stale a decision is acceptable to keep serving during
+one — not against request latency, which this cache was never built to
+improve.
+
+**The window runs from each cached entry's OWN caching time, not from the
+last moment this process successfully reached the PDP for any reason** —
+a deliberate choice (`services/cmd/stratium-pep/cache.go`'s own package
+doc has the full reasoning), and its consequence is visible during a real
+outage: the cache does not hold together and then invalidate all at once
+when the window elapses since the outage began. Each entry ages out on its
+own schedule, so calls whose cached answers happen to be older start
+denying sooner than calls whose answers are newer, even though the PDP
+became unreachable for all of them at the same instant — **the cache empties
+out gradually over the course of the window, rather than dropping in one
+step.** An operator watching denials climb during an outage is seeing this
+gradual drain, not a second, separate failure.
 
 ## `.claude/settings.json`
 
