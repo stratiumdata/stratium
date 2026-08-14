@@ -186,6 +186,17 @@ var (
 	// of a tautology.
 	servingDB *sql.DB
 
+	// papDB connects as the admin plane's own serving identity
+	// (STRATIUM_IT_PAP_DATABASE_URL — the "stratium_pap_login" role, member
+	// of stratium_pap only, deploy/docker/init-db.sql), the same reasoning
+	// servingDB's own doc comment gives for the PDP's identity, applied to
+	// the write role migrations/000016_stratium_pap_role creates. Task 2's
+	// own pap_role_integration_test.go is the only file that uses this
+	// connection: every proof there needs a connection that is genuinely the
+	// stratium_pap role, not testDB (which would make a write "succeed"
+	// whether or not the GRANT it is supposed to prove even exists).
+	papDB *sql.DB
+
 	// narrowPdpClient and narrowTenant back
 	// TestIntegration_Live_OrphanLanguageDeniesNamingIt: a second,
 	// independently configured PDP (deploy/docker/docker-compose.yml's
@@ -305,6 +316,7 @@ func TestMain(m *testing.M) {
 func runTestMain(m *testing.M) int {
 	dbURL := os.Getenv("STRATIUM_IT_DATABASE_URL")
 	servingDBURL := os.Getenv("STRATIUM_IT_SERVING_DATABASE_URL")
+	papDBURL := os.Getenv("STRATIUM_IT_PAP_DATABASE_URL")
 	pdpAddr := os.Getenv("STRATIUM_IT_PDP_ADDR")
 	configuredTenant = os.Getenv("STRATIUM_IT_TENANT_ID")
 	narrowPdpAddr := os.Getenv("STRATIUM_IT_PDP_NARROW_ADDR")
@@ -322,12 +334,13 @@ func runTestMain(m *testing.M) int {
 	epochTenant = os.Getenv("STRATIUM_IT_EPOCH_TENANT_ID")
 	pdpCacheAddr := os.Getenv("STRATIUM_IT_PDP_CACHE_ADDR")
 	cacheTenant = os.Getenv("STRATIUM_IT_CACHE_TENANT_ID")
-	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
+	if dbURL == "" || servingDBURL == "" || papDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
 		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
 		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" ||
 		epochPdpAddr == "" || epochTenant == "" || pdpCacheAddr == "" || cacheTenant == "" {
 		fmt.Fprintln(os.Stderr,
-			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
+			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PAP_DATABASE_URL, "+
+				"STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
 				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, "+
 				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, "+
 				"STRATIUM_IT_ENVOY_ADDR, STRATIUM_IT_PDP_PROXY_ADDR, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_GRPC_TARGET_ADDR, "+
@@ -372,6 +385,18 @@ func runTestMain(m *testing.M) int {
 		return 1
 	}
 	servingDB = sdb
+
+	pdb, err := sql.Open("postgres", papDBURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open pap-role database: %v\n", err)
+		return 1
+	}
+	defer func() { _ = pdb.Close() }()
+	if err := waitForDB(ctx, pdb); err != nil {
+		fmt.Fprintf(os.Stderr, "pap-role database connection never became reachable: %v\n", err)
+		return 1
+	}
+	papDB = pdb
 
 	client, closeConn, err := dialAndWaitForServing(ctx, pdpAddr)
 	if err != nil {

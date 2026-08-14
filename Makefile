@@ -74,6 +74,7 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port   pdp-epoch -> localhost:$$pdp_epoch_port   pdp-cache -> localhost:$$pdp_cache_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_SERVING_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
+	STRATIUM_IT_PAP_DATABASE_URL="postgres://stratium_pap_login:stratium_pap_login_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PDP_ADDR="localhost:$$pdp_port" \
 	STRATIUM_IT_TENANT_ID="tenant-one" \
 	STRATIUM_IT_PDP_NARROW_ADDR="localhost:$$pdp_narrow_port" \
