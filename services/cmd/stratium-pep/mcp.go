@@ -209,13 +209,14 @@ func combineConfigErrors(errs ...error) error {
 // own process-lifecycle wiring is exercised separately against a real subprocess (see
 // TestRunMCPCmd_RealUpstreamProcess_RelaysAndExitsCleanly).
 //
-// Loads TWO configs, not one -- mcpConfig for the upstream process, hookConfig (loadHookConfigFromEnv,
-// hook.go) for everything authorizing a tools/call needs -- and dials the PDP client the same way
+// Loads THREE configs, not one -- mcpConfig for the upstream process, hookConfig (loadHookConfigFromEnv,
+// hook.go) for everything authorizing a tools/call needs, and cacheConfig (loadCacheConfigFromEnv,
+// cache.go) for how long a cached decision may be served -- and dials the PDP client the same way
 // runHookCmd does, with the same client passed to both the first Decide call and any escalation
-// retry. Both loaders always run, even if the first one fails: combineConfigErrors above folds
-// whichever errors come back into one message, so an operator missing values in BOTH groups sees
-// every gap in a single run instead of fixing one, rerunning, and only then discovering the other.
-// Either config failing to load denies closed here, before any subprocess is even started: a proxy
+// retry. All three loaders always run, even if an earlier one fails: combineConfigErrors below folds
+// whichever errors come back into one message, so an operator missing values across groups sees
+// every gap in a single run instead of fixing one, rerunning, and only then discovering the next.
+// Any config failing to load denies closed here, before any subprocess is even started: a proxy
 // that started relaying with no way to reach the PDP would forward every tools/call unauthorized
 // by construction, which is a worse failure mode than simply refusing to start.
 //
@@ -226,7 +227,8 @@ func combineConfigErrors(errs ...error) error {
 func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg, cfgErr := loadMCPConfigFromEnv()
 	hookCfg, hookErr := loadHookConfigFromEnv()
-	if err := combineConfigErrors(cfgErr, hookErr); err != nil {
+	cacheCfg, cacheErr := loadCacheConfigFromEnv()
+	if err := combineConfigErrors(cfgErr, hookErr, cacheErr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
 		return 1
 	}
@@ -260,7 +262,7 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	relayErr := runMCP(stdin, stdout, upstreamIn, upstreamOut, stderr, pdpClient, hookCfg)
+	relayErr := runMCP(stdin, stdout, upstreamIn, upstreamOut, stderr, pdpClient, hookCfg, cacheCfg)
 
 	// Wait only after runMCP has returned, and so has fully stopped reading upstreamOut, by
 	// construction: relayDirection's loop is what reads it, and runMCP does not return until both
@@ -318,7 +320,7 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 // meanwhile -- deliberately NOT wired to cancel early on ctx, which would have made hook.go's
 // describeRPCError need a codes.Canceled case it does not have and should not need to grow just for
 // this caller (see that function's own doc comment).
-func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, upstreamOut io.Reader, stderr io.Writer, client pdpgrpc.PDPServiceClient, cfg hookConfig) error {
+func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, upstreamOut io.Reader, stderr io.Writer, client pdpgrpc.PDPServiceClient, cfg hookConfig, cacheCfg cacheConfig) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -331,7 +333,7 @@ func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, up
 	// writers from interleaving mid-frame; see the package doc's CONCURRENCY note.
 	syncUpstreamIn := &syncWriter{w: upstreamIn}
 	syncAgentOut := &syncWriter{w: agentOut}
-	authz := &mcpAuthorizer{client: client, cfg: cfg, upstreamIn: syncUpstreamIn, agentOut: syncAgentOut}
+	authz := &mcpAuthorizer{client: client, cfg: cfg, cacheCfg: cacheCfg, upstreamIn: syncUpstreamIn, agentOut: syncAgentOut}
 
 	var wg sync.WaitGroup
 	var agentToUpstreamErr, upstreamToAgentErr error

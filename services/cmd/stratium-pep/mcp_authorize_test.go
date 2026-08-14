@@ -562,6 +562,10 @@ func TestMCPDenyHelperProcess(t *testing.T) {
 func TestRunMCPCmd_DeniedToolsCall_NeverReachesRealUpstreamSubprocess(t *testing.T) {
 	clearMCPEnv(t)
 	clearHookEnv(t)
+	// runMCPCmd now loads cacheConfig too (Task 3); this test needs a real, fully successful
+	// startup (code 0 -- a denial is a normal decision outcome, not a startup fault), so every
+	// loader it composes must be satisfied, not just mcpConfig and hookConfig.
+	t.Setenv(cacheStalenessWindowEnv, "1h")
 
 	const denyReason = "principal has no policy permitting delete_file:call"
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: denyReason}}

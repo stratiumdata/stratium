@@ -147,9 +147,19 @@ func loadHookConfigFromEnv() (hookConfig, error) {
 // runs the hook. It is the only function in this file main's dispatch
 // calls; everything it wires is exercised directly by hook_test.go against
 // a fake PDP server instead.
+//
+// Loads TWO configs, not one -- hookConfig and cacheConfig (cache.go) --
+// composed via combineConfigErrors exactly as runMCPCmd (mcp.go) already
+// composes mcpConfig with hookConfig: both loaders always run, even if the
+// first fails, so an operator missing values in both groups sees every gap
+// in one run. cacheConfig stays cache.go's own separate type rather than a
+// field folded into hookConfig -- see cache.go's own doc comment on why that
+// composition question was left to this task, and local_cache.go's package
+// doc for how the two values are threaded into runHook from here.
 func runHookCmd(stdin io.Reader, stdout io.Writer) int {
-	cfg, err := loadHookConfigFromEnv()
-	if err != nil {
+	cfg, hookErr := loadHookConfigFromEnv()
+	cacheCfg, cacheErr := loadCacheConfigFromEnv()
+	if err := combineConfigErrors(hookErr, cacheErr); err != nil {
 		// Missing configuration is not distinguishable from any other reason
 		// this hook cannot be trusted to decide — see the package doc's
 		// fail-closed rule. Deny rather than guess at identity.
@@ -162,19 +172,20 @@ func runHookCmd(stdin io.Reader, stdout io.Writer) int {
 	}
 	defer func() { _ = conn.Close() }()
 
-	return runHook(stdin, stdout, pdpgrpc.NewPDPServiceClient(conn), cfg)
+	return runHook(stdin, stdout, pdpgrpc.NewPDPServiceClient(conn), cfg, cacheCfg)
 }
 
-// runHook is the hook's decision logic end to end: read stdin, build a
-// request that carries raw_input and never declared_tier, call the PDP, and
-// map its effect to an exit code the Claude Code hook contract defines.
+// runHook is the hook's decision logic end to end: read stdin, consult the
+// decision cache, and -- on a miss -- build a request that carries raw_input
+// and never declared_tier, call the PDP, store the result, and map the
+// effect to an exit code the Claude Code hook contract defines.
 //
 // Every failure path here denies. PDP unreachable, malformed stdin, and an
 // effect this switch does not recognize are all, alike, reasons this
 // function cannot vouch for the call — none of them earns the benefit of
 // the doubt. A hook that fails open on any of these looks like enforcement
 // while providing none.
-func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient, cfg hookConfig) int {
+func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient, cfg hookConfig, cacheCfg cacheConfig) int {
 	body, err := io.ReadAll(stdin)
 	if err != nil {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: could not read stdin: %s", err))
@@ -187,6 +198,7 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 	if in.ToolName == "" {
 		return writeDeny(stdout, "stratium-pep: malformed stdin: tool_name is required")
 	}
+	rawInput := string(in.ToolInput)
 
 	// Read fresh every call, deliberately — see the package doc. Any of
 	// "session-start never ran", "someone hand-edited the file", "an old
@@ -196,17 +208,45 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 	// sess is this binary's own local fail-closed gate on "a session was
 	// actually started," independent of whatever the PDP itself goes on to
 	// decide — and, as of Phase 9 Task 4, also the only source for the token
-	// and delegation id the request below and a possible reissue use.
+	// and delegation id the request below and a possible reissue use, and,
+	// as of this task, the only source consultCache/storeCacheResult
+	// (local_cache.go) need for the cache's own key and validity checks.
 	sess, err := loadSessionFile(cfg.SessionFilePath)
 	if err != nil {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", err))
+	}
+
+	// W6: hook is one of the two surfaces spec §4.8.3 permits to consult the
+	// cache at all — see local_cache.go's own package doc for the boundary
+	// this call is part of enforcing structurally, not merely documenting.
+	// now is captured once and reused below for storeCacheResult's own
+	// CachedAt, the same one-instant-per-flow discipline cache.go's own
+	// cacheEntry doc comment establishes. On a hit, the PDP is never dialed
+	// at all — that is the whole of the outage tolerance this phase exists
+	// to buy — and the switch below never falls through to the request this
+	// function would otherwise build.
+	now := time.Now()
+	cachePath := cacheFilePathFor(cfg.SessionFilePath)
+	if entry, hit := consultCache(cachePath, cacheCfg.StalenessWindow, sess, in.ToolName, rawInput, now); hit {
+		switch entry.Decision {
+		case pdpgrpc.Effect_EFFECT_ALLOW:
+			return 0
+		default:
+			// cacheEntryUsable (cache.go) already refuses to ever report a hit
+			// for an ESCALATE entry, so this default case is reached only by a
+			// cached DENY in practice — but stays a default, not an explicit
+			// DENY case, for the identical fail-closed reason hook.go's other
+			// switch below does: nothing this function cannot positively
+			// identify as ALLOW may ever be treated as one.
+			return writeDeny(stdout, cacheHitDenyReason)
+		}
 	}
 
 	req := &pdpgrpc.DecideRequest{
 		AgentId:  cfg.AgentID,
 		Subject:  cfg.Subject,
 		Tool:     in.ToolName,
-		RawInput: string(in.ToolInput),
+		RawInput: rawInput,
 		Token:    sess.GetToken(),
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
 		// (Verb, NormalizedInput) or are ever set here (Resource) anymore —
@@ -218,7 +258,11 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 
 	resp, err := client.Decide(ctx, req)
 	if err != nil {
-		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", describeRPCError(err, agentOrDelegationUnknownMsg)))
+		// cacheMissUnreachableReason (local_cache.go) prefixes describeRPCError's
+		// own text with the one fact unique to a cache-wired surface: this
+		// denial follows a MISS, not merely a failed RPC — the distinction an
+		// operator debugging an outage needs from an ordinary policy denial.
+		return writeDeny(stdout, cacheMissUnreachableReason(describeRPCError(err, agentOrDelegationUnknownMsg)))
 	}
 
 	if resp.GetEffect() == pdpgrpc.Effect_EFFECT_DENY {
@@ -236,6 +280,23 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		resp = reissued
 	}
 
+	// Called unconditionally, including when resp is itself an ESCALATE:
+	// storeCacheResult's own doc comment (local_cache.go) is where W4's "never
+	// cache an ESCALATE" guard actually lives, and it is the ONLY place that
+	// checks -- there is no second, redundant check here, because there is
+	// nothing this call site protects that storeCacheResult does not already
+	// protect identically for its only two callers (this and
+	// decideAndRelay's identical call). The STRICTER property this task adds
+	// -- a RESOLVED escalation is not cached either, not only the raw
+	// ESCALATE value -- is not enforced by any check on resp's effect at all;
+	// it holds because this is the only storeCacheResult call site in this
+	// function, and it runs BEFORE the switch below ever reaches
+	// awaitApproval, never again afterward. req.GetToken(), not
+	// sess.GetToken(): the reissue branch above may have mutated req.Token in
+	// place to a freshly issued one, and storeCacheResult must record the
+	// expiry of whichever token actually produced resp.
+	storeCacheResult(cachePath, sess.GetDelegationId(), in.ToolName, rawInput, req.GetToken(), resp, now)
+
 	switch resp.GetEffect() {
 	case pdpgrpc.Effect_EFFECT_ALLOW:
 		return 0
@@ -244,7 +305,9 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		// GetApproval and either retries Decide with the resolved approval id
 		// or denies. This hook still classifies nothing and decides nothing —
 		// it waits, it retries once, it reports (see escalation.go's own
-		// package doc for why that boundary still holds here).
+		// package doc for why that boundary still holds here). Whatever this
+		// resolves to is never cached — the store above already ran, on the
+		// PRE-escalation response, and is not called again afterward.
 		return awaitApproval(stdout, client, cfg, req, resp)
 	default:
 		// EFFECT_DENY, and any value this build does not recognize (the

@@ -93,6 +93,7 @@ func TestLoadMCPConfigFromEnv(t *testing.T) {
 // for error text -- see runMCPCmd's own doc comment for why that distinction exists at all.
 func TestRunMCPCmd_MissingConfig_ExitsOneStdoutUntouched(t *testing.T) {
 	clearMCPEnv(t)
+	clearCacheEnv(t)
 
 	var stdout, stderr bytes.Buffer
 	code := runMCPCmd(strings.NewReader(""), &stdout, &stderr)
@@ -117,6 +118,7 @@ func TestRunMCPCmd_MissingConfig_ExitsOneStdoutUntouched(t *testing.T) {
 func TestRunMCPCmd_MissingHookConfig_ExitsOneStdoutUntouched(t *testing.T) {
 	clearMCPEnv(t)
 	clearHookEnv(t)
+	clearCacheEnv(t)
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "some-upstream-server")
 
 	var stdout, stderr bytes.Buffer
@@ -144,9 +146,16 @@ func TestRunMCPCmd_MissingHookConfig_ExitsOneStdoutUntouched(t *testing.T) {
 // its pre-Task-3 fail-fast shape (return immediately after loadMCPConfigFromEnv fails, never
 // reaching loadHookConfigFromEnv) makes the hook-variable assertions below fail, because that
 // loader is then never even called.
+//
+// Extended by Task 3 (the decision cache) to a THIRD loader, cacheConfig -- the same property, one
+// more time, over combineConfigErrors' now-three-way composition (runMCPCmd, mcp.go): a build that
+// reverted to composing only two of the three would still pass every assertion above this one, so
+// cacheStalenessWindowEnv gets its own, independent check rather than folding it into the loop over
+// requiredHookEnvVars, which knows nothing about cacheConfig's own variable.
 func TestRunMCPCmd_BothConfigsMissing_NamesEveryMissingKeyFromBoth(t *testing.T) {
 	clearMCPEnv(t)
 	clearHookEnv(t)
+	clearCacheEnv(t)
 
 	var stdout, stderr bytes.Buffer
 	code := runMCPCmd(strings.NewReader(""), &stdout, &stderr)
@@ -168,6 +177,10 @@ func TestRunMCPCmd_BothConfigsMissing_NamesEveryMissingKeyFromBoth(t *testing.T)
 				"first loader's", msg, hookVar)
 		}
 	}
+	if !strings.Contains(msg, cacheStalenessWindowEnv) {
+		t.Errorf("stderr = %q, want it to also name the missing cache variable %s -- the third loader's "+
+			"gap must reach the same combined message as the other two", msg, cacheStalenessWindowEnv)
+	}
 }
 
 // Distinguishes "config rejected at load time" from "cmd.Start failed" (the next test below): a
@@ -178,6 +191,11 @@ func TestRunMCPCmd_BlankUpstreamCommand_ExitsOneWithoutStartingSubprocess(t *tes
 	clearMCPEnv(t)
 	clearHookEnv(t)
 	setAllHookEnv(t, nil)
+	// Set, not cleared: this test is specifically about the blank command, isolated from cacheConfig
+	// entirely -- see TestRunMCPCmd_UpstreamCommandNotFound_ExitsOneWithoutHanging's own comment for
+	// why leaving this unset would let an unrelated missing-cache-config failure stand in for the
+	// property this test's name actually claims.
+	t.Setenv(cacheStalenessWindowEnv, "1h")
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "   ")
 
 	var stdout, stderr bytes.Buffer
@@ -209,6 +227,11 @@ func TestRunMCPCmd_UpstreamCommandNotFound_ExitsOneWithoutHanging(t *testing.T) 
 	clearMCPEnv(t)
 	clearHookEnv(t)
 	setAllHookEnv(t, nil)
+	// runMCPCmd now loads cacheConfig too (Task 3), before ever reaching cmd.Start -- a missing
+	// value here would deny at config loading instead, which would still satisfy this test's
+	// code==1/stdout-empty assertions for the WRONG reason and never actually exercise the
+	// cmd.Start failure path its own name and doc comment claim to test.
+	t.Setenv(cacheStalenessWindowEnv, "1h")
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", "stratium-pep-mcp-upstream-that-does-not-exist")
 
 	var stdout, stderr bytes.Buffer
@@ -268,6 +291,11 @@ func TestRunMCPCmd_RealUpstreamProcess_RelaysAndExitsCleanly(t *testing.T) {
 	clearMCPEnv(t)
 	clearHookEnv(t)
 	setAllHookEnv(t, nil) // this test never sends tools/call, so the PDP is dialed but never actually called
+	// runMCPCmd now loads cacheConfig too (Task 3): a missing value here would deny before ever
+	// reaching cmd.Start, for a reason this test is not about -- see
+	// TestRunMCPCmd_UpstreamCommandNotFound_ExitsOneWithoutHanging's own comment for the identical
+	// concern on its neighbour.
+	t.Setenv(cacheStalenessWindowEnv, "1h")
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", os.Args[0])
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_ARGS", "-test.run=TestMCPHelperProcess")
 	t.Setenv("STRATIUM_MCP_TEST_HELPER", "1")
@@ -336,7 +364,7 @@ func newMCPHarness(t *testing.T, client pdpgrpc.PDPServiceClient, cfg hookConfig
 		done:             make(chan error, 1),
 	}
 	go func() {
-		h.done <- runMCP(agentToProxyR, proxyToAgentW, proxyToUpstreamW, upstreamToProxyR, &stderr, client, cfg)
+		h.done <- runMCP(agentToProxyR, proxyToAgentW, proxyToUpstreamW, upstreamToProxyR, &stderr, client, cfg, testCacheCfg)
 	}()
 	// Safety net, not the primary shutdown path any individual test relies on: closing both send
 	// sides guarantees the background runMCP goroutine (and this harness's own frameSource

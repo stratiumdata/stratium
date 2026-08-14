@@ -27,6 +27,15 @@ import (
 // only its presence on the wire is ever what a test in this file checks.
 const testSessionToken = "test-session-token"
 
+// testCacheCfg is the cacheConfig every runHook/newMCPHarness call in this
+// package's tests uses unless a test builds its own: a staleness window
+// generous enough (one hour) that none of the ordinary hit/miss/escalation
+// tests in hook_cache_test.go or mcp_authorize_cache_test.go ever brush
+// against it by accident -- cache_validity_test.go already owns proving the
+// window's own edge behavior (TestWithinStalenessWindow_BoundaryIsInclusive
+// and neighbours), so Task 3's own tests have no reason to vary it.
+var testCacheCfg = cacheConfig{StalenessWindow: time.Hour}
+
 // testCfg returns a valid baseline hookConfig: an existing, well-formed
 // session file under a test-scoped temp directory, naming a fresh
 // delegation ID and testSessionToken, plus a generous ConnectTimeout -- so a
@@ -102,7 +111,7 @@ func TestRunHook_Allow_ExitsZeroSilently(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Write", `{"file_path":"/tmp/notes.txt"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Write", `{"file_path":"/tmp/notes.txt"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 0 {
 		t.Fatalf("runHook() = %d, want 0", code)
@@ -137,7 +146,7 @@ func TestRunHook_Deny_ExitsTwoWithPDPReason(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Read", `{"file_path":"/etc/shadow"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Read", `{"file_path":"/etc/shadow"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -228,7 +237,7 @@ func TestRunHook_Escalate_ApprovedRetryAllows_ExitsZero(t *testing.T) {
 	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t), testCacheCfg)
 
 	if code != 0 {
 		t.Fatalf("runHook() = %d, want 0 (approved retry allows); stdout: %s", code, stdout.String())
@@ -304,7 +313,7 @@ func TestRunHook_Escalate_TimeoutStillPendingDenies(t *testing.T) {
 	var code int
 	var stdout bytes.Buffer
 	mustReturnWithin(t, 2*time.Second, func() {
-		code = runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, cfg)
+		code = runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, cfg, testCacheCfg)
 	})
 
 	if code != 2 {
@@ -333,7 +342,7 @@ func TestRunHook_Escalate_PollRespectsInterval_DoesNotBusyWait(t *testing.T) {
 
 	var stdout bytes.Buffer
 	mustReturnWithin(t, 2*time.Second, func() {
-		runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, cfg)
+		runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, cfg, testCacheCfg)
 	})
 
 	const wantApprox = 10 // ApprovalTimeout / ApprovalPollInterval
@@ -357,7 +366,7 @@ func TestRunHook_Escalate_ApprovalDeniedExitsTwo_NoRetry(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -401,7 +410,7 @@ func TestRunHook_Escalate_PDPUnreachableMidPollExitsTwo(t *testing.T) {
 	var code int
 	var stdout bytes.Buffer
 	mustReturnWithin(t, 3*time.Second, func() {
-		code = runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, cfg)
+		code = runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, cfg, testCacheCfg)
 	})
 
 	if code != 2 {
@@ -434,7 +443,7 @@ func TestRunHook_Escalate_GetApprovalUnavailableExitsTwo_NoRetry(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -460,7 +469,7 @@ func TestRunHook_Escalate_UnknownApprovalIDExitsTwo(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -488,7 +497,7 @@ func TestRunHook_Escalate_RetryDecideDeniesExitsTwo(t *testing.T) {
 	wrapped := &decideThenDenyClient{PDPServiceClient: client, first: fake.resp, denyReason: denyReason}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -528,7 +537,7 @@ func TestRunHook_Escalate_NoApprovalIDInResponse_DeniesWithoutPolling(t *testing
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -588,7 +597,7 @@ func TestRunHook_MalformedStdin_ExitsTwo(t *testing.T) {
 			client := startFakePDP(t, fake)
 
 			var stdout bytes.Buffer
-			code := runHook(strings.NewReader(tt.stdin), &stdout, client, testCfg(t))
+			code := runHook(strings.NewReader(tt.stdin), &stdout, client, testCfg(t), testCacheCfg)
 
 			if code != 2 {
 				t.Fatalf("runHook() = %d, want 2", code)
@@ -605,7 +614,7 @@ func TestRunHook_UnreachablePDP_ExitsTwo(t *testing.T) {
 	client := unreachablePDPClient(t)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -650,7 +659,7 @@ func TestRunHook_ExpiredToken_ReissuesOnceThenAllows(t *testing.T) {
 	cfg := testCfg(t)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg, testCacheCfg)
 
 	if code != 0 {
 		t.Fatalf("runHook() = %d, want 0 (reissue then an allowing retry); stdout: %s", code, stdout.String())
@@ -685,7 +694,7 @@ func TestRunHook_ExpiredToken_ReissuesOnceThenDeniesWithRetrysOwnReason(t *testi
 	cfg := testCfg(t)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg, testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -716,7 +725,7 @@ func TestRunHook_ReissueFails_Denies(t *testing.T) {
 	cfg := testCfg(t)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -748,7 +757,7 @@ func TestRunHook_Escalate_NeverAttemptsReissue(t *testing.T) {
 	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, testCfg(t), testCacheCfg)
 
 	if code != 0 {
 		t.Fatalf("runHook() = %d, want 0 (escalated, then approved)", code)
@@ -786,7 +795,7 @@ func TestRunHook_NoCodePathSendsABareDelegationID(t *testing.T) {
 	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID, wantSessionToken)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg, testCacheCfg)
 	if code != 0 {
 		t.Fatalf("runHook() = %d, want 0 (reissue then an allowing retry); stdout: %s", code, stdout.String())
 	}
@@ -844,7 +853,7 @@ func TestRunHook_SessionFileHasNoToken_ExitsTwo(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -882,7 +891,7 @@ func TestRunHook_NoSessionFile_ExitsTwo(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -910,7 +919,7 @@ func TestRunHook_MalformedSessionFile_ExitsTwo(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -940,7 +949,7 @@ func TestRunHook_SessionNamesUnknownDelegation_ExitsTwo(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Read", `{}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Read", `{}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -968,7 +977,7 @@ func TestRunHook_PDPReturnsError_ExitsTwo(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -997,7 +1006,7 @@ func TestRunHook_PDPTimesOut_ExitsTwo(t *testing.T) {
 	cfg.ConnectTimeout = 20 * time.Millisecond
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2", code)
@@ -1026,7 +1035,7 @@ func TestRunHook_EffectUnset_DeniesByZeroValue(t *testing.T) {
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{}`), &stdout, client, testCfg(t))
+	code := runHook(stdinBody("Bash", `{}`), &stdout, client, testCfg(t), testCacheCfg)
 
 	if code != 2 {
 		t.Fatalf("runHook() = %d, want 2 -- an unset effect must deny, not allow", code)
@@ -1074,7 +1083,7 @@ func TestRunHook_RequestCarriesRawInputAndNoDeclaredTier(t *testing.T) {
 	writeTestSessionFile(t, cfg.SessionFilePath, wantDelegationID, wantToken)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", toolInput), &stdout, client, cfg)
+	code := runHook(stdinBody("Bash", toolInput), &stdout, client, cfg, testCacheCfg)
 	if code != 0 {
 		t.Fatalf("runHook() = %d, want 0 (fixture is an ALLOW)", code)
 	}
@@ -1244,6 +1253,7 @@ func TestLoadHookConfigFromEnv(t *testing.T) {
 // that refuses to start.
 func TestRunHookCmd_MissingConfig_Denies(t *testing.T) {
 	clearHookEnv(t)
+	clearCacheEnv(t)
 
 	var stdout bytes.Buffer
 	code := runHookCmd(stdinBody("Read", `{}`), &stdout)
