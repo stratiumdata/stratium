@@ -272,6 +272,28 @@ var (
 	// epoch a future cache would validate against.
 	epochPdpClient pdpgrpc.PDPServiceClient
 	epochTenant    string
+
+	// cacheConn, cacheTenant, and cacheAddr back Task 4's live-stack
+	// decision-cache proofs (cache_e2e_integration_test.go): an eighth,
+	// independently configured PDP (deploy/docker/docker-compose.yml's
+	// pdp-cache service), its own tenant, touched by nothing else in this
+	// package — the same reasoning narrowPdpClient, resourcePdpClient,
+	// envoyPdpClient, proxyPdpClient, and epochPdpClient's own comments
+	// already give, restated again in that compose service's own comment
+	// rather than here.
+	//
+	// The raw *grpc.ClientConn is kept, not only a wrapped PDPServiceClient
+	// (every other dedicated PDP above keeps only the latter): those proofs
+	// deliberately stop and restart pdp-cache mid-test — the first PDP
+	// instance in this whole stack any test is allowed to do that to — and
+	// need to re-poll its health service (waitForServing, below) after each
+	// restart, which needs the connection itself, not a client wrapping it.
+	// gRPC's own client connection reconnects automatically once the
+	// container is back, so this one connection, dialed once here, is reused
+	// across every restart rather than leaking a fresh one each time.
+	cacheConn   *grpc.ClientConn
+	cacheTenant string
+	cacheAddr   string
 )
 
 func TestMain(m *testing.M) {
@@ -298,27 +320,29 @@ func runTestMain(m *testing.M) int {
 	pepProxyAddr := os.Getenv("STRATIUM_IT_PEP_PROXY_ADDR")
 	epochPdpAddr := os.Getenv("STRATIUM_IT_PDP_EPOCH_ADDR")
 	epochTenant = os.Getenv("STRATIUM_IT_EPOCH_TENANT_ID")
+	pdpCacheAddr := os.Getenv("STRATIUM_IT_PDP_CACHE_ADDR")
+	cacheTenant = os.Getenv("STRATIUM_IT_CACHE_TENANT_ID")
 	if dbURL == "" || servingDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
 		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
 		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" ||
-		epochPdpAddr == "" || epochTenant == "" {
+		epochPdpAddr == "" || epochTenant == "" || pdpCacheAddr == "" || cacheTenant == "" {
 		fmt.Fprintln(os.Stderr,
 			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
 				"STRATIUM_IT_PDP_NARROW_ADDR, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_PDP_RESOURCE_ADDR, "+
 				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, "+
 				"STRATIUM_IT_ENVOY_ADDR, STRATIUM_IT_PDP_PROXY_ADDR, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_GRPC_TARGET_ADDR, "+
-				"STRATIUM_IT_PEP_PROXY_ADDR, STRATIUM_IT_PDP_EPOCH_ADDR, and STRATIUM_IT_EPOCH_TENANT_ID must all be set — "+
-				"run via `make integration`, not `go test` directly")
+				"STRATIUM_IT_PEP_PROXY_ADDR, STRATIUM_IT_PDP_EPOCH_ADDR, STRATIUM_IT_EPOCH_TENANT_ID, STRATIUM_IT_PDP_CACHE_ADDR, "+
+				"and STRATIUM_IT_CACHE_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
 	tenants := map[string]bool{
 		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true, proxyTenant: true,
-		epochTenant: true,
+		epochTenant: true, cacheTenant: true,
 	}
-	if len(tenants) != 7 {
+	if len(tenants) != 8 {
 		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
-			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_EPOCH_TENANT_ID, and the test's "+
-			"hardcoded second tenant must all be distinct from one another")
+			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_EPOCH_TENANT_ID, "+
+			"STRATIUM_IT_CACHE_TENANT_ID, and the test's hardcoded second tenant must all be distinct from one another")
 		return 1
 	}
 
@@ -447,6 +471,25 @@ func runTestMain(m *testing.M) int {
 	}
 	defer closeEpochConn()
 	epochPdpClient = epochClient
+
+	// Dialed by hand rather than dialAndWaitForServing (used by every other
+	// PDP instance above): this is the one instance whose raw connection a
+	// later test needs directly (see the package var's own doc comment), and
+	// dialAndWaitForServing only ever hands back a wrapped PDPServiceClient.
+	cacheGRPCConn, err := grpc.NewClient(pdpCacheAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-cache: create gRPC client: %v\n", err)
+		return 1
+	}
+	defer func() { _ = cacheGRPCConn.Close() }()
+	waited, err := waitForServing(ctx, cacheGRPCConn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-cache never reported SERVING: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "%s reported SERVING after %s (this is the measured wait, not an assumption)\n", pdpCacheAddr, waited)
+	cacheConn = cacheGRPCConn
+	cacheAddr = pdpCacheAddr
 
 	return m.Run()
 }

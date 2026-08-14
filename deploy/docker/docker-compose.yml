@@ -452,5 +452,51 @@ services:
     ports:
       - "9292"
 
+  # Eighth PDP instance, wired for one purpose: Task 4's live-stack decision-
+  # cache proofs (services/internal/store/cache_e2e_integration_test.go) need
+  # a PDP that is safe to seed cedar policies and delegations into -- the same
+  # reason pdp-narrow, pdp-resource, pdp-extauthz, pdp-proxy, and pdp-epoch
+  # above each exist instead of reusing pdp's own tenant-one, restated again:
+  # tenant-one already carries TestEndToEnd's own cedar policies and its own
+  # order-dependent proofs, including a permanent, role-level revoke of
+  # stratium_app's INSERT on audit_chain that would break every later live
+  # Decide/CreateDelegation call on ANY tenant sharing that role, this one
+  # included. None of the five dedicated tenants above is touched by anything
+  # outside their own one test file either. Another dedicated tenant, touched
+  # by nothing but the cache proofs, is what makes them reachable without an
+  # ordering dependency on any other test.
+  #
+  # This is also the FIRST PDP instance in the whole stack any test is ever
+  # allowed to stop mid-run: proofs 2, 3, 5, and 6 in that test file need the
+  # PDP genuinely unreachable, not a bad address standing in for one (the
+  # task brief's own requirement), and a real `docker compose stop pdp-cache`
+  # is how they get that -- see that file's own package doc. Every one of the
+  # eight PDP instances above stays up for the whole suite specifically
+  # because OTHER tests assume it is; this one is dedicated to a test file
+  # written to expect it disappearing on purpose.
+  #
+  # Shares the same postgres instance as the PDPs above (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart). Full default policy-language
+  # registry (STRATIUM_POLICY_LANGUAGES left unset), matching pdp,
+  # pdp-resource, pdp-extauthz, pdp-proxy, and pdp-epoch: these proofs only
+  # ever need cedar.
+  pdp-cache:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-cache-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # See the "pdp" service's own comment on this variable above -- same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+    ports:
+      - "50051"
+
 volumes:
   pgdata:
