@@ -1074,6 +1074,64 @@ that the live path already honours.
 
 ---
 
+### 4.10 The admin plane (2026-08-14)
+
+**A3** names `stratium-pap` as one of three artifacts and **A5** makes it
+admin-only: policy, entitlement, agent, and override CRUD; UI backend; JWKS.
+It does not exist. Four rulings made since — **E7** (approvals), **T1** (tool
+catalog), **V1** (epoch bumps), **V4** (delegation revocation) — all defer
+writes to "the control plane", so all four currently point at nothing and are
+exercised only by tests writing directly to the database.
+
+**N1 — single-tenant per process, tenant fixed at startup.** Exactly as every
+PDP already works. A cross-tenant write becomes structurally impossible rather
+than a check that must be right on every request — the same reasoning that made
+RLS the only tenant boundary and an absent `GRANT` the enforcement. The cost is
+operational: one admin plane per tenant.
+
+This matters more here than anywhere else in the system. The PAP holds the write
+credentials every other component is deliberately denied, and it is the
+internet-facing plane. A per-request tenant resolution would make the boundary a
+code path for the first time, with the widest possible credentials behind it.
+
+**N2 — operator roles come from OIDC claims, never a table.** Identity is
+standard OIDC against whatever IdP the customer runs, with **no bundled IdP and
+no fallback** (§8) — the deleted `MockValidateToken` path is not to return in
+any form. Roles (`viewer`, `editor`, `admin`) are read from a configured claim.
+
+A roles table would need a bootstrap seed, and "who creates the first admin" is
+the classic way an admin plane locks a tenant out of itself on day one. The
+customer's IdP already knows who its administrators are; duplicating that into a
+table creates a second source of truth that will drift.
+
+**N3 — the PAP holds the writes the PDP is denied, and the PDP's grants do not
+change.** It gets its own database role with `INSERT`/`UPDATE` on the
+configuration tables. `stratium_app` keeps `SELECT` only on `approvals` and
+`tool_catalog`; the absent grants there remain the enforcement of E7 and T1.
+
+**N4 — every PAP write is audited into the same hash chain**, as new
+`EventType` values beside `decision` and `delegation_created`. `audit_chain` is
+owned by `stratium_audit_owner` with `INSERT`/`SELECT` granted to writers and
+`UPDATE`/`DELETE` neutered by rules, so the append-only property holds for a
+second writer exactly as it does for the first. A configuration change that is
+not in the chain is a change nobody can attribute later.
+
+**N5 — REST/JSON.** The UI is a browser client; the PDP stays gRPC. Two
+protocols for two audiences, rather than one protocol serving neither well.
+
+**N6 — dry-run replay against recorded decisions is deferred behind C17.**
+§6.4 promises it, but §4.9 stores only `InputDigest` and never raw input, for a
+stated reason: writing raw shell commands into an undeletable table before
+per-tenant key management exists would be worse than not storing them.
+
+So a replay can reuse a recorded **derived tier** but cannot **re-derive** one.
+"Would this new policy have changed that past decision?" is answerable only for
+decisions that did not turn on tier derivation. Validation and
+test-against-sample-input need no recorded data and ship; replay does not, and
+the gap is recorded rather than half-built.
+
+---
+
 ### 4.8 Caching and revocation
 
 Cache-key granularity differs sharply by leg:
