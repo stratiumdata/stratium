@@ -32,7 +32,7 @@ import (
 // anyway on a hit."
 func TestDecideAndRelay_CacheHit_Allow_ForwardsWithoutContactingPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, 42, now.Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
 	seedHookCache(t, cfg, cacheEntry{
 		cacheKey:            cacheKeyFor(delegationID, "read_file", `{"path":"/tmp/notes.txt"}`),
 		Decision:            pdpgrpc.Effect_EFFECT_ALLOW,
@@ -59,7 +59,7 @@ func TestDecideAndRelay_CacheHit_Allow_ForwardsWithoutContactingPDP(t *testing.T
 // cacheHitDenyReason, never reaches upstream, and never contacts the PDP.
 func TestDecideAndRelay_CacheHit_Deny_DeniesWithoutContactingPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, 42, now.Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
 	seedHookCache(t, cfg, cacheEntry{
 		cacheKey:            cacheKeyFor(delegationID, "delete_file", `{"path":"/etc/passwd"}`),
 		Decision:            pdpgrpc.Effect_EFFECT_DENY,
@@ -84,17 +84,28 @@ func TestDecideAndRelay_CacheHit_Deny_DeniesWithoutContactingPDP(t *testing.T) {
 	}
 }
 
-// TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP is mcp's own
-// mutation-testing anchor for "serve a hit without checking validity": an
-// entry cached under a stale epoch must be a miss, and the PDP's own live
-// (opposite) answer must be what reaches the agent.
+// TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP is mcp's own mutation-testing anchor
+// for "serve a hit without checking validity": a SECOND, unrelated entry in the same cache file
+// proves this PEP has observed a newer epoch than the target entry was cached under (mirroring
+// hook_cache_test.go's identical fix, and local_cache_test.go's
+// TestConsultCache_EntryBelowFileMaxEpoch_IsNotServed at the direct-unit layer) -- so the entry
+// must be a miss, and the PDP's own live (opposite) answer must be what reaches the agent.
 func TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, 42, now.Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
 	seedHookCache(t, cfg, cacheEntry{
 		cacheKey:            cacheKeyFor(delegationID, "read_file", `{"path":"/tmp/x"}`),
 		Decision:            pdpgrpc.Effect_EFFECT_DENY,
-		Epoch:               41, // one less than the session's own epoch (42) -- C20
+		Epoch:               41, // computed before the bump
+		DelegationExpiresAt: now.Add(48 * time.Hour),
+		CachedAt:            now.Add(-time.Minute),
+	})
+	// A different tool/input, same delegation: proves this PEP has since observed epoch 42 --
+	// what makes 42, not 41, the cache file's own true max.
+	seedHookCache(t, cfg, cacheEntry{
+		cacheKey:            cacheKeyFor(delegationID, "other_tool", "other input"),
+		Decision:            pdpgrpc.Effect_EFFECT_ALLOW,
+		Epoch:               42,
 		DelegationExpiresAt: now.Add(48 * time.Hour),
 		CachedAt:            now.Add(-time.Minute),
 	})
@@ -116,7 +127,7 @@ func TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP(t *testing.T) {
 // TestDecideAndRelay_CacheMiss_CallsPDPAndStoresResult is mcp's own version
 // of the task brief's second required test.
 func TestDecideAndRelay_CacheMiss_CallsPDPAndStoresResult(t *testing.T) {
-	cfg, delegationID, _ := hookCacheFixture(t, 42, time.Now().Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
 	epoch := int64(42)
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Epoch: &epoch, Reason: "policy allows"}}
 	client := startFakePDP(t, fake)
@@ -146,7 +157,7 @@ func TestDecideAndRelay_CacheMiss_CallsPDPAndStoresResult(t *testing.T) {
 // TestDecideAndRelay_CacheMissUnreachablePDP_DeniesWithDistinguishingReason
 // is mcp's own version of the task brief's third required test.
 func TestDecideAndRelay_CacheMissUnreachablePDP_DeniesWithDistinguishingReason(t *testing.T) {
-	cfg, _, _ := hookCacheFixture(t, 42, time.Now().Add(time.Hour))
+	cfg, _, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
 	client := unreachablePDPClient(t)
 	h := newMCPHarness(t, client, cfg)
 
@@ -172,7 +183,7 @@ func TestDecideAndRelay_CacheMissUnreachablePDP_DeniesWithDistinguishingReason(t
 // and local_cache.go's package doc for why the RESOLVED outcome must not be
 // cached either, not only the raw ESCALATE value.
 func TestDecideAndRelay_Escalate_ApprovedOutcome_NeverStoredInCache(t *testing.T) {
-	cfg, delegationID, _ := hookCacheFixture(t, 42, time.Now().Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
 	approvalID := uuid.NewString()
 	fake := &fakePDP{
 		resp:                 escalateResp(approvalID),
@@ -202,7 +213,7 @@ func TestDecideAndRelay_Escalate_ApprovedOutcome_NeverStoredInCache(t *testing.T
 func TestDecideAndRelay_CacheMiss_AfterReissue_StoresUnderReissuedTokenExpiry(t *testing.T) {
 	now := time.Now()
 	staleExpiry := now.Add(time.Minute)
-	cfg, delegationID, _ := hookCacheFixture(t, 42, staleExpiry)
+	cfg, delegationID, _ := hookCacheFixture(t, staleExpiry)
 
 	freshExpiry := now.Add(6 * time.Hour).Truncate(time.Second)
 	reissuedToken := signedTestToken(t, freshExpiry)

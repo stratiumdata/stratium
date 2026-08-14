@@ -4,29 +4,37 @@
 // W6: extauthz and proxy always call the PDP and never touch this file's own
 // functions.
 //
-// THE BOUNDARY IS STRUCTURAL, NOT A COMMENT. consultCache and
-// storeCacheResult both require sess *pdpgrpc.CreateDelegationResponse -- the
-// exact value loadSessionFile (session_file.go) returns -- as their one
-// caller-supplied source of the delegation id, epoch, and token a cache
-// operation needs. That is deliberately not a bare (epoch, token, id) tuple,
-// which any caller could assemble from anything: hook.go and mcp_authorize.go
-// both already hold a real *pdpgrpc.CreateDelegationResponse because both
-// already call loadSessionFile for unrelated reasons of their own (K4 --
-// authenticating the call at all). extauthz.go and proxy.go structurally do
-// not, and never have -- see extauthz.go's own "NO SESSION FILE" section and
-// proxy.go's identical one, both there specifically because those surfaces'
-// caller IS the party being policed and must re-authenticate on every call
-// (W6, and A10 one layer up). A future reader wiring the cache into either
-// would hit a compile error reaching for a value that does not exist in
-// scope, before writing a single line of cache-consulting logic -- getting
-// one means first undoing "NO SESSION FILE" as a deliberate property those
-// files state at length, not a line that merely happens to compile by
-// passing something else in its place. This follows the precedent
-// escalation.go's own doc comment sets for resolveApproval's signature: a
-// hookConfig value "populated with only the fields this function actually
-// reads" would be "a lie wearing hookConfig's name" that compiles but
-// misleads; a signature that only accepts the real thing is what keeps a
-// caller honest, here as there.
+// THE BOUNDARY IS STRUCTURAL, NOT A COMMENT. consultCache requires sess
+// *pdpgrpc.CreateDelegationResponse -- the exact value loadSessionFile
+// (session_file.go) returns -- as its source of the delegation id and token
+// a cache lookup needs (storeCacheResult takes the identical two values as
+// plain strings, extracted from that same sess by its only two callers).
+// That is deliberately not a bare (token, id) pair, which any caller could
+// assemble from anything: hook.go and mcp_authorize.go both already hold a
+// real *pdpgrpc.CreateDelegationResponse because both already call
+// loadSessionFile for unrelated reasons of their own (K4 -- authenticating
+// the call at all). extauthz.go and proxy.go structurally do not, and never
+// have -- see extauthz.go's own "NO SESSION FILE" section and proxy.go's
+// identical one, both there specifically because those surfaces' caller IS
+// the party being policed and must re-authenticate on every call (W6, and
+// A10 one layer up). A future reader wiring the cache into either would hit
+// a compile error reaching for a value that does not exist in scope, before
+// writing a single line of cache-consulting logic -- getting one means
+// first undoing "NO SESSION FILE" as a deliberate property those files
+// state at length, not a line that merely happens to compile by passing
+// something else in its place. This follows the precedent escalation.go's
+// own doc comment sets for resolveApproval's signature: a hookConfig value
+// "populated with only the fields this function actually reads" would be "a
+// lie wearing hookConfig's name" that compiles but misleads; a signature
+// that only accepts the real thing is what keeps a caller honest, here as
+// there.
+//
+// The one value this boundary does NOT source from sess is the epoch --
+// see consultCache's own doc comment below, and "WHERE THE EPOCH COMES
+// FROM," for why sess.GetEpoch() turned out to be the wrong choice and what
+// replaced it. That correction does not weaken the boundary above: the
+// delegation id and token still come from nowhere but sess, on both
+// surfaces, for the identical reason.
 //
 // WHY THE BOUNDARY MATTERS (restated from spec §4.8.3, cache.go's own
 // package doc, and this project's git history -- see the plan's own "W6
@@ -52,6 +60,51 @@
 // configures, not a second location that could be pointed elsewhere by
 // mistake or left unset entirely for a location the spec does not leave
 // open to configure at all.
+//
+// WHERE THE EPOCH COMES FROM (corrected after this task's first pass shipped
+// with a real bug -- left here in full, not trimmed to the fixed version
+// alone, because the wrong answer was plausible enough to ship once and is
+// worth a future reader recognizing on sight). lastKnownEpoch is
+// maxCacheEpoch(cachePath): the highest Epoch already recorded among the
+// entries in the cache file, computed fresh on every consultCache call, not
+// tracked anywhere else.
+//
+// The first version used sess.GetEpoch() instead -- the value
+// CreateDelegationResponse carries and cacheGetValid's own doc comment
+// (cache.go) singles out as a natural source. It compiles, it is exactly
+// what W6's structural argument above already requires be in scope, and it
+// passed every test this task first wrote, because every one of those
+// tests' fixtures set the session epoch and the stored entry's epoch to the
+// same value -- the two sides agreed by construction, so no test could
+// ever have told the two apart (this project's now-familiar
+// fixture-makes-the-bug-invisible shape). It is wrong: sess.GetEpoch() is a
+// snapshot written exactly once, at session-start (writeSessionFile's only
+// caller -- session_file.go's own package doc), and never updated by hook
+// or mcp afterward on any later call. storeCacheResult (below) stamps each
+// entry's own Epoch from that SPECIFIC call's live Decide response. The
+// instant any control-plane write anywhere in the tenant bumps the epoch
+// once -- Phase 12's trigger fires on ordinary policy, agent, catalog, and
+// delegation writes, including ones from a completely different session --
+// every entry stored from then on carries the NEW epoch while
+// sess.GetEpoch() stays pinned to the OLD one for the rest of that
+// session's life. epochCurrent (cache.go) then fails for every entry,
+// permanently: not a slow degradation, a hard stop on the one property this
+// whole phase exists to buy, often within seconds in a tenant with any
+// other activity at all.
+//
+// maxCacheEpoch needs no new state to fix this, which is what makes it the
+// right level to fix it at: the newest entry already in the file was
+// written by SOME call that read a real, live epoch from the PDP, and the
+// epoch is monotonic (spec V1) -- so that newest entry's own Epoch already
+// IS "the last epoch this PEP has seen," with nothing extra to track or
+// keep in sync, on either surface, across however many cooperating hook
+// subprocesses W5 already has sharing one file. An entry whose Epoch equals
+// that max is current; one below it was computed before a bump this PEP has
+// since observed via some OTHER entry, and correctly misses; an outage with
+// no new writes leaves the max unchanged, so existing entries keep serving
+// exactly as long as their own staleness window (condition 4) allows --
+// which is precisely what that condition is for. sess.GetEpoch() is not
+// read anywhere in this file any longer.
 //
 // WHY AN ESCALATION IS NEVER CACHED, EVEN RESOLVED. W4 says an ESCALATE
 // decision is never cached; cache.go's cachePut and cacheEntryUsable each
@@ -142,26 +195,52 @@ func cacheKeyFor(delegationID, tool, rawInput string) cacheKey {
 	return cacheKey{DelegationID: delegationID, Tool: tool, InputDigest: sha256.Sum256([]byte(rawInput))}
 }
 
+// maxCacheEpoch reads every entry currently in the cache file at path and
+// returns the highest Epoch among them -- see the package doc's "WHERE THE
+// EPOCH COMES FROM" for why this, not sess.GetEpoch(), is lastKnownEpoch:
+// every entry is written with the epoch it was computed under
+// (storeCacheResult), and the epoch is monotonic (spec V1), so the newest
+// entry already says what the oldest recorded belief could not.
+//
+// Returns 0 for an empty or unreadable file (loadCacheEntries's own
+// fail-closed "no data" case, cache.go). That value is inert either way:
+// cacheGetValid always calls cacheGet FIRST, and an empty or corrupt file
+// means that lookup already reports a miss -- for the identical reason this
+// function has nothing to compute a real max from -- before this return
+// value is ever compared against anything. 0 needs no special-casing at the
+// call site and matches every other "no data" default already in play here
+// (a zero-valued cacheEntry, Go's own int64 zero value) rather than
+// inventing a sentinel meaningful only to this one function.
+func maxCacheEpoch(path string) int64 {
+	entries, ok := loadCacheEntries(path)
+	if !ok {
+		return 0
+	}
+	var maxEpoch int64
+	for _, e := range entries {
+		if e.Epoch > maxEpoch {
+			maxEpoch = e.Epoch
+		}
+	}
+	return maxEpoch
+}
+
 // consultCache is the one cache READ this binary ever performs -- see this
 // file's own package doc for why its signature is what keeps extauthz.go and
 // proxy.go from being able to call it by accident.
 //
-// lastKnownEpoch is sess.GetEpoch() and token is sess.GetToken(): both are
-// exactly what cacheGetValid's own doc comment (cache.go) asks each Task 3
-// surface to supply from "the epoch on its own most recent
-// Decide/CreateDelegation/IssueToken response." For hook, a fresh subprocess
-// with no memory between calls, and for mcp, which re-reads the session file
-// fresh on every call for the identical revocation-latency reason hook does
-// (mcp_authorize.go's own doc comment on decideAndRelay), the session file
-// IS that response -- the freshest one this process has ever independently
-// observed, since neither surface tracks a fresher epoch anywhere else (see
-// the package doc's note on why deliberately not: a second, in-memory-only
-// epoch tracker would be a second piece of state every call site has to
-// remember to update correctly, the same shared-state risk cache.go's own
-// package doc already rejected once for staleness).
+// lastKnownEpoch is maxCacheEpoch(cachePath) -- the package doc's "WHERE THE
+// EPOCH COMES FROM" has the full account of why, including the wrong answer
+// this task shipped first. token is sess.GetToken(), still: condition 3
+// (cache.go's tokenNotExpired) is specifically about the CALLER'S OWN
+// currently-presented credential, which only the session file can supply,
+// re-read fresh on every call for hook (a subprocess with no memory between
+// calls) and for mcp (which re-reads the file per call regardless, for the
+// pre-existing revocation-latency reason mcp_authorize.go's own doc comment
+// on decideAndRelay already gives).
 func consultCache(cachePath string, staleness time.Duration, sess *pdpgrpc.CreateDelegationResponse, tool, rawInput string, now time.Time) (cacheEntry, bool) {
 	key := cacheKeyFor(sess.GetDelegationId(), tool, rawInput)
-	return cacheGetValid(cachePath, key, sess.GetEpoch(), sess.GetToken(), now, staleness)
+	return cacheGetValid(cachePath, key, maxCacheEpoch(cachePath), sess.GetToken(), now, staleness)
 }
 
 // storeCacheResult is the one cache WRITE this binary ever performs, called

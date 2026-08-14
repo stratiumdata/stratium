@@ -28,16 +28,21 @@ import (
 	"stratium/internal/pdpgrpc"
 )
 
-// hookCacheFixture writes a session file naming a fresh delegation id, epoch,
-// and a real signed token expiring at tokenExpiresAt -- everything a cache
-// test needs beyond testCfg's own baseline, which cannot be reused unmodified
-// here (see this file's own package doc).
-func hookCacheFixture(t *testing.T, epoch int64, tokenExpiresAt time.Time) (cfg hookConfig, delegationID, token string) {
+// hookCacheFixture writes a session file naming a fresh delegation id and a
+// real signed token expiring at tokenExpiresAt -- everything a cache test
+// needs beyond testCfg's own baseline, which cannot be reused unmodified
+// here (see this file's own package doc). Deliberately does NOT set the
+// session file's own Epoch field: consultCache no longer reads it (see
+// local_cache.go's package doc, "WHERE THE EPOCH COMES FROM") -- lastKnownEpoch
+// comes from the cache file's own recorded entries, which each test below
+// controls directly by seeding whatever entries the property under test
+// needs, not by this fixture.
+func hookCacheFixture(t *testing.T, tokenExpiresAt time.Time) (cfg hookConfig, delegationID, token string) {
 	t.Helper()
 	cfg = testCfg(t)
 	delegationID = uuid.NewString()
 	token = signedTestToken(t, tokenExpiresAt)
-	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: delegationID, Token: token, Epoch: epoch})
+	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: delegationID, Token: token})
 	if err != nil {
 		t.Fatalf("marshal session fixture: %v", err)
 	}
@@ -66,7 +71,7 @@ func seedHookCache(t *testing.T, cfg hookConfig, entry cacheEntry) {
 // anyway on a hit."
 func TestRunHook_CacheHit_Allow_ServesWithoutContactingPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, 42, now.Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
 	seedHookCache(t, cfg, cacheEntry{
 		cacheKey:            cacheKeyFor(delegationID, "Bash", `{"command":"ls"}`),
 		Decision:            pdpgrpc.Effect_EFFECT_ALLOW,
@@ -97,7 +102,7 @@ func TestRunHook_CacheHit_Allow_ServesWithoutContactingPDP(t *testing.T) {
 // explains why).
 func TestRunHook_CacheHit_Deny_ServesWithoutContactingPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, 42, now.Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
 	seedHookCache(t, cfg, cacheEntry{
 		cacheKey:            cacheKeyFor(delegationID, "Bash", `{"command":"rm -rf /"}`),
 		Decision:            pdpgrpc.Effect_EFFECT_DENY,
@@ -124,22 +129,31 @@ func TestRunHook_CacheHit_Deny_ServesWithoutContactingPDP(t *testing.T) {
 	}
 }
 
-// TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP is the mutation-testing
-// anchor for "serve a hit without checking validity" (e.g. swapping
-// cacheGetValid for a bare cacheGet inside consultCache, local_cache.go): an
-// entry cached under a DIFFERENT epoch than the session's own reported epoch
-// must be treated as a miss, not served -- the PDP must still be asked, and
-// its own live answer must govern, not the stale cached one. The two
-// decisions are deliberately opposite (cached DENY vs. live ALLOW) so a
-// build that wrongly served the stale entry would flip the observable exit
-// code, not just the internal call count.
+// TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP is the mutation-testing anchor for "serve a
+// hit without checking validity" (e.g. swapping cacheGetValid for a bare cacheGet inside
+// consultCache, local_cache.go): a SECOND, unrelated entry in the same cache file (a different
+// tool/input) proves this PEP has observed a newer epoch than the target entry was cached under --
+// exactly the "an entry stored before a bump is not served after it" property local_cache_test.go's
+// own TestConsultCache_EntryBelowFileMaxEpoch_IsNotServed defends directly, proven here end to end
+// through runHook. The two decisions are deliberately opposite (cached DENY vs. live ALLOW) so a
+// build that wrongly served the stale entry would flip the observable exit code, not just the
+// internal call count.
 func TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, 42, now.Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
 	seedHookCache(t, cfg, cacheEntry{
 		cacheKey:            cacheKeyFor(delegationID, "Bash", `{"command":"ls"}`),
 		Decision:            pdpgrpc.Effect_EFFECT_DENY,
-		Epoch:               41, // one less than the session's own epoch (42) -- C20
+		Epoch:               41, // computed before the bump
+		DelegationExpiresAt: now.Add(48 * time.Hour),
+		CachedAt:            now.Add(-time.Minute),
+	})
+	// A different tool/input, same delegation: proves this PEP has since observed epoch 42 --
+	// what makes 42, not 41, the cache file's own true max.
+	seedHookCache(t, cfg, cacheEntry{
+		cacheKey:            cacheKeyFor(delegationID, "OtherTool", "other input"),
+		Decision:            pdpgrpc.Effect_EFFECT_ALLOW,
+		Epoch:               42,
 		DelegationExpiresAt: now.Add(48 * time.Hour),
 		CachedAt:            now.Add(-time.Minute),
 	})
@@ -153,9 +167,9 @@ func TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP(t *testing.T) {
 		t.Fatalf("runHook() = %d, want 0 -- the stale entry must be ignored and the PDP's live ALLOW must govern", code)
 	}
 	if got := fake.requestCount(); got != 1 {
-		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- an entry cached under a stale epoch is a "+
-			"miss, not a hit, so this must still ask the PDP (a mutation serving any cacheGet hit regardless "+
-			"of validity would leave this at 0 and the exit code at 2)", got)
+		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- an entry cached below the file's own "+
+			"max epoch is a miss, not a hit, so this must still ask the PDP (a mutation serving any cacheGet "+
+			"hit regardless of validity would leave this at 0 and the exit code at 2)", got)
 	}
 }
 
@@ -164,7 +178,7 @@ func TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP(t *testing.T) {
 // decision is written to the cache file afterward, keyed and valued so a
 // LATER identical call could find it.
 func TestRunHook_CacheMiss_CallsPDPAndStoresResult(t *testing.T) {
-	cfg, delegationID, _ := hookCacheFixture(t, 42, time.Now().Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
 	epoch := int64(42)
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Epoch: &epoch, Reason: "policy allows"}}
 	client := startFakePDP(t, fake)
@@ -197,7 +211,7 @@ func TestRunHook_CacheMiss_CallsPDPAndStoresResult(t *testing.T) {
 // unreachable" from an ordinary policy denial. Both phrases are checked
 // independently so a build reporting only one or the other still fails.
 func TestRunHook_CacheMissUnreachablePDP_DeniesWithDistinguishingReason(t *testing.T) {
-	cfg, _, _ := hookCacheFixture(t, 42, time.Now().Add(time.Hour))
+	cfg, _, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
 	client := unreachablePDPClient(t)
 
 	var stdout bytes.Buffer
@@ -226,7 +240,7 @@ func TestRunHook_CacheMissUnreachablePDP_DeniesWithDistinguishingReason(t *testi
 // ESCALATION IS NEVER CACHED, EVEN RESOLVED," for why the RESOLVED outcome
 // must not be cached either.
 func TestRunHook_Escalate_ApprovedOutcome_NeverStoredInCache(t *testing.T) {
-	cfg, delegationID, _ := hookCacheFixture(t, 42, time.Now().Add(time.Hour))
+	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
 	approvalID := uuid.NewString()
 	fake := &fakePDP{
 		resp:                 escalateResp(approvalID),
@@ -258,7 +272,7 @@ func TestRunHook_Escalate_ApprovedOutcome_NeverStoredInCache(t *testing.T) {
 func TestRunHook_CacheMiss_AfterReissue_StoresUnderReissuedTokenExpiry(t *testing.T) {
 	now := time.Now()
 	staleExpiry := now.Add(time.Minute)
-	cfg, delegationID, _ := hookCacheFixture(t, 42, staleExpiry)
+	cfg, delegationID, _ := hookCacheFixture(t, staleExpiry)
 
 	// Truncated to whole seconds: a JWT "exp" claim is a Unix timestamp (signedTestToken's own
 	// expiresAt.Unix()), so tokenExpiry's decode can never return sub-second precision -- comparing
