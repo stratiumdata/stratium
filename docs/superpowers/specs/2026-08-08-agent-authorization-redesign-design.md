@@ -646,6 +646,74 @@ threat and needs a replay store.
 
 ---
 
+### 4.4.3 The override read path, and what raise-only compares against (2026-08-15)
+
+§4.4 has resolved a tier by override, then catalog, then built-in since the
+baseline. **The override step has never run in production.**
+`internal/authz.TierTable.Overrides` is read at exactly one place — the first
+loop of `deriveTierByName` — and is assigned nowhere outside `tier_test.go` and
+`catalog_test.go`. The PDP builds its table with `Catalog` alone, under a
+comment that recites all three steps. Consistent with that, `stratium_app` holds
+no grant on `tier_overrides` at all, not even `SELECT`.
+
+This is the **eighth** instance in this project of a mechanism plumbed and never
+populated; `tenant_epoch` was the seventh. It is the one that made a whole
+shipped feature inert: Phase 14 Task 3 built full CRUD over `tier_overrides` and
+gave `ValidateOverride` its first production caller, so an operator can create,
+update, and delete overrides, and be correctly refused a lowering one — and none
+of it reaches a decision. Found while planning the phase's own proof that it
+works.
+
+**T4 — the PDP loads tier overrides and populates `TierTable.Overrides`.**
+Tenant-scoped through `beginTenantTx`, loaded on the decision path exactly as
+policies and catalog entries already are, and keyed by the same `lookupKeys`
+the catalog uses. Phase 12's trigger already fires on `tier_overrides` writes,
+so invalidation needs nothing new.
+
+**T5 — raise-only means "at or above the tier resolution beneath it", not "at
+or above built-in".** `ValidateOverride` compares against the built-in tier
+because it predates the per-tenant catalog. With built-in `READ`, a catalog
+entry of `DESTRUCTIVE`, and an override of `WRITE`, the write-time check passes
+— `WRITE ≥ READ` — and then the override wins the resolution and lowers the
+effective tier from `DESTRUCTIVE` to `WRITE`. A tenant's own catalogued
+judgement is undercut by a correction that was validated as a raise.
+
+The baseline is therefore the catalog entry where one exists and the built-in
+otherwise, **enforced at both ends**:
+
+- **At write time**, so an operator gets an error rather than a row that
+  silently does nothing. This requires the PAP to resolve the tenant's catalog
+  when validating, which it can already do.
+- **At read time**, when the PDP builds the table, because a direct `INSERT` as
+  a database superuser never passes through the PAP at all. A row failing this
+  check is **dropped and surfaced, never silently honored** — dropping falls
+  back to the higher tier beneath it, which is the safe direction, whereas
+  failing the whole decision would let one bad row deny an entire tenant.
+
+The exposure this closes is an operator footgun rather than an agent escape: no
+agent can write either table, and `destructiveEvidence` (§4.4.1) still binds
+above all three sources, so destructive raw input cannot be masked by any
+override. What a lowering override can do is drop a *catalogued* tier beneath a
+delegation's cap.
+
+**T6 — the PDP gets `SELECT` on `tier_overrides` and nothing else.** The same
+reasoning that keeps `UPDATE` on `approvals` and `tool_catalog` away from
+`stratium_app` (**E7**, **T1**, **N3**): the absent grant *is* the enforcement.
+A PDP that could write an override would be the component being policed
+adjusting its own classification — spec defect **D1**, and precisely what
+**C5** exists to forbid.
+
+**C5 becomes assessable only after T4.** "A tier override from an
+agent-writable source is never honored" is satisfied trivially while *no*
+override is honored, and converting it on that basis would be forcing a pass.
+Once overrides are live, the property rests on four mechanisms that must be
+pointed at together: no PEP sends `declared_tier` (asserted on all four
+surfaces); `CheckDeclaredTier` cross-checks a declared tier rather than
+trusting it; `tier_overrides` is writable only by `stratium_pap`, which
+requires an operator's OIDC token; and the PDP holds `SELECT` alone.
+
+---
+
 ### 4.4.2 The per-tenant tool catalog, and extraction moves server-side (2026-08-12)
 
 §4.4 resolves an action's tier by tenant override, then tool catalog, then the
