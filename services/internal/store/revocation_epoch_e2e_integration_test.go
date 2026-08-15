@@ -39,6 +39,12 @@
 // already, deliberately and irreversibly for the rest of the process,
 // revoked stratium_app's INSERT on audit_chain.
 //
+// Phase 14 Task 8 fixed the second failure mode at its source: proof6 now
+// restores both grants in a t.Cleanup and verifies they came back
+// (restoreAuditChainInsert, store_integration_test.go), so this file's own
+// name is no longer load-bearing. The account below is kept as the record of
+// why it was, since that is the trap being described.
+//
 // Switching to a dedicated tenant (this file's first fix) closed the FIRST
 // failure mode but not the second: the audit_chain revoke is a ROLE-level
 // grant, not tenant-scoped (pdp-resource's own compose comment states this

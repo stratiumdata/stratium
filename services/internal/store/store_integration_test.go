@@ -2812,8 +2812,13 @@ allow if {
 // sequentially (never t.Parallel()) because later ones depend on earlier
 // state: proof 3 needs proof 2's decision already written; the concurrency
 // measurements need proof 2's fixture already seeded; proof 6 deliberately
-// revokes the application role's INSERT privilege on audit_chain and must
-// run last, since nothing after it could append an audit row again.
+// revokes the application role's INSERT privilege on audit_chain, so it runs
+// after every subtest that needs to append one. That revoke is no longer
+// permanent — proof 6 restores both grants in a t.Cleanup and verifies they
+// came back (restoreAuditChainInsert, bottom of this file); it used to be
+// left in place for the life of the process, on the mistaken belief that
+// this subtest "runs last" in the package rather than merely last in this
+// function. See proof 6's own comment.
 //
 // Phase 2b Task 4 adds two more, both placed after the concurrency
 // measurements (so every "ordinary" proof has already run against the real
@@ -4434,10 +4439,27 @@ allow if {
 		// (stratium_audit_owner) and the narrower grant
 		// migrations/000004_audit_ownership.up.sql makes to stratium_app —
 		// revoking only one would leave the other still granting it.
-		// Deliberately irreversible for the rest of this process: nothing
-		// after this subtest can append an audit row again, which is why it
-		// runs last.
-		for _, role := range []string{"stratium_app", "stratium_audit_owner"} {
+		//
+		// The revoke is scoped to this subtest by the t.Cleanup below, and
+		// that is a correctness requirement, not tidiness. This revoke is
+		// role-level, not tenant-scoped: while it is in effect NO Decide
+		// call anywhere in this package can append an audit row, on any
+		// tenant, through any PDP instance. It used to be left in place
+		// permanently, on the stated grounds that this subtest "runs last"
+		// — it does not. go test concatenates a package's test files in
+		// FILENAME order, so every integration file sorting after
+		// store_integration_test.go ran with INSERT already revoked and
+		// failed with "permission denied for table audit_chain" in the full
+		// suite while passing in isolation. Two files (Phase 12's
+		// revocation_epoch_e2e_ and Phase 14 Task 7's decide_tier_override_)
+		// were named to sort BEFORE this one specifically to dodge that,
+		// which made two filenames load-bearing with nothing saying so here,
+		// where a rename would happen. Restoring the grants removes that
+		// trap; "deliberately irreversible" was a statement of consequence,
+		// not of impossibility.
+		auditInsertRoles := []string{"stratium_app", "stratium_audit_owner"}
+		t.Cleanup(func() { restoreAuditChainInsert(t, auditInsertRoles) })
+		for _, role := range auditInsertRoles {
 			if _, err := testDB.ExecContext(t.Context(), fmt.Sprintf("REVOKE INSERT ON audit_chain FROM %s", role)); err != nil {
 				t.Fatalf("revoke INSERT from %s: %v", role, err)
 			}
@@ -4465,4 +4487,51 @@ allow if {
 			t.Errorf("test's own database connection broke unexpectedly: %v", confirmErr)
 		}
 	})
+}
+
+// restoreAuditChainInsert re-GRANTs INSERT on audit_chain to roles and then
+// CONFIRMS it, rather than assuming the GRANT statement did what it says.
+// A half-working restore is strictly worse than the permanent revoke it
+// replaces: the revoke failed loudly and identically on every later Decide
+// call, while a restore that silently covered only one of the two roles
+// would leave a failure that depends on which grant path a given connection
+// happens to inherit INSERT through — the definition of a flake.
+//
+// has_table_privilege is the right question to ask of BOTH roles, including
+// stratium_audit_owner, which owns the table: an owner's implicit
+// privileges are materialised into relacl as soon as anything is granted or
+// revoked, so a REVOKE from the owner genuinely removes INSERT and
+// has_table_privilege genuinely reports false until it is granted back
+// (confirmed live against this stack's own postgres:16, not assumed from
+// the documentation).
+//
+// context.Background with an explicit timeout, not t.Context(): as of Go
+// 1.24 a test's context is cancelled BEFORE its cleanup functions run, so
+// t.Context() here would fail every statement with "context canceled" and
+// restore nothing.
+func restoreAuditChainInsert(t *testing.T, roles []string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, role := range roles {
+		if _, err := testDB.ExecContext(ctx, fmt.Sprintf("GRANT INSERT ON audit_chain TO %s", role)); err != nil {
+			t.Errorf("restoring INSERT on audit_chain to %s: %v — every later test in this package "+
+				"that calls Decide will now fail with a permission error that has nothing to do with "+
+				"what it is testing", role, err)
+		}
+	}
+	for _, role := range roles {
+		var granted bool
+		if err := testDB.QueryRowContext(ctx,
+			`SELECT has_table_privilege($1, 'audit_chain', 'INSERT')`, role).Scan(&granted); err != nil {
+			t.Errorf("checking restored INSERT on audit_chain for %s: %v", role, err)
+			continue
+		}
+		if !granted {
+			t.Errorf("INSERT on audit_chain is still absent for %s after the restoring GRANT — "+
+				"the restore did not work, and later tests in this package will fail unpredictably "+
+				"depending on which role their connection inherits INSERT through", role)
+		}
+	}
 }

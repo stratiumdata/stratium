@@ -19,18 +19,26 @@
 // about what the database will happily accept, so faking the database
 // assumes away the premise.
 //
-// The filename is load-bearing, and not for taste. `go test` compiles a
-// package's files in sorted order and runs tests in declaration order, and
+// The filename USED TO BE load-bearing, and is no longer — recorded here
+// because the constraint it encoded is exactly the sort that comes back if
+// nobody writes down that it was lifted. `go test` compiles a package's
+// files in sorted order and runs tests in declaration order, and
 // TestEndToEnd's own proof6_failed_audit_append_blocks_the_decision
-// (store_integration_test.go) permanently REVOKEs INSERT on audit_chain from
-// both stratium_app and stratium_audit_owner — deliberately, and its own
-// comment says "nothing after this subtest can append an audit row again."
-// Every proof below calls Decide, which appends one. Named "decide_..." so
-// it sorts ahead of store_integration_test.go, the same position
-// escalation_integration_test.go's own Decide proofs already depend on.
-// Found empirically: named tier_override_integration_test.go, both Decide
-// proofs failed with "permission denied for table audit_chain" in the full
-// suite while passing in isolation.
+// (store_integration_test.go) REVOKEs INSERT on audit_chain from both
+// stratium_app and stratium_audit_owner. Every proof below calls Decide,
+// which appends an audit row. This file was originally named "decide_..."
+// so it would sort ahead of store_integration_test.go, found empirically:
+// named tier_override_integration_test.go, both Decide proofs failed with
+// "permission denied for table audit_chain" in the full suite while passing
+// in isolation.
+//
+// Phase 14 Task 8 fixed that at the source — proof6 now restores both
+// grants in a t.Cleanup (restoreAuditChainInsert, store_integration_test.go)
+// and verifies they came back — so the revoke is scoped to that subtest and
+// this file may be renamed freely. Confirmed by renaming it to
+// zz_tier_override_integration_test.go (sorting after store_) and running
+// the full integration suite green. The name is kept only because there is
+// no reason to churn it.
 package store_test
 
 import (

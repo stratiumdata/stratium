@@ -39,6 +39,12 @@
 // tenant-cache-integration included, into an audit-write failure instead of a
 // real decision, if this file's name sorted after it.
 //
+// Phase 14 Task 8 removed that constraint: proof6 now restores both grants
+// in a t.Cleanup and verifies they came back (restoreAuditChainInsert,
+// store_integration_test.go), so the revoke lasts only for that subtest and
+// this file's name is no longer load-bearing. Kept as it is because there is
+// no reason to churn it.
+//
 // Every proof below uses tool "Read" only, deliberately, never a second tool
 // name: internal/authz's DefaultCatalog (catalog.go) fixes "Read" at
 // READ_ONLY regardless of RawInput content (the catalog step runs before
