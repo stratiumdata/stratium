@@ -1074,6 +1074,47 @@ that the live path already honours.
 
 ---
 
+### 4.10.2 Authoring endpoints (2026-08-14)
+
+§6.4 item 15 promises validation, test-against-sample-input, and dry-run replay.
+**N6** already deferred replay behind **C17**. Three mechanics settle the rest.
+
+**N9 — a test evaluates the candidate both alone and alongside the tenant's
+existing policies, and returns both.** Deny-overrides makes isolation
+misleading in exactly one direction: a candidate **deny** tested alone is
+accurate, because a deny always wins the fold, while a candidate **allow**
+tested alone is not — an existing `forbid` anywhere in the tenant makes it
+irrelevant, and the endpoint would report success.
+
+Authoring needs both answers. "Did I write this rule correctly" is the isolated
+result; "will it change anything" is the folded one. `PolicyVerdict` already
+carries `Source` and `PolicyID`, so attributing each verdict costs nothing.
+
+**N10 — the response returns principal-leg verdicts and says so structurally.**
+Policies produce only that leg; the agent and delegation legs are structural and
+policy-independent. The response therefore states in its own payload that those
+two were not evaluated, rather than in prose an operator will not read. An
+`ALLOW` here means "no policy denied", never "this request would be permitted",
+and the shape has to carry that distinction on its own.
+
+**N11 — the derived tier is derived, not declared.** By default the tier comes
+from the supplied raw input through the tenant's own catalog, so a test
+exercises the same path production does, including the catalog and §4.4.1's
+evidence rule. An explicit override remains available for hypotheticals — "what
+happens at `DESTRUCTIVE`" is a legitimate question that should not require
+crafting an input that derives there — and the response labels which was used.
+
+A declared tier is spec defect **D1** on the decision path. On an authoring
+endpoint it is a hypothesis, not an assertion, and the labelling is what keeps
+those apart.
+
+**Neither endpoint writes.** A dry-run that mutates is not a dry-run, and it is
+asserted rather than documented. The response shape is deliberately not a
+`DecideResponse`: this is the admin plane, unreachable by any agent, and a test
+result must not be mistakable for an authorization even in a log.
+
+---
+
 ### 4.10.1 Granting requires identity; taking away requires only a role (2026-08-14)
 
 The admin plane performs three writes that look alike and are not. The epoch
