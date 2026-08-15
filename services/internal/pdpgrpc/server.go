@@ -546,23 +546,11 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 func honoredOverrides(
 	stored, catalog map[string]models.ActionTier, entries []models.ToolCatalogEntry,
 ) map[string]models.ActionTier {
-	// stored, not the honored subset being built: every OTHER row is part of
-	// the resolution beneath this one (authz.OverrideBaseline removes only the
-	// key's own row), and a row that will itself be dropped can only make a
-	// baseline HIGHER — over-strict, never permissive. Using the honored
-	// subset instead would make the result depend on map iteration order,
-	// which is exactly the kind of nondeterminism an authorization decision
-	// must not have.
-	honored := make(map[string]models.ActionTier, len(stored))
-	table := authz.TierTable{Catalog: catalog, Overrides: stored}
-	for key, tier := range stored {
-		baseline := authz.OverrideBaseline(table, entries, key)
-		if err := authz.ValidateOverride(baseline, tier); err != nil {
-			slog.Warn("tier override dropped: it would lower the tier resolved beneath it",
-				"tool_or_verb", key, "override_tier", tier.String(), "baseline_tier", baseline.String())
-			continue
-		}
-		honored[key] = tier
+	honored, dropped := authz.HonoredOverrides(
+		authz.TierTable{Catalog: catalog, Overrides: stored}, entries)
+	for _, d := range dropped {
+		slog.Warn("tier override dropped: it would lower the tier resolved beneath it",
+			"tool_or_verb", d.Key, "override_tier", d.Override.String(), "baseline_tier", d.Baseline.String())
 	}
 	return honored
 }

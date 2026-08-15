@@ -253,16 +253,25 @@ type derivedTierResult struct {
 // touched", read together with "do not write a second combining rule" for
 // FoldVerdicts -- the identical discipline applied to tier derivation).
 //
-// It also mirrors production in what it deliberately does NOT load: pdpgrpc.
-// Server.Decide builds authz.TierTable{Catalog: ...} with Overrides left
-// unset -- tenant tier_overrides are Task 3's own CRUD surface, not wired
-// into any live decision today (internal/store/tier_override.go's own
-// package doc: "out of this phase's scope"). Loading overrides HERE, and
-// only here, would make this endpoint more accurate than a real decision
-// currently is -- a worse kind of wrong for an authoring tool to be, since
-// N11's entire point is that a test exercises the SAME path production does.
-// Closing that gap belongs to whatever task wires overrides into Decide
-// itself, not to this one.
+// Tenant tier_overrides are loaded too, and honored through the identical
+// authz.HonoredOverrides call pdpgrpc.Decide makes -- not a second copy of
+// the raise-only filter, which is exactly how the two would drift apart. This
+// comment previously said the opposite, and gave a good reason: at the time
+// Decide left TierTable.Overrides unset, so loading them HERE and only here
+// would have made this endpoint MORE accurate than a real decision. Phase 14
+// Task 7 wired overrides into Decide, which turned that same reasoning around
+// -- not loading them now makes this endpoint LESS accurate than production,
+// and it would silently report a tier that ignores every override a real
+// decision honors. A dry-run that answers a different question than the thing
+// it is predicting is worse than no dry-run, and this endpoint's whole purpose
+// (N11) is letting an operator see production's answer before committing.
+//
+// Dropped rows are discarded rather than reported: pdpgrpc.Decide logs them
+// because a decision has no other channel, but this endpoint's response has no
+// field for "your stored configuration contains a row that is being ignored,"
+// and inventing one is a schema change no task has asked for. The tier
+// reported is still exactly the tier production would derive, which is what
+// N11 promises -- see this task's report for the residual.
 //
 // override is N11's escape hatch: when non-nil, DeriveTier is never called,
 // so the evidence rule (which binds INSIDE DeriveTier -- tier.go's own doc
@@ -287,7 +296,14 @@ func (s *Server) deriveOrDeclareTier(
 		return derivedTierResult{Action: action, Resource: resource, Tier: *override, TierSource: tierSourceDeclaredOverride}, nil
 	}
 
+	storedOverrides, err := s.store.LoadTierOverrides(ctx)
+	if err != nil {
+		return derivedTierResult{}, fmt.Errorf("load tier overrides: %w", err)
+	}
+
 	tiers := authz.TierTable{Catalog: authz.BuildTierCatalog(catalogEntries, authz.DefaultCatalog())}
+	tiers.Overrides, _ = authz.HonoredOverrides(
+		authz.TierTable{Catalog: tiers.Catalog, Overrides: storedOverrides}, catalogEntries)
 	tier, err := authz.DeriveTier(tiers, action)
 	if err != nil {
 		// Unreachable while this endpoint's TierTable leaves DenyUnknown at

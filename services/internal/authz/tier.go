@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"stratium/pkg/models"
@@ -392,12 +393,42 @@ func lookupKeys(a Action) []string {
 // than this function doing them itself, so the case-folding rule has no second
 // copy to drift.
 //
-// t.Overrides matters as much as t.Catalog: deriveTierByName probes overrides
-// at EVERY slot before any catalog lookup, so a sibling row genuinely is part
-// of the resolution beneath this one. A tenant-wide "Bash" raise is beneath a
-// new "Bash:read" row, and without it that more specific row silently lowers
-// the broader one. The key's own row is removed below — that, and only that,
-// is what would be circular.
+// # Two baselines, and why one is not enough
+//
+// The answer is the MAXIMUM of two separate resolutions of the same key:
+//
+//	sibling-aware — every OTHER stored override applies, this key's does not
+//	catalog-only  — no override applies at all
+//
+// Neither subsumes the other, and dropping either one reopens a real attack.
+//
+// Sibling-aware alone misses MUTUAL VOUCHING. Two rows can each supply the
+// other's baseline and both survive: with catalog Foo=READ_ONLY verb "write",
+// write "Foo:write"=READ_ONLY (legitimate, equal to the catalog), then
+// "Foo"=READ_ONLY (baseline READ_ONLY via the sibling). Raise the catalog row
+// to DESTRUCTIVE afterwards and neither row is dropped, because each is
+// measured against the other's STORED tier with no check that the other will
+// itself be honored. Both rows are writable through the PAP's own API, in an
+// order where each write is individually legitimate when it is made. The
+// catalog-only term breaks the cycle: it depends on no override at all, so no
+// set of rows can collectively vouch its way past it.
+//
+// Catalog-only alone misses the SIBLING SHADOW: deriveTierByName probes
+// overrides at EVERY slot before any catalog lookup, so a tenant-wide
+// "Bash"=DESTRUCTIVE raise sits beneath a new "Bash:read" row — and with a
+// NULL-tier Bash catalog entry the catalog-only baseline for "Bash:read" is
+// only READ_ONLY (verbTiers), so the lowering row is accepted.
+//
+// What the maximum buys, as an invariant: an honored override is at or above
+// the catalog-only baseline of its own key, and baselineActions enumerates
+// every action that key can govern, so no set of honored overrides can resolve
+// ANY call below its catalog-only resolution — however the rows refer to each
+// other. That is a strict tightening of both rules, so it refuses no override
+// either rule alone would have accepted for a legitimate reason. Proven over
+// generated input by TestHonoredOverrides_NeverResolveBelowTheCatalog, which
+// is a SET-level property: the per-key one cannot express it, because
+// measuring each row against the stored set is exactly the premise mutual
+// vouching exploits.
 //
 // # The bound, stated exactly
 //
@@ -424,14 +455,31 @@ func OverrideBaseline(t TierTable, entries []models.ToolCatalogEntry, key string
 	// map is a no-op, so a tenant with no other rows needs no special case.
 	others := maps.Clone(t.Overrides)
 	delete(others, key)
-	beneath := TierTable{
+
+	siblingAware := baselineFrom(TierTable{
 		Catalog:     t.Catalog,
 		Overrides:   others,
 		UnknownTier: t.UnknownTier,
 		DenyUnknown: t.DenyUnknown,
-	}
+	}, entries, key)
 
-	baseline := t.UnknownTier
+	catalogOnly := baselineFrom(TierTable{
+		Catalog:     t.Catalog,
+		UnknownTier: t.UnknownTier,
+		DenyUnknown: t.DenyUnknown,
+	}, entries, key)
+
+	if catalogOnly > siblingAware {
+		return catalogOnly
+	}
+	return siblingAware
+}
+
+// baselineFrom is one of OverrideBaseline's two resolutions: the highest tier
+// beneath resolves for any action key can govern. The two calls differ only in
+// what beneath.Overrides holds — see OverrideBaseline for why both are needed.
+func baselineFrom(beneath TierTable, entries []models.ToolCatalogEntry, key string) models.ActionTier {
+	baseline := beneath.UnknownTier
 	for _, a := range baselineActions(entries, key) {
 		tier, err := deriveTierByName(beneath, a)
 		if err != nil {
@@ -526,4 +574,50 @@ func CheckDeclaredTier(derived models.ActionTier, declared *models.ActionTier) L
 		}
 	}
 	return LegResult{Effect: EffectAllow}
+}
+
+// DroppedOverride is one stored override row that failed read-time
+// re-validation, and the two tiers that explain why. Returned rather than
+// logged: internal/authz stays pure, so the caller decides how a dropped row
+// is surfaced (pdpgrpc.Decide logs it; the PAP's dry-run endpoint has nothing
+// to say about it).
+type DroppedOverride struct {
+	Key      string
+	Override models.ActionTier
+	Baseline models.ActionTier
+}
+
+// HonoredOverrides is read-time re-validation of §4.4's raise-only rule: it
+// splits t.Overrides into the rows a decision may honor and the rows it must
+// drop, each measured against OverrideBaseline and compared by the same
+// ValidateOverride the PAP's write path calls.
+//
+// t.Overrides is the STORED set, and every row is measured against all of it
+// (minus its own row — OverrideBaseline's doing). Not against the honored
+// subset being built: that would make the answer depend on map iteration
+// order, which an authorization decision must never do. Soundness does not
+// rest on the stored set being trustworthy — OverrideBaseline's catalog-only
+// term is what stops a set of rows vouching for each other, and its own doc
+// comment carries that argument.
+//
+// dropped is sorted by key so that two runs over the same rows report the same
+// thing in the same order — map iteration alone would not.
+//
+// Both callers route through here rather than reimplementing the filter:
+// pdpgrpc.Decide, which honors the result and logs what it dropped, and the
+// PAP's test-input endpoint, which must predict the same decision production
+// would make. A second copy of this rule is exactly how the two would drift.
+func HonoredOverrides(t TierTable, entries []models.ToolCatalogEntry) (map[string]models.ActionTier, []DroppedOverride) {
+	honored := make(map[string]models.ActionTier, len(t.Overrides))
+	var dropped []DroppedOverride
+	for key, tier := range t.Overrides {
+		baseline := OverrideBaseline(t, entries, key)
+		if ValidateOverride(baseline, tier) != nil {
+			dropped = append(dropped, DroppedOverride{Key: key, Override: tier, Baseline: baseline})
+			continue
+		}
+		honored[key] = tier
+	}
+	slices.SortFunc(dropped, func(a, b DroppedOverride) int { return strings.Compare(a.Key, b.Key) })
+	return honored, dropped
 }

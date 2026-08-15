@@ -40,10 +40,25 @@ func policyLoadColumns() []string {
 // LoadAllPolicies each issue -- crud_helpers_test.go's expectWriteAndAudit
 // sibling for a read rather than a write, one per production query this
 // endpoint's handler calls.
+//
+// expectToolCatalogLoad covers BOTH reads deriveOrDeclareTier performs, in
+// order: the catalog, then the tenant's tier_overrides. Phase 14 Task 7 wired
+// overrides into pdpgrpc.Decide, and this endpoint mirrors Decide exactly --
+// see deriveOrDeclareTier's own doc comment for why not loading them would
+// make this endpoint answer a different question than the decision it
+// predicts. Callers pass the catalog rows; overrides default to none, which is
+// what every test here wants (a tenant with no override rows derives exactly
+// as it did before that task).
 func expectToolCatalogLoad(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
 	mock.ExpectBegin()
 	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("FROM tool_catalog").WillReturnRows(rows)
+	mock.ExpectCommit()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("FROM tier_overrides").
+		WillReturnRows(sqlmock.NewRows([]string{"tool_or_verb", "action_tier"}))
 	mock.ExpectCommit()
 }
 
@@ -478,6 +493,53 @@ func TestTestPolicyAgainstSampleInput_ExistingPoliciesLoadFails_FoldedDeniesIsol
 	if got.WithExistingPolicies.Effect != "DENY" {
 		t.Errorf("WithExistingPolicies.Effect = %q, want DENY -- an unreadable set of existing policies must "+
 			"fail closed, not silently allow", got.WithExistingPolicies.Effect)
+	}
+	assertExpectationsMet(t, f.mock)
+}
+
+// TestTestPolicyAgainstSampleInput_HonorsTenantTierOverrides is the proof for
+// the divergence Phase 14 Task 7's fix round 3 closed: this endpoint reports
+// the tier a real decision would derive, INCLUDING the tenant's own
+// tier_overrides. Before the fix it built its TierTable with Overrides left
+// unset -- correct when pdpgrpc.Decide did the same, silently wrong the moment
+// Decide started honoring them, and wrong in the worst direction for an
+// authoring tool: an operator testing a change would be shown a tier
+// production does not use.
+//
+// `ls -la` on Bash derives READ_ONLY with no override, so DESTRUCTIVE here can
+// only come from the override row actually reaching the resolution. The custom
+// mock sequence (rather than expectToolCatalogLoad) is what supplies that row.
+func TestTestPolicyAgainstSampleInput_HonorsTenantTierOverrides(t *testing.T) {
+	f := newPolicyTestFixture(t)
+
+	f.mock.ExpectBegin()
+	f.mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("FROM tool_catalog").WillReturnRows(sqlmock.NewRows(toolCatalogLoadColumns()))
+	f.mock.ExpectCommit()
+
+	f.mock.ExpectBegin()
+	f.mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("FROM tier_overrides").WillReturnRows(
+		sqlmock.NewRows([]string{"tool_or_verb", "action_tier"}).
+			AddRow("Bash", int64(models.ActionTierDestructive)))
+	f.mock.ExpectCommit()
+
+	expectPolicyLoad(f.mock, sqlmock.NewRows(policyLoadColumns()))
+
+	body := policyTestRequest{
+		Language: "cedar", Text: validateValidCedarPolicy,
+		Action: testInputAction{Tool: "Bash", RawInput: `{"command":"ls -la"}`},
+	}
+	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/policies/test", f.token(t, "org-editors"), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	got := decodeBody[policyTestResponse](t, rec)
+	if got.Tier.Value != models.ActionTierDestructive {
+		t.Errorf("Tier.Value = %s, want DESTRUCTIVE — the tenant's Bash override must reach this endpoint's "+
+			"resolution exactly as it reaches a real decision; `ls -la` alone derives READ_ONLY",
+			got.Tier.Value)
 	}
 	assertExpectationsMet(t, f.mock)
 }
