@@ -1,14 +1,27 @@
-// delegations.go implements the one /v1/delegations/{id}/revoke route
-// routeTable (server.go) registers -- V4's entire admin-plane surface.
-// There is no list or get route: as with approvals.go, discovering which
-// delegation to revoke is Task 6's UI concern, out of this task's own
-// stated scope ("setting revoked and revoked_at").
+// delegations.go implements the /v1/delegations routes routeTable
+// (server.go) registers: Task 4's revoke action -- V4's entire admin-plane
+// write surface -- and Task 6's list, which is the "discovering which
+// delegation to revoke is Task 6's UI concern" that task's own comment here
+// deferred. Revoke stays at RoleAdmin; the list is RoleViewer.
 package main
 
 import (
 	"net/http"
 	"time"
 )
+
+// listDelegations returns every delegation the tenant has, revoked and
+// expired ones included -- see internal/store.listDelegationsQuery's own doc
+// comment. Gated at RoleViewer and unaudited, matching every other list route
+// and GET handler in this package.
+func listDelegations(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {
+	delegations, err := s.store.ListDelegations(r.Context())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, delegations)
+}
 
 // revokeDelegation sets revoked and revoked_at on the id delegation.
 // Role-gated at RoleAdmin (routeTable) with no further identity check --

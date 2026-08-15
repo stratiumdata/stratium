@@ -10,7 +10,10 @@ package main
 
 import (
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,4 +347,145 @@ func TestDecideApproval_ApproveAndDeny_BothRequireTheSameIdentityCheck(t *testin
 			assertExpectationsMet(t, f.mock)
 		})
 	}
+}
+
+// --- GET /v1/approvals (Task 6) -----------------------------------------
+
+// expectApprovalList registers the ordered sqlmock sequence ListApprovals
+// issues: begin, set the tenant, the list query, commit. A loose regex
+// fragment ("FROM approvals"), matching this file's own established
+// discipline for reaching across a package boundary.
+func expectApprovalList(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("FROM approvals").WillReturnRows(rows)
+	mock.ExpectCommit()
+}
+
+// TestListApprovals_ViewerRole_ReturnsRows is the route's own reason for
+// existing: Task 4's approve/deny actions are keyed by an id that, until this
+// route, nothing returned. RoleViewer, matching every other list route.
+//
+// It also pins the two wire properties Task 6's brief names, at the HTTP
+// boundary rather than only at the model: input_digest arrives as a hex
+// string (never the array of 32 numbers a bare [32]byte marshals to), and
+// status is present so a "pending approvals" screen can filter client-side —
+// which is the whole basis for this endpoint returning every status. See
+// internal/store.listApprovalsQuery's doc comment for that ruling.
+func TestListApprovals_ViewerRole_ReturnsRows(t *testing.T) {
+	f := newTestServerFixture(t)
+	pendingID, deniedID := uuid.New(), uuid.New()
+	digest := make([]byte, 32)
+	for i := range digest {
+		digest[i] = byte(i)
+	}
+
+	rows := sqlmock.NewRows(approvalRowColumns()).
+		AddRow(
+			pendingID.String(), fixtureTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
+			"requester@example.com", "root@example.com", "Bash", "execute", int64(models.ActionTierExternalComms),
+			digest, "pending", approvalFixtureRequestedAt, approvalFixtureExpiresAt, nil, nil,
+		).
+		AddRow(
+			deniedID.String(), fixtureTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
+			"requester@example.com", "root@example.com", "Read", "read", int64(models.ActionTierReadOnly),
+			make([]byte, 32), "denied", approvalFixtureRequestedAt, approvalFixtureExpiresAt,
+			"root@example.com", approvalFixtureRequestedAt,
+		)
+	expectApprovalList(f.mock, rows)
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/approvals", f.token(t, "org-viewers"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("GET /v1/approvals returned %d approvals, want 2 (a pending one AND a decided one)", len(got))
+	}
+	if got[0]["input_digest"] != hex.EncodeToString(digest) {
+		t.Errorf("input_digest = %v, want the hex string %q", got[0]["input_digest"], hex.EncodeToString(digest))
+	}
+	statuses := map[string]bool{}
+	for _, a := range got {
+		status, _ := a["status"].(string)
+		statuses[status] = true
+	}
+	if !statuses["pending"] || !statuses["denied"] {
+		t.Errorf("statuses on the wire = %v, want both pending and denied: this route answers /v1/approvals, not /v1/approvals/pending", statuses)
+	}
+
+	assertExpectationsMet(t, f.mock)
+}
+
+// TestListApprovals_Empty_IsEmptyArrayNotNull: a nil slice marshals as JSON
+// null, and a UI must not have to tell "no approvals" apart from "the field
+// is missing." Asserted on the raw body, not on a decoded []T — both null and
+// [] decode into a Go slice, and only one of them is the required answer.
+func TestListApprovals_Empty_IsEmptyArrayNotNull(t *testing.T) {
+	f := newTestServerFixture(t)
+	expectApprovalList(f.mock, sqlmock.NewRows(approvalRowColumns()))
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/approvals", f.token(t, "org-viewers"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Errorf("body = %q, want %q", got, "[]")
+	}
+
+	assertExpectationsMet(t, f.mock)
+}
+
+// TestListApprovals_NoToken_Refused: the new route is registered through
+// authorize like every other, not beside it. A read route is exactly the
+// shape a mutation dropping MinRole would leave looking harmless.
+func TestListApprovals_NoToken_Refused(t *testing.T) {
+	f := newTestServerFixture(t)
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/approvals", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	assertExpectationsMet(t, f.mock) // never reached the store
+}
+
+// TestViewer_CanListButCannotDecide is the direct proof that adding a
+// RoleViewer read beside two RoleAdmin write actions did not relax them — the
+// mutation "drop MinRole on either new route" would not catch this, because
+// it is the SIBLING routes' floor being asserted. It is also N14 stated at
+// the API rather than the UI: the client is bypassed entirely here, and the
+// server refuses the write on its own.
+//
+// The viewer's token carries the matching "email" claim (N7's own identity),
+// so the only thing refusing these two requests is the role floor. A 403 with
+// no store expectation registered proves the refusal happened before any
+// database access.
+func TestViewer_CanListButCannotDecide(t *testing.T) {
+	f := newTestServerFixture(t)
+	id := uuid.New()
+	tok := f.tokenWithClaims(t, "org-viewers", map[string]any{"email": "root@example.com", "email_verified": true})
+
+	for _, path := range []string{
+		"/v1/approvals/" + id.String() + "/approve",
+		"/v1/approvals/" + id.String() + "/deny",
+	} {
+		rec := doRequest(t, f.server, http.MethodPost, path, tok)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s as a viewer: status = %d, want %d", path, rec.Code, http.StatusForbidden)
+		}
+	}
+
+	// The same viewer, on the same resource's read route, succeeds — so the
+	// refusals above are the role floor on the WRITE, not a broken token.
+	expectApprovalList(f.mock, sqlmock.NewRows(approvalRowColumns()))
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/approvals", tok)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /v1/approvals as a viewer: status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	assertExpectationsMet(t, f.mock)
 }

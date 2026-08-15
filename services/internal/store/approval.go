@@ -118,7 +118,10 @@ func (s *Store) LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approva
 // must decode to nil, not the Go zero value for a bare string/time.Time,
 // the same nullable-pointer discipline scanDelegation already applies to
 // parent_delegation_id/revoked_at.
-func scanApproval(row *sql.Row) (*models.Approval, error) {
+// row is a rowScanner (store.go), not a *sql.Row: ListApprovals below scans
+// the same sixteen columns out of a *sql.Rows, and this is the pairing that
+// interface exists for — see its own doc comment.
+func scanApproval(row rowScanner) (*models.Approval, error) {
 	var a models.Approval
 	var derivedTier int64
 	var inputDigest []byte
@@ -320,4 +323,101 @@ func (s *Store) DecideApproval(
 		return nil, fmt.Errorf("store: commit: %w", err)
 	}
 	return a, nil
+}
+
+// --- PAP read (Task 6): the list the approve/deny actions were missing ---
+//
+// Task 4 built POST /v1/approvals/{id}/approve and .../deny keyed by an id no
+// endpoint returned, and said so in its own comment ("discovering a pending
+// approval's id is Task 6's UI concern"). This is that endpoint's store half.
+
+// listApprovalsQuery selects every approvals column loadApprovalQuery does,
+// in the identical order, so both feed the same scanApproval.
+//
+// It returns EVERY status, not only 'pending', and this is the deliberate
+// answer to the one question Task 6's brief left open. Four reasons, in
+// descending weight:
+//
+//  1. There is no other way to reach a decided approval. Task 4 built no
+//     GET /v1/approvals/{id}, and this phase adds none. A 'pending'-only
+//     filter here would make every approved and denied row permanently
+//     unreachable through the admin plane's API — the admin plane being the
+//     only component holding credentials to read them. "What did we approve
+//     last quarter, and who approved it?" would have no answer at all, which
+//     is a strange property for the surface that owns the approval history.
+//  2. The name is /v1/approvals — the collection — not
+//     /v1/approvals/pending. Every sibling list query in this package
+//     (policies, agents, tier_overrides, tool_catalog) returns its whole
+//     table for the tenant, unfiltered. An endpoint named after a table that
+//     silently returns a subset lies by omission: an operator who lists and
+//     sees nothing concludes "no approvals," and would be wrong.
+//  3. status is on the wire (models.Approval.Status, tagged as of Task 6),
+//     so restricting the "pending approvals" screen to pending rows is one
+//     predicate in the client — where it is visible and changeable — rather
+//     than a server-side rule with no way to ask past it.
+//  4. It discloses nothing new. A viewer can already GET the full text of
+//     every stored policy; an approval row is a tool name, an action, a tier,
+//     and a one-way digest.
+//
+// The cost is honest and stated: this returns the whole table, and approvals
+// accumulate. That is a pagination problem, identical in kind to the one
+// ListPolicies and ListAgents already have and equally unsolved for them, and
+// it is not an argument for answering a different question than the one asked.
+//
+// ORDER BY requested_at DESC, not the ORDER BY <name> every other list query
+// in this package uses: approvals have no name, and unlike the config tables
+// those queries serve, this one is closer to a log — newest first is the
+// order both of its readers want (an operator working a pending queue, and an
+// operator investigating what happened most recently). id breaks ties, since
+// requested_at carries no uniqueness constraint and two escalations recorded
+// in the same microsecond must still come back in a stable order.
+const listApprovalsQuery = `SELECT id, tenant_id, agent_id, delegation_id, root_delegation_id, ` +
+	`subject, root_principal, tool_name, action, derived_tier, input_digest, ` +
+	`status, requested_at, expires_at, approved_by, approved_at ` +
+	`FROM approvals ORDER BY requested_at DESC, id`
+
+// ListApprovals loads every approval the tenant has, newest first. A tenant
+// with none is an ordinary, empty result — never an error, and never a nil
+// slice (see the make below).
+//
+// No WHERE tenant_id, exactly as in every other method in this package: RLS,
+// via beginTenantTx, is the only tenant boundary in this codebase, and a
+// second, redundant predicate here would imply to the next reader that the
+// predicate is what does the work.
+//
+// This read is not audited. N4 covers writes; no GET handler in the PAP
+// audits, and an entry per list would bury the write records that chain
+// exists to preserve under reads of them.
+func (s *Store) ListApprovals(ctx context.Context) ([]models.Approval, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, listApprovalsQuery)
+	if err != nil {
+		return nil, fmt.Errorf("store: list approvals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// make, not var: an empty list must marshal as [] and never as null — a
+	// UI should not have to tell "no approvals" apart from "the field is
+	// missing."
+	approvals := make([]models.Approval, 0)
+	for rows.Next() {
+		a, err := scanApproval(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan approval row: %w", err)
+		}
+		approvals = append(approvals, *a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate approval rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return approvals, nil
 }

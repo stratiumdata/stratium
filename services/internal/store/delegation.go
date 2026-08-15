@@ -249,3 +249,68 @@ func (s *Store) RevokeDelegation(ctx context.Context, id uuid.UUID, actor string
 	}
 	return d, nil
 }
+
+// --- PAP read (Task 6): the list the revoke action was missing ---
+//
+// Task 4 built POST /v1/delegations/{id}/revoke keyed by an id no endpoint
+// returned, and said so in its own comment ("discovering which delegation to
+// revoke is Task 6's UI concern"). This is that endpoint's store half.
+
+// listDelegationsQuery selects every delegations column loadDelegationQuery
+// does, in the identical order, so both feed the same scanDelegation. Column
+// list spelled out as a literal rather than shared through a Go constant,
+// matching revokeDelegationQuery's own precedent above.
+//
+// Revoked rows are included, not filtered out, for the same reason
+// listApprovalsQuery includes decided approvals (see its own doc comment):
+// nothing else can reach them — there is no GET /v1/delegations/{id} — and a
+// revocation an operator cannot see afterward is a revocation they cannot
+// confirm took effect. Delegation.Revoked and RevokedAt are both already on
+// the wire, so a screen wanting only live grants filters client-side.
+//
+// ORDER BY created_at DESC, id: newest first, matching listApprovalsQuery's
+// reasoning for a table that accumulates rather than one keyed by a name, and
+// with the same id tiebreak for the same reason.
+const listDelegationsQuery = `SELECT id, tenant_id, user_id, agent_id, approved_tools, max_action_tier, ` +
+	`classification_caps, resource_constraints, purpose, expires_at, ` +
+	`created_at, revoked, revoked_at, parent_delegation_id, ` +
+	`root_delegation_id, depth, chain_agent_ids, escalate_at ` +
+	`FROM delegations ORDER BY created_at DESC, id`
+
+// ListDelegations loads every delegation the tenant has, newest first,
+// revoked and expired ones included. A tenant with none is an ordinary, empty
+// result — never an error, and never a nil slice.
+//
+// No WHERE tenant_id: RLS via beginTenantTx is the only tenant boundary, as
+// everywhere else in this package. Not audited: N4 covers writes.
+func (s *Store) ListDelegations(ctx context.Context) ([]models.Delegation, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, listDelegationsQuery)
+	if err != nil {
+		return nil, fmt.Errorf("store: list delegations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// make, not var — see ListApprovals's own comment: [] not null.
+	delegations := make([]models.Delegation, 0)
+	for rows.Next() {
+		d, err := scanDelegation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan delegation row: %w", err)
+		}
+		delegations = append(delegations, *d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate delegation rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return delegations, nil
+}

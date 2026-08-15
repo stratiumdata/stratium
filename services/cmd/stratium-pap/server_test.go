@@ -393,12 +393,19 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // 4's own seven -- tool-catalog's four (list, create, get, update; no
 // delete -- migrations/000016_stratium_pap_role withholds that grant) and
 // actionRoutes' three (approve, deny, revoke) -- plus Task 5's own two
-// (validate, test) -- twenty-four total.
+// (validate, test), plus Task 6's own two list routes (GET /v1/approvals,
+// GET /v1/delegations) -- twenty-six total.
+//
+// The two Task 6 routes are pinned here, in the same test that pins every
+// other route's existence, for the reason this test exists at all: without
+// it, deleting either one would leave TestRouteTable_RoleGatingMatchesSpec
+// perfectly green while making both write actions on that resource
+// undiscoverable again.
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2
+	const wantTotal = 15 + 4 + 3 + 2 + 2
 	if len(routeTable) != wantTotal {
-		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + 2 Task-5 authoring routes)",
-			len(routeTable), wantTotal)
+		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
+			"2 Task-5 authoring routes + 2 Task-6 list routes)", len(routeTable), wantTotal)
 	}
 
 	want := map[string]bool{}
@@ -419,6 +426,11 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	// Task 5's two authoring routes: POST at the generic editor floor, not
 	// actionRoutes (RoleAdmin) -- see routeTable's own doc comment for why.
 	for _, verb := range []string{"POST /v1/policies/validate", "POST /v1/policies/test"} {
+		want[verb] = false
+	}
+	// Task 6's two list routes -- the read half of the two resources whose
+	// write actions actionRoutes above already covers.
+	for _, verb := range []string{"GET /v1/approvals", "GET /v1/delegations"} {
 		want[verb] = false
 	}
 

@@ -150,15 +150,25 @@ type routeSpec struct {
 //     DELETE routes use elsewhere in this table, because N7 makes a role
 //     NECESSARY but never SUFFICIENT here: decideApproval (approvals.go)
 //     layers the operator-identity-equals-root-principal check on top,
-//     inside the handler, which is the part no role can stand in for. No
-//     list/get route: discovering a pending approval's id is Task 6's UI
-//     concern, out of this task's own scope (see approvals.go's package
-//     doc).
+//     inside the handler, which is the part no role can stand in for.
 //   - delegations: one POST action (revoke), also RoleAdmin -- matching
 //     this table's existing DELETE-tier operations, since revocation is
 //     this table's own sanctioned "delete" (revoked/revoked_at, not a row
 //     removal). Unlike approvals, there is no additional identity check:
 //     N7's own contrast rules that taking authority away needs only a role.
+//
+// Task 6 adds the one route each of those two resources was missing: a GET
+// list, at RoleViewer, exactly like every other list route here. Task 4's own
+// comment in this spot recorded the gap deliberately ("discovering a pending
+// approval's id is Task 6's UI concern") -- both write actions above are
+// keyed by an id that, until now, no endpoint in this table returned. Neither
+// resource gets the other three CRUD verbs: there is no create (the PDP
+// creates a pending approval; a delegation is created over gRPC), no update
+// (the two POST actions above ARE the sanctioned mutations), and no delete
+// (migrations/000016_stratium_pap_role withholds DELETE on both tables, and
+// says at length why). Adding a read at RoleViewer does not touch either
+// resource's RoleAdmin write floor -- a viewer can now find an approval and
+// still cannot decide it.
 //
 // Task 5 adds two more, both POST, both under /v1/policies, and both
 // deliberately at the generic "POST -> editor" floor rather than a
@@ -204,9 +214,11 @@ var routeTable = []routeSpec{
 	{Pattern: "GET /v1/tool-catalog/{id}", MinRole: RoleViewer, Handler: getToolCatalogEntry},
 	{Pattern: "PUT /v1/tool-catalog/{id}", MinRole: RoleEditor, Handler: updateToolCatalogEntry},
 
+	{Pattern: "GET /v1/approvals", MinRole: RoleViewer, Handler: listApprovals},
 	{Pattern: "POST /v1/approvals/{id}/approve", MinRole: RoleAdmin, Handler: approveApproval},
 	{Pattern: "POST /v1/approvals/{id}/deny", MinRole: RoleAdmin, Handler: denyApproval},
 
+	{Pattern: "GET /v1/delegations", MinRole: RoleViewer, Handler: listDelegations},
 	{Pattern: "POST /v1/delegations/{id}/revoke", MinRole: RoleAdmin, Handler: revokeDelegation},
 }
 

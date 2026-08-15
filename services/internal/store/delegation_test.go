@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -527,6 +528,92 @@ func TestStore_RevokeDelegation_AuditFailureRollsBackWrite(t *testing.T) {
 
 	if _, err := s.RevokeDelegation(context.Background(), id, "operator-1", now); err == nil {
 		t.Fatal("RevokeDelegation() error = nil, want the audit failure to propagate")
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// --- ListDelegations (Task 6) ---
+
+// TestStore_ListDelegations_IncludesRevoked is the counterpart of
+// ListApprovals's own "every status" test: this list is what an operator
+// revokes from, and a revocation they cannot see afterward is one they cannot
+// confirm took effect. Delegation.Revoked is on the wire, so a screen wanting
+// only live grants filters client-side.
+func TestStore_ListDelegations_IncludesRevoked(t *testing.T) {
+	s, mock := newMockStore(t)
+	live, revoked, agentID := uuid.New(), uuid.New(), uuid.New()
+
+	rows := sqlmock.NewRows(delegationColumns())
+	addDelegationRow(rows, delegationRow{id: live, rootID: live, agentID: agentID})
+	// addDelegationRow always writes revoked = false, so the revoked fixture
+	// is spelled out here rather than by widening that shared helper for one
+	// caller.
+	now := time.Now().UTC().Truncate(time.Second)
+	rows.AddRow(
+		revoked.String(), testTenant, "user-1", agentID.String(),
+		[]byte(`["Bash"]`), int64(1),
+		[]byte(`{}`), []byte(`{}`), nil, now.Add(time.Hour),
+		now, true, now, nil,
+		revoked.String(), int64(0), []byte(`[]`), nil,
+	)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listDelegationsQuery)).WillReturnRows(rows)
+	mock.ExpectCommit()
+
+	got, err := s.ListDelegations(context.Background())
+	if err != nil {
+		t.Fatalf("ListDelegations() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListDelegations() returned %d delegations, want 2", len(got))
+	}
+	var sawRevoked bool
+	for _, d := range got {
+		if d.Revoked {
+			sawRevoked = true
+		}
+	}
+	if !sawRevoked {
+		t.Error("ListDelegations() dropped the revoked delegation; an operator must be able to confirm a revocation landed")
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_ListDelegations_QueryHasNoTenantPredicate — see
+// TestStore_ListApprovals_QueryHasNoTenantPredicate for why this is asserted
+// on the query text and not on behaviour.
+func TestStore_ListDelegations_QueryHasNoTenantPredicate(t *testing.T) {
+	if strings.Contains(strings.ToLower(listDelegationsQuery), "where") {
+		t.Errorf("listDelegationsQuery = %q, want no WHERE clause: RLS is the only tenant boundary and this list is unfiltered",
+			listDelegationsQuery)
+	}
+}
+
+func TestStore_ListDelegations_EmptyIsNotAnError(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listDelegationsQuery)).WillReturnRows(sqlmock.NewRows(delegationColumns()))
+	mock.ExpectCommit()
+
+	got, err := s.ListDelegations(context.Background())
+	if err != nil {
+		t.Fatalf("ListDelegations() error = %v, want nil", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("ListDelegations() = %v, want a non-nil empty slice", got)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("json.Marshal(empty list) error = %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Errorf("an empty ListDelegations() marshals as %s, want []", raw)
 	}
 
 	assertExpectationsMet(t, mock)

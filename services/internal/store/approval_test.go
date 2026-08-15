@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -701,4 +702,132 @@ func TestStore_LoadApproval_InputDigestWrongLengthFails(t *testing.T) {
 	}
 
 	assertExpectationsMet(t, mock)
+}
+
+// --- ListApprovals (Task 6) ---
+
+// listApprovalRow builds one approvals row in approvalColumns order.
+func listApprovalRow(rows *sqlmock.Rows, id uuid.UUID, status string, requestedAt time.Time) *sqlmock.Rows {
+	var approvedBy, approvedAt interface{}
+	if status != "pending" {
+		approvedBy, approvedAt = "root@example.com", requestedAt.Add(time.Minute)
+	}
+	return rows.AddRow(
+		id.String(), testTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
+		"requester@example.com", "root@example.com", "Bash", "execute", int64(models.ActionTierExternalComms),
+		make([]byte, 32), status, requestedAt, requestedAt.Add(time.Hour), approvedBy, approvedAt,
+	)
+}
+
+// TestStore_ListApprovals_ReturnsEveryStatus is the ruling this method's own
+// doc comment argues for, asserted rather than merely described: the query
+// carries no status predicate, so a decided approval comes back alongside a
+// pending one. Without this, filtering to 'pending' would make every decided
+// row unreachable — there is no GET /v1/approvals/{id} anywhere in this
+// phase — and no existing test would have noticed.
+func TestStore_ListApprovals_ReturnsEveryStatus(t *testing.T) {
+	s, mock := newMockStore(t)
+	requestedAt := time.Now().UTC().Truncate(time.Second)
+
+	rows := sqlmock.NewRows(approvalColumns())
+	listApprovalRow(rows, uuid.New(), "pending", requestedAt)
+	listApprovalRow(rows, uuid.New(), "approved", requestedAt.Add(-time.Hour))
+	listApprovalRow(rows, uuid.New(), "denied", requestedAt.Add(-2*time.Hour))
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listApprovalsQuery)).WillReturnRows(rows)
+	mock.ExpectCommit()
+
+	got, err := s.ListApprovals(context.Background())
+	if err != nil {
+		t.Fatalf("ListApprovals() error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("ListApprovals() returned %d approvals, want 3", len(got))
+	}
+	seen := map[string]bool{}
+	for _, a := range got {
+		seen[a.Status] = true
+	}
+	for _, status := range []string{"pending", "approved", "denied"} {
+		if !seen[status] {
+			t.Errorf("ListApprovals() dropped every %q approval; this endpoint answers /v1/approvals, not /v1/approvals/pending", status)
+		}
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_ListApprovals_QueryHasNoTenantPredicate: RLS via beginTenantTx is
+// this codebase's only tenant boundary. A WHERE tenant_id here would still
+// pass every behavioural test in this file — sqlmock replays whatever rows the
+// test hands it, and against a real database the predicate is simply
+// redundant with the RLS policy that already applies — which is exactly why
+// the check has to be on the query text. See internal/store's own package
+// doc: a second, divergent tenant check is worse than none.
+//
+// Asserted as "no WHERE clause at all," not "no tenant_id substring":
+// tenant_id is a SELECTED COLUMN in this query (models.Approval.TenantID is
+// populated from it), so a substring check would fail on the correct query.
+// This list is unconditional by design — every approval this tenant has —
+// so any WHERE appearing here is a filter someone added, tenant-shaped or
+// otherwise, and worth failing on.
+func TestStore_ListApprovals_QueryHasNoTenantPredicate(t *testing.T) {
+	if strings.Contains(strings.ToLower(listApprovalsQuery), "where") {
+		t.Errorf("listApprovalsQuery = %q, want no WHERE clause: RLS is the only tenant boundary and this list is unfiltered",
+			listApprovalsQuery)
+	}
+}
+
+// TestStore_ListApprovals_EmptyIsNotAnError pins the make([]T, 0) accumulator:
+// a nil slice marshals as JSON null, and the admin UI must not have to tell
+// "this tenant has no approvals" apart from "the field is missing."
+func TestStore_ListApprovals_EmptyIsNotAnError(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listApprovalsQuery)).WillReturnRows(sqlmock.NewRows(approvalColumns()))
+	mock.ExpectCommit()
+
+	got, err := s.ListApprovals(context.Background())
+	if err != nil {
+		t.Fatalf("ListApprovals() error = %v, want nil", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("ListApprovals() = %v, want a non-nil empty slice", got)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("json.Marshal(empty list) error = %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Errorf("an empty ListApprovals() marshals as %s, want []", raw)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_ListApprovals_ScanErrorAborts: a corrupt row must fail the whole
+// call, never be skipped so the caller silently sees a short list. Reuses the
+// short-digest case scanApproval already rejects for a single row.
+func TestStore_ListApprovals_ScanErrorAborts(t *testing.T) {
+	s, mock := newMockStore(t)
+	requestedAt := time.Now().UTC().Truncate(time.Second)
+
+	rows := sqlmock.NewRows(approvalColumns()).AddRow(
+		uuid.New().String(), testTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
+		"requester@example.com", "root@example.com", "Bash", "execute", int64(models.ActionTierExternalComms),
+		make([]byte, 8), "pending", requestedAt, requestedAt.Add(time.Hour), nil, nil,
+	)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(listApprovalsQuery)).WillReturnRows(rows)
+	mock.ExpectRollback()
+
+	if _, err := s.ListApprovals(context.Background()); err == nil {
+		t.Fatal("ListApprovals() error = nil for a row with a truncated input_digest, want an error")
+	}
 }

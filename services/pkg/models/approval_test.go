@@ -2,6 +2,9 @@ package models
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +186,141 @@ func TestApproval_Verify_RejectsMismatchedRequest(t *testing.T) {
 			mutate(&a)
 			if reason := verify(&a); reason == "" {
 				t.Fatalf("Verify() = \"\", want a denial: the approval's %s no longer matches this request", name)
+			}
+		})
+	}
+}
+
+// --- JSON encoding (Task 6) ---
+//
+// Until GET /v1/approvals existed, nothing marshalled an Approval: the PDP
+// speaks protobuf and SQL, and the PAP's approve/deny responses were the only
+// JSON anyone produced, with Go field names nobody had yet had to read. These
+// tests pin the wire format the admin UI reads.
+
+// TestApproval_MarshalJSON_SnakeCaseWithHexDigest checks the two properties
+// Task 6's brief names: every field is snake_case (never the Go field names
+// an untagged struct emits), and input_digest is a hex string rather than the
+// JSON array of 32 numbers a bare [32]byte marshals to.
+//
+// Decoded into a map, not into a second hand-written struct: the point is the
+// literal shape on the wire, and a struct with tags of its own would only
+// prove that two identical tag lists agree with each other.
+func TestApproval_MarshalJSON_SnakeCaseWithHexDigest(t *testing.T) {
+	a := validApproval()
+	a.TenantID = "tenant-json"
+	a.RootDelegationID = approvalDelegationID
+	a.Subject = "requester@example.com"
+	a.RootPrincipal = approvalRootPrincipal
+	a.RequestedAt = approvalTestNow
+
+	raw, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("json.Marshal(Approval) error = %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode marshalled approval %s: %v", raw, err)
+	}
+
+	// Every field of the struct, by its wire name. ApprovedAt is absent from
+	// this list on purpose: it is omitempty and nil on this fixture, so the
+	// key is legitimately missing — which the second loop below checks.
+	for _, key := range []string{
+		"id", "tenant_id", "agent_id", "delegation_id", "root_delegation_id",
+		"subject", "root_principal", "tool_name", "action", "derived_tier",
+		"input_digest", "status", "requested_at", "expires_at", "approved_by",
+	} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("marshalled approval has no %q key; body = %s", key, raw)
+		}
+	}
+
+	// The Go field names an untagged struct would have emitted. Their
+	// presence is the exact defect the tags fix, so it is checked directly
+	// rather than inferred from the snake_case keys being present.
+	for _, key := range []string{"ID", "TenantID", "RootPrincipal", "InputDigest", "ToolName"} {
+		if _, ok := got[key]; ok {
+			t.Errorf("marshalled approval has Go field name %q: the json tags are missing or wrong; body = %s", key, raw)
+		}
+	}
+
+	wantDigest := hex.EncodeToString(a.InputDigest[:])
+	if got["input_digest"] != wantDigest {
+		t.Errorf("input_digest = %v, want the hex string %q (a bare [32]byte marshals as an array of numbers no UI can show)",
+			got["input_digest"], wantDigest)
+	}
+	if _, ok := got["approved_at"]; ok {
+		t.Errorf("approved_at is present for an approval with a nil ApprovedAt; want it omitted; body = %s", raw)
+	}
+}
+
+// TestApproval_JSONRoundTrip is why UnmarshalJSON exists at all. A [32]byte
+// with no MarshalJSON round-trips correctly on its own (as an array of
+// numbers); adding one direction only would have silently turned every
+// decoded InputDigest into 32 zero bytes — a digest that matches nothing,
+// failing Verify's own input comparison for a reason nothing would trace back
+// to a JSON hop.
+func TestApproval_JSONRoundTrip(t *testing.T) {
+	want := validApproval()
+	want.TenantID = "tenant-json"
+	want.RequestedAt = approvalTestNow
+
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("json.Marshal(Approval) error = %v", err)
+	}
+	var got Approval
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("json.Unmarshal(%s) error = %v", raw, err)
+	}
+
+	if got.InputDigest != want.InputDigest {
+		t.Errorf("InputDigest = %x, want %x", got.InputDigest, want.InputDigest)
+	}
+	if got.ID != want.ID || got.ToolName != want.ToolName || got.DerivedTier != want.DerivedTier {
+		t.Errorf("round-tripped approval = %+v, want %+v", got, want)
+	}
+	if got.ApprovedBy == nil || *got.ApprovedBy != *want.ApprovedBy {
+		t.Errorf("ApprovedBy = %v, want %q", got.ApprovedBy, *want.ApprovedBy)
+	}
+	// The round-tripped value must still satisfy the check the digest exists
+	// for — the property a silently-zeroed digest would break.
+	if reason := verify(&got); reason != "" {
+		t.Errorf("Verify() on a round-tripped approval = %q, want \"\"", reason)
+	}
+}
+
+// TestApproval_UnmarshalJSON_BadDigest: a present-but-malformed digest is an
+// error, never a partially-copied array — the same fail-loudly rule
+// store.scanApproval applies to a short input_digest column. An absent digest
+// is not an error: that is what an approval encoded before this field existed
+// looks like, and deciding whether a zero digest is usable is the caller's
+// job, exactly as for a row read any other way.
+func TestApproval_UnmarshalJSON_BadDigest(t *testing.T) {
+	cases := map[string]struct {
+		digest  string
+		wantErr bool
+	}{
+		"not hex":    {digest: `"zzzz"`, wantErr: true},
+		"too short":  {digest: `"00112233"`, wantErr: true},
+		"too long":   {digest: `"` + strings.Repeat("ab", 33) + `"`, wantErr: true},
+		"empty":      {digest: `""`, wantErr: false},
+		"exactly 32": {digest: `"` + strings.Repeat("ab", 32) + `"`, wantErr: false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var a Approval
+			err := json.Unmarshal([]byte(`{"tool_name":"Bash","input_digest":`+tc.digest+`}`), &a)
+			if tc.wantErr && err == nil {
+				t.Fatalf("Unmarshal(%s) error = nil, want an error", tc.digest)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Unmarshal(%s) error = %v, want nil", tc.digest, err)
+			}
+			if tc.wantErr && a.InputDigest != ([32]byte{}) {
+				t.Errorf("InputDigest = %x after a rejected decode, want it left zero, never partially copied", a.InputDigest)
 			}
 		})
 	}

@@ -1,6 +1,8 @@
 package models
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -26,35 +28,54 @@ import (
 // not fit here: verification needs essentially the whole row (status,
 // expiry, approver, and all six of the request-matching fields), so there
 // is no meaningful subset left to reduce to.
+// The json/db tags match Delegation's own snake_case convention (see that
+// type). They arrived later than the type itself because until Task 6 added
+// GET /v1/approvals, nothing ever marshalled an Approval: the PDP's two
+// paths are protobuf (internal/pdpgrpc) and SQL (internal/store), and the
+// PAP's approve/deny responses were the only JSON, produced with Go field
+// names nobody had yet had to read.
 type Approval struct {
-	ID       uuid.UUID
-	TenantID string
+	ID       uuid.UUID `json:"id"        db:"id"`
+	TenantID string    `json:"tenant_id" db:"tenant_id"`
 
-	AgentID          uuid.UUID
-	DelegationID     uuid.UUID
-	RootDelegationID uuid.UUID
+	AgentID          uuid.UUID `json:"agent_id"           db:"agent_id"`
+	DelegationID     uuid.UUID `json:"delegation_id"      db:"delegation_id"`
+	RootDelegationID uuid.UUID `json:"root_delegation_id" db:"root_delegation_id"`
 
 	// Subject is the requesting principal on the escalated call itself
 	// (authz.Principal.Subject / DecideRequest.subject) — who asked, not
 	// who may approve. RootPrincipal, below, is the only identity C21
 	// permits to satisfy that.
-	Subject string
+	Subject string `json:"subject" db:"subject"`
 
 	// RootPrincipal is the chain's root delegation's UserID — the only
 	// identity permitted to approve (spec C21). At chain depth > 0 the
 	// immediate delegator is an agent, and routing approval to an agent
 	// would let the chain approve itself.
-	RootPrincipal string
+	RootPrincipal string `json:"root_principal" db:"root_principal"`
 
-	ToolName    string
-	Action      string
-	DerivedTier ActionTier
+	ToolName    string     `json:"tool_name"    db:"tool_name"`
+	Action      string     `json:"action"       db:"action"`
+	DerivedTier ActionTier `json:"derived_tier" db:"derived_tier"`
 
 	// InputDigest binds this approval to one specific request. Reused
 	// unchanged from the audit chain's own notion of request identity
 	// (a SHA-256 digest of the raw tool input) rather than inventing a
 	// second one — see migrations/000012's own comment.
-	InputDigest [32]byte
+	//
+	// json:"-" is not "do not serialise this": MarshalJSON/UnmarshalJSON
+	// below carry it as a lowercase hex string under "input_digest"
+	// instead. A bare [32]byte marshals as a JSON array of 32 numbers,
+	// which no admin UI can display and no operator can compare against a
+	// digest printed anywhere else in this system. Excluding it here, and
+	// re-adding it in the wrapper, is what keeps those two methods free of
+	// any encoding/json field-shadowing subtlety to reason about.
+	//
+	// The digest is one-way and stays that way: it is a SHA-256 of raw tool
+	// input, so there is nothing for a UI to recover from it. It is useful
+	// only for what a digest is for — telling two requests apart, and
+	// matching this approval to the audit entry carrying the same value.
+	InputDigest [32]byte `json:"-" db:"input_digest"`
 
 	// Status is a closed vocabulary ('pending', 'approved', 'denied')
 	// enforced by a CHECK constraint in the migration, deliberately not
@@ -64,13 +85,71 @@ type Approval struct {
 	// one. Left as a plain string, matching this codebase's existing
 	// pattern for other CHECK-constrained columns (audit_chain.decision,
 	// audit_chain.denied_leg) rather than a typed enum.
-	Status string
+	Status string `json:"status" db:"status"`
 
-	RequestedAt time.Time
-	ExpiresAt   time.Time
+	RequestedAt time.Time `json:"requested_at" db:"requested_at"`
+	ExpiresAt   time.Time `json:"expires_at"   db:"expires_at"`
 
-	ApprovedBy *string
-	ApprovedAt *time.Time
+	ApprovedBy *string    `json:"approved_by,omitempty" db:"approved_by"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty" db:"approved_at"`
+}
+
+// approvalFields exists only to shed Approval's own JSON methods. A defined
+// type with Approval's underlying struct type inherits its fields and tags
+// but none of its methods, which is what keeps the two methods below from
+// recursing into themselves.
+type approvalFields Approval
+
+// approvalWire is the encoding both JSON methods below share: every tagged
+// field exactly as declared above, plus input_digest as hex. Declared once
+// so Marshal and Unmarshal cannot drift into disagreeing about the wire
+// format — the failure mode two hand-written mirror structs would invite.
+type approvalWire struct {
+	approvalFields
+	InputDigest string `json:"input_digest"`
+}
+
+// MarshalJSON renders InputDigest as lowercase hex; every other field
+// follows its own tag above.
+func (a Approval) MarshalJSON() ([]byte, error) {
+	return json.Marshal(approvalWire{
+		approvalFields: approvalFields(a),
+		InputDigest:    hex.EncodeToString(a.InputDigest[:]),
+	})
+}
+
+// UnmarshalJSON is MarshalJSON's exact inverse. It exists because
+// MarshalJSON alone would make an Approval lossy to round-trip — decoding
+// what this type had just encoded would silently yield a zero InputDigest,
+// and a zero digest is not "unknown," it is a digest that matches nothing
+// and would fail Verify's own input comparison for a reason no one could
+// trace back to a JSON hop. A [32]byte with no MarshalJSON at all round-trips
+// correctly (as an array of numbers); adding one direction only would take
+// that away.
+//
+// A digest that is present but not 32 bytes of hex is an error, never a
+// partially-copied array: the same fail-loudly rule store.scanApproval
+// applies to a short input_digest column. An absent or empty field leaves the
+// digest zero without erroring — it is the caller's job to decide whether a
+// zero digest is usable, exactly as it is for a row read any other way.
+func (a *Approval) UnmarshalJSON(b []byte) error {
+	var wire approvalWire
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return err
+	}
+	*a = Approval(wire.approvalFields)
+	if wire.InputDigest == "" {
+		return nil
+	}
+	raw, err := hex.DecodeString(wire.InputDigest)
+	if err != nil {
+		return fmt.Errorf("approval input_digest: %w", err)
+	}
+	if len(raw) != len(a.InputDigest) {
+		return fmt.Errorf("approval input_digest decodes to %d bytes, want %d", len(raw), len(a.InputDigest))
+	}
+	copy(a.InputDigest[:], raw)
+	return nil
 }
 
 // approvalStatusApproved is the one value of Status's closed vocabulary

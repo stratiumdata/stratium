@@ -1,19 +1,34 @@
-// approvals.go implements the two /v1/approvals/{id}/... write routes
-// routeTable (server.go) registers: approve and deny -- E7's entire admin-
-// plane surface, and the security-critical half of this task (spec §4.10.1,
-// N7/N8). There is deliberately no list or get route: discovering a pending
-// approval's id is Task 6's UI concern (it "is a client of the API Tasks
-// 3-5 proved" per the phase plan), out of this task's own stated scope --
-// "the approve action itself." Tests that need a known id create one
-// directly against internal/store, the same way every other integration
-// proof in this codebase seeds fixtures it does not itself expose a read
-// route for.
+// approvals.go implements the /v1/approvals routes routeTable (server.go)
+// registers: Task 4's two write actions -- approve and deny, E7's entire
+// admin-plane write surface and the security-critical half of that task
+// (spec §4.10.1, N7/N8) -- and Task 6's list.
+//
+// Task 4 deliberately shipped no read route, and its own comment here said
+// why: "discovering a pending approval's id is Task 6's UI concern." That is
+// this task, and listApprovals below is the whole of it. The write actions'
+// RoleAdmin floor is untouched by adding a RoleViewer read beside them; a
+// viewer can now find an approval and still cannot decide it, which is
+// precisely the shape N14 asks the UI to reflect rather than enforce.
 package main
 
 import (
 	"net/http"
 	"time"
 )
+
+// listApprovals returns every approval the tenant has, whatever its status
+// -- see internal/store.listApprovalsQuery's own doc comment for why all
+// statuses and not only 'pending'. Gated at RoleViewer, matching every other
+// list route in routeTable, and unaudited, matching every other GET handler
+// in this package (N4 is about writes).
+func listApprovals(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {
+	approvals, err := s.store.ListApprovals(r.Context())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, approvals)
+}
 
 func approveApproval(s *Server, w http.ResponseWriter, r *http.Request, op Operator) {
 	decideApproval(s, w, r, op, true)

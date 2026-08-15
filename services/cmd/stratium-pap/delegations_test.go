@@ -11,6 +11,7 @@ package main
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,5 +104,111 @@ func TestRevokeDelegation_NotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
+	assertExpectationsMet(t, f.mock)
+}
+
+// --- GET /v1/delegations (Task 6) ---------------------------------------
+
+func expectDelegationList(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("FROM delegations").WillReturnRows(rows)
+	mock.ExpectCommit()
+}
+
+// TestListDelegations_ViewerRole_ReturnsRows: the route the revoke action was
+// missing, at RoleViewer like every other list route. Revoked rows come back
+// too — an operator who cannot see a revoked delegation cannot confirm their
+// own revocation landed.
+func TestListDelegations_ViewerRole_ReturnsRows(t *testing.T) {
+	f := newTestServerFixture(t)
+	live, revoked, agentID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	rows := sqlmock.NewRows(delegationRowColumns()).
+		AddRow(
+			live.String(), fixtureTenant, "user-1", agentID.String(),
+			[]byte(`["Bash"]`), int64(models.ActionTierInternalModify),
+			[]byte(`{}`), []byte(`{}`), nil, now.Add(time.Hour),
+			now, false, nil, nil,
+			live.String(), int64(0), []byte(`[]`), nil,
+		).
+		AddRow(
+			revoked.String(), fixtureTenant, "user-2", agentID.String(),
+			[]byte(`[]`), int64(models.ActionTierReadOnly),
+			[]byte(`{}`), []byte(`{}`), nil, now.Add(time.Hour),
+			now, true, now, nil,
+			revoked.String(), int64(0), []byte(`[]`), nil,
+		)
+	expectDelegationList(f.mock, rows)
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/delegations", f.token(t, "org-viewers"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got := decodeBody[[]models.Delegation](t, rec)
+	if len(got) != 2 {
+		t.Fatalf("GET /v1/delegations returned %d delegations, want 2 (a live one AND a revoked one)", len(got))
+	}
+	var sawRevoked bool
+	for _, d := range got {
+		if d.Revoked {
+			sawRevoked = true
+		}
+	}
+	if !sawRevoked {
+		t.Error("the revoked delegation is missing from the wire; an operator must be able to confirm a revocation landed")
+	}
+
+	assertExpectationsMet(t, f.mock)
+}
+
+// TestListDelegations_Empty_IsEmptyArrayNotNull — see
+// TestListApprovals_Empty_IsEmptyArrayNotNull for why the raw body, not a
+// decoded slice.
+func TestListDelegations_Empty_IsEmptyArrayNotNull(t *testing.T) {
+	f := newTestServerFixture(t)
+	expectDelegationList(f.mock, sqlmock.NewRows(delegationRowColumns()))
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/delegations", f.token(t, "org-viewers"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Errorf("body = %q, want %q", got, "[]")
+	}
+
+	assertExpectationsMet(t, f.mock)
+}
+
+func TestListDelegations_NoToken_Refused(t *testing.T) {
+	f := newTestServerFixture(t)
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/delegations", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	assertExpectationsMet(t, f.mock)
+}
+
+// TestViewer_CanListButCannotRevoke is TestViewer_CanListButCannotDecide's
+// counterpart for this resource: adding a RoleViewer read did not lower the
+// RoleAdmin floor on revoke, proven with the client bypassed (N14).
+func TestViewer_CanListButCannotRevoke(t *testing.T) {
+	f := newTestServerFixture(t)
+	id := uuid.New()
+	tok := f.token(t, "org-viewers")
+
+	rec := doRequest(t, f.server, http.MethodPost, "/v1/delegations/"+id.String()+"/revoke", tok)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST revoke as a viewer: status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	expectDelegationList(f.mock, sqlmock.NewRows(delegationRowColumns()))
+	rec = doRequest(t, f.server, http.MethodGet, "/v1/delegations", tok)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /v1/delegations as a viewer: status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
 	assertExpectationsMet(t, f.mock)
 }

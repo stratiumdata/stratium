@@ -121,9 +121,10 @@ func isCheckViolation(err error) bool {
 // rowScanner is satisfied by both *sql.Row and *sql.Rows: their Scan methods
 // share an identical signature, so a single scan* helper can serve both a
 // single-row Get and a multi-row List for the same table without duplicating
-// the column list and decode logic between them. Every PAP CRUD file in this
-// package (policy.go, agent.go, tier_override.go) uses this for exactly that
-// pairing.
+// the column list and decode logic between them. Every PAP-facing file in
+// this package (policy.go, agent.go, tier_override.go, catalog.go, and — as
+// of Task 6's two list methods — approval.go and this file's own
+// scanDelegation) uses this for exactly that pairing.
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -327,7 +328,11 @@ func (s *Store) LoadDelegation(ctx context.Context, id uuid.UUID) (*models.Deleg
 // must decode to nil (never escalate) while a non-NULL value must still run
 // through ParseActionTier — the same validation maxActionTier gets — before
 // it is trusted as an ActionTier at all.
-func scanDelegation(row *sql.Row) (*models.Delegation, error) {
+//
+// row is a rowScanner, not a *sql.Row: delegation.go's ListDelegations scans
+// the same eighteen columns out of a *sql.Rows, and this is the pairing that
+// interface exists for — see its own doc comment above.
+func scanDelegation(row rowScanner) (*models.Delegation, error) {
 	var d models.Delegation
 	var maxActionTier int64
 	var escalateAt sql.NullInt64
