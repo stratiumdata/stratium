@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,14 @@ type testIdP struct {
 
 const testKeyID = "test-key-1"
 
+// idpAuthorizationEndpoint and idpTokenEndpoint are the endpoints
+// newTestIdP's discovery document advertises, both on an origin that is NOT
+// the issuer's own -- see that document's own comment.
+const (
+	idpAuthorizationEndpoint = "https://authorize.idp-example.test/o/oauth2/v2/auth"
+	idpTokenEndpoint         = "https://oauth2.idp-example.test/token"
+)
+
 func newTestIdP(t *testing.T) *testIdP {
 	t.Helper()
 	signer, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -44,9 +53,18 @@ func newTestIdP(t *testing.T) *testIdP {
 		// time above -- by the time any request reaches this handler,
 		// idp.server has already been assigned below, since
 		// httptest.NewServer does not serve until it returns.
+		// authorization_endpoint and token_endpoint are deliberately on a
+		// DIFFERENT host from the issuer, mirroring Google Workspace (issuer
+		// accounts.google.com, token endpoint oauth2.googleapis.com). Nothing
+		// about token verification reads them -- they exist so the admin UI's
+		// connect-src is exercised against the shape that actually breaks a
+		// CSP derived from the issuer alone. Not a live server: no test here
+		// fetches either URL.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer":                                idp.server.URL,
 			"jwks_uri":                              idp.server.URL + "/jwks",
+			"authorization_endpoint":                idpAuthorizationEndpoint,
+			"token_endpoint":                        idpTokenEndpoint,
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -236,5 +254,28 @@ func TestVerifier_RefusalErrorNeverEchoesTokenClaims(t *testing.T) {
 	}
 	if strings.Contains(verifyErr.Error(), leakCanary) {
 		t.Errorf("Verify() error = %q, leaked a claim value from the rejected token", verifyErr.Error())
+	}
+}
+
+// TestNewVerifier_CapturesTheDiscoveredBrowserEndpoints closes the wiring gap
+// between OIDC discovery and the admin UI's Content-Security-Policy. The
+// endpoints a browser reaches during sign-in are named only in the IdP's
+// discovery document, and this process is the only thing that reads it --
+// so if they are not captured here, ui.go has no way to learn them and
+// connect-src falls back to the issuer's origin alone, silently blocking the
+// token exchange for every IdP that serves it from a different host.
+func TestNewVerifier_CapturesTheDiscoveredBrowserEndpoints(t *testing.T) {
+	idp := newTestIdP(t)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+
+	got := v.BrowserEndpoints()
+	want := []string{idpAuthorizationEndpoint, idpTokenEndpoint}
+	if !slices.Equal(got, want) {
+		t.Errorf("BrowserEndpoints() = %v, want %v -- these come from the discovery document and "+
+			"nowhere else; without them the admin UI's connect-src cannot name the token endpoint's origin",
+			got, want)
 	}
 }

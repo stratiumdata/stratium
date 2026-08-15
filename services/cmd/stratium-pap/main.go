@@ -114,6 +114,11 @@ func run(logger *slog.Logger) error {
 		ClientID: cfg.OIDCClientID,
 		Audience: cfg.OIDCAudience,
 		Scope:    cfg.OIDCScope,
+		// From the discovery NewVerifier already performed above, not from
+		// cfg: the authorization and token endpoints need not share the
+		// issuer's origin, and the admin UI's connect-src has to name the
+		// origins the browser actually reaches. See Verifier.BrowserEndpoints.
+		IdPEndpoints: verifier.BrowserEndpoints(),
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,

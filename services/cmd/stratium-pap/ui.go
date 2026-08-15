@@ -80,6 +80,17 @@ type uiConfig struct {
 	ClientID string `json:"client_id"`
 	Audience string `json:"audience"`
 	Scope    string `json:"scope"`
+
+	// IdPEndpoints are the authorization and token endpoints the IdP's own
+	// discovery document named, captured by NewVerifier at startup (oidc.go's
+	// Verifier.BrowserEndpoints). They exist for ONE reason: deriving
+	// connect-src. See contentSecurityPolicy.
+	//
+	// json:"-" -- not served. The browser performs its own discovery
+	// (clients/ui/src/auth.ts) and reads these from the same document; sending
+	// them would be a second copy of a value the browser is about to fetch
+	// anyway, and a second thing to keep in step.
+	IdPEndpoints []string `json:"-"`
 }
 
 // contentSecurityPolicy is served with the UI. This is the only
@@ -96,22 +107,46 @@ type uiConfig struct {
 //     external stylesheet -- no inline script and no inline style -- so
 //     neither 'unsafe-inline' nor a nonce is needed. If a future dependency
 //     needs one, that is a reason to reconsider the dependency.
-//   - connect-src 'self' plus the IdP's origin: the UI fetches its own API
-//     and the issuer's discovery and token endpoints, and nothing else. The
-//     IdP origin is derived from configuration rather than hard-coded, so a
-//     deployment against any IdP works with no edit here.
+//   - connect-src 'self' plus EVERY origin the sign-in flow reaches: the
+//     issuer (discovery) and, separately, the authorization and token
+//     endpoints that document names. Those need not share the issuer's
+//     origin, and for at least one major IdP they do not -- Google Workspace
+//     issues from https://accounts.google.com and exchanges the code at
+//     https://oauth2.googleapis.com/token. Deriving connect-src from the
+//     issuer alone blocks that POST: discovery succeeds, the popup completes,
+//     and the exchange dies as an opaque "Failed to fetch" naming neither CSP
+//     nor the IdP. Fail-closed, and completely undebuggable from the error.
+//     Every origin is derived from the IdP's own discovery document rather
+//     than hard-coded or widened to a registrable domain, so a deployment
+//     against any conformant provider works with no edit here.
 //   - form-action 'none' and frame-ancestors 'none': this page submits no
 //     forms, and framing an admin plane is clickjacking with extra steps.
 //   - base-uri 'none': a base tag injected into this page could repoint every
 //     relative URL, including the API paths the token is sent to.
-func contentSecurityPolicy(issuer string) string {
-	// A malformed issuer yields no origin rather than a broken directive: the
-	// UI's sign-in then fails visibly at the connect-src boundary, which is
-	// the fail-closed direction. loadConfig has already required the value to
-	// be present; it does not require it to parse.
-	idp := ""
-	if u, err := url.Parse(issuer); err == nil && u.Scheme != "" && u.Host != "" {
-		idp = " " + u.Scheme + "://" + u.Host
+//
+// idpURLs is the issuer followed by whatever endpoints were discovered. Only
+// each URL's scheme://host survives into the header -- a CSP source is an
+// origin, and including a path would silently match nothing.
+func contentSecurityPolicy(idpURLs ...string) string {
+	// An unparseable or empty URL contributes no origin rather than a broken
+	// directive: sign-in then fails visibly at the connect-src boundary, which
+	// is the fail-closed direction. loadConfig requires the issuer to be
+	// present; it does not require it to parse, and an IdP whose discovery
+	// document omits an endpoint leaves an empty string here.
+	var connect strings.Builder
+	connect.WriteString("connect-src 'self'")
+	seen := map[string]bool{}
+	for _, raw := range idpURLs {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		origin := u.Scheme + "://" + u.Host
+		if seen[origin] {
+			continue
+		}
+		seen[origin] = true
+		connect.WriteString(" " + origin)
 	}
 	return strings.Join([]string{
 		"default-src 'none'",
@@ -119,7 +154,7 @@ func contentSecurityPolicy(issuer string) string {
 		"style-src 'self'",
 		"img-src 'self' data:",
 		"font-src 'self'",
-		"connect-src 'self'" + idp,
+		connect.String(),
 		"form-action 'none'",
 		"frame-ancestors 'none'",
 		"base-uri 'none'",
@@ -141,14 +176,36 @@ func contentSecurityPolicy(issuer string) string {
 // including, by net/http's own longest-pattern-wins precedence (Go 1.22+),
 // every one of them despite "/" matching more broadly than any of them.
 func registerUI(mux *http.ServeMux, cfg uiConfig) {
-	csp := contentSecurityPolicy(cfg.Issuer)
+	csp := contentSecurityPolicy(append([]string{cfg.Issuer}, cfg.IdPEndpoints...)...)
 
 	mux.HandleFunc("GET /ui-config", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, cfg)
 	})
 
 	files := http.FileServerFS(uiRoot)
-	mux.Handle("GET /", secureHeaders(csp, files))
+	mux.Handle("GET /", secureHeaders(csp, noDirectoryListing(files)))
+}
+
+// noDirectoryListing turns http.FileServerFS's automatic index of any
+// directory without an index.html into a 404. Vite's assets/ has none, so
+// without this GET /assets/ enumerates every bundle the build produced. Only
+// filenames, and they are already referenced from index.html -- but this is
+// the one internet-facing binary in the system, and a directory index is a
+// capability nothing here needs rather than a disclosure worth reasoning
+// about case by case.
+//
+// A trailing-slash test rather than a wrapper fs.FS that hides directories:
+// http.ServeFileFS resolves "/" by opening the directory and looking for
+// index.html inside it, so an FS that refused to open directories would 404
+// the admin UI itself.
+func noDirectoryListing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // secureHeaders wraps the static file server with the response headers a
@@ -156,6 +213,20 @@ func registerUI(mux *http.ServeMux, cfg uiConfig) {
 // Applied only to the UI, not to the JSON API: an API response is not a
 // document a browser renders, and every one of these headers is about
 // document handling.
+//
+// DO NOT ADD Cross-Origin-Opener-Policy HERE. This is the obvious next line
+// for a hardening pass, and it would break sign-in outright. The OIDC flow
+// (clients/ui/src/auth.ts) is a popup precisely because N12 forbids the
+// storage a top-level redirect would need to carry the PKCE verifier, and a
+// popup flow depends on window.opener surviving the cross-origin round trip
+// to the IdP and back. COOP: same-origin severs exactly that reference:
+// callback.ts's opener?.postMessage becomes a silent no-op, no message ever
+// arrives, and every sign-in fails with "sign-in window was closed before
+// completing" -- an error naming nothing to do with the header that caused
+// it. TestUI_ServesTheIndexWithoutAToken asserts the header's ABSENCE so
+// this comment is not the only thing standing between here and a broken
+// login. If COOP is ever genuinely wanted, "same-origin-allow-popups"
+// preserves the opener; plain "same-origin" does not.
 func secureHeaders(csp string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

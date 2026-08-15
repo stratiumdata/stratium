@@ -22,6 +22,7 @@ package main
 import (
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -127,6 +128,80 @@ func TestUI_ServesTheIndexWithoutAToken(t *testing.T) {
 		t.Errorf("Content-Security-Policy = %q, want connect-src to include the configured issuer %q",
 			csp, f.idp.server.URL)
 	}
+
+	// Cross-Origin-Opener-Policy must be ABSENT. See secureHeaders' own
+	// comment: the OIDC flow is a popup (N12 forbids the storage a redirect
+	// would need), and a popup flow depends on window.opener surviving the
+	// round trip to the IdP. COOP: same-origin severs it, callback.ts's
+	// postMessage silently goes nowhere, and every sign-in fails with an
+	// error that names the popup rather than the header. Asserted here so a
+	// hardening pass that adds it fails this test instead of production.
+	if got := rec.Header().Get("Cross-Origin-Opener-Policy"); got != "" && got != "same-origin-allow-popups" {
+		t.Errorf("Cross-Origin-Opener-Policy = %q; this severs window.opener and breaks every "+
+			"sign-in. Only \"\" or \"same-origin-allow-popups\" preserve the popup flow.", got)
+	}
+}
+
+// TestUI_CSPAllowsTheTokenEndpointOriginOffTheIssuer is the header property
+// that a CSP derived from the issuer alone gets wrong. The sign-in flow makes
+// two cross-origin fetches -- discovery at the issuer, and the code exchange
+// at whatever token_endpoint that document names -- and for at least one
+// major IdP those are different hosts (Google Workspace: accounts.google.com
+// and oauth2.googleapis.com). Missing the second one means discovery
+// succeeds, the popup completes, and the token POST dies as an opaque
+// "Failed to fetch": fail-closed, and undebuggable from the error text.
+//
+// Asserted against the SERVED header, not only against
+// contentSecurityPolicy's return value, so the whole chain is covered:
+// discovery -> Verifier.BrowserEndpoints -> uiConfig.IdPEndpoints -> the
+// response. Breaking any link fails this.
+func TestUI_CSPAllowsTheTokenEndpointOriginOffTheIssuer(t *testing.T) {
+	f := newTestServerFixture(t)
+
+	rec := doRequest(t, f.server, http.MethodGet, "/", "")
+	csp := rec.Header().Get("Content-Security-Policy")
+
+	for _, endpoint := range []string{idpAuthorizationEndpoint, idpTokenEndpoint} {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			t.Fatalf("parse %q: %v", endpoint, err)
+		}
+		origin := u.Scheme + "://" + u.Host
+		if !strings.Contains(csp, origin) {
+			t.Errorf("Content-Security-Policy = %q, want connect-src to include %q -- the browser "+
+				"fetches %s during sign-in, and it is not on the issuer's origin", csp, origin, endpoint)
+		}
+	}
+	// An origin, never a path: a CSP source with a path in it matches nothing.
+	if strings.Contains(csp, "/o/oauth2/v2/auth") || strings.Contains(csp, "/token") {
+		t.Errorf("Content-Security-Policy = %q, want bare origins in connect-src, not endpoint paths", csp)
+	}
+}
+
+// TestUI_DirectoryListingIsRefused: http.FileServerFS indexes any directory
+// without an index.html, and Vite's assets/ has none, so without the
+// noDirectoryListing wrapper GET /assets/ enumerates every bundle in the
+// build. Filenames only -- but this is the one internet-facing binary here,
+// and a directory index is a capability nothing needs.
+func TestUI_DirectoryListingIsRefused(t *testing.T) {
+	f := newTestServerFixture(t)
+
+	rec := doRequest(t, f.server, http.MethodGet, "/assets/", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /assets/ status = %d, want %d; body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), ".js") {
+		t.Errorf("GET /assets/ listed the build's asset filenames:\n%s", rec.Body.String())
+	}
+
+	// The root is still the admin UI, not a 404: "/" is a directory too, and
+	// a wrapper that refused every trailing slash would take the whole app
+	// down with the listing.
+	root := doRequest(t, f.server, http.MethodGet, "/", "")
+	if root.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want %d -- the directory-listing guard must not 404 the app itself",
+			root.Code, http.StatusOK)
+	}
 }
 
 // TestUI_ConfigEndpointIsPublicAndCarriesNoSecret: the browser must be told
@@ -198,25 +273,43 @@ func TestUI_DoesNotShadowAnyAPIRoute(t *testing.T) {
 // with its own unrelated use of localStorage would fail a bundle scan for a
 // reason that has nothing to do with this token, and the rule being enforced
 // is about the code in this repository.
+//
+// It is rooted at clients/ui, NOT clients/ui/src. index.html and
+// callback.html -- the two files that actually ship as PAGES, and the two
+// most natural places to answer a "reloading signs me out" complaint with an
+// inline bootstrap script -- live one directory above src/, and eslint's own
+// files: ['**/*.{ts,tsx}'] does not cover HTML at all. Rooted at src/ this
+// scan matched zero HTML files despite listing .html among the extensions it
+// looks at, so the guard the brief asked for structurally had a hole exactly
+// where the structural guard was the only one.
 func TestUI_SourceNeverTouchesBrowserStorage(t *testing.T) {
 	// The eslint config forbids these too (clients/ui/eslint.config.js), at
 	// the moment they are typed. This is the copy that runs in the Go gate,
-	// so the rule survives eslint being reconfigured, skipped, or removed.
+	// so the rule survives eslint being reconfigured, skipped, or removed --
+	// and it is the ONLY one of the two that sees the HTML entry points.
 	forbidden := []string{"localStorage", "sessionStorage", "indexedDB", "document.cookie"}
 
-	root := filepath.Join(uiSourceDir, "src")
-	if _, err := os.Stat(root); err != nil {
-		t.Fatalf("cannot find the admin UI source at %s: %v\n"+
+	if _, err := os.Stat(uiSourceDir); err != nil {
+		t.Fatalf("cannot find the admin UI at %s: %v\n"+
 			"If the UI moved, move this test's uiSourceDir with it -- a silently skipped N12 "+
-			"check is worse than none.", root, err)
+			"check is worse than none.", uiSourceDir, err)
 	}
 
-	var scanned int
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	scanned := map[string]bool{}
+	err := filepath.WalkDir(uiSourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			// The extension switch below does not stop WalkDir DESCENDING;
+			// only SkipDir does. node_modules alone is ~250 packages of
+			// third-party code whose own storage use says nothing about this
+			// repository's rules, and walking it would make this test slow
+			// and noisy at once.
+			switch d.Name() {
+			case "node_modules", "dist", ".vite":
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		switch filepath.Ext(path) {
@@ -224,24 +317,31 @@ func TestUI_SourceNeverTouchesBrowserStorage(t *testing.T) {
 		default:
 			return nil
 		}
-		// Test files are exempt, and only test files: clients/ui/src/
-		// auth.test.ts asserts that a completed sign-in leaves both storage
-		// APIs empty, which it cannot do without naming them. Nothing in a
-		// test file is bundled into dist, so nothing in one can put a token
-		// anywhere. The eslint config lifts the same rule on the same files
-		// for the same reason.
-		if strings.Contains(filepath.Base(path), ".test.") {
+		// Two exemptions, both narrow and both for files that NAME these APIs
+		// in order to forbid or verify them:
+		//
+		//   - *.test.*: auth.test.ts asserts that a completed sign-in leaves
+		//     both storage APIs empty, which it cannot do without naming
+		//     them. Nothing in a test file is bundled into dist.
+		//   - eslint.config.js: the rule configuration that bans these
+		//     identifiers has to spell them out to ban them.
+		base := filepath.Base(path)
+		if strings.Contains(base, ".test.") || base == "eslint.config.js" {
 			return nil
 		}
 		body, readErr := os.ReadFile(path) //nolint:gosec // G304: path comes from WalkDir over a fixed directory
 		if readErr != nil {
 			return readErr
 		}
-		scanned++
+		scanned[base] = true
 		for _, api := range forbidden {
-			// The eslint config and the auth.ts header both NAME these APIs
-			// in prose to explain why they are absent. Only lines that are
-			// not comments count as a use.
+			// auth.ts's header and index.html's own comments both NAME these
+			// APIs in prose to explain why they are absent, so a comment line
+			// is not a use. Deliberately line-based and deliberately crude:
+			// it under-exempts (a continuation line inside a multi-line HTML
+			// comment still counts as a use), which fails loudly and is
+			// trivially fixed, rather than over-exempting, which would be
+			// silent.
 			for i, line := range strings.Split(string(body), "\n") {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") ||
@@ -258,10 +358,18 @@ func TestUI_SourceNeverTouchesBrowserStorage(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("scanning %s: %v", root, err)
+		t.Fatalf("scanning %s: %v", uiSourceDir, err)
 	}
-	if scanned == 0 {
-		t.Fatalf("scanned no files under %s: this check passed without checking anything", root)
+
+	// The two HTML entry points specifically. A "scanned > 0" check would
+	// still pass with the walk rooted back at src/, which is the exact defect
+	// this names -- so the files that must be covered are named.
+	for _, must := range []string{"index.html", "callback.html", "auth.ts"} {
+		if !scanned[must] {
+			t.Errorf("the N12 scan never read %s. index.html and callback.html ship as PAGES and are "+
+				"covered by nothing else -- eslint only matches *.{ts,tsx} -- so a scan that misses "+
+				"them leaves the structural guard hollow exactly where it is the only guard.", must)
+		}
 	}
 }
 

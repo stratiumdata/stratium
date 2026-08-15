@@ -57,6 +57,28 @@ var errTokenInvalid = errors.New("token invalid")
 // names.
 type Verifier struct {
 	inner *oidc.IDTokenVerifier
+
+	// authURL and tokenURL are the authorization_endpoint and token_endpoint
+	// the IdP's discovery document named, captured here purely so the admin
+	// UI's Content-Security-Policy can name the origins the browser will
+	// actually reach (ui.go's contentSecurityPolicy). Nothing in this file
+	// uses them: this process verifies tokens, it never obtains one.
+	//
+	// They are kept because they are not derivable from the issuer. Google
+	// Workspace issues from accounts.google.com and exchanges the code at
+	// oauth2.googleapis.com; a CSP built from the issuer alone blocks that
+	// exchange. Either may be empty if the document omits it, which callers
+	// treat as "contributes no origin" rather than an error -- an IdP with no
+	// token_endpoint is one this UI cannot sign in against anyway, and that
+	// fails visibly at the connect-src boundary.
+	authURL, tokenURL string
+}
+
+// BrowserEndpoints returns the discovered endpoints the admin UI's browser
+// reaches during sign-in, for connect-src. Empty entries are included as-is;
+// contentSecurityPolicy skips whatever does not parse into an origin.
+func (v *Verifier) BrowserEndpoints() []string {
+	return []string{v.authURL, v.tokenURL}
 }
 
 // NewVerifier performs OIDC discovery against issuer (a GET to
@@ -104,7 +126,17 @@ func NewVerifier(ctx context.Context, issuer, audience string, timeout time.Dura
 	// and falls back to the spec's mandatory RS256 if the document names
 	// none, rather than this file guessing an algorithm list a customer's
 	// IdP might not actually support.
-	return &Verifier{inner: provider.Verifier(&oidc.Config{ClientID: audience})}, nil
+	// provider.Endpoint() returns the authorization/token endpoints go-oidc
+	// already parsed out of the discovery document it just fetched -- no
+	// second request, and no second parse of a document this process has
+	// deliberately delegated to a library. Its type is named nowhere here, so
+	// this does not add golang.org/x/oauth2 as a direct dependency.
+	endpoint := provider.Endpoint()
+	return &Verifier{
+		inner:    provider.Verifier(&oidc.Config{ClientID: audience}),
+		authURL:  endpoint.AuthURL,
+		tokenURL: endpoint.TokenURL,
+	}, nil
 }
 
 // Verify checks rawToken's signature against the IdP's published JWKS,

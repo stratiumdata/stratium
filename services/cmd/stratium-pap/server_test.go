@@ -83,6 +83,11 @@ func fixtureUIConfig(issuer string) uiConfig {
 		ClientID: "stratium-pap-ui",
 		Audience: "stratium-pap",
 		Scope:    "openid profile email",
+		// Both on origins that are NOT the issuer's, matching what
+		// newTestIdP's discovery document advertises and what main.go passes
+		// from Verifier.BrowserEndpoints. This is the shape that breaks a
+		// connect-src derived from the issuer alone.
+		IdPEndpoints: []string{idpAuthorizationEndpoint, idpTokenEndpoint},
 	}
 }
 
