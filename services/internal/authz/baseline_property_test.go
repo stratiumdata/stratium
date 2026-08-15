@@ -273,16 +273,14 @@ func TestHonoredOverrides_NeverResolveBelowTheCatalog(t *testing.T) {
 	catalog := BuildTierCatalog(entries, DefaultCatalog())
 	stored := propertyOverrides()
 
-	// The real honoring rule, applied exactly as pdpgrpc.honoredOverrides
-	// applies it: every row checked against the full stored set, survivors
-	// kept.
-	table := TierTable{Catalog: catalog, Overrides: stored}
-	honored := map[string]models.ActionTier{}
-	for key, tier := range stored {
-		if err := ValidateOverride(OverrideBaseline(table, entries, key), tier); err == nil {
-			honored[key] = tier
-		}
-	}
+	// The real honoring rule, taken from the function production calls --
+	// deliberately NOT a copy of it. An inline re-implementation here reads
+	// as equivalent and is not: it leaves HonoredOverrides itself with no
+	// direct coverage in this package, so a mutant that dropped nothing at
+	// all would keep this property green and be caught only over in
+	// internal/pdpgrpc. That is the same drift this task exists to prevent,
+	// displaced into test code.
+	honored, _ := HonoredOverrides(TierTable{Catalog: catalog, Overrides: stored}, entries)
 
 	for name := range propertyToolNames(entries, stored) {
 		action := Action{Tool: name}
