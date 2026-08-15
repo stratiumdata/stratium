@@ -401,7 +401,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
 			fmt.Errorf("load tier overrides: %w", err), &epoch)
 	}
-	tiers.Overrides = honoredOverrides(storedOverrides, tiers.Catalog)
+	tiers.Overrides = honoredOverrides(storedOverrides, tiers.Catalog, catalogEntries)
 
 	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
@@ -543,10 +543,20 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 // decision path does not even select that column — store.LoadTierOverrides's
 // own doc comment), and nothing about the request that happened to observe
 // the bad row.
-func honoredOverrides(stored, catalog map[string]models.ActionTier) map[string]models.ActionTier {
+func honoredOverrides(
+	stored, catalog map[string]models.ActionTier, entries []models.ToolCatalogEntry,
+) map[string]models.ActionTier {
+	// stored, not the honored subset being built: every OTHER row is part of
+	// the resolution beneath this one (authz.OverrideBaseline removes only the
+	// key's own row), and a row that will itself be dropped can only make a
+	// baseline HIGHER — over-strict, never permissive. Using the honored
+	// subset instead would make the result depend on map iteration order,
+	// which is exactly the kind of nondeterminism an authorization decision
+	// must not have.
 	honored := make(map[string]models.ActionTier, len(stored))
+	table := authz.TierTable{Catalog: catalog, Overrides: stored}
 	for key, tier := range stored {
-		baseline := authz.OverrideBaseline(catalog, key)
+		baseline := authz.OverrideBaseline(table, entries, key)
 		if err := authz.ValidateOverride(baseline, tier); err != nil {
 			slog.Warn("tier override dropped: it would lower the tier resolved beneath it",
 				"tool_or_verb", key, "override_tier", tier.String(), "baseline_tier", baseline.String())

@@ -19,21 +19,24 @@ import (
 	"stratium/pkg/models"
 )
 
-// expectTierOverrideBaselineRead queues the tool_catalog SELECT that
+// expectTierOverrideBaselineRead queues the two SELECTs
 // store.CreateTierOverride/UpdateTierOverride perform inside the write's own
-// transaction: since Phase 14 Task 7 the raise-only rule compares against the
-// resolution BENEATH the override — the tenant's own catalog entry where one
-// exists, the built-in otherwise — so every write on this resource reads that
-// table first. An empty result is the "tenant has catalogued nothing" case,
-// under which the baselines below are DefaultCatalog()'s, exactly as they
-// were before that task.
+// transaction. The raise-only rule compares against the resolution BENEATH the
+// override, and two tables make up that resolution: the tenant's own
+// tool_catalog, and its other tier_overrides rows — deriveTierByName probes
+// overrides at every slot before any catalog lookup, so a sibling row at a
+// less specific key really does sit beneath this one. Empty results are the
+// "tenant has configured nothing" case, under which the baselines below are
+// DefaultCatalog()'s.
 func expectTierOverrideBaselineRead(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("FROM tool_catalog").WillReturnRows(
 		sqlmock.NewRows([]string{"tool_name", "action_tier", "verb", "resource_field", "command_field"}))
+	mock.ExpectQuery("FROM tier_overrides").WillReturnRows(
+		sqlmock.NewRows([]string{"tool_or_verb", "action_tier"}))
 }
 
 // expectTierOverrideRefusedAfterBaselineRead is the shape a refused write now
-// takes: the transaction opens and the catalog is read, then nothing else
+// takes: the transaction opens and the baseline is read, then nothing else
 // happens. Before Task 7 a refusal reached the database not at all, because
 // the baseline was a pure function; the property that matters is unchanged
 // and still asserted — no write query is ever queued, so a write reaching one

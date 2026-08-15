@@ -349,3 +349,38 @@ func TestDecide_EpochIsTheFirstStoreRead(t *testing.T) {
 			"can only be labelled older than the state it reflects, never newer (V3)", fs.epochReadAfterCalls)
 	}
 }
+
+// TestDecide_SiblingOverrideIsBeneathAMoreSpecificRow is the review's own
+// scenario, proven through a real Decide: a tenant-wide "Bash" raise to
+// DESTRUCTIVE — the most legitimate override this table has — must not be
+// undone by a more specific "Bash:read" row claiming READ_ONLY.
+//
+// deriveTierByName probes overrides at EVERY slot before any catalog lookup,
+// so the composite row wins the resolution outright. Nothing else catches
+// this: the raise-only check is what has to, which means the baseline for
+// "Bash:read" has to include the sibling "Bash" row. The evidence rule does
+// not help — a compound command classifies INTERNAL_MODIFY, not destructive —
+// and the whole thing is reachable through the PAP's own API with no direct
+// database write anywhere.
+func TestDecide_SiblingOverrideIsBeneathAMoreSpecificRow(t *testing.T) {
+	fs, req := wellFormedFixture()
+	commandField := "command"
+	req.RawInput = `{"command":"ls; cat /etc/hosts"}`
+	fs.catalog = []models.ToolCatalogEntry{
+		{ToolName: "Bash", ActionTier: nil, CommandField: &commandField, Verb: "read"},
+	}
+	fs.overrides = map[string]models.ActionTier{
+		"Bash":      models.ActionTierDestructive,
+		"Bash:read": models.ActionTierReadOnly,
+	}
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if got := resp.GetDerivedTier(); got != int32(models.ActionTierDestructive) {
+		t.Errorf("DerivedTier = %d, want %d (DESTRUCTIVE, the tenant-wide Bash raise): a more specific "+
+			"override row must not lower a broader sibling that sits beneath it", got, models.ActionTierDestructive)
+	}
+}

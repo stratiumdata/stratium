@@ -46,15 +46,24 @@ func toolCatalogRows(rows ...[]driver.Value) *sqlmock.Rows {
 	return out
 }
 
-// expectToolCatalogLoad queues the tool_catalog SELECT that overrideBaseline
-// performs, inside the same transaction as the write it is validating. Every
-// CreateTierOverride/UpdateTierOverride expectation below carries one,
-// immediately after expectSetTenant: since Phase 14 Task 7 the raise-only
-// baseline is the resolution beneath the override -- the tenant's own
-// catalog first -- so there is no write path here that does not read this
-// table first.
-func expectToolCatalogLoad(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
-	mock.ExpectQuery(regexp.QuoteMeta(loadToolCatalogQuery)).WillReturnRows(rows)
+// expectBaselineReads queues the two SELECTs overrideBaseline performs inside
+// the same transaction as the write it is validating: the tenant's
+// tool_catalog and its other tier_overrides rows. Every CreateTierOverride/
+// UpdateTierOverride expectation below carries both, immediately after
+// expectSetTenant -- the raise-only baseline is the resolution BENEATH the
+// override, and both tables are part of that (deriveTierByName probes
+// overrides at every slot before any catalog lookup, so a sibling row sits
+// beneath this one).
+//
+// catalog is the tenant's rows; siblings is its existing overrides, most
+// often none.
+func expectBaselineReads(mock sqlmock.Sqlmock, catalog *sqlmock.Rows, siblings ...[]driver.Value) {
+	mock.ExpectQuery(regexp.QuoteMeta(loadToolCatalogQuery)).WillReturnRows(catalog)
+	overrideRows := sqlmock.NewRows(tierOverrideLoadColumns())
+	for _, r := range siblings {
+		overrideRows.AddRow(r...)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(loadTierOverridesQuery)).WillReturnRows(overrideRows)
 }
 
 // --- CreateTierOverride ---
@@ -66,7 +75,7 @@ func TestStore_CreateTierOverride_Success(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	// "Read"'s builtin is ReadOnly (1); raising to InternalModify (2) is a
 	// legitimate raise, so builtin_tier = 1 is what must be persisted.
 	mock.ExpectQuery(regexp.QuoteMeta(insertTierOverrideQuery)).
@@ -105,7 +114,7 @@ func TestStore_CreateTierOverride_ClientSuppliedBuiltinTierIsIgnored(t *testing.
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	// The real builtin for "Read" (ReadOnly=1) is what must reach the
 	// query, not the attacker-supplied BuiltinTier=Destructive(4) below.
 	mock.ExpectQuery(regexp.QuoteMeta(insertTierOverrideQuery)).
@@ -149,7 +158,7 @@ func TestStore_CreateTierOverride_LoweringRefusedBeforePersisting(t *testing.T) 
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectRollback()
 
 	// Write's baseline is InternalModify (2); ReadOnly (1) is strictly lower.
@@ -180,7 +189,7 @@ func TestStore_CreateTierOverride_CatalogEntryIsTheBaseline(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows(
+	expectBaselineReads(mock, toolCatalogRows(
 		[]driver.Value{"Read", int64(models.ActionTierDestructive), "", nil, nil},
 	))
 	mock.ExpectRollback()
@@ -213,7 +222,7 @@ func TestStore_CreateTierOverride_NullTierCatalogRowFallsBackToBuiltin(t *testin
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows(
+	expectBaselineReads(mock, toolCatalogRows(
 		[]driver.Value{"Bash", nil, "", nil, "command"},
 	))
 	mock.ExpectQuery(regexp.QuoteMeta(insertTierOverrideQuery)).
@@ -249,7 +258,7 @@ func TestStore_CreateTierOverride_EqualTierIsAccepted(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectQuery(regexp.QuoteMeta(insertTierOverrideQuery)).
 		WithArgs(testTenant, "Read", int64(models.ActionTierReadOnly), int64(models.ActionTierReadOnly), "operator-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(id.String(), now))
@@ -283,7 +292,7 @@ func TestStore_CreateTierOverride_DuplicateIsAlreadyExists(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectQuery(regexp.QuoteMeta(insertTierOverrideQuery)).
 		WillReturnError(&pq.Error{Code: sqlStateUniqueViolation, Message: `duplicate key value violates unique constraint "tier_overrides_tenant_id_tool_or_verb_key"`})
 	mock.ExpectRollback()
@@ -307,7 +316,7 @@ func TestStore_CreateTierOverride_AuditFailureRollsBackWrite(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectQuery(regexp.QuoteMeta(insertTierOverrideQuery)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New().String(), time.Now()))
 	expectAdvisoryLock(mock)
@@ -522,7 +531,7 @@ func TestStore_UpdateTierOverride_Success(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectQuery(regexp.QuoteMeta(updateTierOverrideQuery)).
 		WithArgs("Read", int64(models.ActionTierExternalComms), int64(models.ActionTierReadOnly), id.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"created_at", "created_by"}).AddRow(created, "original-author"))
@@ -555,7 +564,7 @@ func TestStore_UpdateTierOverride_LoweringRefusedBeforePersisting(t *testing.T) 
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectRollback()
 
 	in := models.TierOverride{ToolOrVerb: "Write", ActionTier: models.ActionTierReasoning}
@@ -573,7 +582,7 @@ func TestStore_UpdateTierOverride_NotFound(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	expectToolCatalogLoad(mock, toolCatalogRows())
+	expectBaselineReads(mock, toolCatalogRows())
 	mock.ExpectQuery(regexp.QuoteMeta(updateTierOverrideQuery)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
@@ -670,6 +679,38 @@ func TestStore_DeleteTierOverride_NotFound(t *testing.T) {
 
 	if err := s.DeleteTierOverride(context.Background(), id, "operator-1", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteTierOverride() error = %v, want ErrNotFound", err)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_CreateTierOverride_SiblingOverrideIsPartOfTheBaseline is the
+// write-time end of TestDecide_SiblingOverrideIsBeneathAMoreSpecificRow
+// (internal/pdpgrpc): the tenant already has "Bash" raised to DESTRUCTIVE, and
+// a new "Bash:read" row at READ_ONLY is a lowering because deriveTierByName
+// probes the composite key first. Refused here, so the PAP never writes a row
+// the PDP would only drop on every decision.
+//
+// The catalog row is what makes the composite key reachable at all:
+// Action.Verb is copied from tool_catalog.verb (extract.go), never
+// caller-supplied, so without a Bash row carrying verb "read" no request could
+// ever produce the key "Bash:read".
+func TestStore_CreateTierOverride_SiblingOverrideIsPartOfTheBaseline(t *testing.T) {
+	s, mock := newMockStore(t)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	expectBaselineReads(mock,
+		toolCatalogRows([]driver.Value{"Bash", nil, "read", nil, "command"}),
+		[]driver.Value{"Bash", int64(models.ActionTierDestructive)},
+	)
+	mock.ExpectRollback()
+
+	in := models.TierOverride{ToolOrVerb: "Bash:read", ActionTier: models.ActionTierReadOnly}
+	_, err := s.CreateTierOverride(context.Background(), in, "operator-1")
+	if !errors.Is(err, authz.ErrOverrideLowersTier) {
+		t.Errorf("CreateTierOverride() error = %v, want authz.ErrOverrideLowersTier -- the tenant's existing "+
+			"tenant-wide Bash override (DESTRUCTIVE) is beneath this more specific key", err)
 	}
 
 	assertExpectationsMet(t, mock)

@@ -3,6 +3,7 @@ package authz
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 
@@ -364,49 +365,81 @@ func lookupKeys(a Action) []string {
 // the real resolution function, not a re-derivation of its precedence. A key
 // that clears the highest of them cannot lower any of them.
 //
-// That maximum, and the re-use, are both load-bearing. lookupKeys builds
-// Tool+":"+Verb from two free-text values, which is a LOSSY concatenation:
-// "svc:index:delete" is {Tool:"svc:index", Verb:"delete"} and
-// {Tool:"svc", Verb:"index:delete"} equally, and both really can occur
-// (tool_catalog.tool_name and .verb are unvalidated TEXT). There is no
-// faithful single inverse to pick, so every split is a candidate and the
-// strictest wins — first-match over those candidates would happily pick a
-// READ_ONLY "svc" entry while a DESTRUCTIVE "svc:index" entry sat one
-// candidate later. lookupKeys also LOWERCASES its verb slot while leaving the
-// composite key's own case alone, which is why deriveTierByName must do the
-// lookups rather than this function doing them itself: hand it
-// {Tool:"Foo", Verb:"Purge"} and it lowercases exactly where lookupKeys does,
-// with no second copy of that rule to drift.
+// # Which actions, and why the set is small
 //
-// Both of those were live lowering attacks against the first version of this
-// function, which split on the first colon and did not lowercase. See
-// TestOverrideBaseline_NeverBelowAnyResolutionItsKeyNames.
+// Action.Verb has exactly ONE production writer: ApplyExtraction (extract.go),
+// which copies the tenant's tool_catalog.verb for the tool being called. It is
+// not caller-supplied — Task 3 retired it from the wire — so the verb a tool
+// can arrive with is a FUNCTION of the tool name, not a free value. That is
+// what makes this enumerable rather than a maximisation over every verb in
+// verbTiers, and it is why entries, not just the merged catalog map, has to be
+// passed in: the merged map has dropped the verb column.
+//
+// So the actions a stored key can govern are, exactly:
+//
+//  1. key as a whole tool name — {Tool: key, Verb: verbOf(key)}.
+//  2. key as a verb — every catalogued tool whose own verb lowercases to key.
+//     lookupKeys lowercases its verb slot and nothing else.
+//  3. key as Tool+":"+Verb — every split of key at an interior colon whose
+//     tool half actually carries that verb half in the catalog.
+//
+// Cases 2 and 3 are not symmetric decorations: lookupKeys builds Tool+":"+Verb
+// from two unvalidated TEXT columns, so the concatenation is LOSSY —
+// "svc:index:delete" is {Tool:"svc:index", Verb:"delete"} and
+// {Tool:"svc", Verb:"index:delete"} equally. There is no faithful single
+// inverse to pick, so every split the catalog can actually produce is a
+// candidate and the strictest wins. deriveTierByName does the lookups rather
+// than this function doing them itself, so the case-folding rule has no second
+// copy to drift.
+//
+// t.Overrides matters as much as t.Catalog: deriveTierByName probes overrides
+// at EVERY slot before any catalog lookup, so a sibling row genuinely is part
+// of the resolution beneath this one. A tenant-wide "Bash" raise is beneath a
+// new "Bash:read" row, and without it that more specific row silently lowers
+// the broader one. The key's own row is removed below — that, and only that,
+// is what would be circular.
 //
 // # The bound, stated exactly
 //
-// This covers every action the key NAMES: the key as a whole tool, as a verb,
-// and as each of its tool/verb splits. It does NOT cover an action that
-// matches the key at a LESS specific slot than the one it names — a tool
-// "Bash" invoked with verb "delete" resolves DESTRUCTIVE beneath an override
-// keyed "Bash", because lookupKeys offers "Bash" second and "delete" third.
-// Bounding that would mean maximising over every entry in verbTiers, which
-// floors every bare-tool override at DESTRUCTIVE and makes the feature
-// useless. What still binds there is DeriveTier's evidence rule for shell
-// input, and the tenant's own catalog for everything else. This is a real
-// residual, not a closed case.
-func OverrideBaseline(catalog map[string]models.ActionTier, key string) models.ActionTier {
-	// No Overrides field: this is the resolution BENEATH an override, so the
-	// override map is exactly what must not be in scope. DenyUnknown is left
-	// false for the same reason the floor is REASONING below — "this key
-	// resolves to nothing" is an answer here, not an error.
-	table := TierTable{Catalog: catalog}
-	baseline := models.ActionTierReasoning
-	for _, a := range baselineActions(key) {
-		tier, err := deriveTierByName(table, a)
+// This bounds the NAME-KEYED resolution: overrides, the catalog, and the
+// built-in verb table. It does NOT bound BuiltinTier's classification of
+// caller-supplied RawInput, and that one is genuinely unboundable rather than
+// merely unimplemented: RawInput is free text from the PEP, so the maximum
+// over it is DESTRUCTIVE for every key, which would refuse every override
+// anyone could ever write.
+//
+// The consequence, stated plainly: an override on a name REPLACES per-
+// invocation classification for the calls it matches. An override of REASONING
+// on an uncatalogued tool does lower what `ls -la` would have classified. That
+// is not a hole in this function, it is what an override IS — the same
+// residual the NULL-tier Bash ruling above states, in its general form. What
+// still binds is DeriveTier's evidence rule, which re-raises DESTRUCTIVE and
+// EXTERNAL_COMMS raw input unconditionally, above any override. Pinned by
+// TestOverrideBaseline_RawInputClassificationIsNotBounded so it cannot change
+// quietly, and generated (not curated) coverage of everything this DOES bound
+// lives in TestOverrideBaseline_Property.
+func OverrideBaseline(t TierTable, entries []models.ToolCatalogEntry, key string) models.ActionTier {
+	// Every OTHER stored override still applies beneath this one; this one
+	// does not apply to itself. maps.Clone(nil) is nil and delete on a nil
+	// map is a no-op, so a tenant with no other rows needs no special case.
+	others := maps.Clone(t.Overrides)
+	delete(others, key)
+	beneath := TierTable{
+		Catalog:     t.Catalog,
+		Overrides:   others,
+		UnknownTier: t.UnknownTier,
+		DenyUnknown: t.DenyUnknown,
+	}
+
+	baseline := t.UnknownTier
+	for _, a := range baselineActions(entries, key) {
+		tier, err := deriveTierByName(beneath, a)
 		if err != nil {
-			// Unreachable while DenyUnknown is false, which this function
-			// sets itself. Skipping rather than propagating keeps the
-			// contract "a baseline always exists" true if that ever changes.
+			// DenyUnknown only. Skipping is the PERMISSIVE direction, not the
+			// safe one — it leaves the baseline lower than this candidate
+			// might have made it. It is correct anyway: an action
+			// deriveTierByName refuses to classify is denied outright at
+			// decision time, so there is no tier for an override to lower.
 			continue
 		}
 		if tier > baseline {
@@ -416,23 +449,40 @@ func OverrideBaseline(catalog map[string]models.ActionTier, key string) models.A
 	return baseline
 }
 
-// baselineActions returns every action shape whose lookupKeys can contain
-// key: key as a whole tool name, key as a verb, and key split at each interior
-// colon into a tool half and a verb half. It is lookupKeys read backwards —
-// lookupKeys turns an Action into the keys a stored override might match, this
-// turns one stored key back into the actions that could match it.
+// baselineActions returns every action that can reach key — the three cases
+// enumerated in OverrideBaseline's doc comment. It is lookupKeys read
+// backwards: lookupKeys turns an Action into the keys a stored override might
+// match, this turns one stored key back into the actions that could match it.
 //
-// Action{Verb: key} is included unconditionally, even for a key lookupKeys
-// could never produce in its lowercased verb slot ("READ"). It costs one map
-// probe and can only ever raise the baseline, and over-strict on a key that
-// cannot be verb-matched is the safe direction.
-func baselineActions(key string) []Action {
-	actions := []Action{{Tool: key}, {Verb: key}}
-	// Interior colons only: a leading or trailing colon leaves one half
-	// empty, and lookupKeys never builds a composite key from an empty Tool
-	// or Verb.
+// entries is the tenant's catalog rows, not the merged tier map, because the
+// verb column is what makes this enumeration finite — see OverrideBaseline.
+func baselineActions(entries []models.ToolCatalogEntry, key string) []Action {
+	verbOf := func(tool string) string {
+		for _, e := range entries {
+			if e.ToolName == tool {
+				return e.Verb
+			}
+		}
+		return ""
+	}
+
+	// 1. key as a whole tool name, carrying whatever verb the catalog gives
+	//    that tool (possibly none).
+	actions := []Action{{Tool: key, Verb: verbOf(key)}}
+
+	// 2. key as a verb: every tool whose catalogued verb lowercases to it.
+	for _, e := range entries {
+		if strings.ToLower(e.Verb) == key {
+			actions = append(actions, Action{Tool: e.ToolName, Verb: e.Verb})
+		}
+	}
+
+	// 3. key as Tool+":"+Verb, at each interior colon. The verbOf check keeps
+	//    this to splits the catalog can actually produce: a leading or
+	//    trailing colon leaves one half empty, and lookupKeys never builds a
+	//    composite key from an empty Tool or Verb.
 	for i := 1; i < len(key)-1; i++ {
-		if key[i] == ':' {
+		if key[i] == ':' && verbOf(key[:i]) == key[i+1:] {
 			actions = append(actions, Action{Tool: key[:i], Verb: key[i+1:]})
 		}
 	}

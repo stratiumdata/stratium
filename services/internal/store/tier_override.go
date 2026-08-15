@@ -100,12 +100,30 @@ const loadTierOverridesQuery = `SELECT tool_or_verb, action_tier FROM tier_overr
 // resolution — the previous behaviour — instead of the override being
 // refused. See authz.OverrideBaseline's own doc comment for the ruling and
 // the residual it leaves.
+//
+// Both the catalog AND the tenant's other override rows are read, in the
+// caller's own transaction, because both are part of the resolution beneath
+// this key: deriveTierByName probes overrides at every slot before any catalog
+// lookup, so an existing tenant-wide "Bash" raise sits beneath a new
+// "Bash:read" row and a write that ignored it would let the more specific row
+// silently lower the broader one. Reading both here is what keeps this end's
+// answer identical to the PDP's — the two must agree, or a row accepted at
+// write time is dropped on every decision, which is a worse failure than
+// refusing it outright.
 func (s *Store) overrideBaseline(ctx context.Context, tx *sql.Tx, key string) (models.ActionTier, error) {
 	entries, err := queryToolCatalogTx(ctx, tx)
 	if err != nil {
 		return models.ActionTierReasoning, err
 	}
-	return authz.OverrideBaseline(authz.BuildTierCatalog(entries, authz.DefaultCatalog()), key), nil
+	overrides, err := queryTierOverridesTx(ctx, tx)
+	if err != nil {
+		return models.ActionTierReasoning, err
+	}
+	table := authz.TierTable{
+		Catalog:   authz.BuildTierCatalog(entries, authz.DefaultCatalog()),
+		Overrides: overrides,
+	}
+	return authz.OverrideBaseline(table, entries, key), nil
 }
 
 // LoadTierOverrides loads the tenant's tier_overrides rows as the map
@@ -133,6 +151,23 @@ func (s *Store) LoadTierOverrides(ctx context.Context) (map[string]models.Action
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	overrides, err := queryTierOverridesTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return overrides, nil
+}
+
+// queryTierOverridesTx runs loadTierOverridesQuery inside an already-open,
+// already-tenant-scoped transaction — the same split queryToolCatalogTx
+// (catalog.go) makes, and for the same second caller: overrideBaseline needs
+// the tenant's other override rows to compute the resolution beneath a
+// proposed one, in the SAME transaction the write then lands in.
+func queryTierOverridesTx(ctx context.Context, tx *sql.Tx) (map[string]models.ActionTier, error) {
 	rows, err := tx.QueryContext(ctx, loadTierOverridesQuery)
 	if err != nil {
 		return nil, fmt.Errorf("store: load tier overrides: %w", err)
@@ -158,10 +193,6 @@ func (s *Store) LoadTierOverrides(ctx context.Context) (map[string]models.Action
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate tier override rows: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: commit: %w", err)
 	}
 	return overrides, nil
 }

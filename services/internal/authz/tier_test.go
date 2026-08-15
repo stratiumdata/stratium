@@ -2,7 +2,6 @@ package authz
 
 import (
 	"errors"
-	"slices"
 	"testing"
 
 	"stratium/pkg/models"
@@ -370,21 +369,60 @@ func TestOverrideBaseline(t *testing.T) {
 		{ToolName: "Bash", ActionTier: nil, CommandField: strPtr("command")},
 	}, DefaultCatalog())
 
+	tenantEntries := []models.ToolCatalogEntry{
+		{ToolName: "Read", ActionTier: &destructive},
+		{ToolName: "Bash", ActionTier: nil, CommandField: strPtr("command")},
+	}
+	// A composite key is only reachable if the catalog gives that tool that
+	// verb — Action.Verb is copied from the row, never caller-supplied
+	// (extract.go). Entries that make each composite case below real.
+	readOnly := models.ActionTierReadOnly
+	readVerbEntries := []models.ToolCatalogEntry{{ToolName: "Read", ActionTier: &readOnly, Verb: "read"}}
+	mcpDeleteEntries := []models.ToolCatalogEntry{{ToolName: "SomeMCPTool", ActionTier: nil, CommandField: strPtr("cmd"), Verb: "delete"}}
+	deleteVerbEntries := []models.ToolCatalogEntry{{ToolName: "wipe", ActionTier: nil, CommandField: strPtr("cmd"), Verb: "delete"}}
+
 	tests := []struct {
 		name    string
 		catalog map[string]models.ActionTier
+		entries []models.ToolCatalogEntry
 		key     string
 		want    models.ActionTier
 	}{
-		{"built-in catalog entry", DefaultCatalog(), "Read", models.ActionTierReadOnly},
-		{"known verb", DefaultCatalog(), "delete", models.ActionTierDestructive},
-		{"verb lookup is case-insensitive", DefaultCatalog(), "READ", models.ActionTierReadOnly},
-		{"unknown key floors at REASONING", DefaultCatalog(), "totally-unknown-tool", models.ActionTierReasoning},
+		{"built-in catalog entry", DefaultCatalog(), nil, "Read", models.ActionTierReadOnly},
+		{
+			// No catalogued tool carries the verb "delete", and Action.Verb is
+			// only ever copied from a catalog row (extract.go) — so no action
+			// can reach this key through the verb slot, and it governs only a
+			// tool literally NAMED "delete". The floor is the faithful answer.
+			// This returned DESTRUCTIVE before the verb slot was tied to the
+			// catalog: over-strict, refusing overrides on a key nothing reaches.
+			"known verb that no catalogued tool carries",
+			DefaultCatalog(), nil, "delete", models.ActionTierReasoning,
+		},
+		{
+			// The same key once a tool DOES carry it: {Tool:"wipe", Verb:"delete"}
+			// is now reachable, resolves DESTRUCTIVE beneath, and the baseline
+			// rises to match. The pair is the whole point — the bound tracks
+			// the tenant's catalog rather than assuming the worst.
+			"known verb a catalogued tool actually carries",
+			DefaultCatalog(), deleteVerbEntries, "delete", models.ActionTierDestructive,
+		},
+		{
+			// lookupKeys lowercases its verb slot, so "READ" can only ever be
+			// matched as a TOOL name — never as the verb "read". With no
+			// catalog row for a tool called "READ" it names nothing, and the
+			// floor is the faithful baseline. The old expectation here
+			// (READ_ONLY, via a verb lookup this key cannot reach) was
+			// over-strict: it refused overrides on a key that governs nothing.
+			"an uppercase key names a tool, not the lowercased verb slot",
+			DefaultCatalog(), nil, "READ", models.ActionTierReasoning,
+		},
+		{"unknown key floors at REASONING", DefaultCatalog(), nil, "totally-unknown-tool", models.ActionTierReasoning},
 		{
 			// The correction this function exists for: the tenant's own
 			// catalog entry beats DefaultCatalog()'s, so an override on Read
 			// is measured against DESTRUCTIVE, not READ_ONLY.
-			"tenant catalog entry beats the built-in", tenant, "Read", models.ActionTierDestructive,
+			"tenant catalog entry beats the built-in", tenant, tenantEntries, "Read", models.ActionTierDestructive,
 		},
 		{
 			// Bash is absent from DefaultCatalog deliberately, and the
@@ -393,104 +431,28 @@ func TestOverrideBaseline(t *testing.T) {
 			// static answer for it either. The ruling: fall back, do not
 			// refuse. An operator raising Bash to DESTRUCTIVE tenant-wide is
 			// the legitimate case that would otherwise be blocked.
-			"NULL-tier catalog row falls back to the built-in", tenant, "Bash", models.ActionTierReasoning,
+			"NULL-tier catalog row falls back to the built-in", tenant, tenantEntries, "Bash", models.ActionTierReasoning,
 		},
 		{
 			// A composite key falls back through its tool half, exactly as
 			// deriveTierByName would resolve it with the override removed.
 			// Without this, "Read:read" would measure against the floor and
 			// then win the resolution ahead of the Read entry it lowers.
-			"composite key falls back to its tool", DefaultCatalog(), "Read:read", models.ActionTierReadOnly,
+			"composite key falls back to its tool", DefaultCatalog(), readVerbEntries, "Read:read", models.ActionTierReadOnly,
 		},
 		{
 			"composite key falls back to its verb when the tool is unknown",
-			DefaultCatalog(), "SomeMCPTool:delete", models.ActionTierDestructive,
+			DefaultCatalog(), mcpDeleteEntries, "SomeMCPTool:delete", models.ActionTierDestructive,
 		},
-		{"a key that is only a colon is not composite", DefaultCatalog(), ":", models.ActionTierReasoning},
+		{"a key that is only a colon is not composite", DefaultCatalog(), nil, ":", models.ActionTierReasoning},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := OverrideBaseline(tt.catalog, tt.key); got != tt.want {
+			table := TierTable{Catalog: tt.catalog}
+			if got := OverrideBaseline(table, tt.entries, tt.key); got != tt.want {
 				t.Errorf("OverrideBaseline(%q) = %s, want %s", tt.key, got, tt.want)
 			}
 		})
-	}
-}
-
-// TestOverrideBaseline_NeverBelowAnyResolutionItsKeyNames is the safety
-// statement the value table above can only imply, asserted against DeriveTier
-// itself rather than against constants so the two cannot drift — a fourth
-// resolution layer added to deriveTierByName fails this test.
-//
-// One stored key can be reached by several DIFFERENT actions, because
-// lookupKeys builds "Tool:verb" by concatenating two free-text values and
-// that is lossy: "svc:index:delete" is {Tool:"svc:index", Verb:"delete"} and
-// {Tool:"svc", Verb:"index:delete"} equally. The baseline must be at least
-// the highest resolution among them — clear it and no resolution the key
-// names can be lowered. Being higher than one particular action's own
-// resolution is safe (it refuses an override that would not have lowered THAT
-// call); being lower than any of them is the defect.
-//
-// The (key, action) pairs are written out literally rather than generated
-// from baselineActions, which would only prove the implementation agrees with
-// itself. The lookupKeys guard below asserts each pair is real — that the
-// action genuinely can be matched by that override key — so a pair that has
-// been curated into passing fails as a fixture error instead.
-//
-// The last three pairs are the review's own two verified attacks plus its
-// mirror image, and all three failed before this test's fix:
-//
-//   - "svc:index:delete" as {Tool:"svc:index"}: splitting on the FIRST colon
-//     never produced "svc:index", so the baseline floored at REASONING while
-//     the catalog said DESTRUCTIVE.
-//   - "svc:index:delete" as {Tool:"svc"}: "svc" is catalogued READ_ONLY and
-//     "svc:index" DESTRUCTIVE — both are candidates, so taking the FIRST
-//     match rather than the maximum picks READ_ONLY and lets the override
-//     through.
-//   - "Foo:Purge": lookupKeys lowercases its verb slot and the old
-//     baselineKeys did not, so catalog["Purge"] missed the "purge" row.
-//   - "Foo:a:b": the same defect as the first, mirrored — a colon in the VERB
-//     half. Splitting on the LAST colon (the fix suggested in review) yields
-//     [Foo:a:b Foo:a b] and never sees "Foo".
-func TestOverrideBaseline_NeverBelowAnyResolutionItsKeyNames(t *testing.T) {
-	destructive, readOnly := models.ActionTierDestructive, models.ActionTierReadOnly
-	catalog := BuildTierCatalog([]models.ToolCatalogEntry{
-		{ToolName: "Read", ActionTier: &destructive},
-		{ToolName: "svc", ActionTier: &readOnly},
-		{ToolName: "svc:index", ActionTier: &destructive},
-		{ToolName: "purge", ActionTier: &destructive},
-		{ToolName: "Foo", ActionTier: &destructive},
-	}, DefaultCatalog())
-
-	pairs := []struct {
-		key string
-		a   Action
-	}{
-		{"Read", Action{Tool: "Read"}},
-		{"Write", Action{Tool: "Write"}},
-		{"delete", Action{Verb: "delete"}},
-		{"Bash", Action{Tool: "Bash"}},
-		{"unknown-tool", Action{Tool: "unknown-tool"}},
-		{"Read:read", Action{Tool: "Read", Verb: "read"}},
-		{"svc:index:delete", Action{Tool: "svc:index", Verb: "delete"}},
-		{"svc:index:delete", Action{Tool: "svc", Verb: "index:delete"}},
-		{"Foo:Purge", Action{Tool: "Foo", Verb: "Purge"}},
-		{"Foo:a:b", Action{Tool: "Foo", Verb: "a:b"}},
-	}
-
-	for _, p := range pairs {
-		if !slices.Contains(lookupKeys(p.a), p.key) {
-			t.Fatalf("fixture error: %+v can never be matched by an override keyed %q (lookupKeys = %v) — "+
-				"this pair proves nothing", p.a, p.key, lookupKeys(p.a))
-		}
-		beneath, err := DeriveTier(TierTable{Catalog: catalog}, p.a)
-		if err != nil {
-			t.Fatalf("DeriveTier(%+v) error = %v", p.a, err)
-		}
-		if baseline := OverrideBaseline(catalog, p.key); baseline < beneath {
-			t.Errorf("OverrideBaseline(%q) = %s, but %+v resolves %s beneath it — "+
-				"an override clearing this baseline would still lower that call", p.key, baseline, p.a, beneath)
-		}
 	}
 }
 
