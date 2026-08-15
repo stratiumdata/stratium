@@ -119,9 +119,14 @@ func TestDeriveTier_OverrideRaisesSeededCatalogEntry(t *testing.T) {
 // the write-time half of "an override raises a catalog entry but cannot
 // lower it" — DeriveTier's read side is proven by
 // TestDeriveTier_OverrideRaisesSeededCatalogEntry above; ValidateOverride is
-// what must reject the write that DeriveTier has no way to catch (see
-// TierTable.Overrides's doc comment on the decision-path gap this does not
-// close).
+// what must reject the write.
+//
+// This used to point at TierTable.Overrides's doc comment "on the decision-path
+// gap this does not close." That gap is closed as of Phase 14 Task 7:
+// pdpgrpc.Decide re-runs this identical check against the live baseline and
+// drops any row that fails, so a lowering override that never passed through
+// this write path is not honored either. The write-time half is no longer the
+// only half — see TierTable.Overrides and pdpgrpc.honoredOverrides.
 func TestValidateOverride_CatalogEntryRaiseOnly(t *testing.T) {
 	builtin := DefaultCatalog()["Read"] // READ_ONLY
 	if err := ValidateOverride(builtin, models.ActionTierDestructive); err != nil {

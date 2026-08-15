@@ -411,12 +411,17 @@ func (s *Store) UpdateTierOverride(
 }
 
 // DeleteTierOverride deletes the id row and audits the deletion inside one
-// transaction. No ValidateOverride call: removing an override reverts a
-// tool to its built-in tier, never a lowering of anything — the raise-only
-// rule has nothing to say about deletion, the identical reasoning Task 2's
-// own report already gives for why stratium_pap holds DELETE on this table
-// at all ("removing an override reverts a tool to its built-in tier, an
-// ordinary, safe operation").
+// transaction. No ValidateOverride call: removing an override reverts a tool
+// to the resolution beneath it — the tenant's own tool_catalog entry where
+// one exists, the built-in classification otherwise (authz.OverrideBaseline)
+// — and since the row could only ever have been at or ABOVE that resolution,
+// removing it can never lower anything. The raise-only rule has nothing to
+// say about deletion, the same reasoning Task 2's own report gives for why
+// stratium_pap holds DELETE on this table at all.
+//
+// Task 2's report words that as "reverts a tool to its built-in tier," which
+// was accurate when the baseline was the built-in alone and is now one case
+// of it.
 //
 // now is a parameter for the same reason DeletePolicy's/DeleteAgent's are: a
 // DELETE leaves no row behind whose own timestamp the audit entry could

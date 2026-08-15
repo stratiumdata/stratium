@@ -417,39 +417,79 @@ func TestOverrideBaseline(t *testing.T) {
 	}
 }
 
-// TestOverrideBaseline_NeverBelowAnyResolutionItsKeyCanWin is the safety
-// statement the value table above can only imply, and it is asserted against
-// DeriveTier itself rather than against constants so the two cannot drift —
-// a fourth resolution layer added to deriveTierByName fails this test.
+// TestOverrideBaseline_NeverBelowAnyResolutionItsKeyNames is the safety
+// statement the value table above can only imply, asserted against DeriveTier
+// itself rather than against constants so the two cannot drift — a fourth
+// resolution layer added to deriveTierByName fails this test.
 //
-// One stored key can be matched by several different actions: lookupKeys
-// offers "Tool:verb", "Tool", and "verb", so a row keyed "delete" wins for a
-// tool NAMED delete and for any tool called with the delete verb, which
-// resolve differently beneath. The baseline must therefore be at least the
-// highest of them — an override that clears it can then never lower any
-// resolution its key is capable of winning. Being higher than one particular
-// action's own resolution is safe (it refuses an override that would not
-// have lowered THAT call); being lower than any of them is the defect.
-func TestOverrideBaseline_NeverBelowAnyResolutionItsKeyCanWin(t *testing.T) {
-	destructive := models.ActionTierDestructive
+// One stored key can be reached by several DIFFERENT actions, because
+// lookupKeys builds "Tool:verb" by concatenating two free-text values and
+// that is lossy: "svc:index:delete" is {Tool:"svc:index", Verb:"delete"} and
+// {Tool:"svc", Verb:"index:delete"} equally. The baseline must be at least
+// the highest resolution among them — clear it and no resolution the key
+// names can be lowered. Being higher than one particular action's own
+// resolution is safe (it refuses an override that would not have lowered THAT
+// call); being lower than any of them is the defect.
+//
+// The (key, action) pairs are written out literally rather than generated
+// from baselineActions, which would only prove the implementation agrees with
+// itself. The lookupKeys guard below asserts each pair is real — that the
+// action genuinely can be matched by that override key — so a pair that has
+// been curated into passing fails as a fixture error instead.
+//
+// The last three pairs are the review's own two verified attacks plus its
+// mirror image, and all three failed before this test's fix:
+//
+//   - "svc:index:delete" as {Tool:"svc:index"}: splitting on the FIRST colon
+//     never produced "svc:index", so the baseline floored at REASONING while
+//     the catalog said DESTRUCTIVE.
+//   - "svc:index:delete" as {Tool:"svc"}: "svc" is catalogued READ_ONLY and
+//     "svc:index" DESTRUCTIVE — both are candidates, so taking the FIRST
+//     match rather than the maximum picks READ_ONLY and lets the override
+//     through.
+//   - "Foo:Purge": lookupKeys lowercases its verb slot and the old
+//     baselineKeys did not, so catalog["Purge"] missed the "purge" row.
+//   - "Foo:a:b": the same defect as the first, mirrored — a colon in the VERB
+//     half. Splitting on the LAST colon (the fix suggested in review) yields
+//     [Foo:a:b Foo:a b] and never sees "Foo".
+func TestOverrideBaseline_NeverBelowAnyResolutionItsKeyNames(t *testing.T) {
+	destructive, readOnly := models.ActionTierDestructive, models.ActionTierReadOnly
 	catalog := BuildTierCatalog([]models.ToolCatalogEntry{
 		{ToolName: "Read", ActionTier: &destructive},
+		{ToolName: "svc", ActionTier: &readOnly},
+		{ToolName: "svc:index", ActionTier: &destructive},
+		{ToolName: "purge", ActionTier: &destructive},
+		{ToolName: "Foo", ActionTier: &destructive},
 	}, DefaultCatalog())
 
-	for _, key := range []string{"Read", "Write", "delete", "Bash", "unknown-tool", "Read:read"} {
-		baseline := OverrideBaseline(catalog, key)
-		for _, a := range []Action{{Tool: key}, {Verb: key}, {Tool: "Read", Verb: "read"}} {
-			if !slices.Contains(lookupKeys(a), key) {
-				continue // this action would never match this override at all
-			}
-			beneath, err := DeriveTier(TierTable{Catalog: catalog}, a)
-			if err != nil {
-				t.Fatalf("DeriveTier(%+v) error = %v", a, err)
-			}
-			if baseline < beneath {
-				t.Errorf("OverrideBaseline(%q) = %s, but %+v resolves %s beneath it — "+
-					"an override clearing this baseline would still lower that call", key, baseline, a, beneath)
-			}
+	pairs := []struct {
+		key string
+		a   Action
+	}{
+		{"Read", Action{Tool: "Read"}},
+		{"Write", Action{Tool: "Write"}},
+		{"delete", Action{Verb: "delete"}},
+		{"Bash", Action{Tool: "Bash"}},
+		{"unknown-tool", Action{Tool: "unknown-tool"}},
+		{"Read:read", Action{Tool: "Read", Verb: "read"}},
+		{"svc:index:delete", Action{Tool: "svc:index", Verb: "delete"}},
+		{"svc:index:delete", Action{Tool: "svc", Verb: "index:delete"}},
+		{"Foo:Purge", Action{Tool: "Foo", Verb: "Purge"}},
+		{"Foo:a:b", Action{Tool: "Foo", Verb: "a:b"}},
+	}
+
+	for _, p := range pairs {
+		if !slices.Contains(lookupKeys(p.a), p.key) {
+			t.Fatalf("fixture error: %+v can never be matched by an override keyed %q (lookupKeys = %v) — "+
+				"this pair proves nothing", p.a, p.key, lookupKeys(p.a))
+		}
+		beneath, err := DeriveTier(TierTable{Catalog: catalog}, p.a)
+		if err != nil {
+			t.Fatalf("DeriveTier(%+v) error = %v", p.a, err)
+		}
+		if baseline := OverrideBaseline(catalog, p.key); baseline < beneath {
+			t.Errorf("OverrideBaseline(%q) = %s, but %+v resolves %s beneath it — "+
+				"an override clearing this baseline would still lower that call", p.key, baseline, p.a, beneath)
 		}
 	}
 }

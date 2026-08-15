@@ -95,8 +95,16 @@ func TestDecide_OverrideWithoutARowChangesNothing(t *testing.T) {
 // TestDecide_OverrideEqualToItsBaselineIsHonored is the read-time check's own
 // boundary case. ValidateOverride refuses "override < baseline", so an
 // override EQUAL to the baseline is honored, and an off-by-one mutation of <
-// into <= at either end drops a row it must keep.
+// into <= drops a row it must keep.
+//
+// DerivedTier alone cannot prove this and asserting only on it would make the
+// test structurally blind: honored, the override yields READ_ONLY; dropped,
+// the baseline beneath it is also READ_ONLY. Identical by construction — that
+// is what "equal" means here. The log line is the only observable difference
+// between the two outcomes, so the empty-buffer assertion is what carries the
+// property; the DerivedTier check below is a sanity check, not the point.
 func TestDecide_OverrideEqualToItsBaselineIsHonored(t *testing.T) {
+	logs := captureLogs(t)
 	fs, req := wellFormedFixture()
 	req.Tool = "Read"
 	req.RawInput = "/tmp/notes.txt"
@@ -107,9 +115,13 @@ func TestDecide_OverrideEqualToItsBaselineIsHonored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide() error = %v", err)
 	}
+	if out := logs.String(); out != "" {
+		t.Errorf("the override was dropped, not honored: %s\n"+
+			"an override equal to its baseline is not a lowering — ValidateOverride refuses "+
+			"\"override < baseline\", never \"override <= baseline\"", out)
+	}
 	if got := resp.GetDerivedTier(); got != int32(models.ActionTierReadOnly) {
-		t.Errorf("DerivedTier = %d, want %d: an override equal to its baseline is not a lowering",
-			got, models.ActionTierReadOnly)
+		t.Errorf("DerivedTier = %d, want %d", got, models.ActionTierReadOnly)
 	}
 }
 

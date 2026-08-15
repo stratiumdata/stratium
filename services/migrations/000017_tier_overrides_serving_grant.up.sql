@@ -17,10 +17,11 @@
 -- already apply to withholding UPDATE from this role (E7, T1, N3): the
 -- absent grant IS the enforcement, and it is regression-guarded by
 -- TestIntegration_StratiumApp_CanReadButCannotWriteTierOverrides
--- (internal/store/pap_role_integration_test.go), which asserts the read
--- works and every write verb fails with insufficient_privilege — so a
--- future migration quietly adding one fails a test rather than passing
--- unnoticed.
+-- (internal/store/decide_tier_override_integration_test.go), which asserts
+-- the read works and every write verb fails with insufficient_privilege — so
+-- a future migration quietly adding one fails a test rather than passing
+-- unnoticed. That filename is itself load-bearing — see the file's own doc
+-- comment for why it must sort ahead of store_integration_test.go.
 --
 -- No new grant on tenant_epoch is needed alongside this one and none should
 -- be added: this role gains no write on tier_overrides, so it never fires
