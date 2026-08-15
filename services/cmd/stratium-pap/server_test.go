@@ -392,11 +392,12 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // each of the three resources A5 names, fifteen total (Task 3), plus Task
 // 4's own seven -- tool-catalog's four (list, create, get, update; no
 // delete -- migrations/000016_stratium_pap_role withholds that grant) and
-// actionRoutes' three (approve, deny, revoke) -- twenty-two total.
+// actionRoutes' three (approve, deny, revoke) -- plus Task 5's own two
+// (validate, test) -- twenty-four total.
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3
+	const wantTotal = 15 + 4 + 3 + 2
 	if len(routeTable) != wantTotal {
-		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes)",
+		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + 2 Task-5 authoring routes)",
 			len(routeTable), wantTotal)
 	}
 
@@ -414,6 +415,11 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	}
 	for pattern := range actionRoutes {
 		want[pattern] = false
+	}
+	// Task 5's two authoring routes: POST at the generic editor floor, not
+	// actionRoutes (RoleAdmin) -- see routeTable's own doc comment for why.
+	for _, verb := range []string{"POST /v1/policies/validate", "POST /v1/policies/test"} {
+		want[verb] = false
 	}
 
 	for _, rt := range routeTable {

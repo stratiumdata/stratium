@@ -159,12 +159,33 @@ type routeSpec struct {
 //     this table's own sanctioned "delete" (revoked/revoked_at, not a row
 //     removal). Unlike approvals, there is no additional identity check:
 //     N7's own contrast rules that taking authority away needs only a role.
+//
+// Task 5 adds two more, both POST, both under /v1/policies, and both
+// deliberately at the generic "POST -> editor" floor rather than a
+// RoleAdmin exception like actionRoutes below: validate and test read
+// policy and evaluate hypotheticals, but change nothing, which argues for
+// viewer -- except a pure viewer (GET only, by this table's own convention)
+// has no route that could ever ACT on either answer, since they cannot
+// POST/PUT a policy even if validate says it is fine. Authoring a candidate
+// -- even one that never persists -- is part of the write workflow, not the
+// read one, so gating it below editor would carve out the one POST route in
+// this whole table a viewer could reach while still never being able to use
+// what it produces. The other candidate concern -- that test-against-
+// sample-input can reveal what an existing policy would decide for a given
+// input, a disclosure question -- does not raise the floor either: a viewer
+// already has full-fidelity GET access to every stored policy's own text
+// (GET /v1/policies/{id}), so this endpoint's folded verdict discloses
+// strictly less than a viewer holding that text could already work out by
+// hand. Editor is the floor because of the workflow argument, not the
+// disclosure one.
 var routeTable = []routeSpec{
 	{Pattern: "GET /v1/policies", MinRole: RoleViewer, Handler: listPolicies},
 	{Pattern: "POST /v1/policies", MinRole: RoleEditor, Handler: createPolicy},
 	{Pattern: "GET /v1/policies/{id}", MinRole: RoleViewer, Handler: getPolicy},
 	{Pattern: "PUT /v1/policies/{id}", MinRole: RoleEditor, Handler: updatePolicy},
 	{Pattern: "DELETE /v1/policies/{id}", MinRole: RoleAdmin, Handler: deletePolicy},
+	{Pattern: "POST /v1/policies/validate", MinRole: RoleEditor, Handler: validatePolicy},
+	{Pattern: "POST /v1/policies/test", MinRole: RoleEditor, Handler: testPolicyAgainstSampleInput},
 
 	{Pattern: "GET /v1/agents", MinRole: RoleViewer, Handler: listAgents},
 	{Pattern: "POST /v1/agents", MinRole: RoleEditor, Handler: createAgent},
