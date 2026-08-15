@@ -68,9 +68,20 @@ func notBuilt(t *testing.T, cNum int, reason string) {
 	t.Skip("not built: " + reason)
 }
 
+// pointer is one package plus the test functions in it that prove some part
+// of a property. Built by in(); consumed only by provenElsewhere.
+type pointer struct {
+	pkg   string
+	tests []string
+}
+
+// in builds a pointer. Named for how it reads at the call site —
+// provenElsewhere(t, 16, in("internal/store", "TestEndToEnd")).
+func in(pkg string, tests ...string) pointer { return pointer{pkg: pkg, tests: tests} }
+
 // provenElsewhere records cNum as PROVEN ELSEWHERE — the property holds and
-// is tested for real, just in a package this pure, DB-free, network-free
-// suite structurally cannot reach — verifies the pointer against real
+// is tested for real, just in packages this pure, DB-free, network-free
+// suite structurally cannot reach — verifies every pointer against real
 // source, and skips.
 //
 // Verifying before skipping is the actual reason this is a function and not
@@ -79,13 +90,32 @@ func notBuilt(t *testing.T, cNum int, reason string) {
 // happened to read it and notice. verifyPointer (conformance_pointer_test.go)
 // makes a stale pointer fail the build instead — the only way a claim like
 // this stays honest in a codebase that keeps changing after it was written.
-func provenElsewhere(t *testing.T, cNum int, pkgPath string, testFuncs ...string) {
+//
+// It takes SEVERAL pointers, not one package and many test names, because
+// Phase 14 Task 8's reassessment of C5 found a property whose supports span
+// three packages — cmd/stratium-pep, internal/authz, and internal/store.
+// With a single package path the only ways to record that were to name one
+// package and quietly leave the rest of the claim unchecked, or to describe
+// the others in prose no gate reads. Both are the exact failure this helper
+// exists to prevent: a machine-checked pointer that checks less than it
+// appears to is worse than an honest skip, because it looks verified.
+// Widening the parameter costs one struct and makes every mechanism a
+// property rests on equally checkable.
+func provenElsewhere(t *testing.T, cNum int, pointers ...pointer) {
 	t.Helper()
-	if err := verifyPointer(pkgPath, testFuncs); err != nil {
-		t.Fatalf("C%d: proven-elsewhere pointer is stale: %v", cNum, err)
+	if len(pointers) == 0 {
+		t.Fatalf("C%d: provenElsewhere requires at least one pointer — a claim with nothing to check "+
+			"is the stale pointer this gate exists to catch", cNum)
+	}
+	parts := make([]string, 0, len(pointers))
+	for _, p := range pointers {
+		if err := verifyPointer(p.pkg, p.tests); err != nil {
+			t.Fatalf("C%d: proven-elsewhere pointer is stale: %v", cNum, err)
+		}
+		parts = append(parts, p.pkg+": "+strings.Join(p.tests, ", "))
 	}
 	conformanceOutcome[cNum] = outcomeProvenElsewhere
-	t.Skipf("proven elsewhere: %s: %s", pkgPath, strings.Join(testFuncs, ", "))
+	t.Skip("proven elsewhere: " + strings.Join(parts, "; "))
 }
 
 // TestConformanceTally lives at the bottom of conformance_test.go, not

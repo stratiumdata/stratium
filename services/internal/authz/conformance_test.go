@@ -88,9 +88,66 @@ func TestC4_TierOverrideRaiseOnly(t *testing.T) {
 	}
 }
 
+// C5 reads, in spec §7's own words, "a tier override from an agent-writable
+// source is never honored." It is a D1 property — the component being
+// policed must not declare its own authority — and it stayed NOT BUILT for
+// thirteen phases behind the reason "Phase 2: requires the PAP override
+// write path."
+//
+// That reason named a support, not the property, and the phase plan
+// inherited the confusion: C5 was summarised there as "the PAP override
+// write path exists," which is not what §7 says and would have made this a
+// pass the moment Task 3 shipped CreateTierOverride. A write path existing
+// proves nothing about whether an override from the WRONG writer is
+// honored. Read the property, not its skip reason.
+//
+// Four mechanisms hold it up, and a pointer set naming fewer than all four
+// would be an overclaim — which is why provenElsewhere now takes several
+// packages (see its own doc comment; C5 is the property that forced it):
+//
+//  1. No PEP sends declared_tier at all, on any of the four surfaces.
+//     There is no agent-supplied tier for the PDP to honor in the first
+//     place. Asserted on the wire against a real decoded DecideRequest,
+//     once per surface.
+//  2. If one arrived anyway, it is cross-checked rather than trusted:
+//     DeriveTier ignores it when deriving (TestDeriveTier_IgnoresDeclaredTier)
+//     and CheckDeclaredTier denies an under-declaration
+//     (TestCheckDeclaredTier_UnderDeclarationDenies, which is also C1). This
+//     mechanism alone lives in THIS package and does pass here — but a
+//     property is not proven by its one locally-reachable support.
+//  3. The tier_overrides table is writable only by stratium_pap, the admin
+//     plane's own role, which is reachable only by an operator holding a
+//     verified OIDC token from the customer's IdP. Proven live: the role
+//     can write, an unverified caller is refused every route including
+//     POST /v1/tier-overrides, and a lowering row inserted DIRECTLY into the
+//     table — satisfying the schema's own CHECK, never passing through the
+//     PAP — is dropped at read time rather than honored, which is the case
+//     that most literally IS this property.
+//  4. The PDP holds SELECT on that table and nothing else (T6,
+//     migrations/000017_tier_overrides_serving_grant). A PDP that could
+//     write one would be exactly the D1 defect.
+//
+// Not forced to a pass. Three of the four are facts about a wire format, a
+// database grant, and a live HTTP surface — none of which internal/authz,
+// which has no database handle, no network client, and no ambient clock
+// (types.go's package doc), can express even in principle. Same shape as
+// C16, C18-C24.
 func TestC5_AgentWritableOverrideNotHonored(t *testing.T) {
 	markRan(5)
-	notBuilt(t, 5, "Phase 2: requires the PAP override write path")
+	provenElsewhere(t, 5,
+		in("cmd/stratium-pep",
+			"TestRunHook_RequestCarriesRawInputAndNoDeclaredTier",
+			"TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier",
+			"TestCheck_NeverSendsDeclaredTier",
+			"TestAuthorize_NeverSendsDeclaredTier"),
+		in("internal/authz",
+			"TestDeriveTier_IgnoresDeclaredTier",
+			"TestCheckDeclaredTier_UnderDeclarationDenies"),
+		in("internal/store",
+			"TestIntegration_PAPRole_BumpsOnGovernedTableWrites",
+			"TestIntegration_StratiumApp_CanReadButCannotWriteTierOverrides",
+			"TestIntegration_TierOverride_DirectlyInsertedLoweringRowIsDroppedAtReadTime",
+			"TestIntegration_PAPE2E_UnverifiedTokenIsRefusedEverywhere"))
 }
 
 // TestC6_DelegationClampedToPrincipalAuthority is the property Phase 2d
@@ -299,12 +356,24 @@ func TestC15_AuditChainDetectsMutation(t *testing.T) {
 // even compile this file.
 func TestC16_FailedAuditWriteDeniesAction(t *testing.T) {
 	markRan(16)
-	provenElsewhere(t, 16, "internal/store", "TestEndToEnd")
+	provenElsewhere(t, 16, in("internal/store", "TestEndToEnd"))
 }
 
+// C17's reason was re-checked in Phase 14 Task 8 rather than assumed, and
+// its SUBSTANCE still holds: nothing in this tree encrypts an audit row's
+// stored plaintext or has a per-tenant key to destroy. migrations/000003_
+// audit_chain.up.sql and pkg/audit/chain.go both still say so in as many
+// words. internal/token's key (K1) is one process-wide ES256 pair for
+// signing this system's OWN delegation tokens, which is a different
+// subsystem and not a step toward this one.
+//
+// The "Phase 2+" prefix, however, had gone stale twelve phases ago and is
+// dropped: a phase number nobody revisits turns a live reason into an
+// archaeological one. What is missing is named instead.
 func TestC17_CryptoShreddingPreservesChain(t *testing.T) {
 	markRan(17)
-	notBuilt(t, 17, "Phase 2+: blocked on per-tenant key management (spec §8)")
+	notBuilt(t, 17, "no encrypted audit plaintext and no per-tenant key management exists yet "+
+		"(spec §8; migrations/000003_audit_chain.up.sql and pkg/audit/chain.go both defer it)")
 }
 
 // C18 reads "a cross-tenant read is impossible at the data layer, not
@@ -329,9 +398,9 @@ func TestC17_CryptoShreddingPreservesChain(t *testing.T) {
 // other way.
 func TestC18_CrossTenantReadImpossible(t *testing.T) {
 	markRan(18)
-	provenElsewhere(t, 18, "internal/store",
+	provenElsewhere(t, 18, in("internal/store",
 		"TestIntegration_Multi_CrossTenantIsolationAcrossLanguages",
-		"TestIntegration_Escalation_CrossTenantCannotReadOrApprove")
+		"TestIntegration_Escalation_CrossTenantCannotReadOrApprove"))
 }
 
 // C19 reads "with the PDP unreachable and no valid cache entry, every
@@ -399,9 +468,9 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 // property is real and now proven, just never provable at this layer.
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	provenElsewhere(t, 19, "internal/store",
+	provenElsewhere(t, 19, in("internal/store",
 		"TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies",
-		"TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing")
+		"TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing"))
 }
 
 // TestC20_StaleEpochCacheEntryNotServed is C20: an entry cached before a
@@ -437,7 +506,7 @@ func TestC19_UnreachablePDPDenies(t *testing.T) {
 // at this layer.
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 	markRan(20)
-	provenElsewhere(t, 20, "internal/store", "TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry")
+	provenElsewhere(t, 20, in("internal/store", "TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry"))
 }
 
 // C21 reads "escalation routes to the root principal, not an intermediate
@@ -467,9 +536,9 @@ func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 // their own skip reasons for the precedent this follows.
 func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 	markRan(21)
-	provenElsewhere(t, 21, "internal/pdpgrpc",
+	provenElsewhere(t, 21, in("internal/pdpgrpc",
 		"TestDecide_Escalation_CreatesApprovalWithRootPrincipalAsApprover",
-		"TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate")
+		"TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate"))
 }
 
 // C22 reads "escalation timeout denies." Its reason used to say "Phase 2:
@@ -532,12 +601,12 @@ func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 // real, proven, at a layer this file cannot reach.
 func TestC22_EscalationTimeoutDenies(t *testing.T) {
 	markRan(22)
-	provenElsewhere(t, 22, "cmd/stratium-pep",
+	provenElsewhere(t, 22, in("cmd/stratium-pep",
 		"TestRunHook_Escalate_TimeoutStillPendingDenies",
 		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
 		"TestDecideAndRelay_EscalationTimeout_Denies",
 		"TestAuthorize_EscalationTimeout_Denies",
-		"TestHandleStream_EscalationTimeout_DeniesWithoutForwarding")
+		"TestHandleStream_EscalationTimeout_DeniesWithoutForwarding"))
 }
 
 // C23 reads "on a non-blocking surface, escalate returns deny plus a
@@ -577,8 +646,8 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 // pointer in this file.
 func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 	markRan(23)
-	provenElsewhere(t, 23, "internal/store",
-		"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds")
+	provenElsewhere(t, 23, in("internal/store",
+		"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds"))
 }
 
 // TestC24_ExpiredDelegationDenied is C24: an expired TOKEN is denied even
@@ -616,12 +685,23 @@ func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 // at this layer.
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	markRan(24)
-	provenElsewhere(t, 24, "internal/store", "TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry")
+	provenElsewhere(t, 24, in("internal/store", "TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry"))
 }
 
+// C25's reason was re-checked the same way in Phase 14 Task 8, and is also
+// still true in substance: the string "DPoP" appears nowhere in services/ or
+// proto/ outside this file and the phase plans that keep deferring it. Phase
+// 9 built real signed delegation tokens, which is the layer DPoP would bind
+// a proof-of-possession key to, but binding is the part that does not exist
+// — a token is presented as a bearer credential today, with nothing proving
+// the presenter holds a matching key.
+//
+// Same treatment as C17 above for its own stale "Phase 2" prefix.
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
 	markRan(25)
-	notBuilt(t, 25, "Phase 2: DPoP verification lives in the PDP transport layer")
+	notBuilt(t, 25, "no DPoP anywhere in this tree: delegation tokens are presented as bearer "+
+		"credentials with no proof-of-possession binding (spec §8); verification would live in the "+
+		"PDP transport layer")
 }
 
 // conformanceNames is the authoritative list of C-numbered properties this

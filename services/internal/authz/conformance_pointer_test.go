@@ -151,16 +151,35 @@ func servicesRoot() (string, error) {
 
 // TestVerifyPointer_FindsRealTestFunctions is the positive case, run
 // against the exact pointers conformance_test.go wires into provenElsewhere
-// for C16, C18, C21, C22, and C23. If a future rename ever broke one of
-// those pointers, this test — not just a full run of make conformance —
-// names it directly, without needing every one of the 25 conformance
-// properties to execute first.
+// for C5, C16, C18, C19, C20, C21, C22, C23, and C24. If a future rename
+// ever broke one of those pointers, this test — not just a full run of make
+// conformance — names it directly, without needing every one of the 25
+// conformance properties to execute first.
 func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 	tests := []struct {
 		name      string
 		pkgPath   string
 		testFuncs []string
 	}{
+		// C5 spans three packages -- the only property here that does. Each
+		// group is a separate row for the same reason the others are single
+		// rows: a failure names the package whose test moved.
+		{"C5/pep", "cmd/stratium-pep", []string{
+			"TestRunHook_RequestCarriesRawInputAndNoDeclaredTier",
+			"TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier",
+			"TestCheck_NeverSendsDeclaredTier",
+			"TestAuthorize_NeverSendsDeclaredTier",
+		}},
+		{"C5/authz", "internal/authz", []string{
+			"TestDeriveTier_IgnoresDeclaredTier",
+			"TestCheckDeclaredTier_UnderDeclarationDenies",
+		}},
+		{"C5/store", "internal/store", []string{
+			"TestIntegration_PAPRole_BumpsOnGovernedTableWrites",
+			"TestIntegration_StratiumApp_CanReadButCannotWriteTierOverrides",
+			"TestIntegration_TierOverride_DirectlyInsertedLoweringRowIsDroppedAtReadTime",
+			"TestIntegration_PAPE2E_UnverifiedTokenIsRefusedEverywhere",
+		}},
 		{"C16", "internal/store", []string{"TestEndToEnd"}},
 		{"C18", "internal/store", []string{
 			"TestIntegration_Multi_CrossTenantIsolationAcrossLanguages",
