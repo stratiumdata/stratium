@@ -1,0 +1,115 @@
+{
+  "realm": "stratium",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "attributes": {
+    "frontendUrl": "http://keycloak:8080"
+  },
+  "groups": [
+    { "name": "stratium-admins" },
+    { "name": "stratium-editors" },
+    { "name": "stratium-viewers" },
+    { "name": "all-staff" }
+  ],
+  "clients": [
+    {
+      "clientId": "stratium-pap",
+      "name": "Stratium admin plane",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:*", "http://localhost:*/*", "http://127.0.0.1:*/*"],
+      "webOrigins": ["*"],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "full.path": "false",
+            "claim.name": "groups",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "stratium-pap-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "stratium-pap",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "pap-admin",
+      "enabled": true,
+      "email": "pap-admin@example.com",
+      "emailVerified": true,
+      "firstName": "Pap",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "pap_admin_local_dev_only", "temporary": false }
+      ],
+      "groups": ["/stratium-admins"]
+    },
+    {
+      "username": "pap-editor",
+      "enabled": true,
+      "email": "pap-editor@example.com",
+      "emailVerified": true,
+      "firstName": "Pap",
+      "lastName": "Editor",
+      "credentials": [
+        { "type": "password", "value": "pap_editor_local_dev_only", "temporary": false }
+      ],
+      "groups": ["/stratium-editors"]
+    },
+    {
+      "username": "pap-viewer",
+      "enabled": true,
+      "email": "pap-viewer@example.com",
+      "emailVerified": true,
+      "firstName": "Pap",
+      "lastName": "Viewer",
+      "credentials": [
+        { "type": "password", "value": "pap_viewer_local_dev_only", "temporary": false }
+      ],
+      "groups": ["/stratium-viewers"]
+    },
+    {
+      "username": "pap-multi",
+      "enabled": true,
+      "email": "pap-multi@example.com",
+      "emailVerified": true,
+      "firstName": "Pap",
+      "lastName": "Multi",
+      "credentials": [
+        { "type": "password", "value": "pap_multi_local_dev_only", "temporary": false }
+      ],
+      "groups": ["/all-staff", "/stratium-admins"]
+    },
+    {
+      "username": "extauthz-approver",
+      "enabled": true,
+      "email": "extauthz-integration@example.com",
+      "emailVerified": true,
+      "firstName": "Extauthz",
+      "lastName": "Approver",
+      "credentials": [
+        { "type": "password", "value": "extauthz_approver_local_dev_only", "temporary": false }
+      ],
+      "groups": ["/stratium-admins"]
+    }
+  ]
+}

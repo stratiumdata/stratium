@@ -305,6 +305,33 @@ var (
 	cacheConn   *grpc.ClientConn
 	cacheTenant string
 	cacheAddr   string
+
+	// papPdpClient and papTenant back Phase 14 Task 8's live admin-plane
+	// proofs (pap_e2e_integration_test.go): a ninth, independently
+	// configured PDP (deploy/docker/docker-compose.yml's pdp-pap service)
+	// and its own tenant, for the same reason every dedicated PDP above has
+	// one — stated most sharply in that compose service's own comment, since
+	// these proofs do not merely read shared state, they CREATE policies,
+	// revoke delegations, and write tier overrides, every one of which bumps
+	// tenant_epoch under any test unlucky enough to share the tenant.
+	papPdpClient pdpgrpc.PDPServiceClient
+	papTenant    string
+
+	// papAddr is the live stratium-pap process serving papTenant, and
+	// papExtauthzAddr a SECOND stratium-pap process serving envoyTenant.
+	// Two processes rather than one because N1 makes the tenant startup
+	// configuration and forbids a request from carrying one — see that
+	// compose service's own comment. Proof 4 (extauthz_integration_test.go)
+	// is the only user of the second.
+	papAddr         string
+	papExtauthzAddr string
+
+	// keycloakAddr is the real OIDC provider both PAP processes verify
+	// against (deploy/docker/keycloak/stratium-realm.json). Reachable from
+	// the host only so this suite can obtain real operator tokens the same
+	// way the admin UI's browser does; the PAPs themselves reach it over the
+	// compose network, at the issuer URL the realm pins.
+	keycloakAddr string
 )
 
 func TestMain(m *testing.M) {
@@ -334,6 +361,11 @@ func runTestMain(m *testing.M) int {
 	epochTenant = os.Getenv("STRATIUM_IT_EPOCH_TENANT_ID")
 	pdpCacheAddr := os.Getenv("STRATIUM_IT_PDP_CACHE_ADDR")
 	cacheTenant = os.Getenv("STRATIUM_IT_CACHE_TENANT_ID")
+	papPdpAddr := os.Getenv("STRATIUM_IT_PDP_PAP_ADDR")
+	papTenant = os.Getenv("STRATIUM_IT_PAP_TENANT_ID")
+	papAddr = os.Getenv("STRATIUM_IT_PAP_ADDR")
+	papExtauthzAddr = os.Getenv("STRATIUM_IT_PAP_EXTAUTHZ_ADDR")
+	keycloakAddr = os.Getenv("STRATIUM_IT_KEYCLOAK_ADDR")
 	if dbURL == "" || servingDBURL == "" || papDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
 		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
 		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" ||
@@ -348,14 +380,30 @@ func runTestMain(m *testing.M) int {
 				"and STRATIUM_IT_CACHE_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
+	// Phase 14 Task 8's own five, checked here rather than by lengthening
+	// the condition above, which already spans four lines. Same all-at-once
+	// contract; the list itself lives next to the code that consumes it
+	// (papE2ERequiredEnv, pap_e2e_integration_test.go).
+	var missingPAPEnv []string
+	for i, v := range []string{papPdpAddr, papTenant, papAddr, papExtauthzAddr, keycloakAddr} {
+		if v == "" {
+			missingPAPEnv = append(missingPAPEnv, papE2ERequiredEnv[i])
+		}
+	}
+	if len(missingPAPEnv) > 0 {
+		fmt.Fprintln(os.Stderr, papE2EEnvError(missingPAPEnv))
+		return 1
+	}
+
 	tenants := map[string]bool{
 		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true, proxyTenant: true,
-		epochTenant: true, cacheTenant: true,
+		epochTenant: true, cacheTenant: true, papTenant: true,
 	}
-	if len(tenants) != 8 {
+	if len(tenants) != 9 {
 		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
 			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_EPOCH_TENANT_ID, "+
-			"STRATIUM_IT_CACHE_TENANT_ID, and the test's hardcoded second tenant must all be distinct from one another")
+			"STRATIUM_IT_CACHE_TENANT_ID, STRATIUM_IT_PAP_TENANT_ID, and the test's hardcoded second tenant "+
+			"must all be distinct from one another")
 		return 1
 	}
 
@@ -515,6 +563,14 @@ func runTestMain(m *testing.M) int {
 	fmt.Fprintf(os.Stdout, "%s reported SERVING after %s (this is the measured wait, not an assumption)\n", pdpCacheAddr, waited)
 	cacheConn = cacheGRPCConn
 	cacheAddr = pdpCacheAddr
+
+	papClient, closePAPConn, err := dialAndWaitForServing(ctx, papPdpAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-pap: %v\n", err)
+		return 1
+	}
+	defer closePAPConn()
+	papPdpClient = papClient
 
 	return m.Run()
 }

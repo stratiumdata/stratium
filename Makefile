@@ -109,7 +109,7 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	@$(COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
 	trap '$(COMPOSE) down -v --remove-orphans' EXIT; \
 	set -e; \
-	$(COMPOSE) up -d --build --wait --wait-timeout 120; \
+	$(COMPOSE) up -d --build --wait --wait-timeout 300; \
 	pg_port=$$($(COMPOSE) port postgres 5432 | sed -E 's/.*://'); \
 	pdp_port=$$($(COMPOSE) port pdp 50051 | sed -E 's/.*://'); \
 	pdp_narrow_port=$$($(COMPOSE) port pdp-narrow 50051 | sed -E 's/.*://'); \
@@ -121,7 +121,11 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	pep_proxy_port=$$($(COMPOSE) port pep-proxy 9292 | sed -E 's/.*://'); \
 	pdp_epoch_port=$$($(COMPOSE) port pdp-epoch 50051 | sed -E 's/.*://'); \
 	pdp_cache_port=$$($(COMPOSE) port pdp-cache 50051 | sed -E 's/.*://'); \
-	echo "postgres -> localhost:$$pg_port   pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port   pdp-epoch -> localhost:$$pdp_epoch_port   pdp-cache -> localhost:$$pdp_cache_port"; \
+	pdp_pap_port=$$($(COMPOSE) port pdp-pap 50051 | sed -E 's/.*://'); \
+	pap_port=$$($(COMPOSE) port stratium-pap 8080 | sed -E 's/.*://'); \
+	pap_extauthz_port=$$($(COMPOSE) port pap-extauthz 8080 | sed -E 's/.*://'); \
+	keycloak_port=$$($(COMPOSE) port keycloak 8080 | sed -E 's/.*://'); \
+	echo "postgres -> localhost:$$pg_port  pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port   pdp-epoch -> localhost:$$pdp_epoch_port   pdp-cache -> localhost:$$pdp_cache_port   pdp-pap -> localhost:$$pdp_pap_port   stratium-pap -> localhost:$$pap_port   pap-extauthz -> localhost:$$pap_extauthz_port   keycloak -> localhost:$$keycloak_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_SERVING_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PAP_DATABASE_URL="postgres://stratium_pap_login:stratium_pap_login_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
@@ -142,6 +146,11 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	STRATIUM_IT_CACHE_TENANT_ID="tenant-cache-integration" \
 	STRATIUM_IT_GRPC_TARGET_ADDR="localhost:$$grpc_target_port" \
 	STRATIUM_IT_PEP_PROXY_ADDR="localhost:$$pep_proxy_port" \
+	STRATIUM_IT_PDP_PAP_ADDR="localhost:$$pdp_pap_port" \
+	STRATIUM_IT_PAP_TENANT_ID="tenant-pap-e2e-integration" \
+	STRATIUM_IT_PAP_ADDR="localhost:$$pap_port" \
+	STRATIUM_IT_PAP_EXTAUTHZ_ADDR="localhost:$$pap_extauthz_port" \
+	STRATIUM_IT_KEYCLOAK_ADDR="localhost:$$keycloak_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
 .PHONY: help build test vet fmt lint proto conformance integration ui ui-test ui-clean

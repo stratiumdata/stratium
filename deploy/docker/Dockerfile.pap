@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+
+# Builds stratium-pap for Phase 14 Task 8's live-stack proofs: the admin
+# plane, and the only internet-facing component in this system. A third
+# Dockerfile in this directory rather than a shared, target-parameterized
+# one, for the same reason Dockerfile.pep is separate from Dockerfile: each
+# binary needs genuinely different runtime inputs, not just a different
+# entrypoint. stratium-pdp needs an ES256 signing key generated into the
+# image; stratium-pep needs none; and stratium-pap needs neither -- it holds
+# no signing key at all (it verifies an operator's OIDC token against the
+# customer's IdP, and mints nothing) -- but it does need something neither
+# of the others does: the built admin UI.
+#
+# THE ADMIN UI MUST ALREADY BE BUILT ON THE HOST before this image is built.
+# cmd/stratium-pap/ui.go carries `//go:embed dist`, resolved by the compiler
+# against services/cmd/stratium-pap/dist, so `go build ./cmd/stratium-pap`
+# below fails with "pattern dist: no matching files found" if that directory
+# is absent from the build context. That directory is git-ignored (root
+# .gitignore's bare `dist/`) deliberately -- see the Makefile's UI_DIST
+# comment for why a committed dist would defeat the embed test -- so it is
+# present only because something built it.
+#
+# Nothing here builds it. That is deliberate rather than an omission: the
+# Makefile already makes `ui` a prerequisite of every Go target INCLUDING
+# `integration`, which is the only thing that ever builds this image, so the
+# ordering is stated once, in one place, in the same rule that states it for
+# `build`, `test`, `vet`, and `lint`. Adding a Node builder stage here would
+# be a second, independently maintained copy of that knowledge (which Node
+# version, which lockfile, which output directory) that could drift from
+# clients/ui/vite.config.ts without anything noticing -- and it would run npm
+# on every image build, when the host's own incremental `ui` target has
+# already done exactly that work. A missing dist fails loudly at `go build`
+# with a message that names the problem, which is the failure mode this
+# choice trades for.
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /src/services
+COPY services/go.mod services/go.sum ./
+RUN go mod download
+
+COPY services/ ./
+
+# CGO_ENABLED=0: same reasoning as this directory's other two Dockerfiles --
+# every dependency here is pure Go (lib/pq, go-oidc, golang-migrate), so the
+# distroless "static" runtime stage below needs no libc.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/stratium-pap ./cmd/stratium-pap
+
+# Distroless, not golang:alpine -- same reasoning as this directory's other
+# two Dockerfiles, and it carries more weight here than for either of them:
+# this is the one binary in the system reachable from the internet, so
+# "nothing to build with, nothing to fetch with, no shell to get a foothold
+# in" is the image property that matters most for exactly this component.
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /out/stratium-pap /stratium-pap
+
+USER nonroot:nonroot
+ENTRYPOINT ["/stratium-pap"]

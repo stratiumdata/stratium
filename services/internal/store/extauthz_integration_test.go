@@ -624,22 +624,47 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 		t.Errorf("approval RootPrincipal = %q, want %q", pending.RootPrincipal, extauthzSubject)
 	}
 
-	// Approve out of band: a direct UPDATE, as the control plane, since the
-	// PDP's own serving role has no UPDATE grant on approvals (E7 --
+	// Approve out of band, THROUGH THE ADMIN PLANE. Until Phase 14 Task 8
+	// this step was a direct UPDATE issued by the test itself, standing in
+	// for a control plane that did not exist yet; the claim it supported was
+	// only ever "some privileged writer could resolve this." Now there is a
+	// real one: a live stratium-pap process (pap-extauthz, compose), a real
+	// operator, and a real OIDC token from a real IdP. Nothing in
+	// stratium-pdp or stratium-pep could perform this step either way -- the
+	// PDP's serving role holds no UPDATE grant on approvals at all (E7;
 	// TestIntegration_Approvals_ServingRoleCannotUpdate, above, proves that
-	// absence directly). Nothing in stratium-pdp or stratium-pep could have
-	// performed this step.
-	withTenantTx(t, envoyTenant, func(tx *sql.Tx) {
-		res, err := tx.ExecContext(t.Context(),
-			`UPDATE approvals SET status = 'approved', approved_by = $1, approved_at = NOW() WHERE id = $2`,
-			extauthzSubject, approvalUUID.String())
-		if err != nil {
-			t.Fatalf("control-plane UPDATE approvals: %v", err)
-		}
-		if n, err := res.RowsAffected(); err != nil || n != 1 {
-			t.Fatalf("control-plane UPDATE approvals: RowsAffected = %d, err = %v, want 1, nil", n, err)
-		}
-	})
+	// absence directly), and the PAP connects as a different role entirely.
+	// That absence is what makes routing the approval through the admin
+	// plane the ONLY way this retry can succeed.
+	//
+	// pap-extauthz, not the stratium-pap serving the Task 8 proofs: N1 fixes
+	// a PAP process's tenant at startup and forbids a request from carrying
+	// one, so approving a row in envoyTenant requires a process configured
+	// for envoyTenant. See that compose service's own comment.
+	//
+	// The operator is the realm user whose email is extauthzSubject, and
+	// that is not a coincidence to be tidied away: N7 (spec §4.10.1)
+	// requires an approver's own identity to equal the approval's
+	// root_principal, which the PDP populated from pep-extauthz's
+	// STRATIUM_PEP_SUBJECT. The negative below is what proves that gate is
+	// live rather than merely satisfied by luck -- a DIFFERENT admin, with
+	// every role privilege this route requires, is still refused.
+	wrongAdmin := papAccessToken(t, papAdminUser, papAdminPass)
+	if status, body := papDo(t, papExtauthzAddr, http.MethodPost,
+		"/v1/approvals/"+approvalID+"/approve", wrongAdmin, nil); status != http.StatusForbidden {
+		t.Fatalf("approving as an admin who is NOT the root principal = %d, want 403 (N7: a role is "+
+			"necessary and never sufficient); body: %s", status, body)
+	}
+
+	approver := papAccessToken(t, papExtauthzApproverUser, papExtauthzApproverPass)
+	var approved models.Approval
+	papJSON(t, papExtauthzAddr, http.MethodPost, "/v1/approvals/"+approvalID+"/approve", approver, nil, &approved)
+	if approved.Status != "approved" {
+		t.Fatalf("PAP approve returned status %q, want %q", approved.Status, "approved")
+	}
+	if approved.ID != approvalUUID {
+		t.Fatalf("PAP approve returned approval %s, want the pending %s", approved.ID, approvalUUID)
+	}
 
 	// The retry -- see this function's own doc comment for why it is a
 	// direct Decide call, not a second trip through Envoy. Tool and

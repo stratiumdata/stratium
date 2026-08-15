@@ -498,5 +498,219 @@ services:
     ports:
       - "50051"
 
+  # A REAL IdP, and the first component in this stack that authenticates a
+  # human. Phase 14 Task 8's proofs need one because N2 (spec §8) leaves
+  # exactly one way for an operator to reach the admin plane -- OIDC against
+  # a real provider, with no fallback of any kind, not even "for the test
+  # stack" -- so a hand-rolled token issuer here would be inventing the very
+  # claim shapes these proofs exist to discover. Every other surface in this
+  # project was proven against the real thing it fronts (a real `claude`
+  # session, a real Envoy, a real gRPC service), and each such run found
+  # something no constructed fixture had: Task 6's own fix round was a real
+  # IdP's token endpoint sitting on a DIFFERENT ORIGIN from its issuer,
+  # which broke the admin UI's Content-Security-Policy and which no
+  # hand-built test had suggested was possible.
+  #
+  # Keycloak, not Dex, which was Task 8's stated intent. One concrete reason:
+  # STRATIUM_PAP_ROLE_CLAIM must resolve to an ARRAY here. resolveRole
+  # (cmd/stratium-pap/role.go) accepts a string claim or a []any claim, and
+  # only the array branch carries highest-role-wins -- among an operator's
+  # matching groups the highest-ranked role is taken, which is the branch
+  # every real deployment uses and the one where a wrong answer silently
+  # OVER-privileges an operator rather than locking them out. Dex cannot
+  # produce that shape without a second backing service: its staticPasswords
+  # carry no groups at all (storage.Password is Email/Hash/Username/UserID),
+  # and its only groups-bearing connector that needs no external directory,
+  # mockCallback, returns a single hardcoded identity in a single group --
+  # enough for neither three roles nor an operator in two mapped groups. The
+  # remaining Dex route was an LDAP connector plus an OpenLDAP container and
+  # a bootstrap LDIF (two services, a second schema to get right); Keycloak
+  # is one service and one realm document. Task 8's brief names Keycloak
+  # explicitly as the sanctioned heavier alternative.
+  #
+  # start-dev, not start: this is an ephemeral, in-memory-database IdP for a
+  # test stack, torn down with the rest of it. --import-realm reads the
+  # single realm document mounted below, once, at first boot.
+  #
+  # The realm sets frontendUrl = http://keycloak:8080 (an attribute in
+  # stratium-realm.json, not a KC_HOSTNAME environment variable). That is
+  # load-bearing and not cosmetic. Without it Keycloak derives the issuer
+  # from each request's own Host header, so a token the integration test
+  # fetches from localhost:<published port> would carry
+  # iss=http://localhost:<port>/realms/stratium while stratium-pap, which
+  # reaches the same Keycloak over the compose network, is configured for
+  # http://keycloak:8080/realms/stratium -- and go-oidc would reject every
+  # such token on the issuer check alone. Pinning it in the realm rather
+  # than via KC_HOSTNAME keeps Keycloak willing to SERVE requests arriving
+  # under any Host (the test's own localhost:<port> included) while still
+  # issuing, and advertising in discovery, the one issuer the PAP trusts.
+  #
+  # Health is checked against the realm's own discovery document rather than
+  # KC_HEALTH_ENABLED's /health/ready, because that is the condition the two
+  # PAP services below actually depend on: they perform OIDC discovery at
+  # startup (cmd/stratium-pap/main.go's run, before serving) and fail to
+  # start at all if it does not answer, so "the process is up" is the wrong
+  # question and "this realm is imported and serving discovery" is the right
+  # one. The image has neither curl nor wget, but /bin/sh is bash, so bash's
+  # own /dev/tcp is the available HTTP client (verified against this exact
+  # image, not assumed).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: keycloak_admin_local_dev_only
+    volumes:
+      - ./keycloak/stratium-realm.json:/opt/keycloak/data/import/stratium-realm.json:ro
+    ports:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /realms/stratium/.well-known/openid-configuration HTTP/1.1\r\nHost: keycloak:8080\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"issuer"' <&3
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+  # Ninth PDP instance, and the decision-plane half of Task 8's live admin-
+  # plane proofs: the PDP whose Decide calls must OBSERVE what an operator
+  # wrote through stratium-pap below. Its own tenant, for the reason every
+  # dedicated PDP above states and this one states most sharply -- these
+  # proofs do not merely read shared state, they CREATE policies, revoke
+  # delegations, and write tier overrides, every one of which bumps
+  # tenant_epoch (migrations/000015_tenant_epoch_trigger). A test sharing
+  # this tenant would have its own epoch assertions moved under it by a
+  # write it never made.
+  #
+  # Shares the same postgres instance as every PDP above (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart) and the full default policy-
+  # language registry: these proofs only ever need cedar.
+  pdp-pap:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-pap-e2e-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # See the "pdp" service's own comment on this variable above -- same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+    ports:
+      - "50051"
+
+  # The admin plane itself, live, for the first time: the most privileged
+  # component in this system and the only internet-facing one, holding
+  # exactly the write credentials the PDP is denied (spec §4.10, N3). Built
+  # from Dockerfile.pap -- see that file for why the admin UI must already be
+  # built on the host before this image can be.
+  #
+  # Connects as stratium_pap_login (deploy/docker/init-db.sql;
+  # migrations/000016_stratium_pap_role), NEVER as "stratium". The two roles
+  # are disjoint by design: this one holds INSERT/UPDATE/DELETE on the six
+  # governed tables, the PDP's holds SELECT and nothing more on
+  # tier_overrides/approvals/tool_catalog, and those ABSENT grants are what
+  # E7, T1, and T6 actually rest on.
+  #
+  # Every required value below has no default, deliberately (config.go's own
+  # doc comment): a missing one fails at startup naming every missing key at
+  # once, rather than being guessed. STRATIUM_PAP_ROLE_CLAIM names "groups"
+  # -- the array claim keycloak's realm mapper emits -- and not "email",
+  # which would exercise resolveRole's string branch and leave production's
+  # actual shape unproven. The three group lists map the realm's own group
+  # names; VIEWER_GROUPS deliberately holds TWO, so that "all-staff"
+  # (viewer) sitting alongside "stratium-admins" (admin) on the pap-multi
+  # operator makes highest-role-wins actually run rather than being a branch
+  # nothing reaches.
+  #
+  # STRATIUM_PAP_APPROVER_CLAIM is "email", a SECOND and independently
+  # configured claim from the role claim (N8) because it answers a different
+  # question: N7 compares it against an approval's own root_principal, which
+  # a PEP populates from its STRATIUM_PEP_SUBJECT configuration (an email in
+  # practice), and an IdP's opaque "sub" was never going to match that.
+  # role.go's resolveApproverIdentity additionally requires email_verified
+  # to be true when the claim is literally named "email"; the realm's users
+  # are all emailVerified, so that gate passes for real rather than being
+  # bypassed.
+  stratium-pap:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.pap
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      STRATIUM_PAP_TENANT_ID: tenant-pap-e2e-integration
+      STRATIUM_PAP_DATABASE_URL: postgres://stratium_pap_login:stratium_pap_login_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_PAP_OIDC_ISSUER: http://keycloak:8080/realms/stratium
+      STRATIUM_PAP_OIDC_AUDIENCE: stratium-pap
+      STRATIUM_PAP_OIDC_CLIENT_ID: stratium-pap
+      STRATIUM_PAP_ROLE_CLAIM: groups
+      STRATIUM_PAP_APPROVER_CLAIM: email
+      STRATIUM_PAP_ADMIN_GROUPS: stratium-admins
+      STRATIUM_PAP_EDITOR_GROUPS: stratium-editors
+      STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers,all-staff
+      STRATIUM_PAP_LISTEN_ADDR: :8080
+    ports:
+      - "8080"
+
+  # A SECOND stratium-pap, on the extauthz proof's own tenant. Not
+  # redundancy: N1 makes the tenant startup configuration and forbids any
+  # request from carrying one, so a PAP process serves exactly one tenant
+  # for its whole life. Task 8's proof 4 approves an escalation that a real
+  # Envoy -> pep-extauthz -> pdp-extauthz round trip created, and that
+  # approval row lives in tenant-extauthz-integration; the stratium-pap
+  # service above, fixed to tenant-pap-e2e-integration, cannot see it, and
+  # widening it to could only be done by breaking N1. A second process is
+  # the only shape this system permits.
+  #
+  # Safe to point at a tenant another test owns, unlike the write-heavy
+  # proofs above, because of what an approval write does NOT do:
+  # migrations/000015_tenant_epoch_trigger names policies, agents,
+  # tool_catalog, and tier_overrides (every operation) plus delegations
+  # (UPDATE/DELETE), and approvals is absent from that list -- deciding an
+  # approval bumps no epoch. The only row it touches is the one the extauthz
+  # proof itself created moments earlier and is waiting to resolve.
+  #
+  # Same Keycloak, same client, same operators. The user whose email is
+  # extauthz-integration@example.com exists in the realm specifically for
+  # this service: it must equal pep-extauthz's own STRATIUM_PEP_SUBJECT
+  # above, because that value is what the PDP records as the escalation's
+  # root_principal and what N7 requires the approving operator's own
+  # identity to equal.
+  pap-extauthz:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.pap
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      STRATIUM_PAP_TENANT_ID: tenant-extauthz-integration
+      STRATIUM_PAP_DATABASE_URL: postgres://stratium_pap_login:stratium_pap_login_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_PAP_OIDC_ISSUER: http://keycloak:8080/realms/stratium
+      STRATIUM_PAP_OIDC_AUDIENCE: stratium-pap
+      STRATIUM_PAP_OIDC_CLIENT_ID: stratium-pap
+      STRATIUM_PAP_ROLE_CLAIM: groups
+      STRATIUM_PAP_APPROVER_CLAIM: email
+      STRATIUM_PAP_ADMIN_GROUPS: stratium-admins
+      STRATIUM_PAP_EDITOR_GROUPS: stratium-editors
+      STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers,all-staff
+      STRATIUM_PAP_LISTEN_ADDR: :8080
+    ports:
+      - "8080"
+
 volumes:
   pgdata:
