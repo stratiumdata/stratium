@@ -1074,6 +1074,49 @@ that the live path already honours.
 
 ---
 
+### 4.10.3 The admin UI (2026-08-15)
+
+§6.4 item 16 retains a React/Vite/shadcn UI, re-scoped to agent authorization.
+It is the first non-Go artifact in this repository, which is most of what makes
+it different from every other task.
+
+**N12 — the operator's token lives in memory only.** Authorization code with
+PKCE; never `localStorage`, never `sessionStorage`. A refresh loses it and
+re-authenticates.
+
+Implicit flow is deprecated and returns tokens in the URL fragment, where they
+reach history and referrers. Storage APIs are readable by any XSS in the admin
+UI, and **this token can revoke every delegation and approve any escalation in
+the tenant** — the blast radius that makes the usual pragmatic answer wrong here.
+The cost is real and accepted: silent renewal by hidden iframe is increasingly
+blocked by third-party cookie restrictions, so a refresh may mean a visible
+redirect.
+
+**N13 — the UI is embedded in the PAP binary, and its build, lint, and tests
+join the standard gate.** One artifact, matching how the PDP and PEP ship.
+
+The gate part is not optional. Nothing in `build`, `test`, `vet`, `lint`,
+`conformance`, or `integration` would notice a UI that stopped compiling, and
+this project has repeatedly found that an unexercised thing is a broken thing.
+Embedding also introduces a build-order dependency, and with it a specific trap:
+a placeholder that lets `go build` succeed against an empty directory ships an
+empty admin UI silently. **A test must assert the embedded filesystem contains a
+real build**, so an unbuilt UI fails the gate rather than deploying blank.
+
+**N14 — the UI carries no authorization.** Hiding a button is not enforcement.
+Every action is already refused server-side for an operator lacking the role,
+and the UI only reflects that. Proven by a test that exercises the API directly
+as a `viewer`, bypassing the client entirely.
+
+**The policy screen does not display `effect` as truth.** This is precisely the
+screen Phase 4a named when it removed `StoredPolicy.Effect` from the read path —
+*"trusting this column at read time would let a PAP screen listing policies show
+the opposite of what the policy does."* Since `effect` is meaningful only for
+Cedar and JSON and a fixed sentinel for Rego and XACML, the UI shows it only
+where it means something and shows the derived effect otherwise.
+
+---
+
 ### 4.10.2 Authoring endpoints (2026-08-14)
 
 §6.4 item 15 promises validation, test-against-sample-input, and dry-run replay.
