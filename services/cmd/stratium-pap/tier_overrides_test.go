@@ -19,12 +19,45 @@ import (
 	"stratium/pkg/models"
 )
 
+// expectTierOverrideBaselineRead queues the tool_catalog SELECT that
+// store.CreateTierOverride/UpdateTierOverride perform inside the write's own
+// transaction: since Phase 14 Task 7 the raise-only rule compares against the
+// resolution BENEATH the override — the tenant's own catalog entry where one
+// exists, the built-in otherwise — so every write on this resource reads that
+// table first. An empty result is the "tenant has catalogued nothing" case,
+// under which the baselines below are DefaultCatalog()'s, exactly as they
+// were before that task.
+func expectTierOverrideBaselineRead(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("FROM tool_catalog").WillReturnRows(
+		sqlmock.NewRows([]string{"tool_name", "action_tier", "verb", "resource_field", "command_field"}))
+}
+
+// expectTierOverrideRefusedAfterBaselineRead is the shape a refused write now
+// takes: the transaction opens and the catalog is read, then nothing else
+// happens. Before Task 7 a refusal reached the database not at all, because
+// the baseline was a pure function; the property that matters is unchanged
+// and still asserted — no write query is ever queued, so a write reaching one
+// fails as an unexpected query.
+func expectTierOverrideRefusedAfterBaselineRead(mock sqlmock.Sqlmock) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectTierOverrideBaselineRead(mock)
+	mock.ExpectRollback()
+}
+
 func TestCreateTierOverride_Success(t *testing.T) {
 	f := newTestServerFixture(t)
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	expectWriteAndAudit(f.mock, "INSERT INTO tier_overrides",
-		sqlmock.NewRows([]string{"id", "created_at"}).AddRow(id.String(), now))
+	f.mock.ExpectBegin()
+	f.mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectTierOverrideBaselineRead(f.mock)
+	f.mock.ExpectQuery("INSERT INTO tier_overrides").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(id.String(), now))
+	f.mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("FROM audit_chain").WillReturnError(sql.ErrNoRows)
+	f.mock.ExpectExec("INSERT INTO audit_chain").WillReturnResult(sqlmock.NewResult(0, 1))
+	f.mock.ExpectCommit()
 
 	// "Read"'s built-in is READ_ONLY (1); raising to INTERNAL_MODIFY (2)
 	// is legitimate.
@@ -49,10 +82,11 @@ func TestCreateTierOverride_Success(t *testing.T) {
 // own HTTP-level proof, end to end through the real route: "Write" has a
 // built-in of INTERNAL_MODIFY (2); declaring it READ_ONLY (1) is exactly
 // the "declare a destructive action harmless" attempt server-side
-// derivation exists to prevent (task brief's own wording). The
-// zero-expectation mock proves it never reached the database.
+// derivation exists to prevent (task brief's own wording). The expectations
+// stop at the baseline read, so nothing was ever written.
 func TestCreateTierOverride_LoweringRefused_NothingPersisted(t *testing.T) {
 	f := newTestServerFixture(t)
+	expectTierOverrideRefusedAfterBaselineRead(f.mock)
 
 	body := models.TierOverride{ToolOrVerb: "Write", ActionTier: models.ActionTierReadOnly}
 	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/tier-overrides", f.token(t, "org-admins"), body)
@@ -81,6 +115,7 @@ func TestGetTierOverride_NotFound(t *testing.T) {
 func TestUpdateTierOverride_LoweringRefused(t *testing.T) {
 	f := newTestServerFixture(t)
 	id := uuid.New()
+	expectTierOverrideRefusedAfterBaselineRead(f.mock)
 
 	body := models.TierOverride{ToolOrVerb: "Write", ActionTier: models.ActionTierReadOnly}
 	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/tier-overrides/"+id.String(), f.token(t, "org-admins"), body)

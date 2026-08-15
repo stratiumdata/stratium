@@ -1,0 +1,36 @@
+-- The serving identity's read of tier_overrides (spec §4.4's override step,
+-- Phase 14 Task 7 T4/T6). 000005_serving_app_grants.up.sql granted agents
+-- and delegations only and said so explicitly: "policies, entitlements, and
+-- tier_overrides have no reader or writer yet... widen this migration's
+-- down/up pair (or add another) when a Phase 2 slice gives one of those
+-- tables a caller." 000007 did that for policies; this is the same for
+-- tier_overrides. internal/store.LoadTierOverrides is the caller, and
+-- pdpgrpc.Decide is its only one.
+--
+-- SELECT and nothing else, and the omission is the point, not a default to
+-- be widened later by anyone finding it inconvenient. stratium_app is the
+-- identity the PDP serves requests as; an INSERT or UPDATE here would let
+-- the component being policed rewrite its own action-tier classification —
+-- spec defect D1, and precisely what conformance property C5 ("an override
+-- from an agent-writable source is never honored") exists to forbid. This
+-- is the same reasoning 000012_approvals.up.sql and 000013_tool_catalog.up.sql
+-- already apply to withholding UPDATE from this role (E7, T1, N3): the
+-- absent grant IS the enforcement, and it is regression-guarded by
+-- TestIntegration_StratiumApp_CanReadButCannotWriteTierOverrides
+-- (internal/store/pap_role_integration_test.go), which asserts the read
+-- works and every write verb fails with insufficient_privilege — so a
+-- future migration quietly adding one fails a test rather than passing
+-- unnoticed.
+--
+-- No new grant on tenant_epoch is needed alongside this one and none should
+-- be added: this role gains no write on tier_overrides, so it never fires
+-- 000015_tenant_epoch_trigger's bump_tenant_epoch() through this table. The
+-- trigger already fires for the PAP's writes (000016_stratium_pap_role
+-- grants stratium_pap what that needs), which is the whole of this table's
+-- cache-invalidation story — confirmed, not added to.
+--
+-- RLS needs nothing here either: tier_overrides has been ENABLE + FORCE ROW
+-- LEVEL SECURITY with the tenant_isolation policy since
+-- 000002_rls.up.sql, which applies to every role without BYPASSRLS. A grant
+-- widens which VERBS a role may attempt, never which ROWS it then sees.
+GRANT SELECT ON tier_overrides TO stratium_app;

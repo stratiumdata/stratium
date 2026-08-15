@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -62,6 +63,19 @@ type Store interface {
 	// their own per-tenant data — kept consistent rather than special-cased
 	// for this one lookup.
 	LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry, error)
+
+	// LoadTierOverrides loads the tenant's tier_overrides rows as the map
+	// authz.TierTable.Overrides is keyed by — the FIRST step of §4.4's
+	// resolution order, which had no reader on this path until Phase 14 Task
+	// 7 despite DeriveTier having consulted it since Phase 2. Called fresh on
+	// every Decide, alongside LoadToolCatalog and for the same reason: no
+	// caching layer, kept consistent with every other per-tenant read here.
+	//
+	// What comes back is what is stored, unfiltered. Decide re-validates each
+	// row against the live baseline before honoring it — see its own call
+	// site, and authz.TierTable.Overrides's doc comment for why that check
+	// belongs to the caller that also holds the catalog.
+	LoadTierOverrides(ctx context.Context) (map[string]models.ActionTier, error)
 
 	// LoadDelegation loads one delegation row by id, without walking its
 	// parent chain — token.go's IssueToken (re-issuance) is its only
@@ -376,6 +390,19 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// is the regression guard that makes shipping this table safe.
 	tiers := authz.TierTable{Catalog: authz.BuildTierCatalog(catalogEntries, authz.DefaultCatalog())}
 
+	// The override step, the one above it. A load failure fails closed for
+	// the identical reason the catalog load above does, and it is worth
+	// stating separately because the direction is the same but the argument
+	// is not: an override exists only to RAISE a tier, so proceeding as
+	// though the tenant had none would under-rate precisely the actions it
+	// took the trouble to mark as more sensitive.
+	storedOverrides, err := s.store.LoadTierOverrides(ctx)
+	if err != nil {
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
+			fmt.Errorf("load tier overrides: %w", err), &epoch)
+	}
+	tiers.Overrides = honoredOverrides(storedOverrides, tiers.Catalog)
+
 	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
 	// from these same inputs — that second derivation stays authoritative for
@@ -468,6 +495,66 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	resp := toResponse(result, &epoch)
 	resp.ApprovalId = newApprovalID
 	return resp, nil
+}
+
+// honoredOverrides is the read-time half of §4.4's raise-only rule (T5): it
+// returns the subset of stored that this decision may honor, each row
+// re-checked against the resolution beneath it in the tenant's LIVE catalog
+// — authz.OverrideBaseline, the same function the PAP's write path computes
+// its baseline with, and authz.ValidateOverride, the same comparison. Both
+// ends call the identical pair; neither reimplements the other.
+//
+// Re-checking here is not belt-and-braces over the write-time call. Three
+// things it catches that nothing else can:
+//
+//   - A direct INSERT as a database superuser never passes through the PAP.
+//     The schema's own tier_overrides_raise_only CHECK does not stop it
+//     either: that CHECK compares action_tier against the builtin_tier
+//     COLUMN, which such a write supplies for itself.
+//   - The stored builtin_tier is a snapshot. A tenant that catalogs a tool
+//     as DESTRUCTIVE after writing a WRITE override on it has left a row
+//     that was valid when written and is a lowering now. This is why the
+//     check recomputes rather than reading that column — reading it would
+//     re-validate against exactly the stale value that caused the problem.
+//   - An override on a key whose baseline moved for any other reason at all.
+//
+// A failing row is DROPPED, not fatal, and the distinction is deliberate:
+// dropping falls through to the tier beneath the override, which is by
+// construction HIGHER than what the row claimed — the safe direction —
+// whereas failing the decision would let one bad row deny an entire tenant
+// every action, turning a misconfiguration into an outage. Fail closed, not
+// catastrophically.
+//
+// Dropped is not silent. An operator whose override is being ignored has to
+// be able to find out why, and a row that fails this check is either a
+// configuration mistake or a write that bypassed the control plane — both
+// are things somebody needs to see. A log line, not a metric: this codebase
+// has no metrics surface at all (no Prometheus, no OpenTelemetry, in any
+// binary), so a metric would mean introducing one for a single counter,
+// while slog is already the PDP's logging (cmd/stratium-pdp/main.go, which
+// calls slog.SetDefault so these lines land in the same handler and stream
+// as every other line that binary emits). A counter alone would also answer
+// "how many" without answering "which one", which is the only question an
+// operator actually has here.
+//
+// What is logged is the key, the tier claimed, and the baseline it failed
+// against — enough to fix the row, and nothing else. Not the tenant (this
+// process serves exactly one, named at startup), not created_by (the
+// decision path does not even select that column — store.LoadTierOverrides's
+// own doc comment), and nothing about the request that happened to observe
+// the bad row.
+func honoredOverrides(stored, catalog map[string]models.ActionTier) map[string]models.ActionTier {
+	honored := make(map[string]models.ActionTier, len(stored))
+	for key, tier := range stored {
+		baseline := authz.OverrideBaseline(catalog, key)
+		if err := authz.ValidateOverride(baseline, tier); err != nil {
+			slog.Warn("tier override dropped: it would lower the tier resolved beneath it",
+				"tool_or_verb", key, "override_tier", tier.String(), "baseline_tier", baseline.String())
+			continue
+		}
+		honored[key] = tier
+	}
+	return honored
 }
 
 // appendAudit builds the audit entry for one decision and appends it.

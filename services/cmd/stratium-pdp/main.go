@@ -45,6 +45,18 @@ const shutdownTimeout = 10 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// SetDefault as well as passing logger explicitly. Everything in this
+	// file threads the logger through, which stays the house style, but
+	// internal/pdpgrpc has one thing to say that nothing asked it for — a
+	// tier override dropped for lowering the tier beneath it
+	// (honoredOverrides, server.go) — and pdpgrpc.NewServer has no logger
+	// parameter to reach it through. Giving it one would mean touching every
+	// one of its ~79 construction sites to carry a dependency exactly one
+	// line uses. slog.Default() is Go's own answer for a library with no
+	// injected logger; this line is what makes it the same handler, format,
+	// and stream (stdout) as every other line this binary emits, instead of
+	// slog's built-in default, which writes plain text to stderr.
+	slog.SetDefault(logger)
 	if err := run(logger); err != nil {
 		logger.Error("stratium-pdp exited with error", "error", err)
 		os.Exit(1)

@@ -30,14 +30,31 @@ type TierOverride struct {
 
 	ActionTier ActionTier `json:"action_tier" db:"action_tier"`
 
-	// BuiltinTier is the floor ValidateOverride compared ActionTier against
-	// at write time — never client-supplied (a tenant declaring its own
-	// floor would make the raise-only rule vacuous, exactly the "declare a
-	// destructive action harmless" hole server-side derivation exists to
+	// BuiltinTier records the baseline ValidateOverride compared ActionTier
+	// against at write time — never client-supplied (a tenant declaring its
+	// own floor would make the raise-only rule vacuous, exactly the "declare
+	// a destructive action harmless" hole server-side derivation exists to
 	// close), always computed server-side and stored so the row itself
 	// records what it was validated against, matching the schema's own
 	// tier_overrides_raise_only CHECK (action_tier >= builtin_tier), which
 	// reads this exact column.
+	//
+	// The column name predates the value: since Phase 14 Task 7 the baseline
+	// is authz.OverrideBaseline — the tenant's own catalog entry where one
+	// exists, the built-in classifier otherwise — not the built-in alone.
+	// The name is left as it is because it is load-bearing in the CHECK
+	// constraint, in three queries, and in this struct's db tag; "the
+	// baseline that was compared against" is what it has always actually
+	// meant.
+	//
+	// It is a SNAPSHOT, and it can drift: the tenant's tool_catalog may
+	// change after this row was written, at which point the stored value no
+	// longer describes the live resolution beneath this override. Nothing on
+	// the decision path reads it for that reason — pdpgrpc.Decide recomputes
+	// the baseline live and drops a row that no longer clears it. This
+	// column's readers are the schema's own CHECK (a backstop against a
+	// direct write, not a live check) and an operator reading back what the
+	// row was accepted against.
 	BuiltinTier ActionTier `json:"builtin_tier" db:"builtin_tier"`
 
 	CreatedAt time.Time `json:"created_at" db:"created_at"`

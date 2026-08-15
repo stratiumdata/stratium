@@ -21,16 +21,31 @@ var (
 
 // TierTable is a tenant's resolved tier configuration, loaded by the caller.
 type TierTable struct {
-	// Overrides are tenant-authored and meant to be raise-only. That
-	// invariant is enforced only at write time — by ValidateOverride, if the
-	// write path calls it, and by the tier_overrides_raise_only DB CHECK,
-	// which compares against a caller-supplied builtin_tier column rather
-	// than recomputing BuiltinTier(). Neither holds on the decision path
-	// below: DeriveTier consults Overrides first and returns whatever is
-	// stored, without re-deriving or re-validating against the builtin.
-	// TODO(phase-2): close the gap — either have DeriveTier reject an
-	// override below the live BuiltinTier(), or guarantee every write path
-	// is ValidateOverride-gated and builtin_tier cannot drift out of sync.
+	// Overrides are the tenant's raise-only corrections, keyed by the same
+	// lookupKeys as Catalog. deriveTierByName consults them first and returns
+	// whatever is stored, without re-deriving — so whether a lowering row can
+	// ever appear in this map is entirely the caller's responsibility, and as
+	// of Phase 14 Task 7 it is enforced at both ends of the row's life:
+	//
+	//   - Write time: store.CreateTierOverride/UpdateTierOverride compute
+	//     OverrideBaseline against the tenant's own live merged catalog and
+	//     call ValidateOverride before the INSERT/UPDATE lands.
+	//   - Read time: pdpgrpc.Decide re-runs that identical check against the
+	//     catalog it has just loaded for this decision, and DROPS any row
+	//     that fails it before ever putting it in this map.
+	//
+	// The read-time half is the one that cannot be bypassed, and it is not
+	// redundant with either the write-time call or the schema's own
+	// tier_overrides_raise_only CHECK: that CHECK compares action_tier
+	// against a stored builtin_tier column, which a direct INSERT as a
+	// database superuser supplies for itself, and which goes stale the
+	// moment the tenant's tool_catalog changes underneath it. Re-validating
+	// on read is what makes this map's raise-only claim true rather than
+	// merely intended.
+	//
+	// A dropped row is dropped, never failed on: resolution falls through to
+	// the (higher, therefore safer) tier beneath it, so one bad row costs the
+	// tenant that one override, not every decision.
 	Overrides map[string]models.ActionTier
 
 	// Catalog holds tiers registered with a tool at registration time.
@@ -311,12 +326,86 @@ func lookupKeys(a Action) []string {
 	return keys
 }
 
-// ValidateOverride enforces the raise-only invariant. Called when an
-// administrator writes an override, not on the decision path.
-func ValidateOverride(builtin, override models.ActionTier) error {
-	if override < builtin {
-		return fmt.Errorf("%w: built-in is %s, override is %s",
-			ErrOverrideLowersTier, builtin, override)
+// OverrideBaseline is the tier an override on key may not fall below: what
+// deriveTierByName would resolve that key to with the override itself
+// removed — the tenant's catalog entry where one exists, the built-in
+// otherwise, and ActionTier's own floor when neither knows the key.
+//
+// catalog is the merged map BuildTierCatalog produces, not DefaultCatalog()
+// alone. That is the whole correction Phase 14 Task 7 makes: the write path
+// compared against DefaultCatalog()+verbTiers only, which predates Phase 8's
+// per-tenant catalog, so built-in READ_ONLY + catalog DESTRUCTIVE + override
+// WRITE passed validation (WRITE >= READ_ONLY) and then LOWERED the
+// effective tier from DESTRUCTIVE to WRITE — a lowering that satisfied the
+// raise-only rule by comparing against the wrong thing.
+//
+// A NULL-tier catalog row (Bash-shaped: "no fixed tier, classify by
+// command") contributes no entry to the merged map at all (BuildTierCatalog's
+// own doc comment), so a key naming one falls through to the built-in branch
+// here rather than being refused for having no static baseline. That is a
+// deliberate ruling, not an oversight: refusing would block an operator
+// raising Bash to DESTRUCTIVE tenant-wide, which is the single most
+// legitimate override this table exists for. The residual it leaves is real
+// and worth stating — a static override on a command-derived entry replaces
+// per-command classification for that tool, and only DeriveTier's own
+// evidence rule (destructiveEvidence, §4.4.1) still binds above it, which it
+// does unconditionally and regardless of what any override claims.
+//
+// A composite "Tool:verb" key falls back through "Tool" and then "verb", the
+// same most-specific-first order lookupKeys builds and deriveTierByName
+// consults. Without that, an override keyed "Read:read" would be measured
+// against the floor (neither the catalog nor verbTiers holds a composite
+// key), pass the raise-only check at any tier at all, and then win the
+// resolution ahead of the "Read" catalog entry it lowers — the same defect
+// this function exists to close, reached by a longer key.
+func OverrideBaseline(catalog map[string]models.ActionTier, key string) models.ActionTier {
+	keys := baselineKeys(key)
+	for _, k := range keys {
+		if tier, ok := catalog[k]; ok {
+			return tier
+		}
+	}
+	for _, k := range keys {
+		// Verb, never RawInput: an override targets a NAME, not one
+		// invocation, so there is no command text for the shell classifier
+		// to run against — only BuiltinTier's verb-table branch can answer
+		// here. store.builtinTier, which this function replaces, made the
+		// same call for the same reason.
+		if tier, ok := BuiltinTier(Action{Verb: k}); ok {
+			return tier
+		}
+	}
+	return models.ActionTierReasoning
+}
+
+// baselineKeys returns the candidate keys OverrideBaseline resolves through,
+// most specific first. It is lookupKeys read backwards: lookupKeys turns an
+// Action into the keys a stored override might match, this turns one stored
+// key back into the keys its own baseline may come from. Only the composite
+// form splits — a bare key is its own only candidate.
+func baselineKeys(key string) []string {
+	tool, verb, found := strings.Cut(key, ":")
+	if !found || tool == "" || verb == "" {
+		return []string{key}
+	}
+	return []string{key, tool, verb}
+}
+
+// ValidateOverride enforces the raise-only invariant: an override may name a
+// tier at or above the resolution beneath it, never below.
+//
+// baseline is what OverrideBaseline computes for the override's own key, and
+// both ends of an override's life call this with exactly that — the PAP
+// before writing the row (store.CreateTierOverride/UpdateTierOverride) and
+// the PDP before honoring it (pdpgrpc.Decide). The comparison itself is
+// unchanged since Phase 2 and the first parameter is the same VALUE it
+// always should have been; it was named `builtin` until Phase 14 Task 7
+// because until then the only caller had no tenant catalog to consult.
+// Renamed, not re-specified: what moved is what a correct caller passes.
+func ValidateOverride(baseline, override models.ActionTier) error {
+	if override < baseline {
+		return fmt.Errorf("%w: baseline is %s, override is %s",
+			ErrOverrideLowersTier, baseline, override)
 	}
 	return nil
 }

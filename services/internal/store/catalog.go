@@ -104,6 +104,26 @@ func (s *Store) LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry,
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	entries, err := queryToolCatalogTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return entries, nil
+}
+
+// queryToolCatalogTx runs loadToolCatalogQuery inside an already-open,
+// already-tenant-scoped transaction. LoadToolCatalog above is one caller;
+// the other is tier_override.go's overrideBaseline, which needs the tenant's
+// catalog to compute the resolution beneath a proposed override and must see
+// it in the SAME transaction the override is then written in — a separate
+// read would leave a window in which the catalog changes between the check
+// and the write, which is exactly the drift the read-time re-validation on
+// the PDP side exists to catch, and no reason to create more of here.
+func queryToolCatalogTx(ctx context.Context, tx *sql.Tx) ([]models.ToolCatalogEntry, error) {
 	rows, err := tx.QueryContext(ctx, loadToolCatalogQuery)
 	if err != nil {
 		return nil, fmt.Errorf("store: load tool catalog: %w", err)
@@ -113,10 +133,6 @@ func (s *Store) LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry,
 	entries, err := scanToolCatalogRows(rows)
 	if err != nil {
 		return nil, fmt.Errorf("store: load tool catalog: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: commit: %w", err)
 	}
 	return entries, nil
 }

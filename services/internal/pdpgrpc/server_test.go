@@ -130,6 +130,15 @@ type fakeStore struct {
 	catalog    []models.ToolCatalogEntry
 	catalogErr error
 
+	// overrides/overridesErr back LoadTierOverrides. A nil map is what
+	// store.LoadTierOverrides returns for a tenant with no override rows —
+	// which is every tenant in every test in this package that does not set
+	// this field, and was every tenant in production until Phase 14 Task 7
+	// gave this table a reader at all — so the default fakeStore stands in
+	// for "no overrides" without any test having to say so.
+	overrides    map[string]models.ActionTier
+	overridesErr error
+
 	// delegation/delegationErr back LoadDelegation (token.go's IssueToken).
 	// A single fixed value, not a map keyed by id, matching every other
 	// single-value stub in this fake (agent, chain, loadApproval): no test
@@ -147,6 +156,11 @@ type fakeStore struct {
 	// their own single-value stubs.
 	epoch    int64
 	epochErr error
+
+	// epochReadAfterCalls is how many other store methods ran before
+	// LoadTenantEpoch did — 0 on every correctly-ordered RPC. See that
+	// method below.
+	epochReadAfterCalls int
 
 	// bumpOnAgentLoad, if set, runs once at the very start of LoadAgent —
 	// the first store method every real call site in this package invokes
@@ -232,6 +246,14 @@ func (f *fakeStore) LoadToolCatalog(context.Context) ([]models.ToolCatalogEntry,
 	return f.catalog, nil
 }
 
+func (f *fakeStore) LoadTierOverrides(context.Context) (map[string]models.ActionTier, error) {
+	f.calls++
+	if f.overridesErr != nil {
+		return nil, f.overridesErr
+	}
+	return f.overrides, nil
+}
+
 func (f *fakeStore) LoadDelegation(context.Context, uuid.UUID) (*models.Delegation, error) {
 	f.calls++
 	if f.delegationErr != nil {
@@ -241,6 +263,15 @@ func (f *fakeStore) LoadDelegation(context.Context, uuid.UUID) (*models.Delegati
 }
 
 func (f *fakeStore) LoadTenantEpoch(context.Context) (int64, error) {
+	// How many store methods ran BEFORE this one, recorded rather than
+	// inferred. Spec §4.8.1 V3 requires the epoch be read first on every RPC
+	// that reads it at all, and the existing proof of that
+	// (TestDecide_EpochReflectsStateBeforeAConcurrentBump, epoch_test.go)
+	// only observes ordering relative to LoadAgent, via bumpOnAgentLoad — so
+	// a read moved ahead of the epoch but BEHIND that hook would slip past
+	// it. This field is what makes "first, before anything" checkable
+	// directly, whatever the next read added to Decide turns out to be.
+	f.epochReadAfterCalls = f.calls
 	f.calls++
 	if f.epochErr != nil {
 		return 0, f.epochErr

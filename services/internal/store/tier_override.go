@@ -16,12 +16,20 @@ import (
 
 // Package doc for this file: the PAP's CRUD surface over the tier_overrides
 // table (migrations/000001_baseline) — spec §4.4's raise-only tenant
-// correction to a tool or verb's built-in action-tier classification.
-// Nothing reads this table on the decision path through this package today
-// (internal/authz.TierTable.Overrides is populated by whatever the PDP's own
-// wiring loads it from — out of this phase's scope), so unlike policy.go and
-// agent.go there is no sibling PDP-facing read to distinguish this file's
-// methods from.
+// correction to a tool or verb's built-in action-tier classification — plus,
+// as of Phase 14 Task 7, the PDP's own decision-path read of that table
+// (LoadTierOverrides, below).
+//
+// Those two families are named distinctly for the same reason
+// LoadAllPolicies/ListPolicies (policy.go) and LoadToolCatalog/
+// ListToolCatalogEntries (catalog.go) are: they read different shapes for
+// different purposes. LoadTierOverrides selects two columns and returns the
+// map internal/authz.TierTable.Overrides is keyed by; the List/Get family
+// selects all seven and returns models.TierOverride, id and created_by
+// included. A decision has no use for who authored a row — and this phase's
+// own logging rule forbids naming that operator — so the decision path does
+// not read the column at all rather than reading it and remembering not to
+// use it.
 
 // eventTypeTierOverrideCreated, eventTypeTierOverrideUpdated, and
 // eventTypeTierOverrideDeleted are audit_chain.event_type values for this
@@ -62,57 +70,100 @@ const updateTierOverrideQuery = `UPDATE tier_overrides SET tool_or_verb = $1, ac
 
 const deleteTierOverrideQuery = `DELETE FROM tier_overrides WHERE id = $1 RETURNING tool_or_verb`
 
-// builtinTier computes the built-in sensitivity tier ValidateOverride
-// compares a proposed override against for key (a tier_overrides.tool_or_verb
-// value — a tool name or a bare verb, per internal/authz.lookupKeys). It is
-// not a reimplementation of BuiltinTier's own shell-command classifier
-// (tier.go) — that classifier needs an actual RawInput, which an override
-// target (a name, not one invocation) never has, and TASK 3's brief is
-// explicit: "Call ValidateOverride; do not reimplement it," which this
-// function honors by staying entirely upstream of ValidateOverride's own
-// job (comparing two already-known tiers) rather than duplicating any part
-// of it.
+// loadTierOverridesQuery is listTierOverridesQuery's decision-facing
+// sibling: the same table, ordered the same way, but selecting only the two
+// columns a decision consumes. id, tenant_id, created_at, and created_by
+// have no reader on that path (see this file's own package doc), and
+// builtin_tier is deliberately excluded from it too — that column is a
+// snapshot of the baseline compared against at write time, and the PDP
+// recomputes the LIVE baseline instead, which is the entire point of
+// re-validating on read.
+const loadTierOverridesQuery = `SELECT tool_or_verb, action_tier FROM tier_overrides ORDER BY tool_or_verb`
+
+// overrideBaseline computes the tier authz.ValidateOverride compares a
+// proposed override against for key (a tier_overrides.tool_or_verb value —
+// a tool name, a bare verb, or a "Tool:verb" composite, per
+// internal/authz.lookupKeys): the resolution beneath the override, which is
+// the tenant's own merged tool catalog first and the built-in classifier
+// after it. authz.OverrideBaseline is where that rule actually lives; this
+// method's whole job is supplying it the tenant's live catalog, read inside
+// the caller's own transaction.
 //
-// Two, and only two, of DeriveTier's three name-keyed resolution steps are
-// consulted, deliberately not all three:
-//
-//  1. authz.DefaultCatalog() — the fixed tool-name -> tier table (Read,
-//     Write, ...). A key matching an entry here has a real, static built-in
-//     tier, and an override claiming anything below it IS a lowering.
-//  2. authz.BuiltinTier(Action{Verb: key}) — reached only through its
-//     verb-table branch (verbTiers), since a bare key carries no RawInput
-//     for the shell classifier to run against. A key matching a known verb
-//     ("read", "write", "delete", ...) has a real, static built-in tier the
-//     same way a catalogued tool name does.
-//
-// The catalog step DeriveTier itself also consults — a tenant's own
-// tool_catalog rows (BuildTierCatalog, internal/authz/catalog.go) — is
-// deliberately NOT reached here. That table is Task 4's own CRUD scope, not
-// this task's, and more importantly its NULL-tier rows (Bash-shaped: "let
-// BuiltinTier decide per command") have no single static tier to compare an
-// override against at all — the whole reason DefaultCatalog() itself omits
-// Bash (see that function's own doc comment). Reaching into a table this
-// task does not write, for a value that would not answer the question
-// asked, is not a shortcut worth taking.
-//
-// A key matching neither table — "Bash" among them, deliberately (both
-// DefaultCatalog's and this function's own doc comments) — floors at
-// models.ActionTierReasoning, ActionTier's own minimum. Nothing can be
-// "lowered" below the lattice's floor, so an override on a name with no
-// static built-in signal can never fail the raise-only check on that
-// account; the check that actually protects a Bash-typed override from
-// masking a genuinely destructive command happens per-invocation, at
-// decision time, via DeriveTier's own evidence rule (tier.go's
-// destructiveEvidence) — never here, and never by this function pretending
-// to know what a not-yet-issued command will do.
-func builtinTier(key string) models.ActionTier {
-	if t, ok := authz.DefaultCatalog()[key]; ok {
-		return t
+// Until Phase 14 Task 7 this was a pure function consulting
+// authz.DefaultCatalog() and the verb table only, and its doc comment gave
+// two reasons for excluding the tenant's tool_catalog. The first (that table
+// was Task 4's scope, not Task 3's) is obsolete. The second was real: a
+// NULL-tier row (Bash-shaped — "no fixed tier, classify per command") has no
+// static tier to compare against. It is resolved rather than dodged now, by
+// the same merge the decision path itself uses: BuildTierCatalog contributes
+// no entry for such a row, so the key falls through to the built-in
+// resolution — the previous behaviour — instead of the override being
+// refused. See authz.OverrideBaseline's own doc comment for the ruling and
+// the residual it leaves.
+func (s *Store) overrideBaseline(ctx context.Context, tx *sql.Tx, key string) (models.ActionTier, error) {
+	entries, err := queryToolCatalogTx(ctx, tx)
+	if err != nil {
+		return models.ActionTierReasoning, err
 	}
-	if t, ok := authz.BuiltinTier(authz.Action{Verb: key}); ok {
-		return t
+	return authz.OverrideBaseline(authz.BuildTierCatalog(entries, authz.DefaultCatalog()), key), nil
+}
+
+// LoadTierOverrides loads the tenant's tier_overrides rows as the map
+// internal/authz.TierTable.Overrides is keyed by — spec §4.4's override step,
+// which had no reader on the decision path at all until Phase 14 Task 7
+// (migrations/000017_tier_overrides_serving_grant is the SELECT grant that
+// makes this callable as stratium_app; the role holds nothing else on this
+// table, and that absence is T6's enforcement).
+//
+// A map, not a slice: (tenant_id, tool_or_verb) is UNIQUE, so no key can
+// appear twice and nothing is lost by keying on it here rather than at the
+// caller. A tenant with no overrides — every tenant, until an operator
+// writes one — is an ordinary, empty result.
+//
+// The rows are returned exactly as stored. Whether each one may be HONORED
+// is decided by the caller, against the same tenant catalog it resolves
+// tiers with: see pdpgrpc.Decide's own re-validation, and
+// authz.TierTable.Overrides's doc comment for why that check cannot live
+// here (this method has no catalog, and giving it one would put the
+// raise-only rule in two places).
+func (s *Store) LoadTierOverrides(ctx context.Context) (map[string]models.ActionTier, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return models.ActionTierReasoning
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, loadTierOverridesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("store: load tier overrides: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	overrides := make(map[string]models.ActionTier)
+	for rows.Next() {
+		var key string
+		var rawTier int64
+		if err := rows.Scan(&key, &rawTier); err != nil {
+			return nil, fmt.Errorf("store: scan tier override row: %w", err)
+		}
+		// The same fail-loudly discipline scanFullTierOverride applies: a
+		// corrupt or out-of-range tier must error, never silently become
+		// ActionTierReasoning and be honored as though this override really
+		// was that innocuous.
+		tier, err := models.ParseActionTier(int(rawTier))
+		if err != nil {
+			return nil, fmt.Errorf("store: tier override %q action_tier: %w", key, err)
+		}
+		overrides[key] = tier
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate tier override rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return overrides, nil
 }
 
 // scanFullTierOverride scans one row (Get) or the current row of a
@@ -141,11 +192,19 @@ func scanFullTierOverride(row rowScanner) (models.TierOverride, error) {
 	return t, nil
 }
 
-// CreateTierOverride computes t.ToolOrVerb's built-in tier (builtinTier,
-// above), calls authz.ValidateOverride against it — Property 3 of Task 3,
-// spec §4.4's raise-only rule, enforced by the one function written for it
-// rather than reimplemented here — and, only if that succeeds, inserts t
-// and audits its creation inside one transaction (N4).
+// CreateTierOverride computes t.ToolOrVerb's baseline — the resolution
+// beneath the override (overrideBaseline, above) — calls
+// authz.ValidateOverride against it — spec §4.4's raise-only rule, enforced
+// by the one function written for it rather than reimplemented here — and,
+// only if that succeeds, inserts t and audits its creation inside one
+// transaction (N4).
+//
+// The baseline read shares that transaction, so it is the same catalog this
+// write is committed against. A refused override therefore does open a
+// transaction and read one table before refusing — it did not before Phase
+// 14 Task 7, when the baseline was a pure function — but it still never
+// reaches the INSERT, which is what "refused before persisting" has always
+// meant here.
 //
 // t.ID, t.TenantID, t.BuiltinTier, t.CreatedAt, and t.CreatedBy are ignored
 // on input and set authoritatively here: BuiltinTier specifically must never
@@ -157,10 +216,6 @@ func (s *Store) CreateTierOverride(ctx context.Context, t models.TierOverride, a
 	if t.ToolOrVerb == "" {
 		return models.TierOverride{}, fmt.Errorf("%w: tool_or_verb is required", ErrInvalidRequest)
 	}
-	builtin := builtinTier(t.ToolOrVerb)
-	if err := authz.ValidateOverride(builtin, t.ActionTier); err != nil {
-		return models.TierOverride{}, err
-	}
 
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
@@ -168,8 +223,16 @@ func (s *Store) CreateTierOverride(ctx context.Context, t models.TierOverride, a
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	baseline, err := s.overrideBaseline(ctx, tx, t.ToolOrVerb)
+	if err != nil {
+		return models.TierOverride{}, err
+	}
+	if err := authz.ValidateOverride(baseline, t.ActionTier); err != nil {
+		return models.TierOverride{}, err
+	}
+
 	t.TenantID = s.tenantID
-	t.BuiltinTier = builtin
+	t.BuiltinTier = baseline
 	t.CreatedBy = actor
 
 	row := tx.QueryRowContext(ctx, insertTierOverrideQuery,
@@ -270,9 +333,9 @@ func (s *Store) ListTierOverrides(ctx context.Context) ([]models.TierOverride, e
 }
 
 // UpdateTierOverride re-validates the raise-only rule against t.ToolOrVerb's
-// (possibly newly-supplied) built-in tier — the same ValidateOverride call
+// (possibly newly-supplied) baseline — the same ValidateOverride call
 // CreateTierOverride makes, run fresh rather than trusting the row's
-// existing builtin_tier column, so an update is held to the current built-in
+// existing builtin_tier column, so an update is held to the current
 // baseline, not a possibly-stale one recorded at creation time. A
 // PUT-shaped full replace, matching UpdatePolicy/UpdateAgent: the caller
 // supplies both ToolOrVerb and ActionTier, and both may change together.
@@ -296,10 +359,6 @@ func (s *Store) UpdateTierOverride(
 	if t.ToolOrVerb == "" {
 		return models.TierOverride{}, fmt.Errorf("%w: tool_or_verb is required", ErrInvalidRequest)
 	}
-	builtin := builtinTier(t.ToolOrVerb)
-	if err := authz.ValidateOverride(builtin, t.ActionTier); err != nil {
-		return models.TierOverride{}, err
-	}
 
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
@@ -307,7 +366,15 @@ func (s *Store) UpdateTierOverride(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	t.BuiltinTier = builtin
+	baseline, err := s.overrideBaseline(ctx, tx, t.ToolOrVerb)
+	if err != nil {
+		return models.TierOverride{}, err
+	}
+	if err := authz.ValidateOverride(baseline, t.ActionTier); err != nil {
+		return models.TierOverride{}, err
+	}
+
+	t.BuiltinTier = baseline
 	row := tx.QueryRowContext(ctx, updateTierOverrideQuery, t.ToolOrVerb, int64(t.ActionTier), int64(t.BuiltinTier), id.String())
 	if err := row.Scan(&t.CreatedAt, &t.CreatedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

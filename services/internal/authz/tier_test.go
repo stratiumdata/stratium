@@ -2,6 +2,7 @@ package authz
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"stratium/pkg/models"
@@ -348,6 +349,108 @@ func TestDeriveTier_IgnoresDeclaredTier(t *testing.T) {
 	got, err := DeriveTier(TierTable{}, a)
 	if err != nil || got != models.ActionTierDestructive {
 		t.Fatalf("declared tier leaked into derivation: got %v", got)
+	}
+}
+
+// TestOverrideBaseline pins the resolution beneath an override for every
+// shape a tier_overrides.tool_or_verb key takes in practice. It is the
+// pure-function proof behind BOTH ends of the raise-only rule — the PAP's
+// write path (store.CreateTierOverride) and the PDP's read-time
+// re-validation (pdpgrpc.honoredOverrides) compute their baseline with this
+// one function, so a mutation here fails at both ends rather than moving the
+// rule from one to the other.
+func TestOverrideBaseline(t *testing.T) {
+	// A tenant that catalogs Read as DESTRUCTIVE and Bash as a NULL-tier
+	// (command-classified) row. BuildTierCatalog is what a real caller
+	// passes, not a hand-built map: the NULL-tier row DELETING an entry is
+	// the behaviour the Bash case below depends on.
+	destructive := models.ActionTierDestructive
+	tenant := BuildTierCatalog([]models.ToolCatalogEntry{
+		{ToolName: "Read", ActionTier: &destructive},
+		{ToolName: "Bash", ActionTier: nil, CommandField: strPtr("command")},
+	}, DefaultCatalog())
+
+	tests := []struct {
+		name    string
+		catalog map[string]models.ActionTier
+		key     string
+		want    models.ActionTier
+	}{
+		{"built-in catalog entry", DefaultCatalog(), "Read", models.ActionTierReadOnly},
+		{"known verb", DefaultCatalog(), "delete", models.ActionTierDestructive},
+		{"verb lookup is case-insensitive", DefaultCatalog(), "READ", models.ActionTierReadOnly},
+		{"unknown key floors at REASONING", DefaultCatalog(), "totally-unknown-tool", models.ActionTierReasoning},
+		{
+			// The correction this function exists for: the tenant's own
+			// catalog entry beats DefaultCatalog()'s, so an override on Read
+			// is measured against DESTRUCTIVE, not READ_ONLY.
+			"tenant catalog entry beats the built-in", tenant, "Read", models.ActionTierDestructive,
+		},
+		{
+			// Bash is absent from DefaultCatalog deliberately, and the
+			// tenant's NULL-tier row removes nothing that was there — so the
+			// key falls through to the built-in resolution, which has no
+			// static answer for it either. The ruling: fall back, do not
+			// refuse. An operator raising Bash to DESTRUCTIVE tenant-wide is
+			// the legitimate case that would otherwise be blocked.
+			"NULL-tier catalog row falls back to the built-in", tenant, "Bash", models.ActionTierReasoning,
+		},
+		{
+			// A composite key falls back through its tool half, exactly as
+			// deriveTierByName would resolve it with the override removed.
+			// Without this, "Read:read" would measure against the floor and
+			// then win the resolution ahead of the Read entry it lowers.
+			"composite key falls back to its tool", DefaultCatalog(), "Read:read", models.ActionTierReadOnly,
+		},
+		{
+			"composite key falls back to its verb when the tool is unknown",
+			DefaultCatalog(), "SomeMCPTool:delete", models.ActionTierDestructive,
+		},
+		{"a key that is only a colon is not composite", DefaultCatalog(), ":", models.ActionTierReasoning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := OverrideBaseline(tt.catalog, tt.key); got != tt.want {
+				t.Errorf("OverrideBaseline(%q) = %s, want %s", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOverrideBaseline_NeverBelowAnyResolutionItsKeyCanWin is the safety
+// statement the value table above can only imply, and it is asserted against
+// DeriveTier itself rather than against constants so the two cannot drift —
+// a fourth resolution layer added to deriveTierByName fails this test.
+//
+// One stored key can be matched by several different actions: lookupKeys
+// offers "Tool:verb", "Tool", and "verb", so a row keyed "delete" wins for a
+// tool NAMED delete and for any tool called with the delete verb, which
+// resolve differently beneath. The baseline must therefore be at least the
+// highest of them — an override that clears it can then never lower any
+// resolution its key is capable of winning. Being higher than one particular
+// action's own resolution is safe (it refuses an override that would not
+// have lowered THAT call); being lower than any of them is the defect.
+func TestOverrideBaseline_NeverBelowAnyResolutionItsKeyCanWin(t *testing.T) {
+	destructive := models.ActionTierDestructive
+	catalog := BuildTierCatalog([]models.ToolCatalogEntry{
+		{ToolName: "Read", ActionTier: &destructive},
+	}, DefaultCatalog())
+
+	for _, key := range []string{"Read", "Write", "delete", "Bash", "unknown-tool", "Read:read"} {
+		baseline := OverrideBaseline(catalog, key)
+		for _, a := range []Action{{Tool: key}, {Verb: key}, {Tool: "Read", Verb: "read"}} {
+			if !slices.Contains(lookupKeys(a), key) {
+				continue // this action would never match this override at all
+			}
+			beneath, err := DeriveTier(TierTable{Catalog: catalog}, a)
+			if err != nil {
+				t.Fatalf("DeriveTier(%+v) error = %v", a, err)
+			}
+			if baseline < beneath {
+				t.Errorf("OverrideBaseline(%q) = %s, but %+v resolves %s beneath it — "+
+					"an override clearing this baseline would still lower that call", key, baseline, a, beneath)
+			}
+		}
 	}
 }
 
