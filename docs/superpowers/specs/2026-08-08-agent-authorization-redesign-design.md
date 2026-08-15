@@ -1089,8 +1089,24 @@ reach history and referrers. Storage APIs are readable by any XSS in the admin
 UI, and **this token can revoke every delegation and approve any escalation in
 the tenant** — the blast radius that makes the usual pragmatic answer wrong here.
 The cost is real and accepted: silent renewal by hidden iframe is increasingly
-blocked by third-party cookie restrictions, so a refresh may mean a visible
-redirect.
+blocked by third-party cookie restrictions, so a refresh means re-authenticating.
+
+**Corrected 2026-08-15, during Task 6.** This paragraph originally said a
+refresh "may mean a visible redirect." That is not achievable alongside
+memory-only, and the contradiction was found by the implementer and confirmed
+in review. A top-level redirect unloads the JS context, which destroys the PKCE
+`code_verifier` — and the verifier must survive from the authorization request
+to the token exchange. **Memory-only and top-level-redirect are mutually
+exclusive**; the options are a popup, a storage API, or abandoning PKCE.
+
+The flow is therefore a **popup**: a same-origin `callback.html` returns the
+code to the opener by `postMessage` with an explicit `targetOrigin`, and the
+opener validates origin, source, and `state` before believing it. No storage,
+no fallback, and a blocked popup fails with an actionable error rather than
+degrading. This carries one non-obvious dependency, recorded here because it is
+invisible at the point where it would be broken: the flow **requires the
+absence of a `Cross-Origin-Opener-Policy` header**. Adding `COOP: same-origin`
+during a future hardening pass severs `window.opener` and every sign-in fails.
 
 **N13 — the UI is embedded in the PAP binary, and its build, lint, and tests
 join the standard gate.** One artifact, matching how the PDP and PEP ship.
