@@ -164,3 +164,38 @@ func TestOverrideBaseline_RawInputClassificationIsNotBounded(t *testing.T) {
 			"be able to hide destructive raw input (destructiveEvidence, §4.4.1)", hostile.RawInput, got)
 	}
 }
+
+// TestOverrideBaseline_HonorsUnknownTier closes a survivor found by mutation
+// testing: replacing the t.UnknownTier floor with a hardcoded REASONING
+// changed nothing any test could see, because baselineActions always returns
+// at least one candidate and deriveTierByName already returns t.UnknownTier
+// for an unresolvable one.
+//
+// The floor is only observable when every candidate ERRORS, which happens
+// under DenyUnknown. Both halves are asserted, so the claim in
+// OverrideBaseline's doc comment — that the baseline is what deriveTierByName
+// would resolve, including a tenant's configured floor — is true rather than
+// merely intended.
+//
+// No production code sets either field today (pdpgrpc.Decide builds its
+// TierTable with Catalog and Overrides only), so this is latent. That is
+// exactly why it needs a test: a latent claim with no coverage is how the
+// hardcoded REASONING got there in the first place.
+func TestOverrideBaseline_HonorsUnknownTier(t *testing.T) {
+	const key = "nothing-knows-this-name"
+
+	floor := TierTable{Catalog: DefaultCatalog(), UnknownTier: models.ActionTierInternalModify}
+	if got := OverrideBaseline(floor, nil, key); got != models.ActionTierInternalModify {
+		t.Errorf("OverrideBaseline(%q) = %s, want INTERNAL_MODIFY — an unresolvable key resolves to the "+
+			"tenant's configured UnknownTier, so that is what an override on it must not fall below", key, got)
+	}
+
+	// DenyUnknown makes every candidate error, so the initial value is the
+	// only thing left to return. A hardcoded REASONING shows up here and
+	// nowhere else.
+	deny := TierTable{Catalog: DefaultCatalog(), UnknownTier: models.ActionTierInternalModify, DenyUnknown: true}
+	if got := OverrideBaseline(deny, nil, key); got != models.ActionTierInternalModify {
+		t.Errorf("OverrideBaseline(%q) with DenyUnknown = %s, want INTERNAL_MODIFY — when every candidate "+
+			"refuses to classify, the baseline falls back to the tenant's floor, not to the lattice's", key, got)
+	}
+}
