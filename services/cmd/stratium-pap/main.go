@@ -109,7 +109,12 @@ func run(logger *slog.Logger) error {
 	repo := store.New(db, cfg.TenantID)
 	registry := newPolicyRegistry()
 
-	srv := NewServer(verifier, cfg.RoleClaim, cfg.ApproverClaim, cfg.Roles, repo, registry)
+	srv := NewServer(verifier, cfg.RoleClaim, cfg.ApproverClaim, cfg.Roles, repo, registry, uiConfig{
+		Issuer:   cfg.OIDCIssuer,
+		ClientID: cfg.OIDCClientID,
+		Audience: cfg.OIDCAudience,
+		Scope:    cfg.OIDCScope,
+	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           srv,

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      No referrer, ever. The OIDC redirect this app performs returns to a URL
+      on this origin; a Referer header leaking the current URL to any
+      third party is exactly the class of disclosure N12 exists to close.
+    -->
+    <meta name="referrer" content="no-referrer" />
+    <title>Stratium — admin</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

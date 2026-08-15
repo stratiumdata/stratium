@@ -250,11 +250,26 @@ type Server struct {
 // resolveApproverIdentity reads to decide who may satisfy N7, a second and
 // independently configured claim from roleClaim -- see Operator.
 // ApproverIdentity's own doc comment for why the two must not be conflated.
-func NewServer(verify *Verifier, roleClaim, approverClaim string, roles RoleMapping, st *store.Store, registry policy.Registry) *Server {
+// ui is Task 6's own addition: the public configuration the embedded admin UI
+// is served alongside (see ui.go). It is the only argument here that is not
+// about authorizing a request, and the only one whose value reaches an
+// unauthenticated caller -- deliberately, since a browser cannot present a
+// token before being told where to obtain one. It carries no secret; see
+// uiConfig's own doc comment.
+func NewServer(
+	verify *Verifier, roleClaim, approverClaim string, roles RoleMapping,
+	st *store.Store, registry policy.Registry, ui uiConfig,
+) *Server {
 	s := &Server{
 		verify: verify, roleClaim: roleClaim, approverClaim: approverClaim,
 		roles: roles, store: st, registry: registry, mux: http.NewServeMux(),
 	}
+	// Registered BEFORE routeTable's own loop only for readability -- net/http
+	// resolves by pattern specificity, not registration order (Go 1.22+), so
+	// "GET /" never shadows "GET /v1/policies" regardless of which is added
+	// first. TestUI_DoesNotShadowAnyAPIRoute proves that rather than trusting
+	// it.
+	registerUI(s.mux, ui)
 	for _, rt := range routeTable {
 		// Adapts rt.Handler (resourceHandler, needs *Server) into the
 		// routeHandler shape authorize requires, closing over s (this

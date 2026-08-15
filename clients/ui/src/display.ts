@@ -1,0 +1,94 @@
+// display.ts holds the pure functions the screens format with. They live
+// apart from the components for one reason: policyEffect below is the only
+// rule in this application that would be a correctness bug rather than a
+// cosmetic one if it were wrong, and it is much easier to test as a function
+// than as a rendered table cell.
+
+/**
+ * Languages whose stored `effect` column is meaningful.
+ *
+ * services/internal/store/policy.go refuses a write whose effect disagrees
+ * with what the policy text declares — but only for languages whose engine
+ * implements its `effectDeclarer` interface, which is exactly these two:
+ *
+ *   - cedar: every statement begins with permit or forbid, and the engine
+ *     accepts exactly one statement per stored policy.
+ *   - json:  the schema has a literal top-level "effect" key.
+ *
+ * For rego and xacml a single stored policy can define rules of BOTH
+ * effects, resolved only once request data is known, so `effect` is pinned to
+ * the fixed sentinel "deny" (multiValuedLanguageEffect) and says nothing
+ * whatever about the policy. Phase 4a removed the column from the decision
+ * read path naming this exact screen: "trusting this column at read time
+ * would let a PAP screen listing policies show the opposite of what the
+ * policy does."
+ *
+ * Duplicated here rather than served by the API because it is a property of
+ * the four engines, fixed by policies.language's own CHECK constraint, not a
+ * per-deployment setting — and because the safe direction of a mistake is the
+ * one this list produces: a language missing from it is rendered as
+ * "evaluated", which claims nothing.
+ */
+const DECLARED_EFFECT_LANGUAGES = new Set(['cedar', 'json'])
+
+export type PolicyEffect =
+  | { kind: 'declared'; effect: string }
+  | { kind: 'evaluated'; reason: string }
+
+/**
+ * What, if anything, this screen may say a policy's effect is.
+ *
+ * An unknown language falls to 'evaluated', deliberately: a language this
+ * build has never heard of is one whose effect column carries unknown
+ * meaning, and the only honest render for unknown meaning is to not claim
+ * one. Never the other way around.
+ */
+export function policyEffect(language: string, effect: string): PolicyEffect {
+  if (DECLARED_EFFECT_LANGUAGES.has(language)) return { kind: 'declared', effect }
+  return {
+    kind: 'evaluated',
+    reason:
+      `a ${language} policy can define rules of both effects, resolved only when a ` +
+      `request is evaluated — the stored effect column is a fixed placeholder for this ` +
+      `language and is not shown`,
+  }
+}
+
+/** models.ActionTier.String(), for the numeric tier the API sends. An
+ *  out-of-range value is shown as itself rather than silently floored to
+ *  REASONING, which is what an invalid tier must never be mistaken for. */
+const ACTION_TIERS = ['REASONING', 'READ_ONLY', 'INTERNAL_MODIFY', 'EXTERNAL_COMMS', 'DESTRUCTIVE']
+
+export function actionTier(tier: number | null | undefined): string {
+  if (tier === null || tier === undefined) return '—'
+  return ACTION_TIERS[tier] ?? `INVALID_ACTION_TIER(${tier})`
+}
+
+/** models.AgentTrustTier. Same out-of-range discipline as actionTier. */
+const TRUST_TIERS = ['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED']
+
+export function trustTier(tier: number): string {
+  return TRUST_TIERS[tier] ?? `INVALID_TRUST_TIER(${tier})`
+}
+
+/** A timestamp an operator can read, in their own locale and zone. An empty
+ *  or unparseable value renders as an em dash rather than "Invalid Date". */
+export function timestamp(value: string | null | undefined): string {
+  if (!value) return '—'
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString()
+}
+
+/** A digest is 64 hex characters; a table cell is not. Shown head-and-tail so
+ *  two different digests are still distinguishable at a glance, with the full
+ *  value available via the cell's title attribute. */
+export function shortDigest(hex: string): string {
+  return hex.length <= 16 ? hex : `${hex.slice(0, 8)}…${hex.slice(-8)}`
+}
+
+/** An empty tool list means unrestricted, for both Agent and Delegation —
+ *  see models.Agent.HasTool. Rendering it as "" would read as "no tools
+ *  allowed", the exact opposite. */
+export function toolList(tools: string[] | null | undefined): string {
+  return tools && tools.length > 0 ? tools.join(', ') : 'unrestricted'
+}

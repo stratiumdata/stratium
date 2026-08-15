@@ -47,6 +47,28 @@ type Config struct {
 	OIDCAudience string        // STRATIUM_PAP_OIDC_AUDIENCE (required)
 	OIDCTimeout  time.Duration // STRATIUM_PAP_OIDC_TIMEOUT, default 5s
 
+	// OIDCClientID is the public client the admin UI authenticates as
+	// (Task 6). Served to the browser at GET /ui-config, never used by this
+	// process itself -- this binary VERIFIES tokens, it does not obtain them,
+	// and it holds no client secret because a browser could not keep one
+	// anyway (PKCE replaces it; see clients/ui/src/auth.ts).
+	//
+	// Required, with no default, for the same reason RoleClaim below is: an
+	// unset client id makes the UI's sign-in fail against the IdP with an
+	// error naming a client that does not exist, which is a far worse way to
+	// discover a missing config value than being told so at startup. Fail
+	// closed, and say which variable.
+	OIDCClientID string // STRATIUM_PAP_OIDC_CLIENT_ID (required)
+
+	// OIDCScope is the scope string the UI requests. Defaulted, unlike the
+	// client id: "openid profile email" is the same standard set every OIDC
+	// deployment starts from, and a deployment whose role claim needs an
+	// extra scope (Okta's "groups", say) adds it here rather than editing the
+	// client. offline_access is deliberately absent and should stay that way:
+	// it mints a refresh token, a longer-lived credential than the access
+	// token, and N12 leaves the UI nowhere safer to keep one.
+	OIDCScope string // STRATIUM_PAP_OIDC_SCOPE, default "openid profile email"
+
 	// RoleClaim names the single OIDC claim resolveRole reads (N2). Not
 	// defaulted to a guess like "roles" or "groups": a wrong guess would
 	// not fail loudly, it would just refuse every operator, since their
@@ -99,6 +121,7 @@ type Config struct {
 }
 
 const defaultListenAddr = ":8080"
+const defaultOIDCScope = "openid profile email"
 const defaultOIDCTimeout = 5 * time.Second
 const defaultDBTimeout = 5 * time.Second
 
@@ -117,12 +140,14 @@ func loadConfig() (Config, error) {
 	cfg := Config{
 		ListenAddr:  defaultListenAddr,
 		OIDCTimeout: defaultOIDCTimeout,
+		OIDCScope:   defaultOIDCScope,
 		DBTimeout:   defaultDBTimeout,
 	}
 
 	cfg.TenantID = requiredEnv("STRATIUM_PAP_TENANT_ID", &missing)
 	cfg.OIDCIssuer = requiredEnv("STRATIUM_PAP_OIDC_ISSUER", &missing)
 	cfg.OIDCAudience = requiredEnv("STRATIUM_PAP_OIDC_AUDIENCE", &missing)
+	cfg.OIDCClientID = requiredEnv("STRATIUM_PAP_OIDC_CLIENT_ID", &missing)
 	cfg.RoleClaim = requiredEnv("STRATIUM_PAP_ROLE_CLAIM", &missing)
 	cfg.ApproverClaim = requiredEnv("STRATIUM_PAP_APPROVER_CLAIM", &missing)
 	adminGroupsRaw := requiredEnv("STRATIUM_PAP_ADMIN_GROUPS", &missing)
@@ -153,6 +178,9 @@ func loadConfig() (Config, error) {
 
 	if v := os.Getenv("STRATIUM_PAP_LISTEN_ADDR"); v != "" {
 		cfg.ListenAddr = v
+	}
+	if v := os.Getenv("STRATIUM_PAP_OIDC_SCOPE"); v != "" {
+		cfg.OIDCScope = v
 	}
 	if v := os.Getenv("STRATIUM_PAP_OIDC_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)

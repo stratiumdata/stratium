@@ -10,7 +10,20 @@ permissions:
 
 env:
   GO_VERSION: "1.25"
+  NODE_VERSION: "22"
 
+# The build, test, vet, and lint jobs call `make` rather than `go` directly.
+# That is not tidiness: as of Phase 14 Task 6 the admin UI (clients/ui) is
+# embedded into cmd/stratium-pap with //go:embed dist, and dist/ is a
+# git-ignored build output. Every command that COMPILES that package -- go
+# build, go vet, go test, and golangci-lint alike -- fails on a fresh checkout
+# with "pattern dist: no matching files found" until the UI has been built.
+#
+# The Makefile owns that ordering (`build`, `test`, `vet`, and `lint` all
+# depend on `ui`), so calling the same targets here keeps one definition of it
+# instead of two that can drift. It also means N13's "the UI's build, lint,
+# and tests join the standard gate" is true of CI and of a developer's
+# machine in the same way, by the same targets.
 jobs:
   build:
     name: Build
@@ -21,8 +34,12 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/go.sum
-      - working-directory: services
-        run: go build ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: clients/ui/package-lock.json
+      - run: make build
 
   test:
     name: Test (race)
@@ -33,8 +50,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/go.sum
-      - working-directory: services
-        run: go test -race ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: clients/ui/package-lock.json
+      # `make test` runs the Go race suite AND the admin UI's own eslint and
+      # vitest runs (the ui-test target). A UI that stopped compiling, or a
+      # test that started failing, fails this job -- N13's "an unexercised
+      # thing is a broken thing".
+      - run: make test
 
   vet:
     name: Vet
@@ -45,8 +70,15 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/go.sum
-      - working-directory: services
-        run: go vet ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: clients/ui/package-lock.json
+      # The make target vets both build configurations: untagged, and with
+      # -tags integration, which is the only way the integration test files
+      # are type-checked at all outside a run of `make integration`.
+      - run: make vet
 
   lint:
     name: Lint
@@ -57,6 +89,15 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: clients/ui/package-lock.json
+      # golangci-lint compiles cmd/stratium-pap, so it needs dist/ to exist
+      # exactly as much as `go build` does. The action installs the linter and
+      # caches it; `make ui` before it supplies the embed target.
+      - run: make ui
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.2
@@ -90,12 +131,14 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: services/go.sum
-      - working-directory: services
-        # Pattern must include TestConformanceSuiteIsComplete, which fails if any
-        # property was deleted or renamed. Filtering to TestC[0-9] alone excludes it,
-        # and the job then passes green even with the whole suite removed.
-        # Delegates to the Makefile target, which asserts the property COUNT.
-        # Running go test directly is not enough: if conformance_test.go is deleted,
-        # -run matches nothing and go test exits 0 with "no tests to run".
-        working-directory: .
-        run: make conformance
+      # No setup-node here, and no `ui` prerequisite on the conformance
+      # target: it runs only ./internal/authz, which is pure and does not
+      # import cmd/stratium-pap, so nothing in this job compiles the embed.
+      #
+      # Pattern must include TestConformanceSuiteIsComplete, which fails if any
+      # property was deleted or renamed. Filtering to TestC[0-9] alone excludes it,
+      # and the job then passes green even with the whole suite removed.
+      # Delegates to the Makefile target, which asserts the property COUNT.
+      # Running go test directly is not enough: if conformance_test.go is deleted,
+      # -run matches nothing and go test exits 0 with "no tests to run".
+      - run: make conformance

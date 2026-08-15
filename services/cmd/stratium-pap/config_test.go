@@ -16,6 +16,7 @@ var requiredPAPEnvVars = []string{
 	"STRATIUM_PAP_TENANT_ID",
 	"STRATIUM_PAP_OIDC_ISSUER",
 	"STRATIUM_PAP_OIDC_AUDIENCE",
+	"STRATIUM_PAP_OIDC_CLIENT_ID",
 	"STRATIUM_PAP_ROLE_CLAIM",
 	"STRATIUM_PAP_APPROVER_CLAIM",
 	"STRATIUM_PAP_ADMIN_GROUPS",
@@ -31,6 +32,7 @@ func clearPAPEnv(t *testing.T) {
 	}
 	t.Setenv("STRATIUM_PAP_LISTEN_ADDR", "")
 	t.Setenv("STRATIUM_PAP_OIDC_TIMEOUT", "")
+	t.Setenv("STRATIUM_PAP_OIDC_SCOPE", "")
 	t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "")
 }
 
@@ -40,6 +42,7 @@ func setAllPAPEnv(t *testing.T, overrides map[string]string) {
 		"STRATIUM_PAP_TENANT_ID":      "tenant-one",
 		"STRATIUM_PAP_OIDC_ISSUER":    "https://idp.example.com/",
 		"STRATIUM_PAP_OIDC_AUDIENCE":  "stratium-pap",
+		"STRATIUM_PAP_OIDC_CLIENT_ID": "stratium-pap-ui",
 		"STRATIUM_PAP_ROLE_CLAIM":     "roles",
 		"STRATIUM_PAP_APPROVER_CLAIM": "email",
 		"STRATIUM_PAP_ADMIN_GROUPS":   "org-admins",
@@ -75,6 +78,13 @@ func TestLoadConfig(t *testing.T) {
 		}
 		if cfg.RoleClaim != "roles" {
 			t.Errorf("RoleClaim = %q, want %q", cfg.RoleClaim, "roles")
+		}
+		if cfg.OIDCClientID != "stratium-pap-ui" {
+			t.Errorf("OIDCClientID = %q, want %q", cfg.OIDCClientID, "stratium-pap-ui")
+		}
+		// Defaulted, unlike the client id: see Config.OIDCScope's own comment.
+		if cfg.OIDCScope != defaultOIDCScope {
+			t.Errorf("OIDCScope = %q, want the default %q", cfg.OIDCScope, defaultOIDCScope)
 		}
 		if cfg.ApproverClaim != "email" {
 			t.Errorf("ApproverClaim = %q, want %q", cfg.ApproverClaim, "email")

@@ -63,7 +63,27 @@ func newTestServerFixture(t *testing.T) *testServerFixture {
 	// it: f.token below never sets "email", so every route gated on Role/
 	// Subject alone behaves exactly as it did before Task 4 added this
 	// parameter.
-	return &testServerFixture{idp: idp, server: NewServer(v, "roles", "email", roles, repo, policy.Registry{}), mock: mock}
+	//
+	// fixtureUIConfig (below) is Task 6's own addition, and matters to
+	// exactly the two tests in ui_test.go that read it back; no route gated
+	// by authorize consults any of its fields.
+	return &testServerFixture{
+		idp:    idp,
+		server: NewServer(v, "roles", "email", roles, repo, policy.Registry{}, fixtureUIConfig(idp.server.URL)),
+		mock:   mock,
+	}
+}
+
+// fixtureUIConfig mirrors what main.go builds from Config, pointed at this
+// fixture's own test IdP so contentSecurityPolicy has a real origin to derive
+// a connect-src from.
+func fixtureUIConfig(issuer string) uiConfig {
+	return uiConfig{
+		Issuer:   issuer,
+		ClientID: "stratium-pap-ui",
+		Audience: "stratium-pap",
+		Scope:    "openid profile email",
+	}
 }
 
 // token mints a validly signed, unexpired token for group (one of the

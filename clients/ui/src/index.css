@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* The shadcn design-token contract: components below reference these names,
+   never raw colours, so a deployment restyling the admin plane edits this
+   block and nothing else. */
+@theme {
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.15 0.01 260);
+  --color-muted: oklch(0.97 0.005 260);
+  --color-muted-foreground: oklch(0.5 0.02 260);
+  --color-border: oklch(0.91 0.01 260);
+  --color-primary: oklch(0.28 0.04 260);
+  --color-primary-foreground: oklch(0.99 0 0);
+  --color-destructive: oklch(0.52 0.19 25);
+  --color-destructive-foreground: oklch(0.99 0 0);
+  --color-accent: oklch(0.95 0.01 260);
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-background: oklch(0.16 0.01 260);
+    --color-foreground: oklch(0.97 0.005 260);
+    --color-muted: oklch(0.22 0.01 260);
+    --color-muted-foreground: oklch(0.68 0.02 260);
+    --color-border: oklch(0.28 0.01 260);
+    --color-primary: oklch(0.93 0.01 260);
+    --color-primary-foreground: oklch(0.18 0.01 260);
+    --color-accent: oklch(0.25 0.01 260);
+  }
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+}

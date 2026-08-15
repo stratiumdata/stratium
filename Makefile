@@ -1,24 +1,74 @@
 .DEFAULT_GOAL := help
 GO_DIR := services
 PROTO_DIR := proto
+UI_DIR := clients/ui
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
+
+# UI_DIST is where the admin UI is built TO -- inside the Go package that
+# embeds it (services/cmd/stratium-pap/ui.go). //go:embed cannot name a path
+# containing "..", so the build output has to land in the package directory;
+# clients/ui/vite.config.ts sets outDir to exactly this.
+#
+# It is git-ignored (root .gitignore's bare `dist/`, which matches at any
+# depth) and must stay that way. A committed dist would make the Go-side
+# embed test pass forever regardless of whether the UI was ever rebuilt,
+# which is the only thing that test exists to detect.
+UI_DIST := $(GO_DIR)/cmd/stratium-pap/dist
+UI_SRC := $(shell find $(UI_DIR)/src -type f 2>/dev/null) \
+	$(UI_DIR)/index.html $(UI_DIR)/callback.html $(UI_DIR)/vite.config.ts $(UI_DIR)/package.json
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build all binaries
+# --- The admin UI (Phase 14 Task 6, N13) --------------------------------
+#
+# Every Go target below depends on `ui`, and that is not belt-and-braces: it
+# is the whole answer to the build-order problem //go:embed creates. `go
+# build`, `go vet`, `go test`, and golangci-lint ALL compile
+# cmd/stratium-pap, and every one of them fails with
+#
+#     pattern dist: no matching files found
+#
+# on a clean checkout where the UI has never been built. Making the ordering
+# a Make prerequisite puts it in one place, visible, rather than in a README
+# nobody reads twice. CI calls these same targets so there is exactly one
+# definition of it.
+#
+# The two file targets below make repeat runs cheap: npm ci re-runs only when
+# package-lock.json changes, and the Vite build only when a UI source file
+# does. A `make test` that rebuilt the UI unconditionally would be a tax on
+# every Go test run.
+$(UI_DIR)/node_modules: $(UI_DIR)/package-lock.json
+	@command -v npm >/dev/null 2>&1 || { \
+		echo "npm not found -- the admin UI is part of this build: https://nodejs.org/"; exit 1; }
+	cd $(UI_DIR) && npm ci
+	@touch $@
+
+$(UI_DIST)/index.html: $(UI_DIR)/node_modules $(UI_SRC)
+	cd $(UI_DIR) && npm run build
+
+ui: $(UI_DIST)/index.html ## Build the admin UI into the PAP's embed directory
+
+ui-test: $(UI_DIR)/node_modules ## Lint and test the admin UI
+	cd $(UI_DIR) && npm run lint && npm run test
+
+ui-clean: ## Remove the built admin UI
+	rm -rf $(UI_DIST)
+
+build: ui ## Build all binaries (builds the admin UI first -- see the `ui` target)
 	cd $(GO_DIR) && go build ./...
 
-test: ## Run tests with the race detector
+test: ui ui-test ## Run Go tests with the race detector, plus the admin UI's lint and tests
 	cd $(GO_DIR) && go test -race ./...
 
-vet: ## Run go vet
+vet: ui ## Run go vet
 	cd $(GO_DIR) && go vet ./...
+	cd $(GO_DIR) && go vet -tags integration ./...
 
 fmt: ## Format Go code
 	cd $(GO_DIR) && go fmt ./...
 
-lint: ## Lint (requires golangci-lint)
+lint: ui ## Lint (requires golangci-lint)
 	@command -v golangci-lint >/dev/null 2>&1 || { \
 		echo "golangci-lint not found: https://golangci-lint.run/welcome/install/"; exit 1; }
 	cd $(GO_DIR) && golangci-lint run ./...
@@ -53,7 +103,7 @@ conformance: ## Run the authorization conformance suite (spec §7)
 	fi; \
 	echo "$$ran/$(CONFORMANCE_PROPERTIES) conformance properties executed."
 
-integration: ## Run the end-to-end proof: fresh compose volumes -> integration tests -> torn down, always
+integration: ui ## Run the end-to-end proof: fresh compose volumes -> integration tests -> torn down, always
 	@command -v docker >/dev/null 2>&1 || { \
 		echo "docker not found: https://docs.docker.com/get-docker/"; exit 1; }
 	@$(COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
@@ -94,4 +144,4 @@ integration: ## Run the end-to-end proof: fresh compose volumes -> integration t
 	STRATIUM_IT_PEP_PROXY_ADDR="localhost:$$pep_proxy_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
-.PHONY: help build test vet fmt lint proto conformance integration
+.PHONY: help build test vet fmt lint proto conformance integration ui ui-test ui-clean

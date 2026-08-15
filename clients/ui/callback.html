@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Signing in…</title>
+  </head>
+  <body>
+    <p>Completing sign-in… you can close this window.</p>
+    <!--
+      The OIDC redirect target, and deliberately the whole of it: it hands the
+      authorization code back to the window that opened it and closes. It
+      never exchanges the code (it has no code_verifier — that lives in the
+      opener's memory, which is the entire point of N12) and it never writes
+      anything to storage.
+
+      A separate entry point rather than the main app's index.html: loading
+      the full admin UI in a popup only to tear it down half a second later
+      would mean a second React tree, a second config fetch, and a second
+      place that could touch a token.
+    -->
+    <script type="module" src="/src/callback.ts"></script>
+  </body>
+</html>
