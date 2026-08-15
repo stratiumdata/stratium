@@ -93,12 +93,28 @@ conformance: ## Run the authorization conformance suite (spec §7)
 	@# The count assertion lives HERE, not in Go. A completeness test inside
 	@# conformance_test.go cannot detect that file being deleted — it goes with it,
 	@# `go test -run` then matches nothing, and the job exits 0. Verified.
-	@out=$$(cd $(GO_DIR) && go test ./internal/authz/ -run "TestC[0-9]|TestConformanceSuiteIsComplete" -v 2>&1); \
+	@# go test's own exit status is captured and re-asserted below, and that
+	@# is not belt-and-braces either. `out=$$(go test ...)` is an ASSIGNMENT:
+	@# a failing go test leaves this recipe running, and the recipe's exit
+	@# status is whatever its LAST command returns — the trailing echo, which
+	@# always succeeds. Until Phase 14 Task 8 this target therefore exited 0
+	@# on a conformance property that FAILED, and only ever failed on a
+	@# miscount. Measured, not reasoned about: a pointed-to test was renamed,
+	@# TestC5 fatalled on the stale pointer, and `make conformance; echo $$?`
+	@# printed 0 while `make test` printed 2. The whole gate still caught it
+	@# because `go test -race ./...` runs this package too — but the target
+	@# NAMED conformance was not, on its own, the gate it looked like.
+	@out=$$(cd $(GO_DIR) && go test ./internal/authz/ -run "TestC[0-9]|TestConformanceSuiteIsComplete" -v 2>&1); status=$$?; \
 	echo "$$out"; \
 	ran=$$(echo "$$out" | grep -cE "^=== RUN   TestC[0-9]+_[^/]*$$" || true); \
 	if [ "$$ran" -ne $(CONFORMANCE_PROPERTIES) ]; then \
 		echo "CONFORMANCE GATE FAILED: expected $(CONFORMANCE_PROPERTIES) properties, $$ran ran."; \
 		echo "A property was deleted or renamed, or the suite file is missing."; \
+		exit 1; \
+	fi; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "CONFORMANCE GATE FAILED: all $(CONFORMANCE_PROPERTIES) properties ran, but go test exited $$status."; \
+		echo "A property failed its assertions, or a proven-elsewhere pointer named a test that no longer exists."; \
 		exit 1; \
 	fi; \
 	echo "$$ran/$(CONFORMANCE_PROPERTIES) conformance properties executed."
