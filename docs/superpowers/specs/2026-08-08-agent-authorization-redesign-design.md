@@ -596,6 +596,103 @@ rule §4.3.1 states for every other dimension.
 
 ---
 
+### 4.7.2 Sender-constrained tokens — DPoP (2026-08-16)
+
+§4.1.1 states that **sender-constrained tokens are a prerequisite for `proxy`
+and `extauthz`, not an independent later concern**. Both surfaces shipped —
+Phases 10 and 11 — and that prerequisite was never met. C25 remains `notBuilt`
+because delegation tokens are presented as bearer credentials with no
+proof-of-possession binding. This section closes it.
+
+**What is already closed, so the remaining gap is stated accurately.** Tokens
+are ECDSA-signed JWTs the PDP both issues and verifies (**K1**, **K2**), and a
+token is an authenticated *reference* whose delegation the PDP loads and
+evaluates in full (**K3**). An agent therefore cannot mint a token naming a
+delegation it was not granted — the defect §4.1.1 worried about most, an agent
+choosing its own authority, is already prevented by the signature. **What
+remains is replay after theft**: a bearer token that leaks from a log, a proxy,
+or a compromised sidecar is fully usable by whoever holds it, on exactly the two
+surfaces where the request arrives from the party being policed.
+
+**K5 — binding is required on `proxy` and `extauthz`, and not used on `hook` or
+`mcp`.** The two network surfaces refuse a token carrying no `cnf.jkt`. This
+follows §4.1.1's own reasoning rather than extending it: on the local surfaces
+the caller already holds the session file containing a real token, so binding
+grants nothing, and requiring a keypair per session would be cost without a
+threat-model gain. A per-tenant toggle was rejected — a tenant that never sets
+it keeps bearer tokens on the internet-facing surfaces, which is the exact gap
+this work exists to close.
+
+**K6 — `IssueToken` accepts the caller's public JWK and binds the token to its
+RFC 7638 thumbprint** as `cnf.jkt`. A network-surface agent generates a keypair
+and presents the public half when it asks for a token; it is the only party that
+can subsequently produce a valid proof. An `IssueToken` call for a
+network-surface token with no JWK is refused rather than silently issuing a
+bearer token.
+
+**K7 — the PDP verifies the proof; the PEP forwards it along with the request
+metadata it binds to.** A DPoP proof binds to the HTTP request via `htm` and
+`htu`, and the PDP never sees that request — it sees a `Decide` call. The PEP
+therefore forwards the proof JWT *and* the method and URI it observed, and the
+PDP checks the signature, the `cnf.jkt` match, `htm`/`htu`, and freshness.
+
+This keeps **K2** intact: *"verification is a decision about whether a credential
+is genuine, so it belongs where every other decision does."* Splitting the check
+— PEP validates `htm`/`htu`, PDP validates the signature — would put half of
+"is this credential genuine" outside the PDP, and a PEP that decides a proof is
+valid is a PEP making an authorization decision (**D1**). The PEP reporting the
+method and URI it saw is the same category as it serializing `raw_input`, which
+it already does.
+
+**`htu` on the gRPC proxy is the proxy's own address plus the full method
+path**, `/package.Service/Method`, with `htm` as `POST` — gRPC is HTTP/2 POST.
+That is what the agent addressed and what the PEP observes. Binding to the
+*target's* address instead would let a proof for one target be replayed at
+another behind the same proxy.
+
+**K8 — a proof's `jti` is single-use, enforced in the database.** A
+tenant-scoped table with a uniqueness constraint and a TTL; a replayed proof
+collides and denies. This is the stronger of the two options RFC 9449 permits,
+and it was chosen deliberately over relying on a short freshness window alone,
+which leaves a stolen token and its captured proof replayable within that window
+against the same method and URI.
+
+The cost is a write on every network-surface decision. That is not a new class
+of cost — the PDP already writes an audit row per decision (**C16**) — and
+sharing one database means it holds across horizontally-scaled PDPs, which an
+in-memory cache would not. **A failed `jti` write denies**, exactly as a failed
+audit write does; a replay check that fails open is not a replay check. Expired
+rows are reaped on a schedule, and the reaper's failure must be visible rather
+than silently letting the table grow.
+
+**The PDP needs `INSERT` on this table, and that does not contradict E7, T1, or
+T6.** Those rulings withhold writes on *authorization configuration* —
+approvals, the tool catalog, tier overrides — because a PDP that could write
+them would be adjusting its own authority. Replay state is not configuration: it
+records that a specific proof was spent, it is written only by the component
+that spends it, and no value in it can widen any decision.
+
+**K9 — the freshness window is required configuration with no default.** An
+operator states how much clock skew between an agent and the PDP is tolerable.
+No default is right for every deployment, and a wrong one is either useless or
+too permissive — the same reasoning §4.8.2 **W3** applies to the cache staleness
+window.
+
+**K10 — a DPoP proof never reaches `raw_input` or the audit chain.** The same
+rule the `authorization` header already has (§4.1.1, Phases 10 and 11): raw
+input is hashed into an append-only record designed to be retained, and a
+credential-bearing artifact written there cannot be edited out. Strip by
+omission and case-insensitively, and assert the absence structurally.
+
+**C25 then means two things, and both must be tested.** Its wording — *"a
+delegation token without a valid DPoP proof is denied when the token is
+sender-constrained"* — covers a bound token presented without a proof. **K5**
+adds the converse: on `proxy` and `extauthz`, an *unbound* token is also denied,
+because binding is required there. A test covering only the first leaves the
+migration hole open.
+
+---
+
 ### 4.7.1 Token issuance mechanics (2026-08-13)
 
 **A4** says the PDP decides and issues tokens as the sole signing-key holder;
