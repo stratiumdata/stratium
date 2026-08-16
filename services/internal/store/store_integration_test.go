@@ -212,9 +212,8 @@ var (
 	// third, independently configured PDP (deploy/docker/docker-compose.yml's
 	// pdp-resource service) with its own fixed tenant, touched by nothing
 	// else in this file. Neither pdpClient's tenant (TestEndToEnd's proof2
-	// needs zero cedar policies at one specific point, and its own last
-	// subtest permanently revokes audit_chain INSERT for the rest of the
-	// process) nor narrowPdpClient's (already carries a permanent
+	// needs zero cedar policies at one specific point) nor
+	// narrowPdpClient's (already carries a permanent
 	// unconditional cedar forbid from its one existing live test) can serve
 	// a live proof that needs a principal policy which legitimately
 	// allows — see the compose file's own comment on pdp-resource for the
@@ -572,6 +571,26 @@ func runTestMain(m *testing.M) int {
 	defer closePAPConn()
 	papPdpClient = papClient
 
+	// Both PAPs are waited for explicitly, and they are the only services in
+	// this stack that need it in Go rather than in compose. Every PDP is
+	// gated by waitForServing above; postgres and keycloak have compose
+	// healthchecks. The PAP containers have neither -- distroless images
+	// carry no shell, so a compose healthcheck cannot be expressed for them
+	// -- so `compose up --wait` returns as soon as the container is RUNNING,
+	// which is before cmd/stratium-pap's run() has finished OIDC discovery
+	// against keycloak and reached ListenAndServe. The PDP polls above give
+	// incidental slack, which is why this never bit; that is luck, not a
+	// gate, and this is the phase's capstone proof to have it flake in.
+	for _, addr := range []string{papAddr, papExtauthzAddr} {
+		waited, err := waitForPAP(ctx, addr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stratium-pap at %s never became ready: %v\n", addr, err)
+			return 1
+		}
+		fmt.Fprintf(os.Stdout, "stratium-pap at %s answered after %s (this is the measured wait, not an assumption)\n",
+			addr, waited)
+	}
+
 	return m.Run()
 }
 
@@ -594,6 +613,43 @@ func dialAndWaitForServing(ctx context.Context, addr string) (pdpgrpc.PDPService
 	}
 	fmt.Fprintf(os.Stdout, "%s reported SERVING after %s (this is the measured wait, not an assumption)\n", addr, waited)
 	return pdpgrpc.NewPDPServiceClient(conn), func() { _ = conn.Close() }, nil
+}
+
+// waitForPAP polls a stratium-pap process until it answers HTTP at all, and
+// reports how long that took — the http.Server analogue of waitForServing
+// below, for the two services in this stack that can have no readiness gate
+// anywhere else (see runTestMain's own comment on why: a distroless image
+// has no shell for a compose healthcheck to run in).
+//
+// An UNAUTHENTICATED request, and any status at all counts as ready. The
+// question here is exactly "is ListenAndServe accepting connections yet",
+// not "does this process work" — every proof in this package answers the
+// second question for itself, loudly, and a readiness probe that also
+// asserted behavior would just be a worse copy of them. Sending no
+// credential also keeps this from needing a token before keycloak is
+// necessarily reachable, which would make the probe depend on a second
+// service being up to answer a question about the first.
+func waitForPAP(ctx context.Context, addr string) (time.Duration, error) {
+	start := time.Now()
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("last error: %w: %w", lastErr, ctx.Err())
+		default:
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/v1/policies", nil)
+		if err != nil {
+			return 0, fmt.Errorf("build readiness request for %s: %w", addr, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			return time.Since(start), nil
+		}
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // waitForDB retries PingContext instead of assuming the first attempt
@@ -2296,18 +2352,23 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 // task-5-brief.md): the five live-stack token proofs. Placed here,
 // immediately after TestIntegration_Live_ToolCatalogEnforcement and before
 // TestIntegration_Multi_OneEnginePrepareFailureDoesNotSuppressAnother/
-// TestEndToEnd — not a new file — for the same file-ordering reason that
-// test's own doc comment already establishes for resourceTenant: Go runs
-// top-level tests within one file in declaration order, and TestEndToEnd's
-// own last subtest permanently revokes the serving role's INSERT on
-// audit_chain for the rest of this postgres instance's life (role-level, not
-// tenant-scoped — every tenant's Decide calls would stop auditing after it
-// runs). A new file sorting alphabetically after "store_integration_test.go"
-// (e.g. "token_integration_test.go") would register its tests AFTER this
-// one's, i.e. after that revoke — breaking every proof below that expects an
-// audited ALLOW/DENY. Declaring these functions inside this file, before
-// TestEndToEnd, is what keeps them safe regardless of what a future edit
-// adds to this file after them.
+// TestEndToEnd — not a new file — for a file-ordering reason that WAS real
+// and no longer is. Go runs top-level tests within one file in declaration
+// order and concatenates a package's files in filename order, and
+// TestEndToEnd's own proof6 revokes the serving role's INSERT on audit_chain
+// (role-level, not tenant-scoped — every tenant's Decide calls stop auditing
+// while it is in effect). Until Phase 14 Task 8 that revoke was never
+// restored, so a new file sorting after "store_integration_test.go" (e.g.
+// "token_integration_test.go") would have registered its tests after it and
+// broken every proof expecting an audited ALLOW/DENY.
+//
+// proof6 now restores both grants in a t.Cleanup and verifies they came back
+// (restoreAuditChainInsert, bottom of this file), so the revoke lasts only
+// for that subtest and NO FILENAME IN THIS PACKAGE IS LOAD-BEARING ANY MORE.
+// Splitting these proofs into a file of their own is a free choice today,
+// whatever it is called. They stay here only because moving them buys
+// nothing; this paragraph exists so the next person to consider the split is
+// not talked out of it by a constraint that has been deleted.
 //
 // TestIntegration_Live_TokenAuthentication proves proofs 1, 2, and 4 against
 // the REAL containerized PDP (resourcePdpClient/resourceTenant) — the actual
@@ -2913,8 +2974,11 @@ allow if {
 // chain_verifies_across_the_migration_boundary: every "ordinary" proof has
 // by then already run against the real schema (same reasoning Phase 2b Task
 // 4 used for its own placement), and CreateDelegation's own audit step needs
-// INSERT on audit_chain, which proof6 permanently revokes — so these must
-// run before proof6, not just conventionally but structurally.
+// INSERT on audit_chain, which proof6 revokes for the duration of its own
+// subtest — so these run before proof6. That is ordering by convention now,
+// not by structure: since Phase 14 Task 8 proof6 restores both grants in a
+// t.Cleanup (restoreAuditChainInsert), so a subtest declared after it would
+// audit normally too.
 //
 // CreateDelegation's own INSERT into delegations surfaced a grant gap
 // identical in kind to the one 000007_policies_serving_grant.up.sql fixed

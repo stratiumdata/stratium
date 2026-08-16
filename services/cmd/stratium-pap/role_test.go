@@ -154,6 +154,29 @@ func TestResolveRole(t *testing.T) {
 			wantRole: RoleAdmin,
 		},
 		{
+			// The same property with the array the OTHER way round, and it
+			// is not redundant with the row above -- between them they are
+			// the whole of "highest wins". With only the lowest-first
+			// ordering, `best = role` unconditionally (last match wins)
+			// passes: admin is last, so the answer comes out right for the
+			// wrong reason. With only the highest-first ordering, "first
+			// match wins" passes for the same wrong reason. An IdP chooses
+			// this order, not this codebase -- the live proof
+			// (internal/store/pap_e2e_integration_test.go's
+			// TestIntegration_PAPE2E_MultiGroupOperatorResolvesToTheHighestRole)
+			// observed Keycloak emitting lowest-first, which is the same
+			// ordering as the row above, so until this row existed NOTHING
+			// in this repository distinguished highest-wins from
+			// last-match-wins. A customer whose IdP orders groups the other
+			// way would have had an admin silently resolved to viewer and
+			// locked out of every write route.
+			name: "array claim with multiple matches picks the highest regardless of order",
+			claims: map[string]any{
+				"roles": []any{"org-admins", "org-everyone"},
+			},
+			wantRole: RoleAdmin,
+		},
+		{
 			name:      "array claim with no matching entries refuses",
 			claims:    map[string]any{"roles": []any{"org-unknown-a", "org-unknown-b"}},
 			wantErr:   errRoleClaimUnrecognized,

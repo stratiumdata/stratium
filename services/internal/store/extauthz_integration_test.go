@@ -650,10 +650,27 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 	// live rather than merely satisfied by luck -- a DIFFERENT admin, with
 	// every role privilege this route requires, is still refused.
 	wrongAdmin := papAccessToken(t, papAdminUser, papAdminPass)
-	if status, body := papDo(t, papExtauthzAddr, http.MethodPost,
-		"/v1/approvals/"+approvalID+"/approve", wrongAdmin, nil); status != http.StatusForbidden {
+	wrongStatus, wrongBody := papDo(t, papExtauthzAddr, http.MethodPost,
+		"/v1/approvals/"+approvalID+"/approve", wrongAdmin, nil)
+	if wrongStatus != http.StatusForbidden {
 		t.Fatalf("approving as an admin who is NOT the root principal = %d, want 403 (N7: a role is "+
-			"necessary and never sufficient); body: %s", status, body)
+			"necessary and never sufficient); body: %s", wrongStatus, wrongBody)
+	}
+	// The status alone does not attribute the refusal, and that matters
+	// here more than usual: this route is ALSO gated at RoleAdmin, so a 403
+	// is equally consistent with N7 having fired and with pap-admin simply
+	// not clearing the role floor -- which is what a renamed realm group
+	// would quietly turn this proof into, still green and proving nothing.
+	// The body separates them: authorize (cmd/stratium-pap/server.go) writes
+	// a bare "forbidden" for a role refusal, while writeStoreError surfaces
+	// ErrApproverNotRootPrincipal's own message for N7's. Reaching that
+	// message means this operator cleared RoleAdmin, reached decideApproval,
+	// reached internal/store, and was refused on identity.
+	if !strings.Contains(wrongBody, "root principal") {
+		t.Fatalf("approving as the wrong admin was refused with %q, want a body naming N7's own refusal "+
+			"(store.ErrApproverNotRootPrincipal) -- a bare \"forbidden\" is the ROLE floor talking, which "+
+			"would mean this operator never reached the identity check at all and this negative proves "+
+			"nothing about N7", wrongBody)
 	}
 
 	approver := papAccessToken(t, papExtauthzApproverUser, papExtauthzApproverPass)

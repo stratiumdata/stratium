@@ -433,6 +433,31 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			"2 Task-5 authoring routes + 2 Task-6 list routes)", len(routeTable), wantTotal)
 	}
 
+	// The number gated above RoleViewer, pinned alongside the total because
+	// something outside this package depends on it and cannot see it.
+	// internal/store/pap_e2e_integration_test.go keeps a hand-maintained
+	// mirror of this table (it cannot import a main package) and sweeps
+	// every write route asserting a viewer is refused, and every route at
+	// all asserting an unverified token is refused -- and conformance
+	// property C5's machine-checked pointer cites that sweep as evidence the
+	// tier_overrides write surface is unreachable without an operator's OIDC
+	// token. A route added HERE and not mirrored THERE goes unswept in both
+	// proofs, silently, while C5 goes on citing them. That mirror cannot
+	// detect its own omission; this can. Adding a route is meant to fail
+	// here and send the author to that file.
+	writes := 0
+	for _, rt := range routeTable {
+		if rt.MinRole != RoleViewer {
+			writes++
+		}
+	}
+	const wantWrites = 16
+	if writes != wantWrites {
+		t.Fatalf("routeTable has %d routes gated above RoleViewer, want %d -- if that is a deliberate new "+
+			"route, papRouteTable in internal/store/pap_e2e_integration_test.go must gain it too, or proofs "+
+			"2 and 3 will never sweep it and conformance C5's pointer will overclaim", writes, wantWrites)
+	}
+
 	want := map[string]bool{}
 	for _, resource := range []string{"policies", "agents", "tier-overrides"} {
 		want["GET /v1/"+resource] = false
