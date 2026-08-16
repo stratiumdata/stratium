@@ -360,11 +360,6 @@ func runTestMain(m *testing.M) int {
 	epochTenant = os.Getenv("STRATIUM_IT_EPOCH_TENANT_ID")
 	pdpCacheAddr := os.Getenv("STRATIUM_IT_PDP_CACHE_ADDR")
 	cacheTenant = os.Getenv("STRATIUM_IT_CACHE_TENANT_ID")
-	papPdpAddr := os.Getenv("STRATIUM_IT_PDP_PAP_ADDR")
-	papTenant = os.Getenv("STRATIUM_IT_PAP_TENANT_ID")
-	papAddr = os.Getenv("STRATIUM_IT_PAP_ADDR")
-	papExtauthzAddr = os.Getenv("STRATIUM_IT_PAP_EXTAUTHZ_ADDR")
-	keycloakAddr = os.Getenv("STRATIUM_IT_KEYCLOAK_ADDR")
 	if dbURL == "" || servingDBURL == "" || papDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
 		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
 		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" ||
@@ -379,17 +374,32 @@ func runTestMain(m *testing.M) int {
 				"and STRATIUM_IT_CACHE_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
-	// Phase 14 Task 8's own five, checked here rather than by lengthening
-	// the condition above, which already spans four lines. Same all-at-once
-	// contract; the list itself lives next to the code that consumes it
-	// (papE2ERequiredEnv, pap_e2e_integration_test.go).
+	// Phase 14 Task 8's own five, checked here rather than by lengthening the
+	// condition above, which already spans four lines. Same all-at-once
+	// contract, but name -> destination in one map rather than this being a
+	// value list zipped by position against a name list declared in another
+	// file (formerly papE2ERequiredEnv, pap_e2e_integration_test.go): that
+	// coupling could silently drift -- the wrong name in the error, or an
+	// index panic if the two lengths ever diverged -- without either file's
+	// compiler catching it. One list, keyed by name, cannot name the wrong
+	// variable.
+	var papPdpAddr string
+	papEnv := map[string]*string{
+		"STRATIUM_IT_PDP_PAP_ADDR":      &papPdpAddr,
+		"STRATIUM_IT_PAP_TENANT_ID":     &papTenant,
+		"STRATIUM_IT_PAP_ADDR":          &papAddr,
+		"STRATIUM_IT_PAP_EXTAUTHZ_ADDR": &papExtauthzAddr,
+		"STRATIUM_IT_KEYCLOAK_ADDR":     &keycloakAddr,
+	}
 	var missingPAPEnv []string
-	for i, v := range []string{papPdpAddr, papTenant, papAddr, papExtauthzAddr, keycloakAddr} {
-		if v == "" {
-			missingPAPEnv = append(missingPAPEnv, papE2ERequiredEnv[i])
+	for name, dst := range papEnv {
+		*dst = os.Getenv(name)
+		if *dst == "" {
+			missingPAPEnv = append(missingPAPEnv, name)
 		}
 	}
 	if len(missingPAPEnv) > 0 {
+		slices.Sort(missingPAPEnv) // map iteration order isn't; keep the message deterministic
 		fmt.Fprintln(os.Stderr, papE2EEnvError(missingPAPEnv))
 		return 1
 	}

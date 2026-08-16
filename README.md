@@ -44,6 +44,11 @@ build only when the UI's own inputs have changed. Node is therefore a build
 dependency of this repository, not only of the UI. `make ui` on its own is
 enough to unblock bare `go` commands afterwards.
 
+One consequence of this: `go install stratium/cmd/stratium-pap@…` can never
+work. There is no `make ui` step in a module install, and `dist/` — git-ignored
+for the reason above — is never part of the module's source either way.
+Building `stratium-pap` means cloning this repository and running `make`.
+
 `dist/` is deliberately never committed: a checked-in build output would make
 the embed test (`services/cmd/stratium-pap/ui_test.go`) pass forever whether or
 not anyone rebuilt the UI, which is the only thing that test exists to detect.

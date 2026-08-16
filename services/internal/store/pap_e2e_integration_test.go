@@ -997,16 +997,9 @@ func TestIntegration_PAPE2E_TierOverrideRaisesAndLoweringIsRefusedOnBothBaseline
 	})
 }
 
-// papE2ERequiredEnv names every environment variable this file and proof 4's
-// additions to extauthz_integration_test.go need, for TestMain's own
-// all-at-once check. Declared here rather than inline in TestMain so the
-// list lives next to the code that consumes it.
-var papE2ERequiredEnv = []string{
-	"STRATIUM_IT_PDP_PAP_ADDR", "STRATIUM_IT_PAP_TENANT_ID",
-	"STRATIUM_IT_PAP_ADDR", "STRATIUM_IT_PAP_EXTAUTHZ_ADDR", "STRATIUM_IT_KEYCLOAK_ADDR",
-}
-
-// papE2EEnvError formats TestMain's failure when one is missing.
+// papE2EEnvError formats TestMain's failure (store_integration_test.go's
+// runTestMain) when one of Phase 14 Task 8's PAP environment variables is
+// missing.
 func papE2EEnvError(missing []string) error {
 	return fmt.Errorf("%s must be set — run via `make integration`, not `go test` directly",
 		strings.Join(missing, ", "))

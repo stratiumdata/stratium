@@ -118,11 +118,18 @@ func (s *Store) LoadToolCatalog(ctx context.Context) ([]models.ToolCatalogEntry,
 // queryToolCatalogTx runs loadToolCatalogQuery inside an already-open,
 // already-tenant-scoped transaction. LoadToolCatalog above is one caller;
 // the other is tier_override.go's overrideBaseline, which needs the tenant's
-// catalog to compute the resolution beneath a proposed override and must see
-// it in the SAME transaction the override is then written in — a separate
-// read would leave a window in which the catalog changes between the check
-// and the write, which is exactly the drift the read-time re-validation on
-// the PDP side exists to catch, and no reason to create more of here.
+// catalog to compute the resolution beneath a proposed override and reads it
+// in the SAME transaction the override is then written in.
+//
+// That narrows the check-to-write window; it does not close it.
+// beginTenantTx opens with BeginTx(ctx, nil) — READ COMMITTED, Postgres's
+// default — where each statement takes its own snapshot, so a concurrent
+// commit landing between this SELECT and the later write is still possible
+// inside one transaction. What actually closes the residue is read time,
+// not write time: the PDP's honoredOverrides (pdpgrpc/server.go, spec
+// §4.4.3 T5) re-checks every stored override against the tenant's LIVE
+// catalog when a decision is made and drops any that no longer validate,
+// falling back to the higher, safer tier beneath it.
 func queryToolCatalogTx(ctx context.Context, tx *sql.Tx) ([]models.ToolCatalogEntry, error) {
 	rows, err := tx.QueryContext(ctx, loadToolCatalogQuery)
 	if err != nil {
