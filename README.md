@@ -18,6 +18,17 @@ specific point in a delegation chain — may perform a specific action.
     make test       # Go tests with -race, plus the admin UI's lint and tests
     make lint       # golangci-lint
     make conformance  # authorization conformance properties
+    make integration  # the live-stack proofs (see below)
+
+`make integration` brings up the whole stack in Docker — 17 services:
+Postgres, eight PDP instances, two PEPs, a real Envoy and its upstream, a real
+gRPC target, two `stratium-pap` instances, and a real Keycloak — runs the
+integration-tagged tests against it, and tears it down
+again with its volumes, always. It therefore needs Docker and, on a cold
+machine, network access to pull `postgres`, `envoyproxy/envoy`, and
+`quay.io/keycloak/keycloak`. The Keycloak realm is imported from
+`deploy/docker/keycloak/stratium-realm.json`; nothing in it is a credential
+to anything outside this stack.
 
 **Use `make`, not `go build` directly.** The admin UI (`clients/ui`) is
 embedded into the `stratium-pap` binary with `//go:embed dist`, and `dist/` is
