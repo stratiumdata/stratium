@@ -205,6 +205,31 @@ func TestVerify_RejectsSymmetricAlg(t *testing.T) {
 	}
 }
 
+// The allowlist is the security control, and behaviour alone cannot hold it
+// shut. Mutation-testing this package showed why: adding "none" to
+// allowedAlgorithms leaves every behavioural test above green, because
+// go-jose's verifier then refuses the algorithm one step later and the proof
+// is rejected anyway. That makes the two tests above pass for a reason other
+// than the one they are named for, and it would keep passing right up until
+// some future library or key type made the second line of defence miss. So
+// assert the property the list itself must have.
+func TestAllowedAlgorithms_ExcludeNoneAndEverySymmetricAlg(t *testing.T) {
+	if len(allowedAlgorithms) == 0 {
+		t.Fatal("the algorithm allowlist is empty")
+	}
+	for _, alg := range allowedAlgorithms {
+		s := string(alg)
+		switch {
+		case s == "":
+			t.Error("the allowlist contains an empty algorithm")
+		case strings.EqualFold(s, "none"):
+			t.Errorf("%q must never be in the allowlist (RFC 9449 §4.3 item 5)", s)
+		case strings.HasPrefix(s, "HS"):
+			t.Errorf("%q is symmetric and must never be in the allowlist", s)
+		}
+	}
+}
+
 func TestVerify_RejectsMissingOrWrongTyp(t *testing.T) {
 	key := newECKey(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
