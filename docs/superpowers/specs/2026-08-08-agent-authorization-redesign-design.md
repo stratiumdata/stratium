@@ -626,9 +626,20 @@ this work exists to close.
 **K6 — `IssueToken` accepts the caller's public JWK and binds the token to its
 RFC 7638 thumbprint** as `cnf.jkt`. A network-surface agent generates a keypair
 and presents the public half when it asks for a token; it is the only party that
-can subsequently produce a valid proof. An `IssueToken` call for a
-network-surface token with no JWK is refused rather than silently issuing a
-bearer token.
+can subsequently produce a valid proof.
+
+**The JWK is optional at issuance, and the refusal lives at the surface, not
+here.** `IssueToken` cannot know which surface will present the token it mints,
+so it cannot decide whether binding is required — a JWK yields a bound token, no
+JWK yields a bearer token exactly as today. **K5** is what makes an unbound
+token useless on `proxy` and `extauthz`: those surfaces refuse it. An agent that
+intends to use either must therefore supply a JWK, and discovers otherwise on
+its first call rather than at issuance.
+
+*(Corrected 2026-08-16, while planning: this ruling first said an `IssueToken`
+call "for a network-surface token" with no JWK is refused. There is no such
+thing at issuance — the surface is not known until the token is presented. The
+requirement is real but it belongs to K5, which already carries it.)*
 
 **K7 — the PDP verifies the proof; the PEP forwards it along with the request
 metadata it binds to.** A DPoP proof binds to the HTTP request via `htm` and
