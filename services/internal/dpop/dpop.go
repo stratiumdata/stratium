@@ -108,12 +108,21 @@ type Proof struct {
 	// compares against the presented token's cnf.jkt.
 	JKT string
 
-	// HTM and HTU are the HTTP method and target URI the proof was made for
-	// (RFC 9449 §4.2). They are reported verbatim; use MatchesRequest to
-	// compare them against an observed request, because htu comparison is not
-	// string equality — see the package doc.
-	HTM string
-	HTU string
+	// htm and htu are the HTTP method and target URI the proof was made for
+	// (RFC 9449 §4.2). They are UNEXPORTED on purpose, and the purpose is not
+	// encapsulation for its own sake: MatchesRequest is the only correct way
+	// to consume them, and an exported HTU invites `if p.HTU != observedURI`,
+	// which compiles, reads fine, and denies every legitimate request that
+	// carries a query string or names :443 explicitly. The outage that
+	// produces gets "fixed" by loosening the comparison, which is how a
+	// binding check quietly stops binding.
+	//
+	// Nothing outside this package has yet needed the raw claims — the audit
+	// chain must not carry proof material at all (spec §4.7.2 K10), so the
+	// obvious candidate reason is ruled out by the spec. Add a narrow accessor
+	// if a real need appears; do not re-export these.
+	htm string
+	htu string
 
 	// JTI is the proof's unique identifier. Replay prevention is the caller's
 	// (spec §4.7.2 K8); this package only reports the value.
@@ -144,6 +153,17 @@ type Proof struct {
 // and does not know whether this is the right key or a fresh jti. See the
 // package doc for why both are elsewhere.
 func Verify(proof string, now time.Time, window time.Duration) (Proof, error) {
+	// A non-positive window is a configuration error, not a very strict
+	// policy, and it does NOT fail closed by itself: with window == 0 a proof
+	// whose iat lands on the same second as now satisfies both comparisons
+	// below and verifies. That it usually denies in production is an accident
+	// of now having sub-second precision while iat does not — not something
+	// to rely on. K9 makes the window required configuration, so a zero here
+	// means someone defaulted it; say so rather than half-enforcing it.
+	if window <= 0 {
+		return Proof{}, fmt.Errorf("dpop: freshness window must be positive, got %s", window)
+	}
+
 	jws, err := jose.ParseSignedCompact(proof, allowedAlgorithms)
 	if err != nil {
 		return Proof{}, fmt.Errorf("dpop: parse proof: %w", err)
@@ -212,8 +232,8 @@ func Verify(proof string, now time.Time, window time.Duration) (Proof, error) {
 
 	return Proof{
 		JKT:      jkt,
-		HTM:      claims.HTM,
-		HTU:      claims.HTU,
+		htm:      claims.HTM,
+		htu:      claims.HTU,
 		JTI:      claims.JTI,
 		IssuedAt: issuedAt,
 	}, nil
@@ -233,10 +253,10 @@ func Verify(proof string, now time.Time, window time.Duration) (Proof, error) {
 // described in the package doc, which is not string equality. Both arguments
 // are what the surface observed, never what the client asserted.
 func (p Proof) MatchesRequest(method, uri string) error {
-	if p.HTM != method {
-		return fmt.Errorf("dpop: htm %q does not match the observed method %q", p.HTM, method)
+	if p.htm != method {
+		return fmt.Errorf("dpop: htm %q does not match the observed method %q", p.htm, method)
 	}
-	claimed, err := canonicalURI(p.HTU)
+	claimed, err := canonicalURI(p.htu)
 	if err != nil {
 		return fmt.Errorf("dpop: htu claim: %w", err)
 	}
@@ -245,7 +265,11 @@ func (p Proof) MatchesRequest(method, uri string) error {
 		return fmt.Errorf("dpop: observed uri: %w", err)
 	}
 	if claimed != observed {
-		return fmt.Errorf("dpop: htu %q does not match the observed uri %q", p.HTU, uri)
+		// The canonical forms, not the raw ones: they are what actually
+		// differed, and they carry no query string — which the comparison
+		// discarded anyway and which is the part most likely to hold a
+		// credential or personal data if a caller logs this.
+		return fmt.Errorf("dpop: htu %q does not match the observed uri %q", claimed, observed)
 	}
 	return nil
 }
@@ -284,10 +308,12 @@ func Thumbprint(jwkJSON []byte) (string, error) {
 // key material rather than from however the sender happened to format its
 // JSON. That is what RFC 7638 specifies and it is why a proof whose JWK
 // carries extra members, or the same members in a different order, still
-// yields the same thumbprint. TestThumbprint_MatchesRFC7638Example checks the
-// result against the value RFC 7638 §3.1 publishes for its own example key,
-// so the expectation comes from the RFC rather than from a second run of this
-// code.
+// yields the same thumbprint. TestThumbprint_MatchesPublishedVectors checks
+// the result against values three RFCs publish for their own example keys —
+// one per key type, since {e,kty,n}, {crv,kty,x,y} and {crv,kty,x} are three
+// different member sets and being right about one proves nothing about the
+// others — so every expectation comes from an RFC rather than from a second
+// run of this code.
 func thumbprint(key *jose.JSONWebKey) (string, error) {
 	sum, err := key.Thumbprint(crypto.SHA256)
 	if err != nil {
@@ -324,12 +350,19 @@ func canonicalURI(raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%q is not a URI: %w", raw, err)
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("%q is not an absolute URI", raw)
+	// Userinfo is rejected rather than dropped. url.Host excludes it, so
+	// simply reading Host would silently canonicalize
+	// https://alice:secret@host/p to https://host/p — a normalization RFC 3986
+	// §6.2.3 does not authorize, and one that would compare a credential-
+	// bearing URI equal to a bare one. RFC 9110 §4.2.1 forbids userinfo in
+	// http(s) URIs outright. The raw value is deliberately NOT echoed: it
+	// would put a password in an error string.
+	if u.User != nil {
+		return "", errors.New("a target URI must not carry userinfo (RFC 9110 §4.2.1)")
 	}
 
-	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Host)
+	scheme := asciiLower(u.Scheme)
+	host := asciiLower(u.Host)
 	// Scheme-based normalization (RFC 3986 §6.2.3): a default port is
 	// equivalent to no port. url.Host is host[:port] with any userinfo
 	// already split off, so a ":443" suffix is always the port, including
@@ -340,6 +373,12 @@ func canonicalURI(raw string) (string, error) {
 	case scheme == "https" && strings.HasSuffix(host, ":443"):
 		host = strings.TrimSuffix(host, ":443")
 	}
+	// AFTER the trim, not before. "https://:443/p" has a non-empty Host until
+	// the port comes off, so a guard placed above would pass it and then hand
+	// back "https:///p" — an empty authority the guard exists to prevent.
+	if scheme == "" || host == "" {
+		return "", fmt.Errorf("%q is not an absolute URI", raw)
+	}
 
 	// EscapedPath, not Path: url.Path is percent-DECODED, which would make
 	// /a%2Fb compare equal to /a/b. Those are different resources on any
@@ -349,4 +388,22 @@ func canonicalURI(raw string) (string, error) {
 		path = "/"
 	}
 	return scheme + "://" + host + path, nil
+}
+
+// asciiLower lowercases A-Z and leaves every other rune alone.
+//
+// Not strings.ToLower: RFC 3986 §6.2.2.1 defines case normalization over
+// US-ASCII, while strings.ToLower applies full Unicode case mapping, under
+// which U+212A KELVIN SIGN folds to "k" and a host spelled with it would
+// compare equal to one spelled without. Not exploitable here — htu is signed,
+// so both sides describe the same endpoint either way — but it is a fold the
+// RFC does not sanction, in the one function whose whole job is to fold
+// exactly as much as the RFC says and no more.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
 }

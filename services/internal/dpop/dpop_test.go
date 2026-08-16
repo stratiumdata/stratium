@@ -3,6 +3,7 @@ package dpop
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,16 +37,6 @@ const rfc7638ExampleJWK = `{
 }`
 
 const rfc7638ExampleThumbprint = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
-
-func TestThumbprint_MatchesRFC7638Example(t *testing.T) {
-	got, err := Thumbprint([]byte(rfc7638ExampleJWK))
-	if err != nil {
-		t.Fatalf("Thumbprint of the RFC 7638 example key: %v", err)
-	}
-	if got != rfc7638ExampleThumbprint {
-		t.Fatalf("thumbprint disagrees with RFC 7638 §3.1:\n got %q\nwant %q", got, rfc7638ExampleThumbprint)
-	}
-}
 
 // A thumbprint carrying base64 padding or computed over a different digest
 // would still "work" against an expectation this package produced itself, so
@@ -78,6 +70,51 @@ func TestThumbprint_IgnoresDocumentOrderAndExtraMembers(t *testing.T) {
 	}
 	if got != rfc7638ExampleThumbprint {
 		t.Fatalf("reordering the document changed the thumbprint: got %q want %q", got, rfc7638ExampleThumbprint)
+	}
+}
+
+// The EC vector, from the RFC this package implements. RFC 9449 §4.2 (Figure
+// 4) publishes this P-256 key in its example proof header, and §6.1 (Figures 8
+// and 9) publishes the cnf.jkt of the token that proof is bound to. ES256 is
+// what DPoP clients actually use; RFC 7638's own worked example is RSA-only,
+// which is the key type DPoP is least likely to see.
+const (
+	rfc9449ExampleJWK = `{
+  "kty":"EC",
+  "x":"l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
+  "y":"9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA",
+  "crv":"P-256"
+}`
+	rfc9449ExampleThumbprint = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+)
+
+// The OKP vector, from RFC 8037 §A.3, which publishes both the Ed25519 JWK and
+// its thumbprint.
+const (
+	rfc8037ExampleJWK        = `{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}`
+	rfc8037ExampleThumbprint = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"
+)
+
+// One published vector per key type this package can thumbprint. Each of the
+// three has a different required-member set and a different lexicographic
+// order ({e,kty,n}, {crv,kty,x,y}, {crv,kty,x}), so a canonicalization that is
+// right for one can still be wrong for another — a single RSA vector would not
+// have caught it.
+func TestThumbprint_MatchesPublishedVectors(t *testing.T) {
+	for _, tc := range []struct{ name, jwk, want, source string }{
+		{"RSA", rfc7638ExampleJWK, rfc7638ExampleThumbprint, "RFC 7638 §3.1"},
+		{"EC P-256", rfc9449ExampleJWK, rfc9449ExampleThumbprint, "RFC 9449 §4.2 key, §6.1 jkt"},
+		{"OKP Ed25519", rfc8037ExampleJWK, rfc8037ExampleThumbprint, "RFC 8037 §A.3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Thumbprint([]byte(tc.jwk))
+			if err != nil {
+				t.Fatalf("Thumbprint: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("thumbprint disagrees with %s:\n got %q\nwant %q", tc.source, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -134,8 +171,8 @@ func TestVerify_ValidProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a well-formed, self-signed, fresh proof must verify: %v", err)
 	}
-	if got.HTM != testHTM || got.HTU != testHTU {
-		t.Fatalf("htm/htu reported as %q/%q, want %q/%q", got.HTM, got.HTU, testHTM, testHTU)
+	if got.htm != testHTM || got.htu != testHTU {
+		t.Fatalf("htm/htu reported as %q/%q, want %q/%q", got.htm, got.htu, testHTM, testHTU)
 	}
 	if got.JTI != "proof-0001" {
 		t.Fatalf("jti reported as %q", got.JTI)
@@ -184,7 +221,16 @@ func TestVerify_RejectsAlgNone(t *testing.T) {
 
 // An HS256 proof whose "secret" is the public key is the classic alg-confusion
 // defeat: if the verifier honours the header's alg, anyone holding the public
-// key can mint proofs. The allowlist makes the attempt unparseable.
+// key can mint proofs.
+//
+// READ THE NEXT SENTENCE BEFORE TRUSTING THIS TEST. Like TestVerify_RejectsAlgNone
+// below it, this test passes for a reason other than the one it is named for,
+// verified by mutation: adding jose.HS256/384/512 to allowedAlgorithms leaves
+// all three subtests GREEN. The header JWK parses to an *ecdsa.PublicKey, and
+// go-jose's HMAC verifier refuses a non-[]byte key a layer deeper, so the
+// allowlist is never what rejects this. The attack is not executable through
+// this code path at all. What actually holds the allowlist shut is
+// TestAllowedAlgorithms_MatchExactlyTheRegisteredAsymmetricSet.
 func TestVerify_RejectsSymmetricAlg(t *testing.T) {
 	key := newECKey(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -206,17 +252,26 @@ func TestVerify_RejectsSymmetricAlg(t *testing.T) {
 }
 
 // The allowlist is the security control, and behaviour alone cannot hold it
-// shut. Mutation-testing this package showed why: adding "none" to
-// allowedAlgorithms leaves every behavioural test above green, because
-// go-jose's verifier then refuses the algorithm one step later and the proof
-// is rejected anyway. That makes the two tests above pass for a reason other
-// than the one they are named for, and it would keep passing right up until
-// some future library or key type made the second line of defence miss. So
-// assert the property the list itself must have.
-func TestAllowedAlgorithms_ExcludeNoneAndEverySymmetricAlg(t *testing.T) {
-	if len(allowedAlgorithms) == 0 {
-		t.Fatal("the algorithm allowlist is empty")
+// shut in EITHER direction. Mutation-testing this package showed both halves:
+//
+//   - Adding "none" — or HS256/384/512 — leaves every behavioural test above
+//     green, because go-jose's verifier refuses the algorithm one step later
+//     and the proof is rejected anyway. Widening the list is invisible.
+//   - Narrowing the list to {ES256, RS256} also survives the whole suite,
+//     because nothing exercised the other eight entries. Dropping EdDSA would
+//     break every Ed25519 client and ship green.
+//
+// So pin the set exactly. Both halves matter: the forbidden half is a security
+// property, the required half is an interoperability one, and each has its own
+// silent failure mode.
+func TestAllowedAlgorithms_MatchExactlyTheRegisteredAsymmetricSet(t *testing.T) {
+	want := map[jose.SignatureAlgorithm]bool{
+		jose.ES256: true, jose.ES384: true, jose.ES512: true,
+		jose.PS256: true, jose.PS384: true, jose.PS512: true,
+		jose.RS256: true, jose.RS384: true, jose.RS512: true,
+		jose.EdDSA: true,
 	}
+	got := map[jose.SignatureAlgorithm]bool{}
 	for _, alg := range allowedAlgorithms {
 		s := string(alg)
 		switch {
@@ -226,6 +281,72 @@ func TestAllowedAlgorithms_ExcludeNoneAndEverySymmetricAlg(t *testing.T) {
 			t.Errorf("%q must never be in the allowlist (RFC 9449 §4.3 item 5)", s)
 		case strings.HasPrefix(s, "HS"):
 			t.Errorf("%q is symmetric and must never be in the allowlist", s)
+		}
+		if got[alg] {
+			t.Errorf("%q appears twice in the allowlist", s)
+		}
+		got[alg] = true
+	}
+	for alg := range want {
+		if !got[alg] {
+			t.Errorf("%q is missing from the allowlist; dropping it breaks every client using it", alg)
+		}
+	}
+	for alg := range got {
+		if !want[alg] {
+			t.Errorf("%q was added to the allowlist without being added here", alg)
+		}
+	}
+}
+
+// The positive half again, behaviourally: every advertised algorithm must
+// actually round-trip a proof. An entry that is listed but unusable is the
+// same interoperability failure as one that is missing, and the exact-set test
+// above cannot see it.
+func TestVerify_AcceptsEveryAdvertisedAlgorithm(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, alg := range allowedAlgorithms {
+		t.Run(string(alg), func(t *testing.T) {
+			signer, err := jose.NewSigner(
+				jose.SigningKey{Algorithm: alg, Key: signingKeyFor(t, alg)},
+				(&jose.SignerOptions{EmbedJWK: true}).WithType(proofType),
+			)
+			if err != nil {
+				t.Fatalf("new signer: %v", err)
+			}
+			payload, err := json.Marshal(claims(now))
+			if err != nil {
+				t.Fatalf("marshal claims: %v", err)
+			}
+			signed, err := signer.Sign(payload)
+			if err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+			compact, err := signed.CompactSerialize()
+			if err != nil {
+				t.Fatalf("serialize: %v", err)
+			}
+			got, err := Verify(compact, now, time.Minute)
+			if err != nil {
+				t.Fatalf("a proof signed with the advertised alg %s must verify: %v", alg, err)
+			}
+			if got.JKT == "" {
+				t.Fatalf("no thumbprint computed for a %s proof", alg)
+			}
+		})
+	}
+}
+
+func TestVerify_RejectsNonPositiveWindow(t *testing.T) {
+	key := newECKey(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	proof := makeProof(t, header(t, key.Public()), claims(now), es256(key))
+
+	for _, window := range []time.Duration{0, -time.Second} {
+		if _, err := Verify(proof, now, window); err == nil {
+			t.Fatalf("a window of %s is a configuration error and must be refused, "+
+				"not silently treated as very strict: an iat on the same second as now "+
+				"satisfies both bounds", window)
 		}
 	}
 }
@@ -434,7 +555,7 @@ func TestVerify_RejectsGarbage(t *testing.T) {
 // --- MatchesRequest -------------------------------------------------------
 
 func TestMatchesRequest_IgnoresQueryAndFragmentButNotPath(t *testing.T) {
-	p := Proof{HTM: "GET", HTU: "https://pdp.example.com/v1/decide"}
+	p := Proof{htm: "GET", htu: "https://pdp.example.com/v1/decide"}
 
 	matching := []string{
 		"https://pdp.example.com/v1/decide",
@@ -466,14 +587,14 @@ func TestMatchesRequest_IgnoresQueryAndFragmentButNotPath(t *testing.T) {
 // The proof's own htu is normalized the same way the observed URI is, so the
 // query has to be ignored from whichever side carries it.
 func TestMatchesRequest_IgnoresQueryOnTheClaimSideToo(t *testing.T) {
-	p := Proof{HTM: "GET", HTU: "https://pdp.example.com/v1/decide?stale=1#frag"}
+	p := Proof{htm: "GET", htu: "https://pdp.example.com/v1/decide?stale=1#frag"}
 	if err := p.MatchesRequest("GET", "https://pdp.example.com/v1/decide"); err != nil {
 		t.Fatalf("a query in the htu claim must be ignored: %v", err)
 	}
 }
 
 func TestMatchesRequest_SchemeAndHostAreCaseInsensitive(t *testing.T) {
-	p := Proof{HTM: "POST", HTU: "HTTPS://PDP.Example.COM/v1/decide"}
+	p := Proof{htm: "POST", htu: "HTTPS://PDP.Example.COM/v1/decide"}
 	if err := p.MatchesRequest("POST", "https://pdp.example.com/v1/decide"); err != nil {
 		t.Fatalf("scheme and host compare case-insensitively (RFC 3986 §6.2.2.1): %v", err)
 	}
@@ -490,7 +611,7 @@ func TestMatchesRequest_DropsTheDefaultPort(t *testing.T) {
 	}
 	for name, pair := range cases {
 		t.Run(name, func(t *testing.T) {
-			p := Proof{HTM: "POST", HTU: pair[0]}
+			p := Proof{htm: "POST", htu: pair[0]}
 			if err := p.MatchesRequest("POST", pair[1]); err != nil {
 				t.Fatalf("%s and %s name the same resource: %v", pair[0], pair[1], err)
 			}
@@ -500,14 +621,14 @@ func TestMatchesRequest_DropsTheDefaultPort(t *testing.T) {
 
 // A non-default port is part of the authority and must still be compared.
 func TestMatchesRequest_KeepsANonDefaultPort(t *testing.T) {
-	p := Proof{HTM: "POST", HTU: "https://pdp.example.com:8443/v1/decide"}
+	p := Proof{htm: "POST", htu: "https://pdp.example.com:8443/v1/decide"}
 	if err := p.MatchesRequest("POST", "https://pdp.example.com/v1/decide"); err == nil {
 		t.Fatal("a non-default port must not be dropped")
 	}
 }
 
 func TestMatchesRequest_MethodIsExact(t *testing.T) {
-	p := Proof{HTM: "POST", HTU: testHTU}
+	p := Proof{htm: "POST", htu: testHTU}
 	if err := p.MatchesRequest("GET", testHTU); err == nil {
 		t.Fatal("a different method must not match")
 	}
@@ -519,23 +640,62 @@ func TestMatchesRequest_MethodIsExact(t *testing.T) {
 // A relative or schemeless htu is an error, not a match. Comparing bare paths
 // would let a proof minted for one origin satisfy a request to another.
 func TestMatchesRequest_RejectsNonAbsoluteURI(t *testing.T) {
-	if err := (Proof{HTM: "GET", HTU: "/v1/decide"}).MatchesRequest("GET", "/v1/decide"); err == nil {
+	if err := (Proof{htm: "GET", htu: "/v1/decide"}).MatchesRequest("GET", "/v1/decide"); err == nil {
 		t.Fatal("a relative htu must be an error, not a match")
 	}
-	if err := (Proof{HTM: "GET", HTU: testHTU}).MatchesRequest("GET", "/v1/decide"); err == nil {
+	if err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", "/v1/decide"); err == nil {
 		t.Fatal("a relative observed URI must be an error")
 	}
-	if err := (Proof{HTM: "GET", HTU: "pdp.example.com/v1/decide"}).MatchesRequest("GET", testHTU); err == nil {
+	if err := (Proof{htm: "GET", htu: "pdp.example.com/v1/decide"}).MatchesRequest("GET", testHTU); err == nil {
 		t.Fatal("a schemeless htu must be an error")
+	}
+}
+
+// url.Host excludes userinfo, so reading it would silently drop the
+// credentials and compare the URI equal to a bare one — a normalization
+// RFC 3986 §6.2.3 does not authorize. Reject instead (RFC 9110 §4.2.1).
+func TestMatchesRequest_RejectsUserinfo(t *testing.T) {
+	withUser := "https://alice:secret@pdp.example.com/v1/decide"
+	if err := (Proof{htm: "GET", htu: withUser}).MatchesRequest("GET", testHTU); err == nil {
+		t.Fatal("userinfo in the htu claim must be refused, not dropped")
+	} else if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("the error echoed the userinfo password: %v", err)
+	}
+	if err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", withUser); err == nil {
+		t.Fatal("userinfo in the observed URI must be refused")
+	}
+}
+
+// RFC 3986 §6.2.2.1 case normalization is US-ASCII. strings.ToLower applies
+// full Unicode case mapping, under which U+212A KELVIN SIGN folds to "k".
+func TestMatchesRequest_CaseFoldIsASCIIOnly(t *testing.T) {
+	p := Proof{htm: "GET", htu: "https://Kelvin.example.com/p"}
+	if err := p.MatchesRequest("GET", "https://kelvin.example.com/p"); err == nil {
+		t.Fatal("U+212A must not fold to ASCII 'k': RFC 3986 §6.2.2.1 is ASCII-only")
+	}
+	// The ASCII fold itself must still work.
+	if err := (Proof{htm: "GET", htu: "https://KELVIN.example.com/p"}).
+		MatchesRequest("GET", "https://kelvin.example.com/p"); err != nil {
+		t.Fatalf("ASCII case folding must still apply: %v", err)
+	}
+}
+
+// The empty-host guard has to run after the default port comes off, or
+// "https://:443/p" passes it and canonicalizes to an empty authority.
+func TestMatchesRequest_RejectsEmptyHostAfterPortTrim(t *testing.T) {
+	for _, bad := range []string{"https://:443/p", "http://:80/p", "https:///p"} {
+		if err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", testHTU); err == nil {
+			t.Errorf("%q has no host and must be refused", bad)
+		}
 	}
 }
 
 func TestMatchesRequest_RejectsUnparseableURI(t *testing.T) {
 	bad := "https://pdp.example.com/\x7f\x00" // control characters: url.Parse fails
-	if err := (Proof{HTM: "GET", HTU: bad}).MatchesRequest("GET", testHTU); err == nil {
+	if err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", testHTU); err == nil {
 		t.Fatal("an unparseable htu must be an error")
 	}
-	if err := (Proof{HTM: "GET", HTU: testHTU}).MatchesRequest("GET", bad); err == nil {
+	if err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", bad); err == nil {
 		t.Fatal("an unparseable observed URI must be an error")
 	}
 }
@@ -543,7 +703,7 @@ func TestMatchesRequest_RejectsUnparseableURI(t *testing.T) {
 // url.Path is percent-decoded; comparing it would make %2F equal to a real
 // path separator, which is a different resource on any segment-routing server.
 func TestMatchesRequest_DoesNotDecodePercentEncodedPath(t *testing.T) {
-	p := Proof{HTM: "GET", HTU: "https://pdp.example.com/a%2Fb"}
+	p := Proof{htm: "GET", htu: "https://pdp.example.com/a%2Fb"}
 	if err := p.MatchesRequest("GET", "https://pdp.example.com/a/b"); err == nil {
 		t.Fatal("%2F must not compare equal to /")
 	}
@@ -577,6 +737,46 @@ func TestVerifyThenMatchesRequest(t *testing.T) {
 // test the rejections that matter.
 
 type signFunc func(t *testing.T, signingInput string) string
+
+// signingKeyFor returns a key of the right type and size for alg. One RSA key
+// serves all six RSA algorithms — generating six 2048-bit keys is seconds of
+// test time for no extra coverage.
+var (
+	sharedRSAOnce sync.Once
+	sharedRSAKey  *rsa.PrivateKey
+)
+
+func signingKeyFor(t *testing.T, alg jose.SignatureAlgorithm) any {
+	t.Helper()
+	switch alg {
+	case jose.ES256, jose.ES384, jose.ES512:
+		curve := map[jose.SignatureAlgorithm]elliptic.Curve{
+			jose.ES256: elliptic.P256(), jose.ES384: elliptic.P384(), jose.ES512: elliptic.P521(),
+		}[alg]
+		key, err := ecdsa.GenerateKey(curve, rand.Reader)
+		if err != nil {
+			t.Fatalf("generate %s key: %v", alg, err)
+		}
+		return key
+	case jose.RS256, jose.RS384, jose.RS512, jose.PS256, jose.PS384, jose.PS512:
+		sharedRSAOnce.Do(func() {
+			sharedRSAKey, _ = rsa.GenerateKey(rand.Reader, minRSABits)
+		})
+		if sharedRSAKey == nil {
+			t.Fatal("generate rsa key")
+		}
+		return sharedRSAKey
+	case jose.EdDSA:
+		_, key, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generate ed25519 key: %v", err)
+		}
+		return key
+	default:
+		t.Fatalf("no test key for algorithm %q -- was it added to allowedAlgorithms?", alg)
+		return nil
+	}
+}
 
 func newECKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
