@@ -680,12 +680,19 @@ func TestMatchesRequest_CaseFoldIsASCIIOnly(t *testing.T) {
 	}
 }
 
-// The empty-host guard has to run after the default port comes off, or
-// "https://:443/p" passes it and canonicalizes to an empty authority.
+// The empty-host guard has to run AFTER the default port comes off, or
+// "https://:443/p" is non-empty when it is checked and canonicalizes to
+// "https:///p" three lines later.
+//
+// Each URI is matched against ITSELF on purpose. Comparing against some other
+// host would let a plain mismatch produce the error and the test would pass
+// with the guard misplaced — which is exactly what the first version of this
+// test did, and the mutation suite caught it. Against itself, a mismatch
+// cannot be the reason, so only the guard can be.
 func TestMatchesRequest_RejectsEmptyHostAfterPortTrim(t *testing.T) {
 	for _, bad := range []string{"https://:443/p", "http://:80/p", "https:///p"} {
-		if err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", testHTU); err == nil {
-			t.Errorf("%q has no host and must be refused", bad)
+		if err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", bad); err == nil {
+			t.Errorf("%q has no host and must be refused even against itself", bad)
 		}
 	}
 }
