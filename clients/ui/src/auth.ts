@@ -44,7 +44,7 @@ export interface UIConfig {
 }
 
 /** The subset of the IdP's discovery document this flow needs. */
-interface Discovery {
+export interface Discovery {
   authorization_endpoint: string
   token_endpoint: string
 }
@@ -58,8 +58,33 @@ let accessToken: string | null = null
 // login attempt can never be completed with a first attempt's verifier.
 let pending: { verifier: string; state: string } | null = null
 
+// Notified on every accessToken write -- signIn's success, signOut, and
+// onUnauthorized alike. App subscribes via subscribeAuthChange so its shell
+// can never again go stale the way onUnauthorized used to leave it: it only
+// ever nulled accessToken, and the signed-in flag a component derived from
+// isAuthenticated() was separate state nothing told to follow along, so an
+// expired token left full signed-in chrome on screen with every request now
+// failing beneath it.
+const authChangeListeners = new Set<() => void>()
+
+function notifyAuthChange(): void {
+  for (const listener of authChangeListeners) listener()
+}
+
 export function isAuthenticated(): boolean {
   return accessToken !== null
+}
+
+/**
+ * Subscribes to sign-in/sign-out/unauthorized changes; returns an
+ * unsubscribe function. Shaped to drop straight into
+ * useSyncExternalStore(subscribeAuthChange, isAuthenticated), which is what
+ * makes a component's signed-in state track this module's instead of a
+ * one-time snapshot of it.
+ */
+export function subscribeAuthChange(listener: () => void): () => void {
+  authChangeListeners.add(listener)
+  return () => authChangeListeners.delete(listener)
 }
 
 /**
@@ -75,15 +100,19 @@ export function authHeader(): Record<string, string> | null {
 export function signOut(): void {
   accessToken = null
   pending = null
+  notifyAuthChange()
 }
 
 /**
  * Called when the API answers 401: the token expired or was revoked at the
  * IdP. Dropping it puts the app back at the Sign in button rather than
- * retrying with a credential now known to be dead.
+ * retrying with a credential now known to be dead -- and notifying repaints
+ * the shell to match, rather than leaving signed-in chrome over a session
+ * that already ended.
  */
 export function onUnauthorized(): void {
   accessToken = null
+  notifyAuthChange()
 }
 
 /** base64url without padding, per RFC 7636. */
@@ -104,7 +133,7 @@ async function s256(verifier: string): Promise<string> {
   return base64url(new Uint8Array(digest))
 }
 
-async function discover(issuer: string): Promise<Discovery> {
+export async function discover(issuer: string): Promise<Discovery> {
   // The issuer's own discovery document, rather than IdP-specific endpoint
   // paths guessed from the issuer URL: every conformant OIDC provider serves
   // this, and guessing is how a client ends up working against one vendor.
@@ -173,14 +202,22 @@ function awaitCode(popup: Window, state: string): Promise<string> {
  * Runs the whole flow and stores the access token in memory. Must be called
  * from a user gesture; see the popup note in this file's header.
  *
+ * discovery is a parameter rather than a call to discover() made here,
+ * because an await before window.open spends the user-activation token the
+ * popup needs -- Safari in particular blocks a popup opened after an await
+ * in the same handler, and the resulting error ("allow pop-ups") misdiagnoses
+ * a popup blocker that was never the problem. App.tsx's mount effect resolves
+ * discovery once, alongside config, so by the time this can be called from a
+ * click, there is nothing left to await before window.open.
+ *
  * No refresh token is requested (offline_access is deliberately absent from
  * the default scope): a refresh token is a longer-lived credential than the
  * access token it mints, and this application has nowhere to put one that is
  * safer than where it puts the access token. Losing the session on reload is
  * the accepted cost.
  */
-export async function signIn(config: UIConfig): Promise<void> {
-  const { authorization_endpoint, token_endpoint } = await discover(config.issuer)
+export async function signIn(config: UIConfig, discovery: Discovery): Promise<void> {
+  const { authorization_endpoint, token_endpoint } = discovery
 
   const verifier = randomString(32)
   const state = randomString(16)
@@ -236,6 +273,7 @@ export async function signIn(config: UIConfig): Promise<void> {
     const token = (await res.json()) as { access_token?: string }
     if (!token.access_token) throw new Error('token endpoint returned no access_token')
     accessToken = token.access_token
+    notifyAuthChange()
   } finally {
     // Always, on success and on every failure: a verifier that outlives its
     // one exchange is a verifier a later, unrelated code could be redeemed

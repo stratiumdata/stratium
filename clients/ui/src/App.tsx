@@ -6,10 +6,18 @@
 // tempted to survive a reload — which, given the token cannot (N12), would
 // only produce a bookmarked screen that immediately asks you to sign in.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 
 import { describeError, fetchUIConfig } from './api'
-import { isAuthenticated, signIn, signOut, type UIConfig } from './auth'
+import {
+  discover,
+  isAuthenticated,
+  signIn,
+  signOut,
+  subscribeAuthChange,
+  type Discovery,
+  type UIConfig,
+} from './auth'
 import {
   AgentsScreen,
   ApprovalsScreen,
@@ -32,29 +40,43 @@ const SCREENS = [
 
 export default function App() {
   const [config, setConfig] = useState<UIConfig | null>(null)
+  const [discovery, setDiscovery] = useState<Discovery | null>(null)
   const [error, setError] = useState<string | null>(null)
-  // Not derived from isAuthenticated() on every render: that function reads a
-  // module variable React cannot subscribe to, so a state flag is what makes
-  // a completed sign-in actually repaint.
-  const [signedIn, setSignedIn] = useState(isAuthenticated())
+  // Subscribed, not a one-time useState(isAuthenticated()): that function
+  // reads a module variable in auth.ts, and a snapshot taken once goes stale
+  // the moment anything outside a click changes it. That is exactly what
+  // onUnauthorized (auth.ts, called from api.ts on a 401) used to do -- null
+  // the token and leave a local flag true, so the shell kept its signed-in
+  // chrome over a session that had already ended. Every writer of the token
+  // notifies now, so every one of them repaints the shell the same way.
+  const signedIn = useSyncExternalStore(subscribeAuthChange, isAuthenticated)
   const [busy, setBusy] = useState(false)
   const [screen, setScreen] = useState<(typeof SCREENS)[number]['id']>('policies')
 
   useEffect(() => {
-    fetchUIConfig().then(setConfig, (err: unknown) => setError(describeError(err)))
+    fetchUIConfig().then(
+      (cfg) => {
+        setConfig(cfg)
+        // Chained here, on mount, rather than awaited inside signIn: an
+        // await before window.open spends the user-activation token the
+        // popup needs, and Safari blocks the popup as a result. See
+        // auth.ts's signIn for the full reasoning.
+        discover(cfg.issuer).then(setDiscovery, (err: unknown) => setError(describeError(err)))
+      },
+      (err: unknown) => setError(describeError(err)),
+    )
   }, [])
 
   const onSignIn = async () => {
-    if (!config) return
+    if (!config || !discovery) return
     setError(null)
     setBusy(true)
     try {
       // Called straight from the click handler: the popup this opens needs a
-      // user gesture, and anything awaited before window.open costs it. The
-      // discovery fetch inside signIn is the one exception browsers tolerate
-      // in practice; a blocked popup is reported, never worked around.
-      await signIn(config)
-      setSignedIn(isAuthenticated())
+      // user gesture. config and discovery are both already resolved (mount
+      // effect, above), so nothing here awaits anything before signIn's own
+      // window.open.
+      await signIn(config, discovery)
     } catch (err) {
       setError(describeError(err))
     } finally {
@@ -75,17 +97,11 @@ export default function App() {
           </p>
         </div>
         {signedIn ? (
-          <Button
-            variant="outline"
-            onClick={() => {
-              signOut()
-              setSignedIn(false)
-            }}
-          >
+          <Button variant="outline" onClick={() => signOut()}>
             Sign out
           </Button>
         ) : (
-          <Button onClick={() => void onSignIn()} disabled={!config || busy}>
+          <Button onClick={() => void onSignIn()} disabled={!config || !discovery || busy}>
             {busy ? 'Signing in…' : 'Sign in'}
           </Button>
         )}

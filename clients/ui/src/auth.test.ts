@@ -14,6 +14,22 @@ const discovery = {
   token_endpoint: 'https://idp.example.com/oauth/token',
 }
 
+/** RFC 7636 base64url, reimplemented here rather than imported from auth.ts:
+ *  this proves the real bytes crypto.subtle.digest produced, not that
+ *  auth.ts's own encoder agrees with itself. */
+function base64url(bytes: Uint8Array): string {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/** The S256 code_challenge RFC 7636 defines for verifier, computed
+ *  independently of auth.ts's own private s256(). */
+async function s256(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  return base64url(new Uint8Array(digest))
+}
+
 /** A popup stand-in that replies with the state it was asked for, as
  *  callback.html would. */
 function fakePopup(reply: (state: string) => Record<string, unknown> | null) {
@@ -35,12 +51,13 @@ function fakePopup(reply: (state: string) => Record<string, unknown> | null) {
   return popup
 }
 
+// discovery is passed into signIn directly now (item 1: hoisted out of
+// signIn and into App.tsx's mount effect, so signIn stays synchronous up to
+// window.open), so this mock has only ever needed to answer the token
+// endpoint since that change.
 function mockFetch(token: Record<string, unknown> = { access_token: 'operator-token' }) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
     const url = input instanceof Request ? input.url : input.toString()
-    if (url.includes('.well-known/openid-configuration')) {
-      return Promise.resolve(new Response(JSON.stringify(discovery), { status: 200 }))
-    }
     if (url === discovery.token_endpoint) {
       return Promise.resolve(new Response(JSON.stringify(token), { status: 200 }))
     }
@@ -59,7 +76,7 @@ describe('signIn', () => {
     fakePopup((state) => ({ source: 'stratium-oidc-callback', code: 'the-code', state }))
 
     expect(isAuthenticated()).toBe(false)
-    await signIn(config)
+    await signIn(config, discovery)
 
     expect(isAuthenticated()).toBe(true)
     expect(authHeader()).toEqual({ Authorization: 'Bearer operator-token' })
@@ -82,19 +99,22 @@ describe('signIn', () => {
       return { closed: false, close: vi.fn() } as unknown as Window
     })
 
-    await signIn(config)
+    await signIn(config, discovery)
 
     const params = new URL(authorizeURL).searchParams
     expect(params.get('response_type')).toBe('code')
     expect(params.get('code_challenge_method')).toBe('S256')
     expect(params.get('redirect_uri')).toBe(redirectURI())
-    // "plain" would make the challenge equal the verifier, which is the one
-    // mistake that silently removes PKCE's whole protection.
+    // Verified against an independent SHA-256 computation, not merely
+    // "differs from the verifier": any non-hash transform (e.g. "plain",
+    // which sets the challenge equal to the verifier and silently removes
+    // PKCE's whole protection) would pass a bare inequality check without
+    // being S256 at all.
     const challenge = params.get('code_challenge') ?? ''
     const body = (fetchSpy.mock.calls.at(-1)?.[1] as RequestInit).body as URLSearchParams
     const verifier = body.get('code_verifier') ?? ''
     expect(verifier).not.toBe('')
-    expect(challenge).not.toBe(verifier)
+    expect(challenge).toBe(await s256(verifier))
   })
 
   it('never requests offline_access, so no refresh token is ever minted', async () => {
@@ -114,7 +134,7 @@ describe('signIn', () => {
       return { closed: false, close: vi.fn() } as unknown as Window
     })
 
-    await signIn(config)
+    await signIn(config, discovery)
     expect(new URL(authorizeURL).searchParams.get('scope')).not.toContain('offline_access')
   })
 
@@ -122,7 +142,7 @@ describe('signIn', () => {
     mockFetch()
     fakePopup(() => ({ source: 'stratium-oidc-callback', code: 'attacker-code', state: 'wrong' }))
 
-    await expect(signIn(config)).rejects.toThrow(/state mismatch/)
+    await expect(signIn(config, discovery)).rejects.toThrow(/state mismatch/)
     expect(isAuthenticated()).toBe(false)
   })
 
@@ -146,7 +166,7 @@ describe('signIn', () => {
       return popup as unknown as Window
     })
 
-    await expect(signIn(config)).rejects.toThrow(/closed before completing/)
+    await expect(signIn(config, discovery)).rejects.toThrow(/closed before completing/)
     expect(isAuthenticated()).toBe(false)
   })
 
@@ -156,7 +176,7 @@ describe('signIn', () => {
 
     // The message must say what to do, because the alternative — a redirect
     // flow — needs storage, which N12 forbids outright.
-    await expect(signIn(config)).rejects.toThrow(/Allow pop-ups/)
+    await expect(signIn(config, discovery)).rejects.toThrow(/Allow pop-ups/)
     expect(isAuthenticated()).toBe(false)
   })
 
@@ -164,7 +184,7 @@ describe('signIn', () => {
     mockFetch({ id_token: 'an id token is not an access token' })
     fakePopup((state) => ({ source: 'stratium-oidc-callback', code: 'c', state }))
 
-    await expect(signIn(config)).rejects.toThrow(/no access_token/)
+    await expect(signIn(config, discovery)).rejects.toThrow(/no access_token/)
     expect(isAuthenticated()).toBe(false)
   })
 })
@@ -175,7 +195,7 @@ describe('the token never reaches browser storage (N12)', () => {
     fakePopup((state) => ({ source: 'stratium-oidc-callback', code: 'the-code', state }))
 
     const setLocal = vi.spyOn(Storage.prototype, 'setItem')
-    await signIn(config)
+    await signIn(config, discovery)
 
     expect(isAuthenticated()).toBe(true)
     expect(setLocal).not.toHaveBeenCalled()
