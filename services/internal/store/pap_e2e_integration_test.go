@@ -814,6 +814,32 @@ func TestIntegration_PAPE2E_RevokingRootDelegationThroughThePAPDeniesDescendants
 				"some other reason would prove the cascade without proving it is the revocation",
 				name, leg, "delegation")
 		}
+		// The leg alone is not enough, and mutation testing is how that was
+		// established rather than guessed. DelegationLeg checks Revoked
+		// explicitly and then checks IsActive, and IsActive is
+		// `!Revoked && !now.After(ExpiresAt)` -- so a revoked hop fails BOTH.
+		// With the explicit Revoked branch neutered, every assertion above
+		// still passed: the child and grandchild denied at the delegation
+		// leg, at depth 0, reporting the revoked root as "expired at
+		// <time>". A proof that cannot tell "denied because revoked" from
+		// "denied because something else about the same hop" is not proving
+		// V4. The reason and the root's own id are what pin it.
+		reason := got.GetReason()
+		if !strings.Contains(reason, "revoked") {
+			t.Errorf("after revoking the root, the %s delegation denied with reason %q, want it to name the "+
+				"REVOCATION -- IsActive treats a revoked hop as inactive too, so a denial that does not say "+
+				"\"revoked\" is consistent with the per-hop revocation check having been removed entirely",
+				name, reason)
+		}
+		if !strings.Contains(reason, root.ID.String()) {
+			t.Errorf("after revoking the root, the %s delegation denied with reason %q, want it to name the "+
+				"ROOT delegation %s -- the cascade claim is that the ancestor's flag denies its descendants, "+
+				"which means the denial has to be attributed to the ancestor", name, reason, root.ID)
+		}
+		if depth := got.GetDeniedAtDepth(); depth != 0 {
+			t.Errorf("after revoking the root, the %s delegation denied at depth %d, want 0 (the root's own "+
+				"depth)", name, depth)
+		}
 	}
 }
 
