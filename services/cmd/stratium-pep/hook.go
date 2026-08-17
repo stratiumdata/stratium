@@ -330,12 +330,23 @@ const agentOrDelegationUnknownMsg = "PDP says the delegation or agent this reque
 // distinguishes "we could not ask" from "we asked and were told something
 // specific" — the difference between a useful denial and a mysterious one.
 // Without this, every one of these cases would produce the same flat "could
-// not reach PDP" text, which is simply wrong for three of the four: a
-// NotFound, a DeadlineExceeded, or any other application-level error all
-// mean the PDP *was* reached and *did* answer — conflating them with an
-// unreachable PDP would send a developer chasing a network problem that does
-// not exist. Every branch here still denies identically; only the text
-// differs.
+// not reach PDP" text, which is simply wrong for a NotFound or any other
+// application-level error: those mean the PDP *was* reached and *did*
+// answer, and conflating them with an unreachable PDP would send a developer
+// chasing a network problem that does not exist. Every branch here still
+// denies identically; only the text differs.
+//
+// DeadlineExceeded is the exception, and it belongs with the unreachable
+// cases rather than the answered ones. A dropped SYN — a stopped container,
+// a blackholed route — never refuses the connection; it hangs until the dial
+// deadline and surfaces as DeadlineExceeded with nothing having been reached.
+// Whether an unreachable PDP presents as Unavailable or DeadlineExceeded is
+// decided by how the socket dies, which is why
+// TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies asserts the
+// CLASSIFICATION rather than the branch: an earlier version pinned the
+// Unavailable wording and flaked whenever the deadline won the race. See that
+// test's own comment. Do not "correct" this back — the flake it fixes is
+// real and was measured.
 //
 // There is deliberately no codes.Canceled case: every context this hook
 // builds (runHook's ConnectTimeout budget, escalation.go's pollCtx and its

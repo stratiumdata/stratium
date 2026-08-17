@@ -162,7 +162,12 @@ func stratiumPEPBinary(t *testing.T) string {
 // own contract), 0/1 for "session-start" (session_start.go's own contract).
 //
 // stderr is RETURNED rather than discarded, which it was until Phase 15 Task
-// 7. Both subcommands write their diagnostics there, so a caller that fatalled
+// 7. "session-start" writes its diagnostics there; "hook" does not — dispatch
+// hands it no stderr writer (main.go) and every failure it has a contract for
+// goes through writeDeny to stdout. What lands here for "hook" is what escapes
+// that contract: a panic, a loader failure, a runtime message. Those are
+// exactly the failures worth reading, and they were the ones being discarded.
+// A caller that fatalled
 // on an unexpected exit code could previously report only "exit = 1; stdout: "
 // -- with an empty stdout and no cause at all. That is not hypothetical: a
 // session-start failed exactly that way during one integration sweep and left

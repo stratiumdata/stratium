@@ -766,6 +766,14 @@ func TestC24_ExpiredDelegationDenied(t *testing.T) {
 // "not valid" too, but K8 is its own requirement and folding it in here would
 // blur which sentence this row is accountable for.
 //
+// The test names above and below are ILLUSTRATIVE and UNCHECKED — they record
+// which properties were deliberately kept out of the pointer, not what holds
+// this row up. Only the names inside provenElsewhere are AST-verified, and a
+// rename there fails the gate. If one of these drifts, the exclusion reasoning
+// still stands; do not promote a prose name into the pointer to "fix" it. This
+// entry's reason went stale three times before it was ever converted, twice in
+// the direction of claiming more than was built.
+//
 // PROVEN ELSEWHERE, NOT A PASS, and not a close call. C25 is a property about
 // a TOKEN — its signature, its cnf.jkt confirmation claim, and a detached
 // JWS proving possession of the key that claim names. internal/authz has no
