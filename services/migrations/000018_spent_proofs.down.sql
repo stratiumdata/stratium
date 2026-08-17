@@ -1,0 +1,15 @@
+-- Rolling this back discards every jti this deployment has recorded as spent,
+-- and an operator should know what that costs before running it: until each
+-- previously-spent proof passes its own freshness window, every one of them
+-- becomes replayable again. The exposure is bounded by that window, spec
+-- §4.7.2 K9's configured value, not by how long the rollback lasts -- but
+-- during it, a proof captured from a log or a compromised sidecar is usable a
+-- second time against the same method and URI, which is precisely the attack
+-- this table exists to stop.
+--
+-- A bare DROP TABLE, matching 000013_tool_catalog.down.sql, with no REVOKE
+-- line before it. Object-level privileges are dependencies of the object:
+-- dropping the table drops the GRANT with it, so a REVOKE here would either
+-- be redundant or, if the drop were ever made conditional, misleading about
+-- which of the two actually removes the access.
+DROP TABLE IF EXISTS spent_proofs;
