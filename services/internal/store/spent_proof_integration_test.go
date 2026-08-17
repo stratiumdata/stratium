@@ -289,6 +289,59 @@ func TestIntegration_SpentProofs_ServingRoleGrantsAreExactlyInsertSelectDelete(t
 	}
 }
 
+// TestIntegration_SpentProofs_HaveExactlyOneUniqueIndex is the structural
+// guard behind SpendProof's 23505 → ErrProofSpent inference.
+//
+// That mapping is only sound while the primary key is the table's ONLY
+// uniqueness constraint. A migration adding a second one — say
+// UNIQUE (tenant_id, some_new_column) — would make violations of that
+// constraint come back to a caller as "dpop proof already spent", and an
+// operator chasing a replay storm would go hunting an attacker who does not
+// exist. Both branches still deny, so this is a diagnosability defect rather
+// than a security one; it fails in the safe direction, and silently, which is
+// exactly the kind this project keeps deciding a comment cannot hold shut.
+// TestRLSCoversEveryTable (migrations/migrations_test.go) exists for the same
+// shape of drift.
+//
+// Asserted against the live schema, on testDB: this is an observation about
+// what the migrations produced, not about what any role may do, so it wants
+// the connection that can see the catalog rather than the serving identity.
+// The index NAME is pinned alongside the count — replacing the primary key
+// with a differently-named unique index keeps the count at 1 while making
+// SpendProof's doc comment, which says "the primary key", quietly wrong.
+func TestIntegration_SpentProofs_HaveExactlyOneUniqueIndex(t *testing.T) {
+	rows, err := testDB.QueryContext(t.Context(),
+		`SELECT idx.relname FROM pg_index i
+		   JOIN pg_class tbl ON tbl.oid = i.indrelid
+		   JOIN pg_class idx ON idx.oid = i.indexrelid
+		  WHERE tbl.relname = 'spent_proofs' AND i.indisunique
+		  ORDER BY idx.relname`)
+	if err != nil {
+		t.Fatalf("read unique indexes on spent_proofs: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate unique indexes: %v", err)
+	}
+
+	if len(names) != 1 || names[0] != "spent_proofs_pkey" {
+		t.Fatalf("unique indexes on spent_proofs = %v, want exactly [spent_proofs_pkey] — "+
+			"store.SpendProof maps ANY unique_violation on this table to ErrProofSpent, which is "+
+			"only true while the primary key is the only one. Adding another means a violation of "+
+			"it now reports as a replay; either narrow that mapping (inspect the constraint name "+
+			"on the *pq.Error) or reconsider the new constraint", names)
+	}
+}
+
 // TestIntegration_SpendProof_RefusesAnOverlongJTI covers the one thing on
 // this write path that is entirely attacker-chosen. A `jti` arrives inside a
 // client-supplied JWT and is stored on the decision path, so an unbounded one

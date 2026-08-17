@@ -58,6 +58,15 @@ const reapSpentProofsQuery = `DELETE FROM spent_proofs WHERE expires_at <= NOW()
 // second unique constraint to this table breaks it, and would have to revisit
 // this function.
 //
+// That premise is held by a test rather than by this paragraph:
+// TestIntegration_SpentProofs_HaveExactlyOneUniqueIndex
+// (spent_proof_integration_test.go) counts the unique indexes on the table
+// against the live schema, so the migration that would silently make this
+// function misreport fails CI instead. A guard that exists only in a comment
+// is not a guard — the same conclusion TestRLSCoversEveryTable
+// (migrations/migrations_test.go) already reached for a different kind of
+// future-migration drift.
+//
 // Every other failure keeps its own error, wrapped with context and NOT
 // matching ErrProofSpent: a permission error, a lost connection, a CHECK
 // violation from an over-long jti. Both outcomes deny at the caller, which is
