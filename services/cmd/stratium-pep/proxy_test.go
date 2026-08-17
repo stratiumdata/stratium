@@ -574,7 +574,7 @@ func testProxyServerCfg() proxyConfig {
 // Built via metadata.Pairs, which lower-cases every key -- fine for every test that uses this
 // helper, because none of them are about case sensitivity; the casing-defensiveness tests below
 // (TestAuthorize_RawInputNeverCarriesCredential_AnyHeaderCasing,
-// TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound, and others) build
+// TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFound, and others) build
 // their own metadata.MD as a raw map literal instead, specifically to avoid Pairs' own
 // normalization laundering away the exact case variation those tests exist to exercise.
 //
@@ -593,11 +593,11 @@ func incomingBearerCtx(token string, extra ...string) context.Context {
 	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(pairs...))
 }
 
-// TestExtractBearerTokenFromMetadata is the direct, wire-free table of every shape
+// TestExtractCredentialsFromMetadata is the direct, wire-free table of every shape
 // extractCredentialsFromMetadata must accept or reject -- mirrors extauthz_test.go's
 // TestExtractCredentials for the analogous gRPC-metadata shape, faster and more exhaustive than
 // routing every case through a real dial.
-func TestExtractBearerTokenFromMetadata(t *testing.T) {
+func TestExtractCredentialsFromMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		md        metadata.MD
@@ -666,7 +666,39 @@ func TestExtractBearerTokenFromMetadata(t *testing.T) {
 	}
 }
 
-// TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound proves EXTRACTION
+// TestExtractCredentialsFromMetadata_RepeatedKeys_FirstValueWins pins the choice
+// extractCredentialsFromMetadata's own comment states for BOTH credentials: values[0], never the
+// last. A repeated key is non-conformant on either -- RFC 7235 defines exactly one credential per
+// Authorization header and RFC 9449 §4.1 says "there is not more than one DPoP HTTP request header
+// field" -- but it is entirely constructible on this wire, since metadata.MD is natively
+// multi-valued and an interceptor that appended rather than replaced produces exactly this.
+//
+// Only a fixture carrying genuinely MORE THAN ONE value can distinguish "always reads the first"
+// from "always reads the last": with one value the two choices agree, so a single-valued table
+// proves nothing about either. The authorization half has had such a row since Phase 11 (see
+// TestExtractCredentialsFromMetadata's own "multiple authorization values" case, and its comment
+// on the mutation that found it). The dpop half had none until this task's own mutation sweep
+// found that same mutant surviving on the new credential -- the identical defect, one credential
+// later, which is exactly how this class of gap propagates.
+func TestExtractCredentialsFromMetadata_RepeatedKeys_FirstValueWins(t *testing.T) {
+	md := metadata.MD{
+		"authorization": {"Bearer " + testProxyBearerToken, "Bearer " + testProxyOtherCredentialValue},
+		"dpop":          {testProxyDPoPProof, testProxyOtherCredentialValue},
+	}
+	token, proof, _, err := extractCredentialsFromMetadata(md)
+	if err != nil {
+		t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil", err)
+	}
+	if token != testProxyBearerToken {
+		t.Errorf("token = %q, want the FIRST value %q", token, testProxyBearerToken)
+	}
+	if proof != testProxyDPoPProof {
+		t.Errorf("proof = %q, want the FIRST value %q -- taking the last would let a second, appended "+
+			"proof displace the one the caller actually minted for this request", proof, testProxyDPoPProof)
+	}
+}
+
+// TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFound proves EXTRACTION
 // survives a metadata key that differs only in case, using a metadata.MD built as a raw map
 // literal rather than via metadata.Pairs/New -- both of those already force keys to lower case at
 // construction (verified directly against this module's own vendored grpc-go source; see
@@ -674,7 +706,7 @@ func TestExtractBearerTokenFromMetadata(t *testing.T) {
 // case variation this test exists to exercise. A raw literal is the only way to hand this function
 // a metadata.MD shaped the way a non-normalizing client or an interceptor could actually produce
 // one.
-func TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound(t *testing.T) {
+func TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFound(t *testing.T) {
 	for _, headerName := range []string{"authorization", "Authorization", "AUTHORIZATION", "AuthoriZation"} {
 		t.Run(headerName, func(t *testing.T) {
 			md := metadata.MD{headerName: {"Bearer " + testProxyBearerToken}}
@@ -689,12 +721,12 @@ func TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound(t 
 	}
 }
 
-// TestExtractBearerTokenFromMetadata_StripsCredentialHeadersCaseInsensitively is the direct-
+// TestExtractCredentialsFromMetadata_StripsCredentialHeadersCaseInsensitively is the direct-
 // function proof that every entry in credentialHeaderNames (extauthz.go) -- not just
 // authorization -- is actually removed from the returned map, case-insensitively, while a key
 // that merely looks credential-adjacent (testProxyAuthLikeHeaderName) survives untouched. Built as
 // a raw metadata.MD literal for the identical bypass-normalization reason as the test above.
-func TestExtractBearerTokenFromMetadata_StripsCredentialHeadersCaseInsensitively(t *testing.T) {
+func TestExtractCredentialsFromMetadata_StripsCredentialHeadersCaseInsensitively(t *testing.T) {
 	md := metadata.MD{
 		"authorization":             {"Bearer " + testProxyBearerToken},
 		"Cookie":                    {testProxyOtherCredentialValue},
@@ -822,7 +854,7 @@ func TestAuthorize_RawInputNeverCarriesCredential_AnyHeaderCasing(t *testing.T) 
 			allowed, reason := srv.authorize(ctx, "/svc.Svc/Method")
 			if !allowed {
 				t.Fatalf("authorize() denied (%s), want allowed -- extraction must have found this header "+
-					"(see TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound)", reason)
+					"(see TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFound)", reason)
 			}
 
 			req := fake.lastRequest()
