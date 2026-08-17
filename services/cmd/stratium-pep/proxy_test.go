@@ -1253,14 +1253,16 @@ func TestHandleStream_AllowedStream_ForwardsBothDirections(t *testing.T) {
 	}
 }
 
-// countingEchoHandler is echoHandler (above) plus a call counter, so a test can prove BOTH
-// "nothing reached the target yet" (the counter) and "the target's own reply eventually arrives"
-// (the echoed payload) around one escalation wait. TestHandleStream_Escalate_BlocksThenForwardsOnApproval
-// needs the counter specifically because a proxy that started relaying immediately and only
-// delayed the CALLER-visible reply would still look correct from the client's own RecvMsg timing
-// alone -- the same "check the target's own count, not just what the caller observed" discipline
-// TestHandleStream_UnaryCall_DeniedAndTargetNeverContacted already applies to an outright denial,
-// applied here to a call that is merely still pending.
+// countingEchoHandler is echoHandler (above) plus a call counter, so a test can prove BOTH that
+// the target's own reply arrives (the echoed payload) and HOW MANY TIMES the target was reached
+// (the counter) -- two facts a client's own RecvMsg cannot separate.
+//
+// It was written for an escalation test deleted in Phase 15, when proxy stopped blocking. Its one
+// live user is now TestHandleStream_LongLivedStream_OneDecisionOneProof, where the counter carries
+// a different property from the one it was built for: ONE target stream across a ten-message
+// exchange, which is what "a stream is authorized once, at open" means on the far side. Same
+// "check the target's own count, not just what the caller observed" discipline
+// TestHandleStream_UnaryCall_DeniedAndTargetNeverContacted applies to an outright denial.
 type countingEchoHandler struct {
 	mu    sync.Mutex
 	calls int
@@ -2509,17 +2511,21 @@ func TestConsumedRequestKeys(t *testing.T) {
 	}
 }
 
-// TestAuthorize_EscalateOnUnboundToken_RefusedWithoutPagingAHuman is K5 applied at the earliest
+// TestAuthorize_EscalateOnUnboundToken_RefusedWithoutWaiting is K5 applied at the earliest
 // point it is knowable, and it replaces a test that asserted the opposite: through fix round 1 an
 // unbound escalation was routed into the blocking path, where it held the caller's stream and a
 // polling goroutine for up to ApprovalTimeout, PAGED A HUMAN, and was then refused by K5 anyway
 // once the approval resolved.
 //
-// What that cost is the reason it changed. Every legacy bearer-token caller hitting an escalating
-// action hung for the full timeout and interrupted a person for a decision that could not change
-// the outcome; and any holder of an unbound token could generate unbounded human interrupts and
-// held streams at will. Refusing here takes nothing away from the caller it was ever going to
-// get, and names the one thing it can act on.
+// What that cost is the reason it changed: every legacy bearer-token caller hitting an escalating
+// action hung for the full timeout and was then told it TIMED OUT, when the real and fixable
+// problem was its credential. Refusing here takes nothing away from the caller it was ever going
+// to get, and names the one thing it can act on.
+//
+// It does NOT stop a human being asked, and an earlier version of this comment and of this test's
+// own name claimed it did. Decide creates the pending approval row inside resolveEscalation,
+// before the tail that sets sender_constrained, so the row exists before any surface can read the
+// field. What changes is the wait and the answer, not the row -- see authorize's own comment.
 //
 // sender_constrained is trustworthy on an ESCALATE -- every three-leg outcome reaches Decide's
 // tail, where the PDP sets it -- so false here unambiguously means unbound. The field's own proto
@@ -2529,7 +2535,7 @@ func TestConsumedRequestKeys(t *testing.T) {
 // GetApproval must never be called (that is the whole point -- no human paged), and the reason
 // must be K5's own text rather than a degraded escalation's, because a caller told "your action
 // is pending approval" will go and get an approval that cannot help them.
-func TestAuthorize_EscalateOnUnboundToken_RefusedWithoutPagingAHuman(t *testing.T) {
+func TestAuthorize_EscalateOnUnboundToken_RefusedWithoutWaiting(t *testing.T) {
 	approvalID := uuid.NewString()
 	fake := &fakePDP{
 		// sender_constrained left false -- the ONLY difference from
@@ -2547,10 +2553,9 @@ func TestAuthorize_EscalateOnUnboundToken_RefusedWithoutPagingAHuman(t *testing.
 			"approved escalation cannot change that")
 	}
 	if got := fake.getApprovalCallCount(); got != 0 {
-		t.Errorf("GetApproval called %d times, want 0 -- a human must not be paged for a decision K5 will "+
-			"refuse whatever the human says. The script above would have resolved \"approved\" on the "+
-			"FIRST poll, so a build that still blocked would allow here and fail loudly rather than "+
-			"merely being slow", got)
+		t.Errorf("GetApproval called %d times, want 0 -- this call must not wait on a decision K5 will "+
+			"refuse whatever the approver says. Polling at all is the observable difference between "+
+			"refusing and blocking, since both end in a denial", got)
 	}
 	if reason != unboundTokenReason {
 		t.Errorf("reason = %q, want K5's own refusal %q -- a caller told its action is PENDING APPROVAL "+

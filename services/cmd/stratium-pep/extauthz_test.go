@@ -1119,6 +1119,11 @@ func TestCheck_Escalate_DeniesAndApprovalIDReachesBothChannels(t *testing.T) {
 	const pdpReason = "extauthz-escalate-reason-9d2b1f-fixture: tier exceeds delegated ceiling"
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
 		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: pdpReason, ApprovalId: approvalID,
+		// Bound: an UNBOUND escalation is refused rather than degraded (K5 before
+		// E5 -- see TestCheck_EscalateOnUnboundToken_RefusedNotDegraded), so a
+		// fixture leaving this false would be testing the degrade against the one
+		// case that no longer reaches it.
+		SenderConstrained: true,
 	}}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
@@ -1169,7 +1174,8 @@ func TestCheck_Escalate_DeniesAndApprovalIDReachesBothChannels(t *testing.T) {
 // the misleading empty-slot version does. Found by running exactly that
 // mutation, unprompted, during this task's own mutation-testing pass.
 func TestCheck_EscalateWithNoApprovalID_DeniesWithoutClaimingOneExists(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: "escalated, no id"}}
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: "escalated, no id", SenderConstrained: true}}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -1282,6 +1288,7 @@ func TestCheck_ReasonsAreDistinguishableAcrossThreeClasses(t *testing.T) {
 	delegationRevoked := reasonFor(t, &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "delegation revoked", DeniedLeg: "delegation"})
 	pendingApproval := reasonFor(t, &pdpgrpc.DecideResponse{
 		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, Reason: "requires approval", ApprovalId: "d290f1ee-6c54-4b01-90e6-d701748f0851",
+		SenderConstrained: true,
 	})
 
 	classes := map[string]string{
@@ -1348,8 +1355,9 @@ func TestCheckResponseFromDecide(t *testing.T) {
 	}{
 		{name: "allow", resp: allowResponse(""), wantCode: int32(rpccode.Code_OK)},
 		{name: "deny", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "denied"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
-		{name: "escalate with approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: "id-1"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED), wantHeader: true},
-		{name: "escalate with no approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+		{name: "escalate with approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: "id-1", SenderConstrained: true}, wantCode: int32(rpccode.Code_PERMISSION_DENIED), wantHeader: true},
+		{name: "escalate with no approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, SenderConstrained: true}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+		{name: "escalate on an unbound token", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: "id-1"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
 		{name: "unset effect (zero value)", resp: &pdpgrpc.DecideResponse{}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
 		{name: "nil response", resp: nil, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
 	} {
@@ -1828,19 +1836,31 @@ func TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason(t *testing.T) {
 	}
 }
 
-// TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound holds the
-// boundary the proto's "consult it only when effect is EFFECT_ALLOW" rule
-// draws, on the one effect where reading the field early would be tempting
-// and wrong.
+// TestCheck_EscalateOnUnboundToken_RefusedNotDegraded inverts a test that
+// enshrined a bug, and the inversion is the point -- so the old claim is
+// recorded rather than deleted.
 //
-// An EFFECT_ESCALATE degrades to a denial here (E5/M4) and carries a real
-// pending approval id a human is about to act on. Reading sender_constrained
-// before that degrade -- and denying "your token is not bound" instead --
-// would throw the approval id away and send an operator to fix a token whose
-// binding was never the problem. K5 still bites: the approved retry comes
-// back through this same function as an ALLOW, and the ALLOW branch refuses
-// it there.
-func TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound(t *testing.T) {
+// It used to assert that an unbound escalation degrades to a 403 carrying the
+// pending approval id, on the reasoning that the proto's "consult it only when
+// effect is EFFECT_ALLOW" was "honored literally rather than approximately" and
+// that K5 would bite later, on the approved retry. Both halves were wrong. The
+// quote no longer exists -- the proto now sanctions reading the field on an
+// ESCALATE, because an escalation reaches Decide's tail where it is set -- and
+// "K5 bites later" was the defect, not the mitigation: matchProof
+// (internal/pdpgrpc/dpop.go) returns nil for a token with no cnf.jkt no matter
+// what proof accompanies it, so the retry ALWAYS resolves to an ALLOW with
+// sender_constrained=false and is always refused. A human approved something
+// that could never succeed.
+//
+// That is "approval granted, retry refused" -- the exact shape spec §4.7.2 K11
+// closes on the sibling surface -- so this surface now refuses it the same way
+// and for the same stated reason: a caller told its action is PENDING APPROVAL
+// will go and obtain one, which cannot help it.
+//
+// The approval id assertion is inverted with the behaviour and kept, not
+// dropped: handing back an id whose approval can never be spent is the
+// misdirection, so its ABSENCE is now the property.
+func TestCheck_EscalateOnUnboundToken_RefusedNotDegraded(t *testing.T) {
 	const approvalID = "extauthz-approval-2c7f5e14-fixture"
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
 		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: approvalID,
@@ -1855,24 +1875,27 @@ func TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
-	if got := resp.GetStatus().GetMessage(); got == unboundTokenReason {
-		t.Fatalf("Status.Message = K5's unbound-token reason, but this response was an ESCALATE. The "+
-			"proto's rule is CONSULT IT ONLY WHEN effect IS EFFECT_ALLOW, and it is honored literally "+
-			"rather than approximately: an escalate that reached the three-leg evaluation does carry the "+
-			"real answer, but the six pre-decision denials do not, and this surface cannot tell the two "+
-			"apart from the response. Reading it here discards a real pending approval (%s)", approvalID)
+	if got := resp.GetStatus().GetMessage(); got != unboundTokenReason {
+		t.Errorf("Status.Message = %q, want K5's own refusal %q -- an approval cannot rescue an unbound "+
+			"token, so telling the caller to obtain one sends it to fix something that was never the "+
+			"problem while a human spends attention on a decision whose outcome is already fixed", got, unboundTokenReason)
 	}
-	if !strings.Contains(resp.GetStatus().GetMessage(), approvalID) {
-		t.Errorf("Status.Message = %q, want it to carry the pending approval id %q", resp.GetStatus().GetMessage(), approvalID)
+	if strings.Contains(resp.GetStatus().GetMessage(), approvalID) {
+		t.Errorf("Status.Message = %q carries approval id %q -- an id whose approval can never be spent "+
+			"is worse than no id at all", resp.GetStatus().GetMessage(), approvalID)
 	}
 	denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
 	if !ok {
 		t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
 	}
-	if len(denied.DeniedResponse.GetHeaders()) != 1 {
-		t.Errorf("DeniedResponse.Headers = %v, want the approval-id header -- degrading an escalation must "+
-			"still hand back the id a retry needs", denied.DeniedResponse.GetHeaders())
+	if got := denied.DeniedResponse.GetHeaders(); len(got) != 0 {
+		t.Errorf("denied response carries %d header(s), want none -- the %s header names an approval the "+
+			"caller must not be pointed at", len(got), approvalIDHeaderInTest)
 	}
+	// The bound half of the same branch still degrades, and that pairing is
+	// what makes this a test about BINDING rather than about escalations in
+	// general -- TestCheck_Escalate_DeniesAndApprovalIDReachesBothChannels
+	// sends the identical shape with sender_constrained set and gets the id.
 }
 
 // TestCheck_UnservedAuthority_DeniesWithoutContactingPDP is the fix for the
@@ -2249,5 +2272,55 @@ func TestCheck_MalformedApprovalIDHeader_DroppedAndTheRequestIsStillDecided(t *t
 	}
 	if req := fake.lastRequest(); req.ApprovalId != nil {
 		t.Errorf("approval_id = %q, want unset", req.GetApprovalId())
+	}
+}
+
+// TestCheck_EscalateBoundVsUnbound_DifferInExactlyOneField is the pairing that makes the two
+// tests above tests about BINDING rather than about escalations in general. Same effect, same
+// approval id, same reason, same request -- one field apart.
+//
+// It exists because the bug it guards was invisible without the pair: for months this surface
+// degraded BOTH, and every escalation test passed, because each one only ever asserted the
+// degrade it expected. The unbound row is the one that was wrong, and only a fixture differing in
+// exactly that field can attribute the difference to the field.
+func TestCheck_EscalateBoundVsUnbound_DifferInExactlyOneField(t *testing.T) {
+	const approvalID = "extauthz-approval-pairing-91f3-fixture"
+	for _, tc := range []struct {
+		name              string
+		senderConstrained bool
+		wantApprovalID    bool
+	}{
+		{name: "bound token degrades and names the approval", senderConstrained: true, wantApprovalID: true},
+		{name: "unbound token is refused and names none", senderConstrained: false, wantApprovalID: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+				Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: approvalID,
+				Reason: "requires approval", SenderConstrained: tc.senderConstrained,
+			}}
+			client := startExtauthzServer(t, &extauthzServer{client: startFakePDP(t, fake), cfg: testExtauthzServerCfg()})
+			resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+				"authorization": "Bearer " + testBearerToken,
+			}))
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			// Both outcomes are denials -- so the status code cannot tell them apart, and asserting
+			// only that would have passed against the bug.
+			if got := resp.GetStatus().GetCode(); got != int32(rpccode.Code_PERMISSION_DENIED) {
+				t.Fatalf("Status.Code = %d, want PERMISSION_DENIED for both rows", got)
+			}
+			carriesID := strings.Contains(resp.GetStatus().GetMessage(), approvalID)
+			if carriesID != tc.wantApprovalID {
+				t.Errorf("denial carries the approval id = %v, want %v -- an unbound token cannot be "+
+					"rescued by an approval (matchProof returns nil for a token with no cnf.jkt whatever "+
+					"proof accompanies it), so naming one sends a human to approve something that can "+
+					"never succeed", carriesID, tc.wantApprovalID)
+			}
+			isK5 := resp.GetStatus().GetMessage() == unboundTokenReason
+			if isK5 == tc.wantApprovalID {
+				t.Errorf("denial is K5's refusal = %v, want %v", isK5, !tc.wantApprovalID)
+			}
+		})
 	}
 }

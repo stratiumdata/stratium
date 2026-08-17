@@ -648,16 +648,31 @@ The proof itself never reaches `raw_input` and so never reaches the audit
 chain, exactly like `authorization` — a credential hashed into an
 append-only chain cannot be edited back out of it.
 
-### An escalation on `proxy` does not block — it degrades
+### An escalation never blocks on `proxy` — and this is where §4.6 has its exception
 
-`proxy` is a blocking surface (spec §4.6): for an ordinary bearer token it
-holds the caller's stream open across a human approval, unlike `extauthz`,
-which cannot. **A sender-constrained token is the exception, and this is the
-one place §4.6's split has one.**
+`proxy` used to be a blocking surface (spec §4.6): it held the caller's stream
+open across a human approval, unlike `extauthz`, which cannot. **It no longer
+does, for either kind of token**, and the rule that replaced the old split is
+worth knowing before you design around either surface:
 
 > **A surface can block only while the credential it would wait with outlives
 > the wait.** A DPoP proof does not: it is single-use and short-lived, and a
 > human approval is neither.
+
+Since both network surfaces now *require* a sender-constrained token, neither
+has a credential that survives a wait, so neither waits:
+
+- **A bound token degrades**, on both surfaces — a denial naming the pending
+  approval, which you retry (see below).
+- **An unbound token is refused outright**, on both surfaces, with the
+  "get a bound token" message rather than an approval id. An approval cannot
+  rescue it: the retry would resolve to an ALLOW that the surface refuses
+  anyway, so pointing you at an approval would send you to fix something that
+  was never the problem.
+
+`hook` and `mcp` still block, and should: a bearer token is legitimate there
+(you already hold the session file it lives in), and a bearer token outlives a
+human.
 
 So when an escalating call presents a bound token, `proxy` returns
 `PERMISSION_DENIED` immediately, carrying the pending approval's id in two
@@ -694,9 +709,11 @@ differently from the original and cannot use an approval created for it. Send
 the approved retry as a fresh call.
 
 The same recipe works on `extauthz`, which reads the id from a
-`stratium-approval-id` **request header** and strips it identically. `extauthz`
-degrades *every* escalation, not only bound ones, because it can never hold a
-call open at all.
+`stratium-approval-id` **request header** and strips it identically. The two
+surfaces behave the same way on an escalation — degrade a bound token, refuse
+an unbound one — for different underlying reasons: `proxy` *could* hold a call
+open and no longer does because the credential would not survive the wait,
+while `extauthz` never could (Envoy's `ext_authz` budget is milliseconds).
 
 ## Reading a denial
 

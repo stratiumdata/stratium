@@ -989,19 +989,30 @@ const unboundTokenReason = "stratium-pep: this surface requires a sender-constra
 // proof that failed, a jti that could not be spent, and three catalog/tier
 // load failures) all report false regardless of what the caller actually
 // presented, and a bound token with a valid proof denied at the principal leg
-// reports true. So false-on-a-denial means "not established", never "the
-// caller presented a bearer token", and a refusal keyed off it anywhere but
-// the ALLOW branch would be reading a value that does not mean what it says.
-// It costs nothing to restrict it to that branch, because a denial is refused
-// here anyway.
+// reports true. So false-on-a-DENIAL means "not established", never "the
+// caller presented a bearer token", and a refusal keyed off it on a denial
+// would be reading a value that does not mean what it says.
 //
-// EFFECT_ESCALATE never reaches the check for the same reason: it degrades to
-// a denial below (E5/M4), and the proto's "consult it only when effect is
-// EFFECT_ALLOW" is honored literally rather than approximately. An escalation
-// on an unbound token therefore denies with the pending-approval reason, and
-// the approved retry -- which comes back through this same function as an
-// ALLOW -- is where K5 refuses it. One refusal, at the point the request would
-// otherwise have been forwarded.
+// EFFECT_ESCALATE IS A SECOND PLACE THIS IS READ, and an earlier version of
+// this comment said the opposite -- that an escalation "never reaches the
+// check" because "the proto's 'consult it only when effect is EFFECT_ALLOW' is
+// honored literally rather than approximately". That quote no longer exists:
+// the proto now says to consult the field on ALLOW OR ESCALATE and never on a
+// DENY, because an escalation reaches Decide's tail where the field is set, so
+// the value is the real one there.
+//
+// The stale quote was not merely out of date, it was actively holding a bug
+// open. Under it, an escalation on an UNBOUND token degraded to a 403 carrying
+// an approval id and telling the caller to retry with a fresh proof -- and a
+// human then approved something that could never succeed, because matchProof
+// (internal/pdpgrpc/dpop.go) returns nil for a token with no cnf.jkt no matter
+// what proof accompanies it, so the retry resolves to ALLOW with
+// sender_constrained=false and is refused right here. "Approval granted, retry
+// refused" is precisely the shape spec §4.7.2 K11 exists to close on the
+// sibling surface, and it had grown here. checkResponseFromDecide now refuses
+// an unbound escalation with unboundTokenReason, exactly as proxy's authorize
+// does, and for the same reason: a caller told its action is PENDING APPROVAL
+// will go and obtain one, which cannot help it.
 //
 // TestCheck_UnboundToken_DeniedEvenWhenPDPAllows and
 // TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason are the two halves
@@ -1072,6 +1083,23 @@ func checkResponseFromDecide(resp *pdpgrpc.DecideResponse) *authv3.CheckResponse
 	}
 
 	if resp.GetEffect() == pdpgrpc.Effect_EFFECT_ESCALATE {
+		// K5 before E5's degrade. An unbound token cannot be rescued by an
+		// approval -- the retry resolves to an ALLOW this same function refuses
+		// two branches up -- so degrading would spend a human's attention on a
+		// decision whose outcome is already fixed, and hand the caller an
+		// instruction that cannot work. Refusing names the one thing it can act
+		// on. See this function's own doc comment for the stale proto quote
+		// that kept this case open, and proxy.go's authorize for the identical
+		// refusal on the sibling surface.
+		//
+		// This does NOT prevent the pending approval row: Decide creates it
+		// inside resolveEscalation, before the tail that sets
+		// sender_constrained, so the row already exists by the time this reads
+		// the field. What it prevents is telling the caller to go and get that
+		// row approved.
+		if !resp.GetSenderConstrained() {
+			return denyCheckResponse(unboundTokenReason, "")
+		}
 		if approvalID == "" {
 			return denyCheckResponse(fmt.Sprintf(
 				"stratium-pep: PDP escalated this action but returned no approval id to attach; denying (PDP reason: %s)",

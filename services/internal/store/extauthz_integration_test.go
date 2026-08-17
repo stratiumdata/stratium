@@ -706,16 +706,27 @@ func TestIntegration_Envoy_AuthorizationHeaderExcludedFromAuditDigest(t *testing
 // only verify a top-level Go test declaration; see this file's own package
 // doc).
 //
-// The retry is a DIRECT Decide call to pdp-extauthz, never through Envoy a
-// second time: decideRequestFromCheck (extauthz.go) never attaches
-// approval_id to an outgoing DecideRequest, deliberately (Task 3's own
-// report: "the consuming side of a retry is a direct-PDP-call concern the
-// proto already supports without extauthz needing new plumbing") -- there
-// is no way to make Envoy carry one. E5 only requires the non-blocking
-// surface to degrade to deny plus a FINDABLE pending record; this proves
-// the record it finds is real and actionable by resolving it the way the
-// system actually supports, not by inventing a retry path extauthz itself
-// does not have.
+// THE RETRY GOES THROUGH ENVOY, and through Phase 14 it could not. The reason
+// recorded here then was that decideRequestFromCheck "never attaches
+// approval_id to an outgoing DecideRequest, deliberately... there is no way to
+// make Envoy carry one." Phase 15 Task 6 made both clauses false: extauthz now
+// reads stratium-approval-id off a request header and forwards it, AND strips
+// it, so the retry's raw_input still hashes to the digest the approval is
+// bound to.
+//
+// I declined this rewrite once, on the grounds that a through-Envoy retry
+// needs the escalating call to be minted BOUND -- which is true -- and that
+// rebinding it was too large a change to a proof conformance_test.go points at
+// for C23 and that also carries N7's wrong-admin negative. Fix round 3 removed
+// that objection rather than overruling it: extauthz now refuses an UNBOUND
+// escalation outright, so the escalating call HAD to become bound for this
+// proof to reach a degrade at all. Once it was, the retry cost two header
+// values. The lesson is worth the sentence -- a cost estimate is a claim to
+// re-check after the code around it moves.
+//
+// E5 only requires the non-blocking surface to degrade to deny plus a FINDABLE
+// pending record. This now proves the record is not merely findable but
+// SPENDABLE, over the exact request docs/pep.md tells an operator to make.
 //
 // calibDelegation exists because the real escalating call below can never
 // itself reach a real audit row this test could compare a fresh
@@ -787,10 +798,23 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 			"either. reconstructed=%s got=%x want=%x", calibRawInput, calibGot, calibWant)
 	}
 
-	// The real escalating call: identical path and headers, a different
-	// token -- which cannot itself change RawInput (proof 6), so this
-	// call's own RawInput is provably calibRawInput, unchanged.
-	escStatus, escBody, escHeader, _ := envoyDo(t, http.MethodGet, path, mintToken(t, envoyPdpClient, escDelegation.ID), nil)
+	// The real escalating call: identical path, a different token and a
+	// different proof -- neither of which can change RawInput (proof 6), so
+	// this call's own RawInput is provably calibRawInput, unchanged.
+	//
+	// BOUND, and it has to be as of Phase 15 Task 6's fix round 3: extauthz
+	// refuses an UNBOUND escalation outright rather than degrading it (K5
+	// before E5), because an approval cannot rescue a token that carries no
+	// cnf.jkt -- matchProof returns nil for one whatever proof accompanies it,
+	// so the retry always resolves to an ALLOW the surface refuses anyway.
+	// This test caught that live: with mintToken here it now gets K5's
+	// refusal and no approval id at all, which is the correct new behaviour
+	// and is asserted directly by
+	// TestCheck_EscalateOnUnboundToken_RefusedNotDegraded.
+	escKey := dpopKey(t)
+	escToken := mintExtauthzBoundToken(t, escDelegation.ID, escKey)
+	escStatus, escBody, escHeader, _ := envoyDo(t, http.MethodGet, path, escToken,
+		map[string]string{"DPoP": extauthzProof(t, escKey, http.MethodGet, path)})
 	if escStatus != http.StatusForbidden {
 		t.Fatalf("escalating call status = %d, want 403 (E5: a non-blocking surface degrades ESCALATE to "+
 			"deny); body: %s", escStatus, escBody)
@@ -879,27 +903,57 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 		t.Fatalf("PAP approve returned approval %s, want the pending %s", approved.ID, approvalUUID)
 	}
 
-	// The retry -- see this function's own doc comment for why it is a
-	// direct Decide call, not a second trip through Envoy. Tool and
-	// RawInput reuse the escalating call's own values exactly:
-	// models.Approval.Verify checks both for equality against what the
-	// original escalation recorded.
-	retryToken := mintToken(t, envoyPdpClient, escDelegation.ID)
-	retryResp, err := envoyPdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-		Token: retryToken, AgentId: extauthzAgentID.String(), Subject: extauthzSubject,
-		Tool: path, RawInput: calibRawInput, ApprovalId: &approvalID,
+	// THE RETRY, THROUGH ENVOY -- see this function's own doc comment for why
+	// it used to be a direct Decide call and why it no longer has to be.
+	//
+	// Same token, same path, a FRESH proof, and the approval id in the header
+	// the denial handed back. Every one of those is load-bearing: the original
+	// proof's jti is spent (K8) so it cannot be replayed; without the id the
+	// PDP would create a SECOND pending approval instead of resolving this
+	// one; and the id must not disturb raw_input, because
+	// models.Approval.Verify checks sha256(raw_input) for equality against
+	// what the escalation recorded -- which is why extauthz strips the header
+	// rather than reporting it.
+	//
+	// A 200 through Envoy is therefore the end-to-end evidence for all three
+	// at once, and for the operator recipe docs/pep.md publishes. A direct
+	// Decide call could never have shown any of it: it bypasses the surface
+	// that reads and strips the header.
+	retryStatus, retryBody, _, _ := envoyDo(t, http.MethodGet, path, escToken, map[string]string{
+		"DPoP":               extauthzProof(t, escKey, http.MethodGet, path),
+		approvalIDHeaderName: approvalID,
 	})
-	if err != nil {
-		t.Fatalf("retry Decide() error = %v, want a decision", err)
+	if retryStatus != http.StatusOK {
+		t.Fatalf("retry through Envoy status = %d, want 200 -- E5 end to end requires an approved retry to "+
+			"succeed, and this is the exact request docs/pep.md tells an operator to make; body: %s",
+			retryStatus, retryBody)
 	}
-	if retryResp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
-		t.Fatalf("retry Effect = %v, want EFFECT_ALLOW (reason: %s) -- E5 end to end requires an approved "+
-			"retry to succeed", retryResp.GetEffect(), retryResp.GetReason())
+
+	// No SECOND approval was created: the retry resolved the existing one
+	// rather than escalating afresh. Without the header this is exactly what
+	// would have happened, and a human would be asked twice.
+	after := pendingApprovalCount(t, escDelegation.ID)
+	if after != 0 {
+		t.Errorf("pending approvals for this delegation after the retry = %d, want 0 -- a retry that failed "+
+			"to carry the approval id escalates again and leaves a fresh pending row", after)
 	}
-	if retryResp.GetApprovalId() != "" {
-		t.Errorf("retry ApprovalId = %q, want empty: no second approval is created on an approved retry",
-			retryResp.GetApprovalId())
-	}
+}
+
+// pendingApprovalCount reports how many approvals for delegationID are still
+// pending. Used by proof 5 to prove the approved retry RESOLVED the existing
+// approval rather than creating a second one -- the failure mode a retry that
+// silently dropped the approval id would produce, which no status code shows.
+func pendingApprovalCount(t *testing.T, delegationID uuid.UUID) int {
+	t.Helper()
+	var n int
+	withTenantTx(t, envoyTenant, func(tx *sql.Tx) {
+		if err := tx.QueryRowContext(t.Context(),
+			`SELECT count(*) FROM approvals WHERE delegation_id = $1 AND status = 'pending'`,
+			delegationID.String()).Scan(&n); err != nil {
+			t.Fatalf("count pending approvals: %v", err)
+		}
+	})
+	return n
 }
 
 // TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted is K5's live

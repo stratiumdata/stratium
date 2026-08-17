@@ -79,7 +79,7 @@ func awaitApproval(
 	// disconnect mid-poll -- see resolveApproval's own doc comment for why passing anything else
 	// here (in particular runHook's own ConnectTimeout-scoped ctx variable, were it threaded this
 	// far) would be actively wrong, not merely unnecessary.
-	effect, reason, _ := resolveApproval(context.Background(), client, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout, req, resp)
+	effect, reason := resolveApproval(context.Background(), client, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout, req, resp)
 	if effect == pdpgrpc.Effect_EFFECT_ALLOW {
 		return 0
 	}
@@ -118,24 +118,21 @@ func awaitApproval(
 // the package doc for why a concrete hookConfig parameter stopped being the
 // right shape once a caller with no session file needed this function too.
 //
-// ctx is a THIRD reshape this same caller forced, on top of the config-type
-// one above: proxy.go's authorize is the first caller of this function that
-// itself received a real, externally-sourced context (handleStream's own
-// stream.Context(), ultimately) rather than one it synthesized locally from
-// context.Background() with nothing upstream to inherit from (hook.go's
-// runHook and mcp_authorize.go's decideAndRelay are both exactly that --
-// see hook.go's own describeRPCError doc comment, which already states this
-// as settled fact: "every context this hook builds ... derives from
-// context.Background() with only a deadline, never a cancellable parent").
+// ctx is a THIRD reshape the same caller forced, on top of the config-type
+// one above -- and that caller is gone: proxy.go stopped blocking entirely in
+// Phase 15 (K5/K11, see its own package doc), so BOTH remaining callers pass
+// context.Background(). The parameter stays because a function making RPCs
+// takes a context, and because the reshape costs those callers nothing:
 // ctx is used ONLY as the PARENT for cancellation, never to shorten
 // approvalTimeout itself: context.WithTimeout(ctx, approvalTimeout) resolves
 // whichever of ctx's own cancellation or approvalTimeout comes first, so a
 // caller passing context.Background() (hook.go, mcp_authorize.go -- neither
 // has a deadline of its own to contribute) sees IDENTICAL behavior to before
-// this parameter existed, while proxy.go's real stream ctx additionally lets
-// this function stop promptly if the original caller disconnects mid-poll,
-// instead of continuing to hold a goroutine and spend GetApproval calls
-// against a call nothing is listening for anymore. This is why hook.go's own
+// this parameter existed. What it BOUGHT, and what a future caller holding a
+// real caller-supplied context would get back, is prompt exit when the
+// original caller disconnects mid-poll, instead of continuing to hold a
+// goroutine and spend GetApproval calls against a call nothing is listening
+// for anymore. That is worth keeping reachable, and it is why hook.go's own
 // ctx variable (built inside runHook, scoped to cfg.ConnectTimeout -- a much
 // SHORTER budget meant for one RPC's round trip, not an entire escalation
 // wait) is deliberately NOT what awaitApproval passes here: reusing it would
@@ -145,25 +142,21 @@ func awaitApproval(
 // prevent. Each caller passes what it actually has to offer, not whatever
 // context.Context value happens to be lying around in its own scope.
 //
-// resolved is the retry's OWN DecideResponse, and it is non-nil ONLY when effect is
-// EFFECT_ALLOW: on every deny path there either is no retry response (the poll timed out, the
-// id was missing, the retry RPC failed) or there is one this function has already reduced to
-// its reason. It exists for one caller. proxy.go's authorize must apply spec §4.7.2 K5 -- refuse
-// an allow whose token was never bound to a key -- and DecideResponse.sender_constrained's own
-// proto comment says in capitals to consult that field only when effect is EFFECT_ALLOW. The
-// escalation this function was handed is not an ALLOW; the retry it resolved to is, and that is
-// the response the caller is about to act on, so it is the only one entitled to answer. Returning
-// it rather than a bool keeps this function free of any knowledge of K5: it hands back what the
-// PDP said and lets each surface apply its own rule. hook.go's awaitApproval and
-// mcp_authorize.go's decideAndRelay discard it -- a bearer token is legitimate on both of those
-// surfaces (K5 binds the two network surfaces only), so neither has a rule to apply.
+// A third return value carrying the retry's own DecideResponse was added in Phase 15 and REMOVED
+// again in the same phase, which is worth one sentence so nobody re-adds it half-remembering why:
+// proxy.go's authorize needed it to apply spec §4.7.2 K5 to the response an escalation RESOLVED
+// to rather than to the escalation itself, and then proxy stopped calling this function at all.
+// Both remaining callers would have discarded it -- a bearer token is legitimate on hook and mcp,
+// so neither has a K5 rule to apply -- and a return value every caller ignores is dead API. A
+// caller that needs it again should add it back and hand the RESOLVED response, never the
+// escalation, to whatever narrows the allow.
 func resolveApproval(
 	ctx context.Context,
 	client pdpgrpc.PDPServiceClient,
 	connectTimeout, pollInterval, approvalTimeout time.Duration,
 	req *pdpgrpc.DecideRequest,
 	resp *pdpgrpc.DecideResponse,
-) (effect pdpgrpc.Effect, reason string, resolved *pdpgrpc.DecideResponse) {
+) (effect pdpgrpc.Effect, reason string) {
 	approvalID := resp.GetApprovalId()
 	if approvalID == "" {
 		// DecideResponse.approval_id's own doc comment guarantees this is
@@ -173,7 +166,7 @@ func resolveApproval(
 		// this file follows for a response it cannot act on.
 		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf(
 			"stratium-pep: PDP returned ESCALATE with no approval_id to poll; denying (PDP reason: %s)",
-			resp.GetReason()), nil
+			resp.GetReason())
 	}
 
 	// pollCtx bounds the wait at approvalTimeout AT THE LATEST -- independent
@@ -188,7 +181,7 @@ func resolveApproval(
 
 	ok, pollReason := pollApproval(pollCtx, client, pollInterval, approvalID)
 	if !ok {
-		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason), nil
+		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason)
 	}
 
 	// The retry: req, unchanged, plus the now-approved id. Reusing req rather
@@ -209,11 +202,11 @@ func resolveApproval(
 	retryResp, err := client.Decide(retryCtx, req)
 	if err != nil {
 		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: retry after approval: %s",
-			describeRPCError(err, agentOrDelegationUnknownMsg)), nil
+			describeRPCError(err, agentOrDelegationUnknownMsg))
 	}
 
 	if retryResp.GetEffect() == pdpgrpc.Effect_EFFECT_ALLOW {
-		return pdpgrpc.Effect_EFFECT_ALLOW, "", retryResp
+		return pdpgrpc.Effect_EFFECT_ALLOW, ""
 	}
 	// EFFECT_DENY — a leg the approval does not cover started refusing
 	// between the escalation and this retry (a revoked delegation, a policy
@@ -225,7 +218,7 @@ func resolveApproval(
 	// top-level DENY case, this is the PDP's own verdict text, not a local
 	// diagnostic this process is synthesizing, and the two must stay visually
 	// distinguishable to a human reading the denial.
-	return pdpgrpc.Effect_EFFECT_DENY, retryResp.GetReason(), nil
+	return pdpgrpc.Effect_EFFECT_DENY, retryResp.GetReason()
 }
 
 // pollApproval blocks until approvalID resolves to "approved" or "denied",

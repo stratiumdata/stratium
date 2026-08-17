@@ -15,28 +15,35 @@
 // and extauthz's path), token comes from gRPC metadata's own "authorization: Bearer" key (P2),
 // and raw_input is that same metadata, JSON-encoded, with every credential header already
 // stripped (P3) -- calls the PDP, and either allows (forward runs, no longer unreachable),
-// blocks on EFFECT_ESCALATE (proxy IS a blocking surface, spec §4.6, unlike extauthz -- see the
-// ESCALATE BLOCKS section below), or denies. Task 3 documents this mechanism's remaining limits
+// degrades or refuses on EFFECT_ESCALATE (it BLOCKED on one until Phase 15 -- see the ESCALATE
+// DOES NOT BLOCK section below), or denies. Task 3 documents this mechanism's remaining limits
 // (per-message authorization, opaque message bodies -- plan §P3/P4, consequences A and B); Task
 // 4 proves the whole thing against a real service.
 //
-// ESCALATE BLOCKS -- EXCEPT FOR A SENDER-CONSTRAINED TOKEN (K11). Unlike extauthz.go's Check,
-// which cannot hold a call open (Envoy's ext_authz budget is milliseconds, not minutes --
-// pdpgrpc.DegradeEscalateToDeny) and so degrades EFFECT_ESCALATE straight to a denial, this
-// surface holds the caller's own stream open exactly like hook and mcp already do, by calling
-// escalation.go's resolveApproval -- the same transport-free wait mcp_authorize.go's
-// decideAndRelay already reuses unmodified for its own blocking surface, not a second poll loop
-// written for a third time. See escalation.go's own package doc for what reusing it here required
-// changing in that file, and why.
+// ESCALATE DOES NOT BLOCK, AND THIS SURFACE NO LONGER BLOCKS AT ALL. Through Phase 11 it did:
+// unlike extauthz.go's Check, which cannot hold a call open (Envoy's ext_authz budget is
+// milliseconds, not minutes -- pdpgrpc.DegradeEscalateToDeny) and so degrades EFFECT_ESCALATE
+// straight to a denial, this surface held the caller's own stream open exactly like hook and mcp
+// still do, by calling escalation.go's resolveApproval. Phase 15 ended that in two steps, for two
+// different reasons:
 //
-// Phase 15 carved out the one case where it must not: an escalation carrying a BOUND token
-// degrades here too (degradeEscalation, below), because the proof it would have to wait with does
-// not survive the wait -- single-use (K8), short-lived (K9), and unmintable by this process, which
-// does not hold the key. §4.6's split is therefore narrower than it looked: A SURFACE MAY BLOCK
-// ONLY WHILE THE CREDENTIAL IT WOULD WAIT WITH OUTLIVES THE WAIT. Since K5 already refuses an
-// unbound token on this surface, the blocking path is unreachable in practice today -- it is kept
-// anyway, deliberately, because it is still correct for the condition it names; see its own
-// comment in authorize.
+//   - A BOUND escalation degrades to a denial naming the approval (K11, degradeEscalation below).
+//     The proof it would have to wait with does not survive the wait -- single-use (K8),
+//     short-lived (K9), and unmintable by this process, which does not hold the key. The client
+//     retries with a fresh proof once approved.
+//   - An UNBOUND one is refused outright (K5, in authorize's own ESCALATE branch). K5 refuses the
+//     ALLOW an approval could only ever resolve to, so waiting first buys nothing and answers with
+//     a timeout instead of with the credential.
+//
+// So §4.6's blocking/non-blocking split is narrower than it looked, and this is the sentence worth
+// carrying: A SURFACE MAY BLOCK ONLY WHILE THE CREDENTIAL IT WOULD WAIT WITH OUTLIVES THE WAIT. A
+// bearer token does; a DPoP proof does not; and this surface requires the latter.
+//
+// resolveApproval itself is untouched and still correct for the surfaces whose credential does
+// outlive a human -- hook and mcp, its two remaining callers. What is gone is only this file's
+// call to it, which could not be kept once both ESCALATE outcomes returned (go vet rejects
+// unreachable code). authorize's own ESCALATE branch carries the recipe for restoring it if K5 is
+// ever relaxed.
 //
 // NO REISSUE ON DENY. hook.go's runHook and mcp_authorize.go's decideAndRelay each attempt
 // exactly one reissueAndRetryDecide on a first EFFECT_DENY, because a session file
@@ -573,10 +580,10 @@ func (p *proxyServer) handleStream(_ any, stream grpc.ServerStream) error {
 }
 
 // authorize is this task's entire decision surface: it maps ctx and method to a DecideRequest
-// (decideRequestFromStream, P1-P3), calls the PDP, and resolves to a final allow/deny -- blocking
-// on EFFECT_ESCALATE via resolveApproval (escalation.go) rather than degrading it the way
-// extauthz.go's non-blocking checkResponseFromDecide must (see the package doc's ESCALATE BLOCKS
-// section). The signature is still (bool, string): handleStream's own call site needed only ctx
+// (decideRequestFromStream, P1-P3), calls the PDP, and resolves to a final allow/deny. An
+// EFFECT_ESCALATE never blocks here as of Phase 15 -- a bound token degrades to a denial naming
+// the approval (K11), an unbound one is refused outright (K5) -- and the package doc's ESCALATE
+// DOES NOT BLOCK section carries why each. The signature is still (bool, string): handleStream's own call site needed only ctx
 // threaded through, not a rework, because method was already accepted here in Task 1 for exactly
 // this reason (that function's own prior doc comment said so).
 //
@@ -636,18 +643,29 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 			// retries with a fresh proof once approved. See degradeEscalation for the whole case.
 			return degradeEscalation(resp)
 		}
-		// K5: an UNBOUND escalation is refused HERE, before a human is ever paged.
+		// K5: an UNBOUND escalation is refused HERE rather than waited on.
 		//
 		// This is a narrowing, which a PEP may always do, and it is the same refusal
-		// allowIfSenderConstrained applies one branch up -- moved earlier, not invented. What
-		// blocking here would actually cost is the point: the PDP has already created a pending
-		// approval row, resolveApproval would hold the caller's stream and a polling goroutine
-		// for up to ApprovalTimeout, A HUMAN WOULD BE PAGED, and the ALLOW that approval resolves
-		// to is then refused by K5 anyway. So a legacy bearer-token caller hitting an escalating
-		// action hangs for the full timeout and interrupts a person for a decision that cannot
-		// change the outcome -- and any holder of an unbound token can generate unbounded human
-		// interrupts and held streams at will. Refusing now costs the caller nothing it was ever
-		// going to get, and tells it the one thing it can act on: get a bound token.
+		// allowIfSenderConstrained applies one branch up -- moved earlier, not invented.
+		//
+		// BE PRECISE ABOUT WHAT THIS DOES NOT PREVENT, because an earlier version of this comment
+		// overreached and claimed it stopped a human being paged. It does not. Decide creates the
+		// pending approval row itself, inside resolveEscalation, BEFORE the tail that sets
+		// sender_constrained -- so by the time any surface can read that field the row already
+		// exists, and whatever queue an operator watches has already seen it. Polling GetApproval
+		// is a read; it pages nobody.
+		//
+		// What refusing here actually buys is the wait and the answer. Blocking would hold the
+		// caller's stream and a polling goroutine for up to ApprovalTimeout and then deny anyway,
+		// because the ALLOW an approval resolves to is refused by K5 -- so a legacy bearer-token
+		// caller hitting an escalating action would hang for the full timeout and be told it timed
+		// out, when the real and fixable problem is its credential. Refusing now costs it nothing
+		// it was ever going to get and names the one thing it can act on.
+		//
+		// The residue is worth stating rather than hiding: the pending row survives and nothing
+		// will ever retry against it, so an operator approving it achieves nothing. That was
+		// equally true of the blocking version -- a timed-out escalation left the same orphan --
+		// so this changes the wait, not the row.
 		//
 		// THE BLOCKING PATH ITSELF IS NOT GONE, and it is still the right behaviour for the
 		// condition it serves -- which is not "unbound" but "a credential that outlives the
@@ -662,9 +680,10 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 		// unreachable check rejects outright -- it is not a style question. If K5 is ever
 		// relaxed, restoring it is four lines: call resolveApproval with (ctx, p.client,
 		// ConnectTimeout, ApprovalPollInterval, ApprovalTimeout, req, resp), and on
-		// EFFECT_ALLOW hand the RESOLVED response -- never resp -- to allowIfSenderConstrained,
-		// because the retry is the ALLOW being acted on. That is what the third return value
-		// resolveApproval already carries exists for.
+		// EFFECT_ALLOW hand the RETRY's own response -- never resp -- to allowIfSenderConstrained,
+		// because the retry is the ALLOW being acted on. resolveApproval no longer returns that
+		// response (it was added for this caller and removed when this caller went away, see its
+		// own doc comment), so restoring the call means restoring that return value too.
 		return false, unboundTokenReason, ""
 	default:
 		// EFFECT_DENY, and any value this build does not recognize (the proto documents
@@ -682,7 +701,7 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 // extauthz's checkResponseFromDecide does for every escalation on its own surface. The client
 // retries once approved, with a FRESH proof, minted by the only party that can mint one.
 //
-// # Why a blocking surface stops blocking for this one credential
+// # Why this surface stopped blocking, starting with this credential
 //
 // spec §4.6 splits the surfaces into blocking (hook, mcp, proxy) and non-blocking (extauthz), and
 // until Phase 15 that split was purely about whether the transport could hold a call open for a
@@ -696,7 +715,7 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 // and the PDP refuses the retry with "store: dpop proof already spent". Had it not, a human
 // slower than STRATIUM_DPOP_FRESHNESS_WINDOW would have put the same proof outside the window
 // instead. This process cannot mint a replacement: the client holds the private key, and a
-// blocking surface has by definition not returned to the client.
+// surface that is still blocking has by definition not returned to the client.
 //
 // # The alternative that was rejected, and why it is worse than the deny
 //

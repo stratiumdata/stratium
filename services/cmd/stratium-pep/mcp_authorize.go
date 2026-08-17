@@ -255,7 +255,7 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		// propagate -- mcp.go relays over stdio, not a cancellable per-request transport -- see
 		// resolveApproval's own doc comment for why every caller passes what it actually has,
 		// never a locally-scoped ctx built for an unrelated, shorter budget.
-		effect, reason, _ := resolveApproval(context.Background(), a.client, a.cfg.ConnectTimeout, a.cfg.ApprovalPollInterval, a.cfg.ApprovalTimeout, req, resp)
+		effect, reason := resolveApproval(context.Background(), a.client, a.cfg.ConnectTimeout, a.cfg.ApprovalPollInterval, a.cfg.ApprovalTimeout, req, resp)
 		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
 			a.forward(line)
 			return

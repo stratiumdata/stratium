@@ -483,14 +483,19 @@ services:
   # generated once with no committed key or secret behind it.
   #
   # ApprovalPollInterval/ApprovalTimeout are proxy-only settings (proxyConfig,
-  # proxy.go) neither pdp-extauthz-fronting service needs: proxy, unlike
-  # extauthz, is a BLOCKING surface (spec §4.6) -- it holds a caller's own
-  # stream open across an escalation instead of degrading to a denial (see
-  # proxy.go's own package doc, ESCALATE BLOCKS). The poll interval is short
-  # and the timeout generous so proof 5's own out-of-band approval -- issued
-  # by the test itself, against real Postgres, while the call is still
-  # blocked -- has ample time to land before the timeout would otherwise
-  # fire and turn that proof into a flake.
+  # proxy.go) neither pdp-extauthz-fronting service needs. proxy WAS a
+  # blocking surface (spec §4.6) and stopped being one in Phase 15: an
+  # escalation carrying a bound token degrades to a denial naming the pending
+  # approval (K11) and one carrying an unbound token is refused outright (K5),
+  # so nothing here waits on a human any more -- see proxy.go's own package
+  # doc, ESCALATE DOES NOT BLOCK.
+  #
+  # Both values are still REQUIRED with no default, so they are still set
+  # here: loadProxyConfigFromEnv refuses to start without them, and they are
+  # what the blocking path would need if K5 were ever relaxed (authorize's own
+  # ESCALATE branch carries the restoration recipe). Nothing in the current
+  # integration suite waits on either -- proof 5 now asserts a prompt degrade
+  # and a fresh-proof retry rather than a held call.
   pep-proxy:
     build:
       context: ../..
