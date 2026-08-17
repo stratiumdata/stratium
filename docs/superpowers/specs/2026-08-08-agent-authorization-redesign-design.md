@@ -695,6 +695,38 @@ input is hashed into an append-only record designed to be retained, and a
 credential-bearing artifact written there cannot be edited out. Strip by
 omission and case-insensitively, and assert the absence structurally.
 
+**K11 — a sender-constrained call does not block on `proxy`; it degrades to a
+denial plus a pending approval, exactly as `extauthz` does (2026-08-17).**
+
+§4.6 splits the surfaces into blocking and non-blocking, and puts `proxy` in the
+blocking class: unlike `extauthz` it can hold a call open while a human approves.
+**That is not achievable for a bound token, and the reason is structural rather
+than an implementation gap.** A DPoP proof is single-use (**K8**) and short-lived
+(**K9**); a human approval is neither. The escalation retry resends the same
+request — it must, because the approval binds to `input_digest` — so it resends
+the same proof, whose `jti` the PDP has already spent. Even were it not spent,
+the freshness window would have closed. And the proxy cannot mint a replacement:
+the client holds the private key, and a blocking surface has by definition not
+returned to the client.
+
+So on `ESCALATE` with a bound token, `proxy` returns a denial carrying the
+approval id, and the client retries with a **fresh** proof once the approval is
+granted — minted by the only party that can mint one. Proof-of-possession stays
+intact end to end; nothing is waived and no approval is consumed without a live
+proof.
+
+This covers every case `proxy` actually serves, because **K5** already refuses an
+unbound token there. `extauthz` never met this problem only because **E5** had
+already made it non-blocking for an unrelated reason — Envoy's millisecond
+timeouts. The right reading of §4.6's split is therefore narrower than it looked:
+a surface can block only while the credential it would wait with outlives the
+wait. A sender-constrained credential does not.
+
+*Found in Phase 15 Task 6 by an integration test, not by reading. The
+alternative — letting an approved retry skip the proof check — was rejected:
+approvals are not consumed, so a token plus an approval id would re-execute the
+approved action for the approval's whole TTL with no proof of possession at all.*
+
 **C25 then means two things, and both must be tested.** Its wording — *"a
 delegation token without a valid DPoP proof is denied when the token is
 sender-constrained"* — covers a bound token presented without a proof. **K5**
