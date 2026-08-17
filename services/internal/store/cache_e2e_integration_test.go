@@ -458,6 +458,31 @@ func TestIntegration_Cache_E2E_HitServesWithPDPStopped(t *testing.T) {
 // EMPTY) cache file, and pdp-cache stopped before the only hook call this
 // proof ever makes -- there is no entry to be valid or invalid, and no PDP to
 // fall back on either.
+//
+// WHAT THE TAIL OF THE REASON MAY SAY, and why this stopped asserting one
+// spelling of it (Phase 15 Task 7). Until now the second check required the
+// literal "could not reach", which is describeRPCError's (hook.go)
+// codes.Unavailable branch and only that branch. Which branch a stopped
+// container produces is not a property of this system: it depends on how
+// Docker tears the socket down. A listener that refuses immediately gives
+// grpc-go a connection-refused and therefore Unavailable; one whose packets
+// are dropped instead leaves the dial hanging until the PEP's own
+// ConnectTimeout elapses, which is codes.DeadlineExceeded and reads "PDP did
+// not respond in time". Measured on this host, both happen: ~1.2s for the
+// first, ~6.2s for the second. The test was passing or failing on a race
+// against a real clock, not on anything C19 says.
+//
+// So it now asserts the CLASSIFICATION, which is stable, instead of the prose
+// one of two racing branches happens to produce -- and it is not a weakening.
+// cacheMissUnreachableReason's prefix (local_cache.go) is applied uniformly to
+// every describeRPCError outcome, so "no cached decision for this request,
+// and ..." is what distinguishes "the PDP was never successfully consulted"
+// from an ordinary policy DENY, whose reason passes through unprefixed. The
+// two branches a stopped container can legitimately produce are named
+// explicitly and either is accepted; the two it cannot -- NotFound (the agent
+// or delegation is unknown to a PDP that ANSWERED) and a generic application
+// error -- are still rejected, because either arriving here would mean this
+// call reached something and this proof is about a call that reached nothing.
 func TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies(t *testing.T) {
 	const subject = "cache-proof-b@example.com"
 	agentID := uuid.New()
@@ -477,8 +502,15 @@ func TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies(t *testing.T) {
 	if !strings.Contains(reason, "no cached decision") {
 		t.Errorf("reason = %q, want it to say no cached decision was available", reason)
 	}
-	if !strings.Contains(strings.ToLower(reason), "could not reach") {
-		t.Errorf("reason = %q, want it to also say the PDP could not be reached", reason)
+	// Either transport outcome of a stopped container -- see this test's own
+	// doc comment. Both are describeRPCError branches, both fail closed, and
+	// neither is reachable from a PDP that actually answered.
+	unreachable := strings.Contains(reason, "could not reach PDP") ||
+		strings.Contains(reason, "PDP did not respond in time")
+	if !unreachable {
+		t.Errorf("reason = %q, want it to name a PDP that could not be reached or did not respond in time "+
+			"-- anything else (an unknown agent or delegation, a generic application error) would mean this "+
+			"call reached a PDP that ANSWERED, and this proof is about a call that reached nothing", reason)
 	}
 }
 
