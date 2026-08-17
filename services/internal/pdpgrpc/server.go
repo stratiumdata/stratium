@@ -92,6 +92,15 @@ type Store interface {
 	// interface, on every RPC that reads it — see that method's own doc
 	// comment for why that ordering is the entire point.
 	LoadTenantEpoch(ctx context.Context) (int64, error)
+
+	// SpendProof records a DPoP proof's jti as spent, returning
+	// store.ErrProofSpent on a replay (spec §4.7.2 K8). Decide's spendProof
+	// (dpop.go) is its only caller and invokes it AFTER LoadTenantEpoch, never
+	// beside the local proof checks — it is a write, and V3 admits no store
+	// call ahead of the epoch. It is also the LAST credential check, so a
+	// proof that fails any cheaper one never burns a jti; see dpop.go's own
+	// package doc for both halves of that argument.
+	SpendProof(ctx context.Context, jti string, expiresAt time.Time) error
 }
 
 // TokenSigner is what this package needs from internal/token to both mint
@@ -235,12 +244,17 @@ func (s *Server) loadEpochOrDeny(ctx context.Context) (int64, error) {
 //
 // Order: parse and validate the request's shape -> authenticate the token
 // (authenticate.go: verify it and read the delegation id it names — spec
-// §4.7.1 K4, the PDP's only gate on who is calling) -> read the tenant's
-// revocation epoch (loadEpochOrDeny, spec §4.8.1 V3 — the first store read
-// on this path, ahead of the agent, the chain, and the policies, so a
+// §4.7.1 K4, the PDP's only gate on who is calling) -> check the DPoP proof's
+// LOCAL half, if the token is bound (dpop.go's matchProof: signature,
+// freshness, thumbprint, htm/htu — no store access, so it belongs with the
+// token check) -> read the tenant's revocation epoch (loadEpochOrDeny, spec
+// §4.8.1 V3 — the first store CALL of any kind on this path, ahead of the
+// spend below as well as the agent, the chain, and the policies, so a
 // revocation racing this call can only make the response look older than
 // it actually is, never newer; see loadEpochOrDeny's own doc comment for
-// why) -> load the acting agent -> load the delegation chain that id names
+// why) -> spend the proof's jti (dpop.go's spendProof: the store half, last
+// of the credential checks, so nothing cheaper can burn a jti on its way to
+// failing) -> load the acting agent -> load the delegation chain that id names
 // -> evaluate (tenant from cfg, principal decision from policy, clock from
 // time.Now — the one boundary where the ambient clock is allowed, so
 // internal/authz itself stays pure)
@@ -256,7 +270,16 @@ func (s *Server) loadEpochOrDeny(ctx context.Context) (int64, error) {
 // verifies is not trusted for anything about that delegation's own current
 // state — the load and all three legs below run exactly as they would have
 // from a bare id, so a revoked or expired delegation still denies there, at
-// the delegation leg, never at the token check above it.
+// the delegation leg, never at the token check above it. The same holds for
+// the proof: it proves possession of the bound key for this one request, and
+// buys nothing about the delegation either.
+//
+// Neither the token check nor the proof check is a fourth leg, and this task
+// did not make one. The compound decision is still principal ∧ agent ∧
+// delegation, folded by authz.FoldVerdicts — untouched here, and the single
+// place deny-overrides-with-default-deny lives. A credential that fails
+// verification denies through denyAndAudit before authz.Decide is ever
+// called, so there is nothing for the fold to see.
 func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideResponse, error) {
 	agentID, err := parseNonNilUUID(req.GetAgentId())
 	if err != nil {
@@ -317,7 +340,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// pre-decision-denial helper a catalog load failure and a DeriveTier
 	// failure already share below — see its own doc comment for why a
 	// third caller here does not risk the three drifting apart.
-	delegationID, err := s.authenticateToken(req.GetToken())
+	delegationID, jkt, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		// No epoch to report: loadEpochOrDeny has not run yet on this path,
 		// and there is no legitimate value to substitute for "never read" —
@@ -326,9 +349,41 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, nil)
 	}
 
+	// Every LOCAL half of the proof-of-possession check (spec §4.7.2 K7),
+	// here beside authenticateToken for the same reason that check sits ahead
+	// of every store call: parse, signature, freshness, thumbprint-versus-
+	// cnf.jkt and htm/htu are pure computation over bytes already in hand.
+	// The one part that is NOT local — spending the jti, which is a store
+	// write — deliberately does not run here; it runs after the epoch read
+	// below. dpop.go's package doc carries both reasons for that split.
+	//
+	// matched is nil with a nil error for an unbound (bearer) token, which
+	// still decides normally: K5 puts that refusal at the two network
+	// surfaces, not here, because refusing it here would deny every local-
+	// surface caller (hook, mcp). Reported on the response instead, below.
+	matched, err := s.matchProof(req, jkt, now)
+	if err != nil {
+		// Same shape and same nil epoch as the token failure just above: a
+		// proof that does not verify is a fact about a presented credential,
+		// audited like one, and loadEpochOrDeny still has not run.
+		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, nil)
+	}
+
 	epoch, err := s.loadEpochOrDeny(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// The store half of the credential check, and the FIRST store write on
+	// this path — after the epoch read (V3: the epoch must be the first store
+	// call of any kind) and after every cheaper check has already passed, so
+	// a malformed or stolen proof can never burn a jti an honest client might
+	// legitimately retry with. See dpop.go's package doc: two independent
+	// arguments, one placement.
+	if matched != nil {
+		if err := s.spendProof(ctx, *matched); err != nil {
+			return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, &epoch)
+		}
 	}
 
 	agent, err := s.store.LoadAgent(ctx, agentID)
@@ -494,6 +549,14 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// effect is EFFECT_ESCALATE).
 	resp := toResponse(result, &epoch)
 	resp.ApprovalId = newApprovalID
+	// A wire-only fact, attached here exactly like ApprovalId above and for
+	// the same reason: it is not a decision fact, so authz.Result has nothing
+	// to name it with, and toResponse has no business knowing what a proof is.
+	// matched is non-nil only when a bound token's proof passed every check
+	// AND its jti was spent — both above — so this can never read true for a
+	// token that was merely bound. See the proto's own doc comment for why the
+	// PDP reports this rather than refusing (K5 belongs at the surfaces).
+	resp.SenderConstrained = matched != nil
 	return resp, nil
 }
 

@@ -31,13 +31,19 @@ import (
 // DecideRequest for an absent token to fall back to.
 var errNoToken = errors.New("no token provided")
 
-// authenticateToken verifies token and returns the delegation id it names.
-// This is Decide's ONLY gate on who is calling. An absent, malformed,
-// expired, or wrongly-signed token returns the zero UUID and a non-nil
-// error; Decide's own call site denies on that error without ever loading
-// an agent or a delegation chain — see Decide's own comment for why that
-// ordering (authenticate first, cheapest and no store I/O, before either
-// lookup) is deliberate.
+// authenticateToken verifies token and returns the delegation id it names,
+// plus the key thumbprint it was bound to ("" for a bearer token). This is
+// Decide's ONLY gate on who is calling. An absent, malformed, expired, or
+// wrongly-signed token returns the zero UUID and a non-nil error; Decide's
+// own call site denies on that error without ever loading an agent or a
+// delegation chain — see Decide's own comment for why that ordering
+// (authenticate first, cheapest and no store I/O, before either lookup) is
+// deliberate.
+//
+// The thumbprint comes back from here rather than from a second decode of
+// the same token in dpop.go: the claims are already parsed and, more to the
+// point, already VERIFIED at this line. A cnf.jkt read off an unverified
+// token would be a binding an attacker could choose.
 //
 // A token that verifies buys authentication only, never authorization (K3):
 // the id returned here is not trusted for anything beyond "load this row
@@ -54,14 +60,14 @@ var errNoToken = errors.New("no token provided")
 // echoing the token or the key, and this function's own errors about a bad
 // "sub" claim name only the claim's key, never a value decoded from the
 // token.
-func (s *Server) authenticateToken(tokenString string) (uuid.UUID, error) {
+func (s *Server) authenticateToken(tokenString string) (uuid.UUID, string, error) {
 	if tokenString == "" {
-		return uuid.Nil, errNoToken
+		return uuid.Nil, "", errNoToken
 	}
 
 	claims, err := s.signer.Verify(tokenString)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 
 	// claims is otherwise unvalidated by internal/token.Verify — that
@@ -83,11 +89,15 @@ func (s *Server) authenticateToken(tokenString string) (uuid.UUID, error) {
 	// Go-level, one RLS-level, free to silently disagree.
 	sub, ok := claims[subjectClaim].(string)
 	if !ok {
-		return uuid.Nil, fmt.Errorf("token: claim %q is missing or not a string", subjectClaim)
+		return uuid.Nil, "", fmt.Errorf("token: claim %q is missing or not a string", subjectClaim)
 	}
 	delegationID, err := parseNonNilUUID(sub)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("token: claim %q: %w", subjectClaim, err)
+		return uuid.Nil, "", fmt.Errorf("token: claim %q: %w", subjectClaim, err)
 	}
-	return delegationID, nil
+	jkt, err := tokenThumbprint(claims)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	return delegationID, jkt, nil
 }

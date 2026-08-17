@@ -19,8 +19,13 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "")
 	t.Setenv("STRATIUM_APPROVAL_TTL", "")
+	t.Setenv("STRATIUM_SPENT_PROOF_REAP_INTERVAL", "")
 	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "")
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "")
+	// Required with no default (spec §4.7.2 K9), so the known-good baseline
+	// has to carry one or every test in this file would fail on the missing
+	// variable rather than on its own subject.
+	t.Setenv("STRATIUM_DPOP_FRESHNESS_WINDOW", "30s")
 	// A placeholder, not a real key file: this package checks presence only
 	// (see Load's own comment on TokenSigningKeyPath — opening and parsing
 	// the file is internal/token.Load's job, exercised by that package's own
@@ -40,6 +45,8 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "8")
 	t.Setenv("STRATIUM_DB_TIMEOUT", "30s")
 	t.Setenv("STRATIUM_APPROVAL_TTL", "48h")
+	t.Setenv("STRATIUM_DPOP_FRESHNESS_WINDOW", "90s")
+	t.Setenv("STRATIUM_SPENT_PROOF_REAP_INTERVAL", "12m")
 	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "postgres://migrate:pass@localhost:5432/stratium")
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "xacml,cedar")
 	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/keys/current.pem")
@@ -75,6 +82,12 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	}
 	if got.ApprovalTTL != 48*time.Hour {
 		t.Errorf("ApprovalTTL = %v", got.ApprovalTTL)
+	}
+	if got.DPoPFreshnessWindow != 90*time.Second {
+		t.Errorf("DPoPFreshnessWindow = %v", got.DPoPFreshnessWindow)
+	}
+	if got.SpentProofReapInterval != 12*time.Minute {
+		t.Errorf("SpentProofReapInterval = %v", got.SpentProofReapInterval)
 	}
 	if want := []string{"xacml", "cedar"}; !slices.Equal(got.PolicyLanguages, want) {
 		t.Errorf("PolicyLanguages = %v, want %v", got.PolicyLanguages, want)
@@ -130,6 +143,13 @@ func TestLoad_Defaults(t *testing.T) {
 	if got.ApprovalTTL != 24*time.Hour {
 		t.Errorf("ApprovalTTL = %v, want %v", got.ApprovalTTL, 24*time.Hour)
 	}
+	if got.SpentProofReapInterval != 5*time.Minute {
+		t.Errorf("SpentProofReapInterval = %v, want %v", got.SpentProofReapInterval, 5*time.Minute)
+	}
+	// DPoPFreshnessWindow is deliberately NOT asserted here: it has no
+	// default to assert (K9), and setValidEnv supplies one only so the rest
+	// of this test can run. TestLoad_MissingDPoPFreshnessWindow below is
+	// where its absence of a default is the property.
 }
 
 func TestLoad_MissingDatabaseURL(t *testing.T) {
@@ -194,9 +214,9 @@ func TestLoad_TokenPreviousKeyPathIsOptional(t *testing.T) {
 
 // The property the brief is built around: a missing required value is
 // reported alongside every OTHER missing required value, not just the first
-// one Load happens to check. Three required variables unset at once (a
+// one Load happens to check. Four required variables unset at once (a
 // freshly cloned deployment with none of the PDP's environment configured
-// yet is exactly this case) must produce ONE error naming all three, so
+// yet is exactly this case) must produce ONE error naming all four, so
 // fixing configuration takes one read of one error message, not three
 // restarts each revealing the next gap in turn.
 func TestLoad_MissingMultipleRequired_NamesAllAtOnce(t *testing.T) {
@@ -204,12 +224,16 @@ func TestLoad_MissingMultipleRequired_NamesAllAtOnce(t *testing.T) {
 	t.Setenv("STRATIUM_DATABASE_URL", "")
 	t.Setenv("STRATIUM_TENANT_ID", "")
 	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "")
+	t.Setenv("STRATIUM_DPOP_FRESHNESS_WINDOW", "")
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("Load() with three required variables unset: want error, got nil")
+		t.Fatal("Load() with four required variables unset: want error, got nil")
 	}
-	for _, want := range []string{"STRATIUM_DATABASE_URL", "STRATIUM_TENANT_ID", "STRATIUM_TOKEN_SIGNING_KEY_PATH"} {
+	for _, want := range []string{
+		"STRATIUM_DATABASE_URL", "STRATIUM_TENANT_ID",
+		"STRATIUM_TOKEN_SIGNING_KEY_PATH", "STRATIUM_DPOP_FRESHNESS_WINDOW",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %s alongside the other missing variables", err.Error(), want)
 		}
@@ -380,5 +404,116 @@ func TestLoad_PolicyLanguagesEmptyEntry(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "STRATIUM_POLICY_LANGUAGES") {
 		t.Fatalf("error %q does not name the offending variable", err.Error())
+	}
+}
+
+// TestLoad_MissingDPoPFreshnessWindow is spec §4.7.2 K9's "required
+// configuration with no default", stated as the same fail-closed property
+// TestLoad_TenantIDHasNoDefault states for the tenant.
+//
+// Every other required value is set explicitly rather than through
+// setValidEnv, for the reason TestLoad_TenantIDHasNoDefault spells out: with
+// "name every missing variable at once" behaviour, a test that left a second
+// gap open would still see a non-nil error and pass for the wrong reason,
+// never proving THIS variable has no default. The assertion on the returned
+// Config is what makes it specific — a Load that silently defaulted the
+// window would return nil and a non-zero duration, and only checking both
+// catches it.
+func TestLoad_MissingDPoPFreshnessWindow(t *testing.T) {
+	t.Setenv("STRATIUM_DATABASE_URL", "postgres://localhost/stratium")
+	t.Setenv("STRATIUM_TENANT_ID", "tenant-123")
+	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/test/current-key.pem")
+	t.Setenv("STRATIUM_DPOP_FRESHNESS_WINDOW", "")
+	t.Setenv("STRATIUM_LISTEN_ADDR", "")
+	t.Setenv("STRATIUM_MAX_DELEGATION_DEPTH", "")
+	t.Setenv("STRATIUM_DB_TIMEOUT", "")
+	t.Setenv("STRATIUM_APPROVAL_TTL", "")
+	t.Setenv("STRATIUM_SPENT_PROOF_REAP_INTERVAL", "")
+	t.Setenv("STRATIUM_MIGRATION_DATABASE_URL", "")
+	t.Setenv("STRATIUM_POLICY_LANGUAGES", "")
+	t.Setenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH", "")
+
+	got, err := Load()
+	if err == nil {
+		t.Fatalf("Load() with no STRATIUM_DPOP_FRESHNESS_WINDOW: want error, got nil "+
+			"(DPoPFreshnessWindow = %v) — K9 gives this value no default at any level", got.DPoPFreshnessWindow)
+	}
+	if !strings.Contains(err.Error(), "STRATIUM_DPOP_FRESHNESS_WINDOW") {
+		t.Fatalf("error %q does not name the missing variable", err.Error())
+	}
+}
+
+func TestLoad_DPoPFreshnessWindowUnparseable(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_DPOP_FRESHNESS_WINDOW", "thirty seconds")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with an unparseable STRATIUM_DPOP_FRESHNESS_WINDOW: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "STRATIUM_DPOP_FRESHNESS_WINDOW") {
+		t.Fatalf("error %q does not name the offending variable", err.Error())
+	}
+	// A malformed value must not be reported as a MISSING one: the two have
+	// different fixes (correct the syntax vs. supply the variable), and the
+	// missing-variable path is the one that runs first, so a check placed on
+	// the wrong side of it would collapse them.
+	if strings.Contains(err.Error(), "missing required configuration") {
+		t.Errorf("error %q reports a malformed value as a missing one", err.Error())
+	}
+}
+
+// A non-positive window is refused at startup rather than half-enforced:
+// internal/dpop.Verify's own doc comment records that window == 0 does NOT
+// fail closed by itself — a proof whose iat lands on the same second as now
+// satisfies both freshness comparisons and verifies. An operator who wrote 0
+// meaning "as strict as possible" would get the opposite.
+func TestLoad_DPoPFreshnessWindowNotPositive(t *testing.T) {
+	for _, v := range []string{"0s", "-30s"} {
+		t.Run(v, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("STRATIUM_DPOP_FRESHNESS_WINDOW", v)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with STRATIUM_DPOP_FRESHNESS_WINDOW=%s: want error, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "STRATIUM_DPOP_FRESHNESS_WINDOW") {
+				t.Fatalf("error %q does not name the offending variable", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_SpentProofReapIntervalUnparseable(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_SPENT_PROOF_REAP_INTERVAL", "every 5 minutes")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with an unparseable STRATIUM_SPENT_PROOF_REAP_INTERVAL: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "STRATIUM_SPENT_PROOF_REAP_INTERVAL") {
+		t.Fatalf("error %q does not name the offending variable", err.Error())
+	}
+}
+
+// A non-positive interval would panic time.NewTicker in cmd/stratium-pdp's
+// reapSpentProofs — a crash at startup rather than a config error, and one
+// whose stack trace names time, not this variable.
+func TestLoad_SpentProofReapIntervalNotPositive(t *testing.T) {
+	for _, v := range []string{"0s", "-5m"} {
+		t.Run(v, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("STRATIUM_SPENT_PROOF_REAP_INTERVAL", v)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with STRATIUM_SPENT_PROOF_REAP_INTERVAL=%s: want error, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "STRATIUM_SPENT_PROOF_REAP_INTERVAL") {
+				t.Fatalf("error %q does not name the offending variable", err.Error())
+			}
+		})
 	}
 }

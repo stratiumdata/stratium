@@ -367,7 +367,7 @@ func TestAuthenticateToken_SubjectClaimNotAString_Denies(t *testing.T) {
 	}
 	srv := NewServer(nil, policy.Multi{}, config.Config{}, signer)
 
-	_, err = srv.authenticateToken(tok)
+	_, _, err = srv.authenticateToken(tok)
 	if err == nil {
 		t.Fatal("authenticateToken() error = nil, want an error: \"sub\" is not a string")
 	}
@@ -387,7 +387,7 @@ func TestAuthenticateToken_SubjectClaimMissing_Denies(t *testing.T) {
 	}
 	srv := NewServer(nil, policy.Multi{}, config.Config{}, signer)
 
-	_, err = srv.authenticateToken(tok)
+	_, _, err = srv.authenticateToken(tok)
 	if err == nil {
 		t.Fatal("authenticateToken() error = nil, want an error: \"sub\" is absent")
 	}
@@ -398,7 +398,7 @@ func TestAuthenticateToken_SubjectClaimZeroUUID_Denies(t *testing.T) {
 	tok := signRealToken(t, signer, uuid.Nil, time.Now(), time.Now().Add(time.Hour))
 	srv := NewServer(nil, policy.Multi{}, config.Config{}, signer)
 
-	_, err := srv.authenticateToken(tok)
+	_, _, err := srv.authenticateToken(tok)
 	if err == nil {
 		t.Fatal("authenticateToken() error = nil, want an error: the zero UUID is never a legitimate " +
 			"delegation id (parseNonNilUUID's own rule, applied here exactly as everywhere else)")
@@ -418,7 +418,7 @@ func TestAuthenticateToken_ErrorNeverContainsTheTokenString(t *testing.T) {
 	const marker = "MARKER-THIS-STRING-MUST-NEVER-APPEAR-IN-AN-ERROR"
 	srv := NewServer(nil, policy.Multi{}, config.Config{}, signer)
 
-	_, err := srv.authenticateToken(marker)
+	_, _, err := srv.authenticateToken(marker)
 	if err == nil {
 		t.Fatal("authenticateToken() error = nil, want an error: marker is not a valid token")
 	}

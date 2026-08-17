@@ -162,6 +162,16 @@ type fakeStore struct {
 	// method below.
 	epochReadAfterCalls int
 
+	// spendErr/spentProofs back SpendProof (dpop.go's spendProof).
+	// spentProofs grows only on a nil spendErr, the same
+	// grows-only-on-success discipline created/createdApprovals above use, so
+	// a test asserting "no jti was burned" checks len(spentProofs) == 0 rather
+	// than trusting the response alone — which is the only way to state "an
+	// earlier check failed BEFORE the spend" as a fact about the write rather
+	// than a fact about the reply.
+	spendErr    error
+	spentProofs []spentProof
+
 	// bumpOnAgentLoad, if set, runs once at the very start of LoadAgent —
 	// the first store method every real call site in this package invokes
 	// immediately after loadEpochOrDeny succeeds (Decide: epoch, then
@@ -260,6 +270,24 @@ func (f *fakeStore) LoadDelegation(context.Context, uuid.UUID) (*models.Delegati
 		return nil, f.delegationErr
 	}
 	return f.delegation, nil
+}
+
+// spentProof is one recorded SpendProof call. Both arguments are kept, not
+// just the jti: expiresAt is the value store.SpendProof deliberately does not
+// validate (it has no clock and no window), which makes pinning it exactly
+// this fake's job — see TestDecide_SpendsTheProofWithAnExpiryOfIATPlusTheWindow.
+type spentProof struct {
+	jti       string
+	expiresAt time.Time
+}
+
+func (f *fakeStore) SpendProof(_ context.Context, jti string, expiresAt time.Time) error {
+	f.calls++
+	if f.spendErr != nil {
+		return f.spendErr
+	}
+	f.spentProofs = append(f.spentProofs, spentProof{jti: jti, expiresAt: expiresAt})
+	return nil
 }
 
 func (f *fakeStore) LoadTenantEpoch(context.Context) (int64, error) {

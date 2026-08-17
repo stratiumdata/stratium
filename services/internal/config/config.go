@@ -51,6 +51,53 @@ type Config struct {
 	// any value.
 	ApprovalTTL time.Duration // STRATIUM_APPROVAL_TTL, default 24h
 
+	// DPoPFreshnessWindow is how far a DPoP proof's iat may sit from the PDP's
+	// own clock, in either direction, before internal/dpop.Verify refuses it as
+	// stale (STRATIUM_DPOP_FRESHNESS_WINDOW, required).
+	//
+	// Required with NO default, unlike ApprovalTTL/MaxDepth/DBTimeout above —
+	// spec §4.7.2 K9, and the exception is deliberate. An operator is stating
+	// how much clock skew between their agents and this PDP is tolerable, and
+	// no single value is right for every deployment: too small denies an
+	// honest fleet with ordinary NTP drift, too large widens the window a
+	// stolen token and its captured proof stay replayable in. A guessed value
+	// is therefore either useless or too permissive, which is exactly the
+	// DatabaseURL/TenantID argument (see this package's own doc comment)
+	// applied to a duration rather than a string.
+	//
+	// It joins the same `missing` collection those two use rather than
+	// failing on its own, so a fresh deployment learns every gap from one run.
+	DPoPFreshnessWindow time.Duration // STRATIUM_DPOP_FRESHNESS_WINDOW (required)
+
+	// SpentProofReapInterval is how often the PDP sweeps its own tenant's
+	// expired spent_proofs rows (STRATIUM_SPENT_PROOF_REAP_INTERVAL, default
+	// 5m). K8 requires expired rows be reaped on a schedule; this is that
+	// schedule's period, and cmd/stratium-pdp's reapSpentProofs is its caller.
+	//
+	// A default, unlike DPoPFreshnessWindow directly above, and the difference
+	// is not an inconsistency: the window is a security parameter whose wrong
+	// value is silently unsafe, while this is a throughput/table-size tradeoff
+	// whose wrong value is merely a bigger table or a busier database — the
+	// same "operational tunable with a sensible default" treatment ApprovalTTL
+	// and DBTimeout already get. Rows only become reapable once they are past
+	// the freshness window anyway, so a longer interval cannot shorten replay
+	// protection, only delay the cleanup of rows that no longer protect
+	// anything.
+	//
+	// # An operator will meet this coverage limit here
+	//
+	// The sweep is TENANT-SCOPED and cannot be otherwise: store.
+	// ReapSpentProofs runs through beginTenantTx because an unscoped DELETE is
+	// silently zeroed by FORCE ROW LEVEL SECURITY, and this schema deliberately
+	// issues no BYPASSRLS role to any identity (see that method's own doc
+	// comment for the full argument). A PDP process serves exactly one tenant,
+	// so each process reaping its own covers every tenant that HAS a running
+	// PDP — and a tenant whose PDP is scaled to zero keeps its expired rows
+	// until one runs again. That is a deployment property, not a defect: those
+	// rows deny nothing and cost nothing but space, since a tenant with no PDP
+	// is also making no decisions.
+	SpentProofReapInterval time.Duration // STRATIUM_SPENT_PROOF_REAP_INTERVAL, default 5m
+
 	// PolicyLanguages is the deployment's enabled set of policy engines —
 	// STRATIUM_POLICY_LANGUAGES, a comma-separated list, default every
 	// language this build ships (defaultPolicyLanguages below). Unlike
@@ -80,11 +127,12 @@ var defaultPolicyLanguages = []string{"cedar", "json", "rego", "xacml"}
 
 func Load() (Config, error) {
 	c := Config{
-		ListenAddr:      envOr("STRATIUM_LISTEN_ADDR", ":50051"),
-		MaxDepth:        5,
-		DBTimeout:       5 * time.Second,
-		ApprovalTTL:     24 * time.Hour,
-		PolicyLanguages: defaultPolicyLanguages,
+		ListenAddr:             envOr("STRATIUM_LISTEN_ADDR", ":50051"),
+		MaxDepth:               5,
+		DBTimeout:              5 * time.Second,
+		ApprovalTTL:            24 * time.Hour,
+		SpentProofReapInterval: 5 * time.Minute,
+		PolicyLanguages:        defaultPolicyLanguages,
 	}
 	var err error
 
@@ -118,8 +166,28 @@ func Load() (Config, error) {
 	if c.TokenSigningKeyPath == "" {
 		missing = append(missing, "STRATIUM_TOKEN_SIGNING_KEY_PATH")
 	}
+	// Presence is collected here, alongside the other three, so it appears in
+	// the same one-run report; the value is PARSED below, after that report,
+	// because a malformed duration is a different failure from an absent one
+	// and deserves its own message rather than being folded into "missing".
+	dpopWindow := os.Getenv("STRATIUM_DPOP_FRESHNESS_WINDOW")
+	if dpopWindow == "" {
+		missing = append(missing, "STRATIUM_DPOP_FRESHNESS_WINDOW")
+	}
 	if len(missing) > 0 {
 		return c, fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
+	}
+
+	if c.DPoPFreshnessWindow, err = time.ParseDuration(dpopWindow); err != nil {
+		return c, fmt.Errorf("STRATIUM_DPOP_FRESHNESS_WINDOW: %w", err)
+	}
+	if c.DPoPFreshnessWindow <= 0 {
+		// internal/dpop.Verify refuses a non-positive window itself rather than
+		// half-enforcing it (its own doc comment: with window == 0 a proof
+		// whose iat lands on the same second still verifies). Catching it here
+		// too means the operator learns at startup instead of watching every
+		// DPoP-bearing decision deny for a reason that reads like a client bug.
+		return c, fmt.Errorf("STRATIUM_DPOP_FRESHNESS_WINDOW must be positive, got %s", c.DPoPFreshnessWindow)
 	}
 
 	// No presence check: unset is a valid, deliberate choice (skip migrations),
@@ -154,6 +222,18 @@ func Load() (Config, error) {
 		// would otherwise only discover as every single escalation retry
 		// mysteriously denying "expired."
 		return c, fmt.Errorf("STRATIUM_APPROVAL_TTL must be positive, got %s", c.ApprovalTTL)
+	}
+	if v := os.Getenv("STRATIUM_SPENT_PROOF_REAP_INTERVAL"); v != "" {
+		if c.SpentProofReapInterval, err = time.ParseDuration(v); err != nil {
+			return c, fmt.Errorf("STRATIUM_SPENT_PROOF_REAP_INTERVAL: %w", err)
+		}
+	}
+	if c.SpentProofReapInterval <= 0 {
+		// A non-positive interval is a time.NewTicker panic, not a "never
+		// reap" setting — and an operator who wanted "never reap" is asking
+		// for the unbounded table K8 exists to prevent, so there is no value
+		// here worth interpreting rather than refusing.
+		return c, fmt.Errorf("STRATIUM_SPENT_PROOF_REAP_INTERVAL must be positive, got %s", c.SpentProofReapInterval)
 	}
 	if v := os.Getenv("STRATIUM_POLICY_LANGUAGES"); v != "" {
 		if c.PolicyLanguages, err = splitPolicyLanguages(v); err != nil {

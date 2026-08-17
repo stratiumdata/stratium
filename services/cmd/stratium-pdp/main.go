@@ -134,6 +134,22 @@ func run(logger *slog.Logger) error {
 
 	repo := store.New(db, cfg.TenantID)
 
+	// The schedule K8 requires for spent_proofs (reaper.go). Started here,
+	// after the connection is proven and before the server accepts anything,
+	// so the very first decision that spends a jti already has a sweeper
+	// behind it. Cancelled by this defer when run returns — which is after
+	// serve() below has finished shutting the gRPC server down — so the last
+	// thing to stop is the thing with nothing left to do.
+	//
+	// Nothing waits for the goroutine to observe the cancellation. A sweep in
+	// flight at shutdown is a DELETE of rows that are already expired: losing
+	// it costs one interval of table growth, and the next process to start
+	// deletes them. Blocking exit on it would be paying a shutdown-latency
+	// risk for nothing.
+	reaperCtx, stopReaper := context.WithCancel(context.Background())
+	defer stopReaper()
+	go reapSpentProofs(reaperCtx, logger, repo.ReapSpentProofs, cfg.SpentProofReapInterval, cfg.DBTimeout)
+
 	// policy.Multi is wired in with a real, non-empty registry (built above,
 	// from cfg.PolicyLanguages, before this process opened any network
 	// connection) holding every language this deployment enabled, default

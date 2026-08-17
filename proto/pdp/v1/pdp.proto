@@ -142,6 +142,46 @@ message DecideRequest {
   // empty token are simply invalid, and Decide denies either the same way,
   // with no fallback (K4).
   string token = 11;
+
+  // dpop_proof is the RFC 9449 DPoP proof JWT the caller presented, forwarded
+  // verbatim by the PEP (spec §4.7.2 K7). Empty when the caller presented
+  // none.
+  //
+  // The PDP verifies it, never the PEP (K2, D1): the signature against the
+  // key the proof's own header carries, freshness against the configured
+  // window (K9), the thumbprint of that key against the presented token's
+  // cnf.jkt, htm/htu against observed_method/observed_uri below, and
+  // single-use of its jti (K8). Splitting any of that out to the PEP would
+  // put half of "is this credential genuine" outside the PDP, and a PEP that
+  // decides a proof is valid is a PEP making an authorization decision.
+  //
+  // A plain string, not optional, matching token above: an absent proof and
+  // an explicitly-empty one are the same fact — the caller presented none —
+  // and the PDP treats them identically, so there is no presence to track.
+  // Never copied into raw_input and never written to the audit chain (K10).
+  string dpop_proof = 12;
+
+  // observed_method and observed_uri are the HTTP method and target URI the
+  // ENFORCEMENT SURFACE saw, never anything the caller asserted about its own
+  // request (K7). A DPoP proof binds to an HTTP request through its htm and
+  // htu claims, and the PDP never sees that request — it sees this Decide
+  // call — so the PEP has to report the pair, exactly as it already
+  // serializes raw_input on the caller's behalf.
+  //
+  // On the gRPC proxy surface that pair is the PROXY's own address plus the
+  // full method path, "/package.Service/Method", with observed_method "POST"
+  // (gRPC is HTTP/2 POST) — what the agent addressed and what the PEP
+  // observes. Reporting the TARGET's address instead would let a proof minted
+  // for one target be replayed at another behind the same proxy.
+  //
+  // Both are ignored entirely when dpop_proof is empty, and neither is a
+  // trusted input even when it is not: they can only ever NARROW what a proof
+  // satisfies. A surface that reported the wrong pair denies its own traffic;
+  // it cannot make a proof minted for somewhere else pass, because htm/htu
+  // are covered by the proof's signature and the comparison is equality
+  // against a value the surface — not the presenter — supplies.
+  string observed_method = 13;
+  string observed_uri = 14;
 }
 
 // DecideResponse is the compound decision and each leg's individual
@@ -214,6 +254,26 @@ message DecideResponse {
   // fails denies the call outright (internal/pdpgrpc.loadEpochOrDeny), it
   // does not reach a response for this field to be zeroed on.
   optional int64 epoch = 15;
+
+  // sender_constrained reports whether the token this call presented was
+  // bound to a key — a cnf.jkt claim, RFC 9449 §6.1 — AND a DPoP proof of
+  // possession of that key was verified for this exact request (spec §4.7.2
+  // K7). False means the caller presented an ordinary bearer token.
+  //
+  // It REPORTS; it does not refuse. A bearer token is legitimate on the local
+  // surfaces (hook, mcp), where the caller already holds the session file the
+  // token lives in and binding would buy nothing (K5) — refusing one in the
+  // PDP would break that entire fleet. The two NETWORK surfaces (proxy,
+  // extauthz) are where K5 requires the refusal, and this field is how they
+  // make it: a PEP cannot read cnf.jkt for itself without parsing a token it
+  // has no key to verify, and a PEP that decides anything about a credential
+  // is a PEP making an authorization decision (D1).
+  //
+  // Never true without a verified proof, so this is not a second, weaker
+  // signal sitting alongside effect: a bound token presented with a missing,
+  // stale, wrong-key, wrong-request, or replayed proof is denied outright and
+  // never reaches a response carrying true.
+  bool sender_constrained = 16;
 }
 
 // RequestedScope is what a caller asks a new delegation to hold: an action-
