@@ -174,15 +174,46 @@ const (
 	rfc9449ExampleThumbprint = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
 )
 
+// TestConfirmationClaimUsesTheNamesTheRFCsDefine pins the two strings that
+// are this system's entire interop contract for binding. They are not
+// internal vocabulary: RFC 7800 §3.1 names the claim "cnf" and RFC 9449 §6.1
+// names its thumbprint member "jkt", and Tasks 4, 5 and 6 — plus any
+// DPoP-aware verifier outside this repo — will look for exactly those.
+//
+// Asserted directly, against literals, because the property cannot be
+// isolated behaviourally at all: every test that reads a bound token reads it
+// through these same constants, so a misspelling agrees with itself and the
+// suite stays green while every bound token this system mints is unusable.
+// Mutation testing found precisely that — renaming either constant survived
+// the entire suite. Same treatment, and the same reason, as internal/dpop's
+// own direct assertion of its algorithm allowlist.
+func TestConfirmationClaimUsesTheNamesTheRFCsDefine(t *testing.T) {
+	if confirmationClaim != "cnf" {
+		t.Errorf("confirmationClaim = %q, want %q (RFC 7800 §3.1) — a token whose confirmation claim is "+
+			"spelled anything else is bound as far as this package is concerned and unbound to everyone else",
+			confirmationClaim, "cnf")
+	}
+	if thumbprintKey != "jkt" {
+		t.Errorf("thumbprintKey = %q, want %q (RFC 9449 §6.1)", thumbprintKey, "jkt")
+	}
+}
+
 // tokenConfirmation returns the cnf claim of a VERIFIED token's claim set,
 // and whether it was present at all. The claims have been through a JSON
 // round trip by the time Verify hands them back, so cnf arrives as
 // map[string]any regardless of what tokenClaims put in — asserting on the
 // decoded shape is the point: it is what a verifier on another surface, and
 // in Task 4, will actually see.
+//
+// Reads the RFC's literal name, not confirmationClaim. Every caller of this
+// helper is looking at a real signed token, i.e. at the wire, and on the wire
+// the name is fixed by RFC 7800 rather than by whatever this package happens
+// to have assigned its constant. Using the constant here would make these
+// tests agree with a misspelling instead of catching it — see
+// TestConfirmationClaimUsesTheNamesTheRFCsDefine.
 func tokenConfirmation(t *testing.T, claims jwt.MapClaims) (map[string]any, bool) {
 	t.Helper()
-	raw, present := claims[confirmationClaim]
+	raw, present := claims["cnf"]
 	if !present {
 		return nil, false
 	}
@@ -636,7 +667,9 @@ func TestIssueToken_WithJWK_BindsTokenToRFC7638Thumbprint(t *testing.T) {
 	if !present {
 		t.Fatalf("issued token carries no cnf claim, want one bound to the supplied key")
 	}
-	if got := cnf[thumbprintKey]; got != rfc9449ExampleThumbprint {
+	// "jkt", the literal RFC 9449 §6.1 member name, for the same reason
+	// tokenConfirmation reads "cnf" literally: this is the wire.
+	if got := cnf["jkt"]; got != rfc9449ExampleThumbprint {
 		t.Fatalf("cnf.jkt = %v, want %q — the thumbprint RFC 9449 §6.1 publishes for the §4.2 key. "+
 			"A value this system computes but a verifier does not reproduce binds the token to nothing usable",
 			got, rfc9449ExampleThumbprint)
@@ -668,7 +701,7 @@ func TestIssueToken_NoJWK_TokenCarriesNoConfirmationClaim(t *testing.T) {
 	if _, present := tokenConfirmation(t, claims); present {
 		t.Fatalf("issued token carries a cnf claim (= %#v) though no JWK was supplied, want none at all: "+
 			"a cnf with an empty jkt looks bound to a surface checking for one and is matchable by no key",
-			claims[confirmationClaim])
+			claims["cnf"])
 	}
 	if got := claims[subjectClaim]; got != resp.GetToken() && got == nil {
 		t.Fatalf("token sub = %v, want the delegation id", got)
@@ -750,7 +783,7 @@ func TestIssueToken_PrivateKeyJWK_RefusedWhileItsPublicHalfIsAccepted(t *testing
 	if err != nil {
 		t.Fatalf("Verify() of the issued token = %v, want success", err)
 	}
-	if cnf, present := tokenConfirmation(t, claims); !present || cnf[thumbprintKey] == "" {
+	if cnf, present := tokenConfirmation(t, claims); !present || cnf["jkt"] == "" {
 		t.Fatalf("the public half produced no cnf.jkt (claims %v), want a bound token", claims)
 	}
 
