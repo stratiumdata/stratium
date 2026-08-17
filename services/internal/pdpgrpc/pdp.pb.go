@@ -382,16 +382,27 @@ type DecideResponse struct {
 	// possession of that key was verified for this exact request (spec §4.7.2
 	// K7).
 	//
-	// ONLY MEANINGFUL WHEN effect IS EFFECT_ALLOW. It is false on every denial,
-	// including a denial that came after a bound token's proof verified and its
-	// jti was spent — a decision denied at a leg, or by a catalog or tier
-	// failure, reports false regardless of what the caller presented. That is
-	// the same convention denied_leg and approval_id above already use (empty
-	// unless one specific effect applies), and it costs a K5 surface nothing:
-	// such a surface refuses a denied decision anyway, so the only case in
-	// which it has to ask this question is an ALLOW.
+	// CONSULT IT ONLY WHEN effect IS EFFECT_ALLOW. On an ALLOW, false means the
+	// caller presented an ordinary bearer token, and that is the question K5's
+	// refusal turns on. A surface refuses a denied decision anyway, so an ALLOW
+	// is the only case in which this field has to be asked at all.
 	//
-	// On an ALLOW, false means the caller presented an ordinary bearer token.
+	// On a denial it is populated inconsistently, by construction, and the rule
+	// is worth stating precisely rather than approximately — the PDP fills this
+	// in on the tail of Decide, so:
+	//
+	//   - A decision that REACHED the three-leg evaluation carries the real
+	//     answer, whatever the verdict. A bound token with a valid proof that
+	//     is then denied at the principal, agent, or delegation leg — or that
+	//     escalates — reports true.
+	//   - A decision denied BEFORE that evaluation reports false regardless of
+	//     what was presented: a token that failed to verify, a proof that
+	//     failed, a jti that could not be spent, and the tool-catalog,
+	//     tier-override, and DeriveTier load failures all return early.
+	//
+	// So false on a denial means "not established", never "the caller presented
+	// a bearer token". Reading it as the latter would be wrong for three of
+	// those six paths, where the caller's token may well have been bound.
 	//
 	// It REPORTS; it does not refuse. A bearer token is legitimate on the local
 	// surfaces (hook, mcp), where the caller already holds the session file the

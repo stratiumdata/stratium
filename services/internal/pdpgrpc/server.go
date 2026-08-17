@@ -566,6 +566,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// AND its jti was spent — both above — so this can never read true for a
 	// token that was merely bound. See the proto's own doc comment for why the
 	// PDP reports this rather than refusing (K5 belongs at the surfaces).
+	//
+	// This is Decide's TAIL, which every three-leg outcome reaches — allow,
+	// deny at a leg, and escalate alike. So a bound token with a valid proof
+	// that is then denied at the principal leg reports TRUE: the field
+	// describes what the caller presented, and that does not depend on the
+	// verdict. Only the six denyAndAudit early returns bypass this line, and
+	// they leave it false meaning "not established", never "bearer token".
+	// The proto's own comment states that rule; TestDecide_SenderConstrained
+	// IsSetOnALegDenialButNotOnAPreDecisionDenial holds the two halves of it
+	// apart, because this comment has already been wrong once.
 	resp.SenderConstrained = matched != nil
 	return resp, nil
 }
@@ -630,22 +640,24 @@ func honoredOverrides(
 
 // appendAudit builds the audit entry for one decision and appends it.
 //
-// chain is empty on the three of Decide's pre-decision denials that happen
-// before LoadChain runs: a token that failed authentication, a DPoP proof
-// that failed verification, and a jti that could not be spent (Decide's own
-// call sites; denyAndAudit's doc comment below covers why all five
-// pre-decision denials route through this same function rather than each
-// inlining its own copy). Every other caller reaches this only after
-// LoadChain has already succeeded — Decide's success/escalation path, plus a
-// catalog load failure and a DeriveTier failure — so for them chain is
-// non-empty and delegationID is always chain[len(chain)-1].ID by
-// construction; LoadChain guarantees as much on a nil error.
+// chain is empty on the three of Decide's SIX pre-decision denials that
+// happen before LoadChain runs: a token that failed authentication, a DPoP
+// proof that failed verification, and a jti that could not be spent (Decide's
+// own call sites; denyAndAudit's doc comment below enumerates all six and
+// covers why they route through this same function rather than each inlining
+// its own copy). Every other caller reaches this only after LoadChain has
+// already succeeded — Decide's success/escalation path, plus a tool-catalog
+// load failure, a tier-override load failure, and a DeriveTier failure — so
+// for them chain is non-empty and delegationID is always
+// chain[len(chain)-1].ID by construction; LoadChain guarantees as much on a
+// nil error.
 //
 // delegationID and chain are therefore NOT the same question, and this
-// function treats them separately. Only ONE of the five pre-decision paths
+// function treats them separately. Only ONE of the six pre-decision paths
 // has no delegation id at all: an authentication failure, where the token
-// never yielded one. On the other two the token verified — the id is known
-// and correct — and the chain simply was not loaded yet. Writing NULL there
+// never yielded one. On the other five the token verified — the id is known
+// and correct — and on the two DPoP paths the chain simply was not loaded
+// yet. Writing NULL there
 // would lose the single most useful fact about a replay: WHICH delegation's
 // token is being replayed. An operator investigating a replay storm would
 // see the agent and the actor and nothing to connect them to a credential,
@@ -742,14 +754,25 @@ func (s *Server) appendAudit(
 }
 
 // denyAndAudit builds the DeriveTierDenial-shaped Result for err, appends
-// the audit entry, and returns the wire response. Five failures on Decide's
-// pre-decision path — a token that failed authentication, a DPoP proof that
-// failed verification, a jti that could not be spent, a tool catalog that
-// could not be loaded, and a DeriveTier failure — resolve through this one
-// function rather than each inlining its own copy of "build the denial,
-// audit it, respond," so they are audited identically and cannot
-// independently drift the way five hand-written copies of the same lines
-// eventually would.
+// the audit entry, and returns the wire response. SIX failures on Decide's
+// pre-decision path resolve through this one function rather than each
+// inlining its own copy of "build the denial, audit it, respond," so they are
+// audited identically and cannot independently drift the way six hand-written
+// copies of the same lines eventually would:
+//
+//  1. a token that failed authentication
+//  2. a DPoP proof that failed verification
+//  3. a jti that could not be spent
+//  4. a tool catalog that could not be loaded
+//  5. tier overrides that could not be loaded
+//  6. a DeriveTier failure
+//
+// The list is numbered because it has now been wrong twice, in both
+// directions: it said "three" while there were four (the tier-override
+// failure was missing from the day it was added), and then "five" while there
+// were six, because the count was re-derived by adding the two new DPoP paths
+// to a list that was already short. Count the call sites, do not extend the
+// sentence.
 //
 // DeriveTierDenial attributes every one of these to the "delegation" leg,
 // including a token failure, which is not really about the delegation's own
@@ -777,12 +800,12 @@ func (s *Server) appendAudit(
 //
 // epoch is nil on the two that run BEFORE loadEpochOrDeny (authentication
 // and the proof check; Decide's own call sites pass nil for exactly that
-// reason) and non-nil on the other three, all of which run after a
-// successful epoch read — including the spend failure, which is why a replay
-// denial can honestly report an epoch where a bad-proof denial cannot. Forwarded straight to toResponse
-// rather than re-decided here — this function has no opinion of its own on
-// whether an epoch is available, only on how to audit and respond once
-// that has already been decided by the caller.
+// reason) and non-nil on the other four, all of which run after a successful
+// epoch read — including the spend failure, which is why a replay denial can
+// honestly report an epoch where a bad-proof denial cannot. Forwarded
+// straight to toResponse rather than re-decided here — this function has no
+// opinion of its own on whether an epoch is available, only on how to audit
+// and respond once that has already been decided by the caller.
 func (s *Server) denyAndAudit(
 	ctx context.Context,
 	agentID, delegationID uuid.UUID,

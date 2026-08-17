@@ -762,16 +762,16 @@ func TestFakeStore_SpendProofIsSingleUse(t *testing.T) {
 // (tier_override_test.go) and TestDecide_EpochIsStillTheFirstStoreCallWhenA
 // ProofIsSpent above — work by comparing LoadTenantEpoch's observed call
 // count against zero. That is only a proof of "the epoch is read first" if
-// EVERY other method counts. Twelve of them do, by convention, and until this
+// EVERY other method counts. All eleven do, by convention, and until this
 // test nothing checked it: removing the single `f.calls++` from SpendProof
 // left TestDecide_EpochIsStillTheFirstStoreCallWhenAProofIsSpent GREEN with
 // the spend deliberately moved ahead of the epoch read. Verified, not
 // supposed.
 //
 // That is the same defect class as a reaper with no caller, one level up: the
-// guard depends on a convention no test enforces, so the thirteenth store
-// method added without that line silently hollows out both V3 tests and
-// nothing fails.
+// guard depends on a convention no test enforces, so a TWELFTH store method
+// added without that line silently hollows out both V3 tests and nothing
+// fails.
 //
 // Driven by reflection over the Store interface rather than by a hand-written
 // list, which is the whole point: a list would have to be extended by the
@@ -898,4 +898,78 @@ func TestDecide_TokenFailure_AuditRowNamesNoDelegation(t *testing.T) {
 		t.Errorf("audit entry DelegationID = %v, want nil: this decision never identified a delegation "+
 			"at all, which is a different fact from identifying the zero UUID", got)
 	}
+}
+
+// --- Which denials carry sender_constrained, and which do not -------------
+
+// sender_constrained is set on the TAIL of Decide, so it carries the real
+// answer on every outcome that reached the three-leg evaluation — including a
+// DENY at a leg — and is false on every pre-decision denial, which returns
+// before that line.
+//
+// This test exists because the proto comment describing this field has
+// already been wrong once, in exactly the half that is easy to assume: it
+// claimed the field was false on "a decision denied at a leg", when a leg
+// denial reaches the tail like any other verdict and reports true. The field
+// describes what the CALLER PRESENTED, and that does not depend on the
+// verdict. Nothing failed, because nothing asserted it.
+//
+// Both halves are pinned here, in one test, because the rule is the boundary
+// between them and asserting either alone would leave the comment free to
+// drift back across it.
+func TestDecide_SenderConstrainedIsSetOnALegDenialButNotOnAPreDecisionDenial(t *testing.T) {
+	t.Run("denied at a leg: the evaluation ran, so the real answer is reported", func(t *testing.T) {
+		f := newBoundFixture(t)
+		// The ONLY change from the passing fixture: a policy that denies.
+		// The token is still bound, the proof still valid, the jti still
+		// spent — so anything but true here would be reporting the verdict
+		// rather than what the caller presented.
+		f.srv = NewServer(f.fs, denyAllPolicy(), testConfig(), f.signer)
+
+		resp := f.decide(t)
+
+		if resp.GetEffect() != Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "principal" {
+			t.Fatalf("DeniedLeg = %q, want %q: this must be a LEG denial, not a pre-decision one, or the "+
+				"subtest proves the opposite of what it says", resp.GetDeniedLeg(), "principal")
+		}
+		if !resp.GetSenderConstrained() {
+			t.Error("SenderConstrained = false on a leg denial, but the caller presented a bound token " +
+				"with a valid proof whose jti was spent. This field reports what was PRESENTED; it does " +
+				"not depend on the verdict")
+		}
+		if len(f.fs.spentProofs) != 1 {
+			t.Errorf("spent proofs = %d, want 1: the proof really was verified and spent on this path",
+				len(f.fs.spentProofs))
+		}
+	})
+
+	t.Run("denied before the evaluation: false means not established, not bearer", func(t *testing.T) {
+		f := newBoundFixture(t)
+		// A tool-catalog load failure: the LAST pre-decision denial that
+		// still runs AFTER the proof was verified and its jti spent, which is
+		// what makes it the honest test of "false here does not mean bearer".
+		f.fs.catalogErr = errors.New("catalog unavailable")
+
+		resp := f.decide(t)
+
+		if resp.GetEffect() != Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+		}
+		if resp.GetSenderConstrained() {
+			t.Error("SenderConstrained = true on a pre-decision denial: that path returns before the " +
+				"field is ever set, so true could only come from something else setting it")
+		}
+		// The evidence that false does NOT mean "bearer token" here: the
+		// proof was verified and its jti spent before this denial happened.
+		// A consumer reading false as "bearer" would be wrong about this
+		// exact request, which is why the proto comment says "not
+		// established" instead.
+		if len(f.fs.spentProofs) != 1 {
+			t.Fatalf("spent proofs = %d, want 1: without the spend having happened, this subtest cannot "+
+				"show that a false reading is about the PATH rather than about the token", len(f.fs.spentProofs))
+		}
+	})
 }

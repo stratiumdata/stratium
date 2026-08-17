@@ -42,10 +42,21 @@ const insertSpentProofQuery = `INSERT INTO spent_proofs (tenant_id, jti, expires
 const reapSpentProofsQuery = `DELETE FROM spent_proofs WHERE expires_at <= NOW()`
 
 // SpendProof records jti as spent for this tenant, returning ErrProofSpent if
-// it already was. expiresAt is the instant after which the row may be reaped:
-// the proof's own iat plus the configured freshness window (§4.7.2 K9), past
-// which internal/dpop.Verify refuses the proof for staleness whether or not
-// this table still remembers it.
+// it already was. expiresAt is the instant after which the row may be reaped,
+// and this function neither computes nor validates it: it has no clock and no
+// window, so it cannot tell a legitimately short expiry from a broken one.
+// That makes the value entirely its caller's problem, and the caller is
+// internal/pdpgrpc's spendProof (dpop.go), which passes the proof's own iat
+// plus the configured freshness window (§4.7.2 K9) plus a small clock-skew
+// margin.
+//
+// The margin is not slack. Freshness is judged on the PDP's Go clock while
+// the reaper below deletes on the DATABASE clock, so setting expires_at to
+// exactly iat+window would make two independent clocks decide the same
+// boundary: a database clock running ahead would delete the row inside the
+// band where internal/dpop.Verify still accepts the proof, and the proof
+// would stop colliding. See pdpgrpc.reapSkewMargin for the arithmetic; the
+// value is pinned by a test there rather than assumed here.
 //
 // # How a replay is distinguished from any other write failure
 //
