@@ -160,7 +160,16 @@ func stratiumPEPBinary(t *testing.T) string {
 // no benefit this task needs). stdin is fed verbatim; stdout is captured and
 // returned alongside the real process exit code -- 0/2 for "hook" (hook.go's
 // own contract), 0/1 for "session-start" (session_start.go's own contract).
-func runPEPSubcommand(t *testing.T, subcommand string, env map[string]string, stdin string) (stdout string, exitCode int) {
+//
+// stderr is RETURNED rather than discarded, which it was until Phase 15 Task
+// 7. Both subcommands write their diagnostics there, so a caller that fatalled
+// on an unexpected exit code could previously report only "exit = 1; stdout: "
+// -- with an empty stdout and no cause at all. That is not hypothetical: a
+// session-start failed exactly that way during one integration sweep and left
+// nothing to diagnose it with. It stays a separate return value rather than
+// being folded into stdout because callHook parses stdout as JSON and must not
+// have diagnostics mixed into it.
+func runPEPSubcommand(t *testing.T, subcommand string, env map[string]string, stdin string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -177,14 +186,14 @@ func runPEPSubcommand(t *testing.T, subcommand string, env map[string]string, st
 
 	err := cmd.Run()
 	if err == nil {
-		return out.String(), 0
+		return out.String(), errOut.String(), 0
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return out.String(), exitErr.ExitCode()
+		return out.String(), errOut.String(), exitErr.ExitCode()
 	}
 	t.Fatalf("stratium-pep %s: %v (stderr: %s)", subcommand, err, errOut.String())
-	return "", -1
+	return "", "", -1
 }
 
 // ---------------------------------------------------------------------------
@@ -367,9 +376,9 @@ func startCacheSession(t *testing.T, sessionFile string, agentID uuid.UUID, subj
 	env["STRATIUM_PEP_TTL_SECONDS"] = fmt.Sprintf("%d", ttlSeconds)
 	env["STRATIUM_PEP_PURPOSE"] = "integration test: Task 4 decision-cache live proof"
 
-	stdout, code := runPEPSubcommand(t, "session-start", env, "")
+	stdout, stderr, code := runPEPSubcommand(t, "session-start", env, "")
 	if code != 0 {
-		t.Fatalf("stratium-pep session-start exit = %d, want 0; stdout: %s", code, stdout)
+		t.Fatalf("stratium-pep session-start exit = %d, want 0; stdout: %q; stderr: %s", code, stdout, stderr)
 	}
 
 	data, err := os.ReadFile(sessionFile) //nolint:gosec // G304: sessionFile is this test's own t.TempDir() path, not attacker input
@@ -398,7 +407,7 @@ func callHook(t *testing.T, agentID uuid.UUID, subject, sessionFile, staleness, 
 	env["STRATIUM_PEP_CACHE_STALENESS_WINDOW"] = staleness
 	stdin := fmt.Sprintf(`{"tool_name":%q,"tool_input":%s}`, tool, input)
 
-	stdout, code := runPEPSubcommand(t, "hook", env, stdin)
+	stdout, stderr, code := runPEPSubcommand(t, "hook", env, stdin)
 	if code == 0 {
 		return 0, ""
 	}
@@ -408,7 +417,7 @@ func callHook(t *testing.T, agentID uuid.UUID, subject, sessionFile, staleness, 
 		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
-		t.Fatalf("decode hook deny output %q: %v", stdout, err)
+		t.Fatalf("decode hook deny output %q (exit %d; stderr: %s): %v", stdout, code, stderr, err)
 	}
 	return code, out.HookSpecificOutput.PermissionDecisionReason
 }
