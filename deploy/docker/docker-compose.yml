@@ -59,6 +59,18 @@ services:
       # deployment's key reaches the PDP (an operator-mounted file, per
       # K1).
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # Required with no default (spec §4.7.2 K9): an operator states how
+      # much clock skew between an agent and the PDP is tolerable, and no
+      # value is right for every deployment -- a guess is either useless or
+      # too permissive. Every PDP service in this file therefore sets it, and
+      # a service that forgot would fail to START rather than serve with a
+      # silently-defaulted window.
+      #
+      # 30s is generous for containers sharing one host clock; a real fleet
+      # tunes it to its own NTP discipline. STRATIUM_SPENT_PROOF_REAP_INTERVAL
+      # is deliberately left UNSET here, so `make integration` exercises the
+      # 5m default rather than a value only this file uses.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 
@@ -95,6 +107,9 @@ services:
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
       # Deliberately omits "rego" — one of the four languages this build
       # ships, not an invented fifth one, so the gap this proves is exactly
       # "an operator's own STRATIUM_POLICY_LANGUAGES left something out,"
@@ -152,6 +167,9 @@ services:
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 
@@ -193,6 +211,9 @@ services:
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 
@@ -311,6 +332,9 @@ services:
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 
@@ -368,6 +392,9 @@ services:
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 
@@ -495,6 +522,9 @@ services:
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 
@@ -604,6 +634,9 @@ services:
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
       - "50051"
 

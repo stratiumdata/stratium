@@ -281,10 +281,24 @@ type spentProof struct {
 	expiresAt time.Time
 }
 
+// SpendProof enforces single-use across calls, unlike every other stub in
+// this fake. That is not gratuitous fidelity: it is the one property
+// spent_proofs exists for, and modelling it here is what lets a replay test
+// be TWO REAL Decide calls presenting the SAME proof — the actual attack —
+// rather than a store error injected through spendErr, which would only
+// prove that Decide propagates whatever the store said. The real store gets
+// this from a primary key on (tenant_id, jti); this map is the same rule
+// with one tenant, which is all a *Server ever serves.
+//
+// spendErr stays for the OTHER failure kind — a database that is not
+// answering — which no amount of fidelity can produce on demand.
 func (f *fakeStore) SpendProof(_ context.Context, jti string, expiresAt time.Time) error {
 	f.calls++
 	if f.spendErr != nil {
 		return f.spendErr
+	}
+	if slices.ContainsFunc(f.spentProofs, func(p spentProof) bool { return p.jti == jti }) {
+		return store.ErrProofSpent
 	}
 	f.spentProofs = append(f.spentProofs, spentProof{jti: jti, expiresAt: expiresAt})
 	return nil
@@ -313,8 +327,28 @@ func (f *fakeStore) LoadTenantEpoch(context.Context) (int64, error) {
 // TestLoad_ApprovalTTLNotPositive) — so a fresh escalation's computed
 // expires_at is genuinely in the future rather than the zero-value
 // coincidence of now.Add(0) landing exactly on now.
+//
+// DPoPFreshnessWindow is positive here for exactly the same reason, and it
+// is NOT how "the window is required configuration" is proven: config.Load
+// refuses to produce a Config without one at all (K9, config_test.go's
+// TestLoad_MissingDPoPFreshnessWindow), so every deployed Config carries a
+// positive value and this fake should too. A zero here would make every
+// DPoP test in this package fail inside dpop.Verify's non-positive-window
+// guard, which proves nothing about the PDP.
+//
+// testDPoPWindow is deliberately an odd, un-round duration: the tests that
+// pin a computed expiry against iat+window (dpop_test.go) need a value that
+// cannot coincidentally equal now, now+something-else, or any round number a
+// buggy implementation might reach for.
+const testDPoPWindow = 97 * time.Second
+
 func testConfig() config.Config {
-	return config.Config{TenantID: testTenant, MaxDepth: 5, ApprovalTTL: time.Hour}
+	return config.Config{
+		TenantID:            testTenant,
+		MaxDepth:            5,
+		ApprovalTTL:         time.Hour,
+		DPoPFreshnessWindow: testDPoPWindow,
+	}
 }
 
 // wellFormedFixture returns a fake store and request that, evaluated
