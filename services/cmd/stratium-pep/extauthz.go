@@ -508,37 +508,74 @@ var credentialHeaderNames = map[string]bool{
 // and an unbound token is refused by checkResponseFromDecide (K5); both
 // outcomes need this function to report faithfully what arrived, not to
 // pre-judge it.
-func extractCredentials(headers map[string]string) (token, proof string, stripped map[string]string, err error) {
+func extractCredentials(headers map[string]string) (token, proof, approvalID string, stripped map[string]string, err error) {
 	stripped = make(map[string]string, len(headers))
-	// creds is the ONLY thing the reads below draw from, and it is populated
-	// only for names in credentialHeaderNames. That is what makes "everything
-	// this function reads is also stripped" true by construction rather than
-	// by a test: a future credential read straight off headers would need a
-	// second traversal to get at it, which is visible in a diff, where an
-	// added case in a switch over the same loop was not.
-	creds := make(map[string]string, len(credentialHeaderNames))
+	// consumed is the ONLY thing the reads below draw from, and it is
+	// populated only for names consumedRequestKey reports. That is what makes
+	// "everything this function reads is also stripped" true by construction
+	// rather than by a test: a future credential read straight off headers
+	// would have to index headers directly, outside this loop -- see
+	// consumedRequestKey's own doc comment for the check that catches, and for
+	// the honest limit of what it guarantees.
+	consumed := make(map[string]string, len(credentialHeaderNames)+1)
 	for name, value := range headers {
 		lower := strings.ToLower(name)
-		if credentialHeaderNames[lower] {
-			creds[lower] = value
+		if consumedRequestKey(lower) {
+			consumed[lower] = value
 			continue
 		}
 		stripped[name] = value
 	}
 
-	proof = creds[dpopHeaderName]
-	authValue, found := creds[authorizationHeaderName]
+	proof = consumed[dpopHeaderName]
+	approvalID = consumed[approvalIDHeader]
+	authValue, found := consumed[authorizationHeaderName]
 	if !found {
-		return "", "", nil, errors.New("no authorization header")
+		return "", "", "", nil, errors.New("no authorization header")
 	}
 	if !strings.HasPrefix(authValue, bearerPrefix) {
-		return "", "", nil, errors.New("authorization header is not a Bearer token")
+		return "", "", "", nil, errors.New("authorization header is not a Bearer token")
 	}
 	token = strings.TrimPrefix(authValue, bearerPrefix)
 	if token == "" {
-		return "", "", nil, errors.New("authorization header carries an empty Bearer token")
+		return "", "", "", nil, errors.New("authorization header carries an empty Bearer token")
 	}
-	return token, proof, stripped, nil
+	return token, proof, approvalID, stripped, nil
+}
+
+// consumedRequestKey reports whether lower -- already lower-cased -- names a header or metadata
+// key the enforcement surfaces READ AND REMOVE rather than report as part of the request they
+// describe. Shared by both network surfaces (extauthz's extractCredentials and proxy's
+// extractCredentialsFromMetadata), because a key consumed on one and reported on the other is
+// exactly the asymmetry that makes an operator's working recipe misfire when they move between
+// them. Two kinds qualify, for two different reasons that demand the same treatment:
+//
+//   - Every credentialHeaderNames entry, because raw_input is hashed into an append-only audit
+//     chain and a credential written there cannot be edited out (K10).
+//   - approvalIDHeader, which is not a credential at all. It is removed because raw_input must
+//     stay BYTE-IDENTICAL between an escalating call and its approved retry: resolveEscalation
+//     (internal/pdpgrpc/escalation.go) binds the approval to sha256(raw_input), so a retry
+//     carrying one extra key would fail Approval.Verify's digest check -- the approval would be
+//     unusable by the exact call it was created for, and the failure would read as a policy
+//     denial rather than as plumbing. Reporting it would also make raw_input describe this
+//     system's own control plane rather than the caller's request.
+//
+// One predicate, one loop, one place a key stops being part of the request -- rather than the
+// separate "also delete this one" pass credentialHeaderNames' own doc comment argues against.
+//
+// # What the map-filled-read pattern guarantees, stated accurately
+//
+// Confining reads to a map filled only from this predicate makes "everything read is also
+// stripped" true BY CONSTRUCTION. It does not make a leak impossible: an edit that reads an
+// unlisted key can still be written, and it will land that value in raw_input. What the pattern
+// buys is that such an edit MUST index the SOURCE map directly, outside the extraction loop -- so
+// the property a reviewer checks is exactly: every credential read indexes the local set, never
+// the source. That check is mechanical and reliable; it is not automatic, and no test can
+// substitute for it, because the fixture would have to name a key that does not exist yet. Claim
+// diff-visible under a named check -- not "structurally impossible", and not "a second traversal",
+// since the offending diff is three lines sitting beside the legitimate reads.
+func consumedRequestKey(lower string) bool {
+	return credentialHeaderNames[lower] || lower == approvalIDHeader
 }
 
 // errUnservedAuthority is what matchAllowedHost returns for a request whose
@@ -753,7 +790,7 @@ func observedURI(httpReq *authv3.AttributeContext_HttpRequest, authority string)
 func decideRequestFromCheck(req *authv3.CheckRequest, cfg extauthzConfig) (*pdpgrpc.DecideRequest, error) {
 	httpReq := req.GetAttributes().GetRequest().GetHttp()
 
-	token, proof, headers, err := extractCredentials(httpReq.GetHeaders())
+	token, proof, approvalID, headers, err := extractCredentials(httpReq.GetHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -777,7 +814,7 @@ func decideRequestFromCheck(req *authv3.CheckRequest, cfg extauthzConfig) (*pdpg
 		return nil, fmt.Errorf("could not serialize request metadata: %w", err)
 	}
 
-	return &pdpgrpc.DecideRequest{
+	decideReq := &pdpgrpc.DecideRequest{
 		AgentId:  cfg.AgentID,
 		Subject:  cfg.Subject,
 		Tool:     httpReq.GetPath(), // M1: the request path IS the tool identity.
@@ -794,7 +831,23 @@ func decideRequestFromCheck(req *authv3.CheckRequest, cfg extauthzConfig) (*pdpg
 		// "GET".
 		ObservedMethod: httpReq.GetMethod(),
 		ObservedUri:    observedURI(httpReq, authority),
-	}, nil
+	}
+	// The consuming half of E5's degrade, and the symmetric twin of the
+	// identical read in proxy.go's decideRequestFromStream -- see
+	// forwardableApprovalID (proxy.go) for the shape guard and for why a
+	// value that cannot be one is DROPPED rather than denied on.
+	//
+	// Without this, a caller following the retry recipe this system's own
+	// denial hands it -- a fresh proof plus the approval id -- would have the
+	// id ignored, escalate a second time, and get a second human asked for the
+	// same action while the first approval sat unused. The strip above is the
+	// other half: reported, the id would change raw_input and break the very
+	// digest the first approval is bound to, so even reading it would not have
+	// been enough.
+	if id, ok := forwardableApprovalID(approvalID); ok {
+		decideReq.ApprovalId = &id
+	}
+	return decideReq, nil
 }
 
 // approvalIDHeader is the response header name checkResponseFromDecide
@@ -1025,8 +1078,10 @@ func checkResponseFromDecide(resp *pdpgrpc.DecideResponse) *authv3.CheckResponse
 				resp.GetReason()), "")
 		}
 		reason := fmt.Sprintf(
-			"stratium-pep: this action requires approval and is pending (approval id %s); a retry after approval succeeds -- PDP: %s",
-			approvalID, resp.GetReason())
+			"stratium-pep: this action requires approval and is pending (approval id %s); once approved, retry it "+
+				"with a FRESH DPoP proof and this id in the %s header -- the proof presented with this request is "+
+				"single-use (RFC 9449, spec K8) and cannot be replayed on the retry -- PDP: %s",
+			approvalID, approvalIDHeader, resp.GetReason())
 		return denyCheckResponse(reason, approvalID)
 	}
 

@@ -193,8 +193,6 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 			"TestRunHook_Escalate_TimeoutStillPendingDenies",
 			"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
 			"TestDecideAndRelay_EscalationTimeout_Denies",
-			"TestAuthorize_EscalationTimeout_Denies",
-			"TestHandleStream_EscalationTimeout_DeniesWithoutForwarding",
 		}},
 		{"C23", "internal/store", []string{
 			"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds",

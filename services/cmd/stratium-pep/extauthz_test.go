@@ -12,6 +12,7 @@ import (
 
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/google/uuid"
 	rpccode "google.golang.org/genproto/googleapis/rpc/code"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -288,7 +289,23 @@ const (
 	testAgentIDFixture       = "extauthz-agent-6a2f0b13-fixture"
 	testSubjectFixture       = "extauthz-subject-6a2f0b13-fixture@example.com"
 	testDPoPProof            = "extauthz-dpop-proof-b41e7a92-fixture"
+	// approvalIDHeaderInTest spells approvalIDHeader out as a literal rather
+	// than referencing the constant, so a rename of the constant cannot
+	// silently rename the wire key these tests assert against -- the
+	// cross-system self-agreement Phase 15 Task 2 was bitten by (a claim name
+	// that agreed with itself perfectly and matched no external verifier). The
+	// two are checked against each other once, below.
+	approvalIDHeaderInTest = "stratium-approval-id"
 )
+
+// The wire key both network surfaces read and write must be the one spelled
+// out above; a constant compared only against itself proves nothing.
+func TestApprovalIDHeaderName(t *testing.T) {
+	if approvalIDHeader != approvalIDHeaderInTest {
+		t.Errorf("approvalIDHeader = %q, want %q -- this is the key an operator is told to send back, "+
+			"and it is published in a denial before any code reads it", approvalIDHeader, approvalIDHeaderInTest)
+	}
+}
 
 // allowResponse is the DecideResponse a real PDP returns for the only case
 // EITHER network surface may forward as of Phase 15: a bound token whose DPoP
@@ -894,7 +911,7 @@ func TestExtractCredentials(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			token, proof, stripped, err := extractCredentials(tc.headers)
+			token, proof, _, stripped, err := extractCredentials(tc.headers)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("extractCredentials() error = nil, want an error")
@@ -946,7 +963,7 @@ func TestExtractCredentials_HeaderNameCaseDiffers_CredentialsStillFound(t *testi
 		{"AuthoriZation", "DpOp"},
 	} {
 		t.Run(tc.authName+"/"+tc.dpopName, func(t *testing.T) {
-			token, proof, _, err := extractCredentials(map[string]string{
+			token, proof, _, _, err := extractCredentials(map[string]string{
 				tc.authName: "Bearer " + testBearerToken,
 				tc.dpopName: testDPoPProof,
 			})
@@ -972,7 +989,7 @@ func TestExtractCredentials_HeaderNameCaseDiffers_CredentialsStillFound(t *testi
 // case-insensitively, while a header that merely looks credential-adjacent
 // (testAuthLikeHeaderName) survives untouched.
 func TestExtractCredentials_StripsCredentialHeadersCaseInsensitively(t *testing.T) {
-	_, _, stripped, err := extractCredentials(map[string]string{
+	_, _, _, stripped, err := extractCredentials(map[string]string{
 		"authorization":        "Bearer " + testBearerToken,
 		"Cookie":               testOtherCredentialValue,
 		"PROXY-AUTHORIZATION":  testOtherCredentialValue,
@@ -2106,5 +2123,131 @@ func TestParseAllowedHosts(t *testing.T) {
 				t.Errorf("parseAllowedHosts(%q) = %v, want %v", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCheck_ApprovalIDHeader_ForwardedAndKeptOutOfRawInput is the symmetric twin of proxy's
+// TestAuthorize_ApprovalIDMetadata_ForwardedAndKeptOutOfRawInput, and it exists because this
+// surface previously had the DEAD-END half of the escalation story: it degrades every escalation
+// (E5) and hands back an approval id, but never read one back, and -- because the header is not a
+// credential -- never stripped one either.
+//
+// Both halves were broken and each broke the other's fix. Ignored, the id makes a retry escalate a
+// SECOND time, asking a human for the same action twice while the first approval sits unused.
+// Reported, it changes raw_input, so the digest no longer matches the first approval -- meaning
+// even a later fix that read the id would fail Approval.Verify.
+//
+// That mattered more than a gap on one surface, because the two surfaces deliberately share the
+// header name so an operator learns one key for both: a recipe that works on proxy has to work
+// here, or the sharing is a trap rather than a convenience.
+//
+// The raw_input comparison is the load-bearing assertion, from two requests differing ONLY by the
+// presence of the header.
+func TestCheck_ApprovalIDHeader_ForwardedAndKeptOutOfRawInput(t *testing.T) {
+	approvalID := uuid.NewString()
+
+	escalatingPDP := &fakePDP{resp: allowResponse("")}
+	escalatingClient := startFakePDP(t, escalatingPDP)
+	escalatingSrv := &extauthzServer{client: escalatingClient, cfg: testExtauthzServerCfg()}
+	if _, err := escalatingSrv.Check(context.Background(), checkRequest("POST", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+		"dpop":          testDPoPProof,
+	})); err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	retryPDP := &fakePDP{resp: allowResponse("")}
+	retryClient := startFakePDP(t, retryPDP)
+	retrySrv := &extauthzServer{client: retryClient, cfg: testExtauthzServerCfg()}
+	if _, err := retrySrv.Check(context.Background(), checkRequest("POST", "/svc.Svc/Method", map[string]string{
+		"authorization":        "Bearer " + testBearerToken,
+		"dpop":                 testDPoPProof,
+		approvalIDHeaderInTest: approvalID,
+	})); err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	escalating, retry := escalatingPDP.lastRequest(), retryPDP.lastRequest()
+	if escalating == nil || retry == nil {
+		t.Fatal("PDP never received one of the two requests")
+	}
+	if got := retry.GetApprovalId(); got != approvalID {
+		t.Errorf("approval_id = %q, want %q -- without it a retry escalates again and a human is asked "+
+			"for the same action twice", got, approvalID)
+	}
+	if escalating.ApprovalId != nil {
+		t.Errorf("approval_id = %q on a request that sent none, want unset", escalating.GetApprovalId())
+	}
+	if escalating.GetRawInput() != retry.GetRawInput() {
+		t.Errorf("raw_input differs between the escalating request and its retry:\n  escalating: %s\n  retry:      %s\n"+
+			"want byte-identical -- resolveEscalation binds the approval to sha256(raw_input), so an extra "+
+			"header here makes the approval unusable by the very request it was created for",
+			escalating.GetRawInput(), retry.GetRawInput())
+	}
+	if strings.Contains(retry.GetRawInput(), approvalID) {
+		t.Errorf("raw_input carries the approval id verbatim: %s", retry.GetRawInput())
+	}
+}
+
+// TestCheck_ApprovalIDHeaderCaseDiffers_StillConsumed: HTTP header names are case-insensitive
+// (RFC 7230), and unlike the credentials this surface reads, this one is a name STRATIUM ITSELF
+// hands out -- in a response header, which Go's own http.Header.Set canonicalizes to
+// "Stratium-Approval-Id" before it ever reaches a client. So the spelling that comes back is
+// routinely NOT the one this file writes, and a case-sensitive match would drop it on exactly the
+// path the system's own denial recommends.
+func TestCheck_ApprovalIDHeaderCaseDiffers_StillConsumed(t *testing.T) {
+	for _, headerName := range []string{
+		"stratium-approval-id", "Stratium-Approval-Id", "STRATIUM-APPROVAL-ID", "sTrAtIuM-aPpRoVaL-iD",
+	} {
+		t.Run(headerName, func(t *testing.T) {
+			approvalID := uuid.NewString()
+			fake := &fakePDP{resp: allowResponse("")}
+			srv := &extauthzServer{client: startFakePDP(t, fake), cfg: testExtauthzServerCfg()}
+			if _, err := srv.Check(context.Background(), checkRequest("POST", "/svc.Svc/Method", map[string]string{
+				"authorization": "Bearer " + testBearerToken,
+				headerName:      approvalID,
+			})); err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			req := fake.lastRequest()
+			if got := req.GetApprovalId(); got != approvalID {
+				t.Errorf("approval_id = %q, want %q -- a header spelled %q must still be recognized",
+					got, approvalID, headerName)
+			}
+			var meta requestMetadata
+			if err := json.Unmarshal([]byte(req.GetRawInput()), &meta); err != nil {
+				t.Fatalf("raw_input is not well-formed JSON: %v", err)
+			}
+			for key := range meta.Headers {
+				if strings.EqualFold(key, "stratium-approval-id") {
+					t.Errorf("raw_input.headers carries key %q -- reported, it changes the digest the "+
+						"approval is bound to", key)
+				}
+			}
+		})
+	}
+}
+
+// TestCheck_MalformedApprovalIDHeader_DroppedAndTheRequestIsStillDecided is the extauthz half of
+// the audit guard: an unparseable approval_id makes Decide fail with InvalidArgument BEFORE
+// authenticateToken runs, so no audit row is written. Dropping it lets the request reach a real,
+// audited decision, which is what keeps the header from being a switch a caller can use to
+// suppress its own audit trail. See forwardableApprovalID (proxy.go) for the full case, including
+// why denying locally would close nothing.
+func TestCheck_MalformedApprovalIDHeader_DroppedAndTheRequestIsStillDecided(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	srv := &extauthzServer{client: startFakePDP(t, fake), cfg: testExtauthzServerCfg()}
+	if _, err := srv.Check(context.Background(), checkRequest("POST", "/svc.Svc/Method", map[string]string{
+		"authorization":        "Bearer " + testBearerToken,
+		approvalIDHeaderInTest: "not-a-uuid",
+	})); err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := fake.requestCount(); got != 1 {
+		t.Fatalf("PDP received %d Decide call(s), want exactly 1 -- the request must still be DECIDED, "+
+			"because that is what writes the audit row", got)
+	}
+	if req := fake.lastRequest(); req.ApprovalId != nil {
+		t.Errorf("approval_id = %q, want unset", req.GetApprovalId())
 	}
 }

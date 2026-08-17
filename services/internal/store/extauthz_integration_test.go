@@ -380,7 +380,15 @@ func stripCredentialHeaders(headers map[string]string) map[string]string {
 	out := make(map[string]string, len(headers))
 	for name, value := range headers {
 		lower := strings.ToLower(name)
-		if extauthzCredentialHeaderNames[lower] {
+		// approvalIDHeaderName alongside the credentials: as of Phase 15 Task
+		// 6 both network surfaces CONSUME that header rather than reporting it
+		// (cmd/stratium-pep/extauthz.go's consumedRequestKey), for a reason
+		// that is not K10's -- raw_input has to stay byte-identical between an
+		// escalating request and its approved retry, because the approval is
+		// bound to sha256(raw_input). Mirrored here so this reconstruction
+		// cannot drift from what the surface actually does; no proof in this
+		// file sends the header today, so it changes no current digest.
+		if extauthzCredentialHeaderNames[lower] || lower == approvalIDHeaderName {
 			continue
 		}
 		out[lower] = value

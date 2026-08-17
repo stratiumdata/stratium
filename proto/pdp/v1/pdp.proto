@@ -260,10 +260,18 @@ message DecideResponse {
   // possession of that key was verified for this exact request (spec §4.7.2
   // K7).
   //
-  // CONSULT IT ONLY WHEN effect IS EFFECT_ALLOW. On an ALLOW, false means the
-  // caller presented an ordinary bearer token, and that is the question K5's
-  // refusal turns on. A surface refuses a denied decision anyway, so an ALLOW
-  // is the only case in which this field has to be asked at all.
+  // CONSULT IT ONLY WHEN effect IS EFFECT_ALLOW OR EFFECT_ESCALATE. On an
+  // ALLOW, false means the caller presented an ordinary bearer token, and that
+  // is the question K5's refusal turns on. On an ESCALATE it carries the same
+  // real answer, for the reason the enumeration below gives, and K11 needs it
+  // there: a network surface must degrade a BOUND escalation to a denial
+  // rather than blocking on it, because the proof it would wait with is
+  // single-use (K8) and short-lived (K9) while a human approval is neither —
+  // and it must refuse an UNBOUND one outright rather than paging a human for
+  // a decision K5 will refuse anyway.
+  //
+  // NEVER consult it on a DENY. That is the case the rest of this comment is
+  // about, and the one where the value can mean nothing at all.
   //
   // On a denial it is populated inconsistently, by construction, and the rule
   // is worth stating precisely rather than approximately — the PDP fills this

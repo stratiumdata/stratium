@@ -249,6 +249,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -626,45 +627,45 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 		allowed, reason := allowIfSenderConstrained(resp)
 		return allowed, reason, ""
 	case pdpgrpc.Effect_EFFECT_ESCALATE:
-		// K11: a bound token does not block here. See degradeEscalation for the whole case.
+		// NEITHER outcome blocks, and the two reasons are different. sender_constrained carries
+		// its real answer on an ESCALATE -- every three-leg outcome reaches Decide's tail, where
+		// the PDP sets it -- so this branch can tell the two apart, which the field's own proto
+		// comment now sanctions explicitly for exactly these two rules.
 		if resp.GetSenderConstrained() {
+			// K11: a BOUND escalation degrades to a denial naming the approval. The client
+			// retries with a fresh proof once approved. See degradeEscalation for the whole case.
 			return degradeEscalation(resp)
 		}
-
-		// AN UNBOUND TOKEN STILL BLOCKS, and this path is deliberately kept rather than deleted
-		// even though K5 refuses the ALLOW it can only ever resolve to -- which makes it, today,
-		// unreachable in any deployment that ends in a forwarded call.
+		// K5: an UNBOUND escalation is refused HERE, before a human is ever paged.
 		//
-		// It stays because it is the CORRECT behaviour for the condition it names, and the
-		// condition is not "unbound" but "a credential that outlives the wait". K11's own
-		// reasoning is that a surface may block only while the credential it would wait with
-		// survives the waiting; a bearer token does, a single-use short-lived proof does not.
-		// If K5 is ever relaxed, or a surface class arrives whose credential outlives a human,
-		// blocking is what that case wants and this is already it. Deleting it would leave the
-		// next person to rediscover both the mechanism and the rule.
+		// This is a narrowing, which a PEP may always do, and it is the same refusal
+		// allowIfSenderConstrained applies one branch up -- moved earlier, not invented. What
+		// blocking here would actually cost is the point: the PDP has already created a pending
+		// approval row, resolveApproval would hold the caller's stream and a polling goroutine
+		// for up to ApprovalTimeout, A HUMAN WOULD BE PAGED, and the ALLOW that approval resolves
+		// to is then refused by K5 anyway. So a legacy bearer-token caller hitting an escalating
+		// action hangs for the full timeout and interrupts a person for a decision that cannot
+		// change the outcome -- and any holder of an unbound token can generate unbounded human
+		// interrupts and held streams at will. Refusing now costs the caller nothing it was ever
+		// going to get, and tells it the one thing it can act on: get a bound token.
 		//
-		// resolveApproval (escalation.go) owns everything from here: it polls GetApproval and
-		// either retries Decide with the resolved approval id or reports why not, bounding the
-		// wait at p.cfg.ApprovalTimeout AT THE LATEST -- the same bound hook.go's and
-		// mcp_authorize.go's identical calls rest on -- but, unlike either of those two callers,
-		// also ending early if ctx itself ends first: this handler's ctx is a real caller-supplied
-		// one (stream.Context(), ultimately), so a caller that disconnects while this call is
-		// still escalating stops the poll promptly instead of holding a goroutine and spending
-		// GetApproval calls against a stream nothing is listening to anymore (see resolveApproval's
-		// own doc comment for why passing ctx here is safe and why hook.go/mcp_authorize.go pass
-		// context.Background() instead, not this same ctx variable). A timed-out or denied
-		// approval both fall out of resolveApproval's own reason text; this function adds nothing
-		// case-specific on top of it.
+		// THE BLOCKING PATH ITSELF IS NOT GONE, and it is still the right behaviour for the
+		// condition it serves -- which is not "unbound" but "a credential that outlives the
+		// wait" (degradeEscalation's own comment carries that rule). It lives in escalation.go's
+		// resolveApproval, unchanged, still called by hook.go and mcp_authorize.go, and still
+		// carrying both reshapes proxy itself forced on it: the by-value durations and the
+		// caller-supplied ctx that lets a poll stop when the caller disconnects. proxyConfig
+		// keeps ApprovalPollInterval and ApprovalTimeout for the same reason.
 		//
-		// K5 is applied to the RETRY's own response, not to resp: the retry is the ALLOW this
-		// function is about to act on, and sender_constrained is only meaningful on an ALLOW.
-		// resolveApproval hands the resolved response back for exactly that.
-		effect, escReason, resolved := resolveApproval(ctx, p.client, p.cfg.ConnectTimeout, p.cfg.ApprovalPollInterval, p.cfg.ApprovalTimeout, req, resp)
-		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
-			allowed, reason := allowIfSenderConstrained(resolved)
-			return allowed, reason, ""
-		}
-		return false, escReason, ""
+		// What is gone is only THIS call site, and it could not be kept: with both outcomes above
+		// returning, a call to resolveApproval below them is unreachable, which `go vet`'s own
+		// unreachable check rejects outright -- it is not a style question. If K5 is ever
+		// relaxed, restoring it is four lines: call resolveApproval with (ctx, p.client,
+		// ConnectTimeout, ApprovalPollInterval, ApprovalTimeout, req, resp), and on
+		// EFFECT_ALLOW hand the RESOLVED response -- never resp -- to allowIfSenderConstrained,
+		// because the retry is the ALLOW being acted on. That is what the third return value
+		// resolveApproval already carries exists for.
+		return false, unboundTokenReason, ""
 	default:
 		// EFFECT_DENY, and any value this build does not recognize (the proto documents
 		// EFFECT_DENY as the zero value for exactly this case -- see hook.go's identical default
@@ -903,19 +904,72 @@ func decideRequestFromStream(ctx context.Context, method string, cfg proxyConfig
 	}
 	// The consuming half of K11's degrade: a caller retrying an approved escalation sends back the
 	// id the denial handed it, and this forwards it so the PDP resolves that approval instead of
-	// creating a second one. Set only when non-empty -- approval_id is `optional` in the proto
-	// precisely so "asking fresh" stays distinguishable from an explicitly-blank id, which its own
-	// doc comment calls a caller bug worth an InvalidArgument.
+	// creating a second one.
 	//
-	// Accepting it from the caller is safe, and it is not this process trusting anything: the PDP
-	// re-verifies the approval in full (resolveEscalation -> Approval.Verify) against the tenant,
-	// root principal, agent, delegation, tool, verb, tier, input_digest, expiry, and status. A
-	// forged, expired, or borrowed id fails there and denies. Nothing about the request's own
-	// authorization is decided here, which is what D1 forbids.
-	if approvalID != "" {
-		req.ApprovalId = &approvalID
+	// Forwarded ONLY if it is shaped like an approval id at all -- see forwardableApprovalID.
+	// Accepting a well-formed one from the caller is safe and decides nothing: the PDP re-verifies
+	// the approval in full (resolveEscalation -> Approval.Verify) against tenant (via RLS), root
+	// principal, agent, delegation, tool, verb, derived tier, input_digest, expiry, and status. A
+	// forged, expired, or borrowed id fails there and denies -- audited. Nothing about this
+	// request's own authorization is decided here, which is what D1 forbids.
+	if id, ok := forwardableApprovalID(approvalID); ok {
+		req.ApprovalId = &id
 	}
 	return req, nil
+}
+
+// forwardableApprovalID reports whether raw is shaped like an approval id, and is the guard that
+// keeps a caller from switching off its own audit trail.
+//
+// # The hole it closes
+//
+// Decide rejects an unparseable approval_id with InvalidArgument from parseNonNilUUID
+// (internal/pdpgrpc/server.go) BEFORE authenticateToken runs -- so that path never reaches
+// denyAndAudit and NO AUDIT ROW IS WRITTEN. Without this guard an agent could attach
+// "stratium-approval-id: x" to every call and have every attempt denied, correctly and
+// fail-closed, while leaving nothing behind: an operator asking "did agent X attempt method Y?"
+// gets no row. Decide's own comment promises the opposite for a bad token -- it "still produces
+// an audited DENY, not a bare RPC error... the audit trail is exactly where 'someone tried and
+// failed to authenticate' belongs" -- and forwarding an unvalidated string made that guarantee
+// switchable by the caller.
+//
+// # Why it DROPS rather than denies, which is the whole point
+//
+// Denying locally would close nothing. A local denial never reaches the PDP either, so it writes
+// no audit row and leaves exactly the same switch in the caller's hand. Dropping the field lets
+// the call proceed to a real decision, which IS audited -- allow, deny, or escalate -- so the
+// header cannot suppress a row no matter what a caller puts in it. That is the property, and only
+// dropping has it.
+//
+// Silently ignoring caller input is a real cost and is accepted knowingly: an approval id this
+// surface cannot parse as an id names no approval, so "unusable value" and "absent" are the same
+// fact for an OPTIONAL field, and the caller is not misled -- it gets the truthful answer for a
+// request naming no valid approval, which is a fresh escalation telling it to obtain one. The
+// alternative, a bespoke denial, trades that for the audit gap above.
+//
+// Contrast the malformed-CREDENTIAL paths, which do deny locally without an audit row
+// (extractCredentialsFromMetadata's errors, K4/M2): those requests are UNDECIDABLE -- there is no
+// token, so there is no delegation, no agent, and nothing for an audit row to be about. A
+// malformed approval id leaves the request perfectly decidable. Audit away only what cannot be
+// decided.
+//
+// # The check
+//
+// Exactly parseNonNilUUID's own two conditions, deliberately: parses as a UUID, and is not the
+// nil UUID. Any narrower and a value the PDP would have accepted gets dropped; any wider and the
+// InvalidArgument this exists to prevent comes back. This is shape validation, not classification
+// -- it decides nothing about the approval, only whether the string can be one -- and it follows
+// the same in-file precedent as the leading-slash guard above, which shape-validates for a
+// strictly weaker reason.
+func forwardableApprovalID(raw string) (string, bool) {
+	if raw == "" {
+		return "", false
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil || id == uuid.Nil {
+		return "", false
+	}
+	return raw, true
 }
 
 // grpcObservedMethod is DecideRequest.observed_method's value on this surface, always: gRPC is
@@ -980,8 +1034,8 @@ const grpcObservedMethod = "POST"
 func extractCredentialsFromMetadata(md metadata.MD) (token, proof, approvalID string, stripped map[string][]string, err error) {
 	stripped = make(map[string][]string, len(md))
 	// consumed is the ONLY thing the reads below draw from, and it is populated only for names
-	// consumedMetadataKey reports -- see this function's own doc comment for why that containment
-	// is the whole of K10's strip-by-omission for the proof.
+	// consumedRequestKey (extauthz.go) reports -- see that predicate's own doc comment for the two
+	// reasons a key qualifies, and for what this containment does and does not guarantee.
 	//
 	// A key present with no values at all is not stored: it carries nothing, and leaving it out
 	// keeps "an entry exists" and "a value exists" the same fact, so the reads below can index [0]
@@ -990,7 +1044,7 @@ func extractCredentialsFromMetadata(md metadata.MD) (token, proof, approvalID st
 	consumed := make(map[string][]string, len(credentialHeaderNames)+1)
 	for name, values := range md {
 		lower := strings.ToLower(name)
-		if consumedMetadataKey(lower) {
+		if consumedRequestKey(lower) {
 			if len(values) > 0 {
 				consumed[lower] = values
 			}
@@ -1023,27 +1077,6 @@ func extractCredentialsFromMetadata(md metadata.MD) (token, proof, approvalID st
 		return "", "", "", nil, errors.New("authorization metadata carries an empty Bearer token")
 	}
 	return token, proof, approvalID, stripped, nil
-}
-
-// consumedMetadataKey reports whether lower -- already lower-cased -- names metadata this surface
-// READS AND REMOVES rather than reports as part of the request it describes. Two kinds qualify,
-// for two different reasons that happen to demand the same treatment:
-//
-//   - Every credentialHeaderNames entry (extauthz.go), because raw_input is hashed into an
-//     append-only audit chain and a credential written there cannot be edited out (K10).
-//   - approvalIDHeader, which is not a credential at all. It is removed because raw_input must
-//     stay BYTE-IDENTICAL between an escalating call and its approved retry: resolveEscalation
-//     (internal/pdpgrpc/escalation.go) binds the approval to sha256(raw_input), so a retry
-//     carrying one extra metadata key would fail Approval.Verify's digest check -- the approval
-//     would be unusable by the exact call it was created for. Reporting it would also make
-//     raw_input describe this system's own control plane rather than the caller's request.
-//
-// One predicate, one loop, one place a key stops being part of the request -- rather than the
-// separate "also delete this one" pass credentialHeaderNames' own doc comment argues against. The
-// containment property is unchanged and still structural: everything the reads above draw from is
-// a key this returns true for, so everything read is also absent from stripped.
-func consumedMetadataKey(lower string) bool {
-	return credentialHeaderNames[lower] || lower == approvalIDHeader
 }
 
 // forward relays fullMethod between serverStream (the caller handleStream accepted) and

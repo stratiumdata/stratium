@@ -679,11 +679,24 @@ matter and the failure modes differ:
   creates a *second* pending approval. Nothing is broken, but a human is asked
   to approve the same action twice and the first approval is left unused.
 
-Do not add anything else to the retry's metadata. `proxy` strips
+Do not add anything else to the retry's metadata. Both surfaces strip
 `stratium-approval-id` before building `raw_input` precisely so the retry
 hashes identically to the escalating call — an approval is bound to that hash,
-so any *other* metadata difference between the two calls makes the approval
-unusable and the retry denies.
+so any *other* difference between the two calls makes the approval unusable and
+the retry denies.
+
+One difference is not yours to control and is worth knowing about: if your gRPC
+client retries transparently, grpc-go adds `grpc-previous-rpc-attempts` on
+attempts after the first, and that *does* reach `raw_input`. It is ordinary
+request metadata rather than something to strip — an auditor should see that a
+call was a retry — but it means a transparently-retried attempt hashes
+differently from the original and cannot use an approval created for it. Send
+the approved retry as a fresh call.
+
+The same recipe works on `extauthz`, which reads the id from a
+`stratium-approval-id` **request header** and strips it identically. `extauthz`
+degrades *every* escalation, not only bound ones, because it can never hold a
+call open at all.
 
 ## Reading a denial
 

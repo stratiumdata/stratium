@@ -1109,68 +1109,6 @@ func TestAuthorize_UnreachablePDP_Denies(t *testing.T) {
 	}
 }
 
-// TestAuthorize_Escalate_ApprovedRetryAllows is the direct-authorize-level companion to
-// TestHandleStream_Escalate_BlocksThenForwardsOnApproval (wire-level, further down): the happy
-// path, GetApproval resolves "approved" on its third call, the retry Decide (decideThenAllowClient,
-// hook_test.go, reused unmodified) answers ALLOW, and the exact approval id polled and retried
-// with is the one the escalation named.
-func TestAuthorize_Escalate_ApprovedRetryAllows(t *testing.T) {
-	approvalID := uuid.NewString()
-	fake := &fakePDP{
-		resp: escalateResp(approvalID),
-		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{
-			{Status: "pending"}, {Status: "pending"}, {Status: "approved"},
-		},
-	}
-	client := startFakePDP(t, fake)
-	// senderConstrained on the RETRY, because that is the response K5 is applied to -- see
-	// TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused, which is this test with
-	// that one field flipped and nothing else changed.
-	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: true}
-	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
-
-	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
-	if !allowed {
-		t.Fatalf("authorize() denied (%s), want allowed after approval", reason)
-	}
-	if fake.getApprovalCallCount() != 3 {
-		t.Errorf("GetApproval called %d times, want 3", fake.getApprovalCallCount())
-	}
-	if got := wrapped.lastDecideReq.GetApprovalId(); got != approvalID {
-		t.Errorf("retry Decide request approval_id = %q, want %q", got, approvalID)
-	}
-}
-
-// TestAuthorize_EscalationTimeout_Denies is the direct-authorize-level companion to
-// TestHandleStream_EscalationTimeout_DeniesWithoutForwarding (wire-level, further down):
-// GetApproval never resolves (pendingApproval repeats "pending" forever, hook_test.go), so the
-// only way this call ends is ApprovalTimeout firing, and it must deny.
-// mustReturnWithin (hook_test.go) proves this directly rather than trusting go test's own default
-// timeout to eventually notice a "retry forever" mutation.
-func TestAuthorize_EscalationTimeout_Denies(t *testing.T) {
-	approvalID := uuid.NewString()
-	fake := &fakePDP{resp: escalateResp(approvalID), getApprovalResponses: pendingApproval()}
-	client := startFakePDP(t, fake)
-	cfg := testProxyServerCfg()
-	cfg.ApprovalPollInterval = 5 * time.Millisecond
-	// Deliberately not a multiple of the interval -- see TestRunHook_Escalate_TimeoutStillPendingDenies
-	// (hook_test.go) for why: avoids the deadline racing a tick at the same instant.
-	cfg.ApprovalTimeout = 33 * time.Millisecond
-	srv := &proxyServer{client: client, cfg: cfg}
-
-	var allowed bool
-	var reason string
-	mustReturnWithin(t, 2*time.Second, func() {
-		allowed, reason, _ = srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
-	})
-	if allowed {
-		t.Fatal("authorize() = allowed, want denied (C22: a timeout must deny)")
-	}
-	if !strings.Contains(reason, "did not resolve within the escalation timeout") {
-		t.Errorf("reason = %q, want it to name the escalation timeout", reason)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Task 2: the real decision -- over the wire, through the real handleStream gate. These are the
 // tests the task's own brief asks for by name: proof that the GATE (not just authorize in
@@ -1362,146 +1300,6 @@ func startCountingEchoTarget(t *testing.T) (addr string, counter *countingEchoHa
 	t.Cleanup(gs.Stop)
 
 	return lis.Addr().String(), counter
-}
-
-// streamRecvResult is one RecvMsg outcome, carried over a channel so a test can select between it
-// and a timeout without RecvMsg itself blocking the test goroutine indefinitely -- the gRPC-stream
-// equivalent of mcp_authorize_test.go's readFrame/assertNoFrame pair, adapted to a live
-// grpc.ClientStream instead of a byte-oriented pipe.
-type streamRecvResult struct {
-	frame proxyFrame
-	err   error
-}
-
-// tryRecv starts stream.RecvMsg on its own goroutine and returns a channel it reports its one
-// result on. Callers select against this with their OWN timeout(s) rather than this function
-// taking one, because TestHandleStream_Escalate_BlocksThenForwardsOnApproval needs two different
-// things from the SAME in-flight call -- proof nothing arrives within a short window while still
-// escalating, then the eventual real result once approval resolves -- and RecvMsg can only be
-// issued once per message; a second, independent call to it would race the first rather than
-// observing the same outcome.
-func tryRecv(stream grpc.ClientStream) <-chan streamRecvResult {
-	ch := make(chan streamRecvResult, 1)
-	go func() {
-		var f proxyFrame
-		err := stream.RecvMsg(&f)
-		ch <- streamRecvResult{frame: f, err: err}
-	}()
-	return ch
-}
-
-// TestHandleStream_Escalate_BlocksThenForwardsOnApproval is the required property "an escalating
-// call blocks then forwards on approval" -- proxy is a BLOCKING surface (spec §4.6), unlike
-// extauthz, so this holds the caller's own stream open rather than degrading to a denial. Reuses
-// decideThenAllowClient/escalateResp/pendingApproval (hook_test.go) unmodified, the same fixtures
-// mcp_authorize_test.go's own escalation tests already share rather than each redefining their
-// own.
-//
-// As of Phase 15 this covers the UNBOUND path only: escalateResp leaves sender_constrained false,
-// and a BOUND escalation degrades instead of blocking (K11 --
-// TestAuthorize_EscalateOnBoundToken_DegradesInsteadOfBlocking, and
-// TestHandleStream_EscalateOnBoundToken_TrailerCarriesApprovalID over this same wire). The
-// blocking behaviour proven here is still §4.6's own and is deliberately kept; see authorize's
-// own comment for why.
-func TestHandleStream_Escalate_BlocksThenForwardsOnApproval(t *testing.T) {
-	targetAddr, target := startCountingEchoTarget(t)
-	approvalID := uuid.NewString()
-	fake := &fakePDP{
-		resp: escalateResp(approvalID),
-		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{
-			{Status: "pending"}, {Status: "pending"}, {Status: "pending"},
-			{Status: "pending"}, {Status: "pending"}, {Status: "pending"},
-			{Status: "approved"},
-		},
-	}
-	pdpClient := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: pdpClient, first: fake.resp, senderConstrained: true}
-	cfg := testProxyServerCfg()
-	cfg.ApprovalPollInterval = 20 * time.Millisecond // ~6 polls before "approved" lands, ~120ms total
-	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: wrapped, cfg: cfg}
-	conn := startProxyServer(t, srv)
-
-	ctx := bearerCtx(context.Background(), testProxyBearerToken)
-	stream, err := conn.NewStream(ctx, proxyStreamDesc, "/inventory.Inventory/WatchItems", grpc.ForceCodec(proxyCodec{}))
-	if err != nil {
-		t.Fatalf("NewStream() error = %v", err)
-	}
-	// Buffered client-side (HTTP/2 flow control), so this succeeds immediately even though the
-	// server has not yet started reading -- handleStream's authorize call has not returned yet,
-	// so forward's relayCallerToTarget goroutine, the only thing that ever calls RecvMsg on the
-	// server side of this stream, has not started.
-	if err := stream.SendMsg(&proxyFrame{payload: []byte("watch-request")}); err != nil {
-		t.Fatalf("SendMsg() error = %v", err)
-	}
-
-	result := tryRecv(stream)
-
-	// BLOCKS: nothing reaches the target, and no response arrives, while still polling -- checked
-	// well before the ~120ms the scripted "approved" response lands at.
-	select {
-	case res := <-result:
-		t.Fatalf("RecvMsg() returned early (payload=%q err=%v) -- the call must still be blocked on escalation", res.frame.payload, res.err)
-	case <-time.After(60 * time.Millisecond):
-	}
-	if got := target.count(); got != 0 {
-		t.Errorf("target received %d call(s) while still escalating, want 0", got)
-	}
-
-	// THEN FORWARDS: once GetApproval resolves "approved" and the retry Decide (wrapped) answers
-	// ALLOW, the target is reached and its own echoed reply comes back.
-	select {
-	case res := <-result:
-		if res.err != nil {
-			t.Fatalf("RecvMsg() error = %v, want the echoed payload after approval", res.err)
-		}
-		if string(res.frame.payload) != "watch-request" {
-			t.Errorf("RecvMsg() payload = %q, want the echoed %q", res.frame.payload, "watch-request")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("RecvMsg() did not return within 2s after approval should have resolved")
-	}
-	if got := target.count(); got != 1 {
-		t.Errorf("target received %d call(s), want exactly 1", got)
-	}
-	if got := fake.lastGetApprovalRequest().GetApprovalId(); got != approvalID {
-		t.Errorf("GetApproval was asked about %q, want the escalation's own approval id %q", got, approvalID)
-	}
-}
-
-// TestHandleStream_EscalationTimeout_DeniesWithoutForwarding is the required property "an
-// escalation timeout denies without forwarding" -- checked against the target's own received-call
-// count (contactCounter), the anchor for the required mutation "treat an escalation timeout as
-// allow".
-func TestHandleStream_EscalationTimeout_DeniesWithoutForwarding(t *testing.T) {
-	targetAddr, target := startFakeTarget(t)
-	approvalID := uuid.NewString()
-	fake := &fakePDP{resp: escalateResp(approvalID), getApprovalResponses: pendingApproval()}
-	pdpClient := startFakePDP(t, fake)
-	cfg := testProxyServerCfg()
-	cfg.ApprovalPollInterval = 5 * time.Millisecond
-	cfg.ApprovalTimeout = 33 * time.Millisecond
-	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: cfg}
-	conn := startProxyServer(t, srv)
-
-	ctx := bearerCtx(context.Background(), testProxyBearerToken)
-	var resp proxyFrame
-	var err error
-	mustReturnWithin(t, 2*time.Second, func() {
-		err = conn.Invoke(ctx, "/inventory.Inventory/DeleteItem", &proxyFrame{payload: []byte("request")}, &resp, grpc.ForceCodec(proxyCodec{}))
-	})
-	if err == nil {
-		t.Fatal("Invoke() error = nil, want PermissionDenied (C22: a timeout must deny)")
-	}
-	st := status.Convert(err)
-	if st.Code() != codes.PermissionDenied {
-		t.Errorf("status code = %s, want %s", st.Code(), codes.PermissionDenied)
-	}
-	if !strings.Contains(st.Message(), "did not resolve within the escalation timeout") {
-		t.Errorf("status message = %q, want it to name the escalation timeout", st.Message())
-	}
-	if got := target.count(); got != 0 {
-		t.Errorf("target received %d call(s), want 0 -- an escalation timeout must forward nothing", got)
-	}
 }
 
 // metadataCapture is an echo target with a side channel: it records the incoming gRPC metadata a
@@ -2398,43 +2196,6 @@ func TestAuthorize_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason(t *testing.T
 	}
 }
 
-// TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused closes the one path on which K5
-// could otherwise be walked around: escalate, get a human to approve, and be forwarded.
-//
-// It is TestAuthorize_Escalate_ApprovedRetryAllows with exactly one field flipped -- the RETRY's
-// own sender_constrained -- and nothing else changed. K5 is applied to the response authorize is
-// about to act on, which on this path is the retry's, not the escalation's:
-// DecideResponse.sender_constrained's proto comment says in capitals to consult it only when
-// effect is EFFECT_ALLOW, and an escalation is not one. That is why resolveApproval hands the
-// resolved response back at all.
-func TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused(t *testing.T) {
-	approvalID := uuid.NewString()
-	fake := &fakePDP{
-		resp: escalateResp(approvalID),
-		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{
-			{Status: "pending"}, {Status: "pending"}, {Status: "approved"},
-		},
-	}
-	client := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: false}
-	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
-
-	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
-	if allowed {
-		t.Fatal("authorize() allowed after an approved escalation on an UNBOUND token, want refused (K5)")
-	}
-	if reason != unboundTokenReason {
-		t.Errorf("reason = %q, want the K5 refusal %q -- the approval resolved, so the denial must name "+
-			"the binding, not the escalation", reason, unboundTokenReason)
-	}
-	// The escalation genuinely resolved: without this, a refusal that happened for some other
-	// reason (a poll that never resolved, a retry that never happened) would look identical.
-	if got := fake.getApprovalCallCount(); got != 3 {
-		t.Errorf("GetApproval called %d times, want 3 -- the approval must actually have resolved for this "+
-			"to be a test about the RETRY's own response", got)
-	}
-}
-
 // TestHandleStream_LongLivedStream_OneDecisionOneProof is P4 stated in Phase 15's own terms, and
 // it is the property docs/pep.md warns an operator about by name: a stream is authorized ONCE, at
 // open, so it rides ONE proof, whose ONE jti is spent once (K8).
@@ -2566,42 +2327,6 @@ func TestAuthorize_EscalateOnBoundToken_DegradesInsteadOfBlocking(t *testing.T) 
 	if reason == unboundTokenReason {
 		t.Error("a degraded escalation reads as K5's unbound-token refusal -- they name different defects " +
 			"and the caller's next action differs")
-	}
-}
-
-// TestAuthorize_EscalateOnUnboundToken_StillBlocks is the negative control for the test above,
-// and it differs from it in EXACTLY ONE FIELD: sender_constrained. Same escalation, same approval
-// id, same poll script.
-//
-// It is also the reason authorize's blocking path is kept rather than deleted. K5 refuses the
-// ALLOW an unbound escalation can only resolve to, so nothing reaches a target down this path
-// today -- but the path is correct for the condition it names ("a credential that outlives the
-// wait"), and if K5 is ever relaxed this is already the right behaviour. A suite that let the
-// blocking branch go untested would let it rot silently until the day it mattered.
-func TestAuthorize_EscalateOnUnboundToken_StillBlocks(t *testing.T) {
-	approvalID := uuid.NewString()
-	fake := &fakePDP{
-		resp: escalateResp(approvalID), // sender_constrained false -- the ONLY difference
-		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{
-			{Status: "pending"}, {Status: "pending"}, {Status: "approved"},
-		},
-	}
-	client := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: true}
-	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
-
-	allowed, reason, gotID := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
-	if !allowed {
-		t.Fatalf("authorize() denied (%s), want allowed after the approval resolved -- an UNBOUND "+
-			"escalation still blocks and still forwards", reason)
-	}
-	if got := fake.getApprovalCallCount(); got != 3 {
-		t.Errorf("GetApproval called %d times, want 3 -- this path must genuinely poll, or it is not the "+
-			"blocking path at all and the control proves nothing", got)
-	}
-	if gotID != "" {
-		t.Errorf("approvalID = %q, want \"\" -- a blocked-then-approved call was not degraded, so there is "+
-			"no pending approval left for the caller to go and find", gotID)
 	}
 }
 
@@ -2749,22 +2474,22 @@ func TestAuthorize_ApprovalIDMetadata_ForwardedAndKeptOutOfRawInput(t *testing.T
 	}
 }
 
-// TestConsumedMetadataKeys asserts the set directly, rather than only through behaviour, and pins
+// TestConsumedRequestKeys asserts the set directly, rather than only through behaviour, and pins
 // what each entry is there FOR -- the two reasons differ and an editor who conflates them will get
 // the next entry wrong.
 //
 // Asserting the set rather than a count: a mutant that swapped one entry for another keeps the
 // count and changes the meaning. The credential half walks credentialHeaderNames itself so a fifth
 // credential is covered the moment it is added, not whenever someone remembers this test.
-func TestConsumedMetadataKeys(t *testing.T) {
+func TestConsumedRequestKeys(t *testing.T) {
 	for name := range credentialHeaderNames {
-		if !consumedMetadataKey(name) {
-			t.Errorf("consumedMetadataKey(%q) = false, want true -- every credential must be kept out of "+
+		if !consumedRequestKey(name) {
+			t.Errorf("consumedRequestKey(%q) = false, want true -- every credential must be kept out of "+
 				"raw_input (K10)", name)
 		}
 	}
-	if !consumedMetadataKey(approvalIDHeader) {
-		t.Errorf("consumedMetadataKey(%q) = false, want true -- raw_input must stay byte-identical between "+
+	if !consumedRequestKey(approvalIDHeader) {
+		t.Errorf("consumedRequestKey(%q) = false, want true -- raw_input must stay byte-identical between "+
 			"an escalating call and its approved retry, or the approval cannot be used", approvalIDHeader)
 	}
 	// The boundary: a key that merely looks like this system's own is still ordinary request
@@ -2777,9 +2502,237 @@ func TestConsumedMetadataKeys(t *testing.T) {
 		":authority",
 		"user-agent",
 	} {
-		if consumedMetadataKey(name) {
-			t.Errorf("consumedMetadataKey(%q) = true, want false -- an over-broad match silently deletes "+
+		if consumedRequestKey(name) {
+			t.Errorf("consumedRequestKey(%q) = true, want false -- an over-broad match silently deletes "+
 				"request metadata from the audit record", name)
 		}
+	}
+}
+
+// TestAuthorize_EscalateOnUnboundToken_RefusedWithoutPagingAHuman is K5 applied at the earliest
+// point it is knowable, and it replaces a test that asserted the opposite: through fix round 1 an
+// unbound escalation was routed into the blocking path, where it held the caller's stream and a
+// polling goroutine for up to ApprovalTimeout, PAGED A HUMAN, and was then refused by K5 anyway
+// once the approval resolved.
+//
+// What that cost is the reason it changed. Every legacy bearer-token caller hitting an escalating
+// action hung for the full timeout and interrupted a person for a decision that could not change
+// the outcome; and any holder of an unbound token could generate unbounded human interrupts and
+// held streams at will. Refusing here takes nothing away from the caller it was ever going to
+// get, and names the one thing it can act on.
+//
+// sender_constrained is trustworthy on an ESCALATE -- every three-leg outcome reaches Decide's
+// tail, where the PDP sets it -- so false here unambiguously means unbound. The field's own proto
+// comment now says so, and names this rule and K11 as the two that need it.
+//
+// The two assertions past the denial are what make this a real test rather than "it denied":
+// GetApproval must never be called (that is the whole point -- no human paged), and the reason
+// must be K5's own text rather than a degraded escalation's, because a caller told "your action
+// is pending approval" will go and get an approval that cannot help them.
+func TestAuthorize_EscalateOnUnboundToken_RefusedWithoutPagingAHuman(t *testing.T) {
+	approvalID := uuid.NewString()
+	fake := &fakePDP{
+		// sender_constrained left false -- the ONLY difference from
+		// TestAuthorize_EscalateOnBoundToken_DegradesInsteadOfBlocking, which is the same
+		// escalation with the same approval id and the same poll script.
+		resp:                 escalateResp(approvalID),
+		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{{Status: "approved"}},
+	}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	allowed, reason, gotID := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	if allowed {
+		t.Fatal("authorize() allowed, want refused -- K5 refuses an unbound token on this surface, and an " +
+			"approved escalation cannot change that")
+	}
+	if got := fake.getApprovalCallCount(); got != 0 {
+		t.Errorf("GetApproval called %d times, want 0 -- a human must not be paged for a decision K5 will "+
+			"refuse whatever the human says. The script above would have resolved \"approved\" on the "+
+			"FIRST poll, so a build that still blocked would allow here and fail loudly rather than "+
+			"merely being slow", got)
+	}
+	if reason != unboundTokenReason {
+		t.Errorf("reason = %q, want K5's own refusal %q -- a caller told its action is PENDING APPROVAL "+
+			"will go and obtain one, which cannot help it; the actionable answer is to get a bound token",
+			reason, unboundTokenReason)
+	}
+	if gotID != "" {
+		t.Errorf("approvalID = %q, want \"\" -- nothing here is pending for the caller to go and find", gotID)
+	}
+}
+
+// TestHandleStream_EscalateOnUnboundToken_RefusedAndTargetNeverContacted is the wire-level half:
+// the refusal reaches the caller as PermissionDenied, carries no approval trailer, and -- the
+// assertion that actually matters -- returns promptly rather than after ApprovalTimeout.
+//
+// testProxyServerCfg sets ApprovalTimeout to 500ms, so a build that still blocked would take at
+// least that long even with the approval scripted to resolve immediately. Bounding the call well
+// under it makes "did not block" a checked fact rather than an inference from the reason text.
+func TestHandleStream_EscalateOnUnboundToken_RefusedAndTargetNeverContacted(t *testing.T) {
+	targetAddr, target := startFakeTarget(t)
+	fake := &fakePDP{resp: escalateResp(uuid.NewString()), getApprovalResponses: pendingApproval()}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	var trailer metadata.MD
+	start := time.Now()
+	err := conn.Invoke(bearerCtx(context.Background(), testProxyBearerToken), "/svc.Svc/Method",
+		&proxyFrame{payload: []byte("req")}, &proxyFrame{},
+		grpc.ForceCodec(proxyCodec{}), grpc.Trailer(&trailer))
+	elapsed := time.Since(start)
+
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("Invoke() error = %v, want PermissionDenied", err)
+	}
+	if elapsed >= testProxyServerCfg().ApprovalTimeout {
+		t.Errorf("call took %s, want well under the %s ApprovalTimeout -- it must refuse immediately, not "+
+			"hold the caller's stream open for an escalation whose outcome K5 already decides",
+			elapsed, testProxyServerCfg().ApprovalTimeout)
+	}
+	if got := trailer.Get(approvalIDHeader); len(got) != 0 {
+		t.Errorf("trailer %s = %v, want it absent -- there is nothing pending for the caller to go and find",
+			approvalIDHeader, got)
+	}
+	if got := target.count(); got != 0 {
+		t.Errorf("target received %d call(s), want 0", got)
+	}
+	if got := fake.getApprovalCallCount(); got != 0 {
+		t.Errorf("GetApproval called %d times, want 0 -- no human paged", got)
+	}
+}
+
+// TestAuthorize_MalformedApprovalIDMetadata_DroppedAndTheCallIsStillDecided is the guard against
+// a caller switching off its own audit trail.
+//
+// Decide rejects an unparseable approval_id with InvalidArgument BEFORE authenticateToken runs, so
+// that path writes NO AUDIT ROW. An agent attaching "stratium-approval-id: not-a-uuid" to every
+// call would then have every attempt denied -- correctly, fail-closed -- while leaving nothing
+// behind for an operator asking "did agent X attempt method Y?".
+//
+// The assertion that matters is the SECOND one: the PDP must still have been called, because that
+// is what produces the audit row. A build that denied locally instead would satisfy "the malformed
+// value never reached the PDP" while leaving the audit gap exactly as it was -- which is why this
+// test checks the call count rather than only the field.
+//
+// The rows are the shapes parseNonNilUUID (internal/pdpgrpc/server.go) rejects, since matching it
+// exactly is the requirement: anything narrower drops a value the PDP would have accepted,
+// anything wider lets the InvalidArgument back in. The nil-UUID row is the one a check written as
+// a bare uuid.Parse would miss.
+func TestAuthorize_MalformedApprovalIDMetadata_DroppedAndTheCallIsStillDecided(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"not a uuid", "not-a-uuid"},
+		{"nil uuid", "00000000-0000-0000-0000-000000000000"},
+		{"truncated", "033b3169-46f9-4477-9c3c"},
+		{"whitespace", "  "},
+		{"uuid with trailing junk", "033b3169-46f9-4477-9c3c-c671b24c2a8b-extra"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+			srv.authorize(
+				incomingBearerCtx(testProxyBearerToken, approvalIDHeader, tc.value), "/svc.Svc/Method")
+
+			if got := fake.requestCount(); got != 1 {
+				t.Fatalf("PDP received %d Decide call(s), want exactly 1 -- the call must still be DECIDED, "+
+					"because that is what writes the audit row. Denying locally would keep the malformed "+
+					"value away from the PDP and leave the audit gap exactly as it was", got)
+			}
+			req := fake.lastRequest()
+			if req.ApprovalId != nil {
+				t.Errorf("approval_id = %q, want unset -- forwarding it makes Decide fail with "+
+					"InvalidArgument before it audits anything", req.GetApprovalId())
+			}
+			// Dropping it must not disturb anything else the PDP compares. raw_input in
+			// particular is what an approval is bound to.
+			if strings.Contains(req.GetRawInput(), tc.value) {
+				t.Errorf("raw_input carries the rejected value verbatim: %s", req.GetRawInput())
+			}
+		})
+	}
+}
+
+// TestForwardableApprovalID is the direct table for the guard above, pinned against
+// parseNonNilUUID's own two conditions rather than against behaviour alone -- a mutation that
+// widened or narrowed the check by one case would otherwise have to be caught through a whole
+// authorize round trip, where a wrong verdict is one of several plausible explanations.
+func TestForwardableApprovalID(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"033b3169-46f9-4477-9c3c-c671b24c2a8b", true},
+		{"033B3169-46F9-4477-9C3C-C671B24C2A8B", true}, // uuid.Parse accepts either case
+		{"", false},
+		{"00000000-0000-0000-0000-000000000000", false},
+		{"not-a-uuid", false},
+		{"033b3169-46f9-4477-9c3c", false},
+		{"033b3169-46f9-4477-9c3c-c671b24c2a8b-extra", false},
+		// Measured, and it corrected this table rather than the code: uuid.Parse accepts several
+		// padded spellings (this one, "{...}", "urn:uuid:..."), so the PDP's parseNonNilUUID
+		// accepts them too and forwarding is right. A guard "hardened" to reject them would drop
+		// values the PDP would have honoured -- which is precisely why this check matches
+		// parseNonNilUUID's own two conditions instead of a stricter idea of what a UUID is.
+		{" 033b3169-46f9-4477-9c3c-c671b24c2a8b ", true},
+		{"{033b3169-46f9-4477-9c3c-c671b24c2a8b}", true},
+		{"urn:uuid:033b3169-46f9-4477-9c3c-c671b24c2a8b", true},
+	} {
+		got, ok := forwardableApprovalID(tc.raw)
+		if ok != tc.want {
+			t.Errorf("forwardableApprovalID(%q) ok = %v, want %v", tc.raw, ok, tc.want)
+		}
+		if ok && got != tc.raw {
+			t.Errorf("forwardableApprovalID(%q) = %q, want the value unaltered -- the PDP parses it again "+
+				"and any rewriting here is a second, divergent notion of what an id is", tc.raw, got)
+		}
+	}
+}
+
+// TestHandleStream_BoundTokenWithNoProof_DeniedAndTargetNeverContacted gives C25's own half the
+// wire-level, target-counter proof every sibling property on this surface already has.
+//
+// It was previously satisfied only by composition -- TestAuthorize_BoundTokenWithNoProof_...
+// proves the denial, and separate tests prove that a denial does not forward -- which is a sound
+// argument and not the same thing as a check. Every other deny property here (a missing token, a
+// policy DENY, an unbound token, a degraded escalation) is asserted against the TARGET's own
+// received-call count, because a proxy that forwards and then errors has already leaked the
+// request and checking only the caller's response would miss it entirely. This one was the
+// exception; it no longer is.
+//
+// The PDP denies this, not the PEP -- verifying a proof is the PDP's job (K2/D1) -- so the fake
+// scripts C25's own denial and the test checks that the verdict text survives to the caller
+// unaltered. Substituting a local reason would tell the caller to fix the wrong thing: this is
+// fixed by producing a proof, where K5's refusal can only be fixed by getting a different token.
+func TestHandleStream_BoundTokenWithNoProof_DeniedAndTargetNeverContacted(t *testing.T) {
+	const pdpReason = "stratium: the presented token is bound to a key but the request carried no DPoP proof"
+	targetAddr, target := startFakeTarget(t)
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason}}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	// No "dpop" metadata, deliberately: that absence is the whole fixture.
+	err := conn.Invoke(bearerCtx(context.Background(), testProxyBearerToken), "/svc.Svc/Method",
+		&proxyFrame{payload: []byte("req")}, &proxyFrame{}, grpc.ForceCodec(proxyCodec{}))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("Invoke() error = %v, want PermissionDenied", err)
+	}
+	if msg := status.Convert(err).Message(); msg != pdpReason {
+		t.Errorf("status message = %q, want the PDP's own text %q verbatim", msg, pdpReason)
+	}
+	if got := target.count(); got != 0 {
+		t.Errorf("target received %d call(s), want 0 -- a bound token with no proof must not reach the "+
+			"upstream, and a denial that forwards first has already leaked the request", got)
+	}
+	// The empty proof still had to be REPORTED, or this denial would be about a request the PDP
+	// never saw the shape of -- and a build that dropped the field would pass on the same status.
+	if req := fake.lastRequest(); req == nil || req.GetDpopProof() != "" {
+		t.Errorf("dpop_proof = %v, want \"\" reported to the PDP", req.GetDpopProof())
 	}
 }

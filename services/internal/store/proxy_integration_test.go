@@ -837,9 +837,13 @@ func TestIntegration_Proxy_ProofBoundToTheTargetsAddressIsRefused(t *testing.T) 
 // computed over something that ignores metadata entirely.
 //
 // context.Background(), not t.Context(): a context carrying a deadline makes
-// grpc-go send a "grpc-timeout" header that counts DOWN, which would differ
-// between two otherwise identical calls and break the comparison for a reason
-// that has nothing to do with K10.
+// grpc-go send a "grpc-timeout" header that counts DOWN. It does NOT reach
+// raw_input -- the server handles it in its own switch case and isReservedHeader
+// keeps it out of metadata entirely (internal/transport/http2_server.go), so
+// this is belt-and-braces rather than a load-bearing choice. Kept anyway: the
+// comparison below is only meaningful if the two calls are identical for
+// reasons this test controls, and depending on a dependency's header filtering
+// to keep them so is depending on it never changing.
 func TestIntegration_Proxy_ProofExcludedFromAuditDigest(t *testing.T) {
 	ensureProxyAgent(t)
 	ensureProxyCatalog(t)

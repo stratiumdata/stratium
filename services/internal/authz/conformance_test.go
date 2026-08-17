@@ -572,23 +572,25 @@ func TestC21_EscalationRoutesToRootPrincipal(t *testing.T) {
 // hook_test.go and mcp_authorize_test.go, and this pointer is stale again if
 // either one is ever renamed without the other being checked.
 //
-// Extended again in Phase 11 Task 4, correcting a gap Task 2's own report
-// flagged directly ("cites TestDecideAndRelay_EscalationTimeout_Denies
-// (mcp) but not proxy's own timeout tests"): proxy.go's authorize reaches
-// resolveApproval/pollApproval through the identical, unmodified shared
-// helpers hook and mcp already do (proxy.go's own package doc, ESCALATE
-// BLOCKS — the third caller Task 2's own report names), so it is the exact
-// same shape of fact as mcp's own addition above, not a new mechanism.
-// TestAuthorize_EscalationTimeout_Denies proves it directly (authorize
-// alone, a still-pending approval at ApprovalTimeout denies);
-// TestHandleStream_EscalationTimeout_DeniesWithoutForwarding proves it
-// through the real dispatch gate, against a fake target's own
-// received-call counter — the mutation-testing anchor for "treat an
-// escalation timeout as allow" (proxy_test.go's own doc comment on that
-// test). A regression in resolveApproval's timeout handling now fails a
-// test under all three of hook_test.go, mcp_authorize_test.go, and
-// proxy_test.go; this pointer is stale again if any one of the three is
-// ever renamed without the others being checked.
+// Extended in Phase 11 Task 4 to name proxy's own two timeout tests, and
+// NARROWED BACK to hook and mcp in Phase 15 Task 6 — a change to the
+// property's reach, not a renaming, so it is recorded rather than quietly
+// applied. Spec §4.7.2 K11 stopped proxy blocking on an escalation at all:
+// a BOUND token degrades to a denial naming the pending approval (the
+// proof it would wait with is single-use and short-lived, where a human
+// approval is neither), and an UNBOUND one is refused outright by K5
+// rather than paging a human for a decision that cannot change. proxy
+// therefore no longer calls resolveApproval, so it has no escalation
+// timeout left to prove, and TestAuthorize_EscalationTimeout_Denies and
+// TestHandleStream_EscalationTimeout_DeniesWithoutForwarding were removed
+// with the behaviour rather than left asserting a path nothing reaches.
+//
+// The property itself is untouched and still proven: resolveApproval and
+// pollApproval are unchanged, and the three tests below exercise them
+// under hook and mcp, which are still blocking surfaces. What changed is
+// only which surfaces the property applies to — C22 is about a PEP that
+// blocks, and proxy has stopped being one for the credential this phase
+// requires. This pointer is stale again if any of the three is renamed.
 //
 // It cannot become a pass HERE: C22 is a property of blocking and time —
 // "the agent blocks there" until the PEP's own timeout (spec §4.6.1 E6) —
@@ -604,9 +606,7 @@ func TestC22_EscalationTimeoutDenies(t *testing.T) {
 	provenElsewhere(t, 22, in("cmd/stratium-pep",
 		"TestRunHook_Escalate_TimeoutStillPendingDenies",
 		"TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies",
-		"TestDecideAndRelay_EscalationTimeout_Denies",
-		"TestAuthorize_EscalationTimeout_Denies",
-		"TestHandleStream_EscalationTimeout_DeniesWithoutForwarding"))
+		"TestDecideAndRelay_EscalationTimeout_Denies"))
 }
 
 // C23 reads "on a non-blocking surface, escalate returns deny plus a
