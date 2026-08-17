@@ -1234,6 +1234,29 @@ the session file's, not a new one.
 **W6.** The decision cache is consulted by `hook` and `mcp` only. `extauthz` and
 `proxy` always call the PDP.
 
+**Phase 15 made W6 permanent rather than provisional, and closed the obvious
+argument for lifting it (2026-08-17).** The exclusion below is justified by a
+forged token being served a cached ALLOW without the PDP ever seeing it — a risk
+sender-constrained tokens might look like they answer. They do not, and the
+reason is structural:
+
+The cache key is `(delegation id, tool, input digest)` (**W2**,
+`cacheKeyFor`), and **K10** keeps the DPoP proof out of `raw_input` altogether.
+So the proof is not part of the key. Extend the cache to a network surface and a
+second request bearing a *different* proof — or a replayed one, or none — hits
+the same entry and is served an ALLOW **without that proof ever being verified**.
+Caching there would not merely risk bypassing DPoP; it would bypass it by
+construction.
+
+Nor can the key be widened to include the proof. A proof is single-use
+(**K8**), so every request would produce a distinct key and the hit rate would
+be exactly zero — a cache that never hits is not a cache.
+
+**Sender-constrained tokens therefore make W6 more necessary, not less.** Anyone
+proposing to lift it for latency should read this paragraph first: the
+performance argument is real, and there is no version of it that keeps
+proof-of-possession intact.
+
 **Why, and it is not a performance judgement.** A cache hit is defined by *not*
 calling the PDP — and the PDP is the only component that verifies a token's
 signature (**K2**). The PEP holds no verification key and reads the token with
