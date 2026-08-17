@@ -550,7 +550,10 @@ nobody can take back once it has been made.
 **One stream, one proof.** `proxy` requires a sender-constrained token (RFC
 9449 DPoP — see "Sender-constrained tokens on `proxy`" below), and the same
 "once, at open" rule governs it: one stream gets one `Decide` call carrying
-one proof, whose single-use `jti` is spent once. **A long-lived stream rides
+one proof, whose single-use `jti` is spent once. (The one place a *second*
+proof is genuinely needed is an escalation, which is why `proxy` hands an
+escalating call back to the client instead of blocking — see "An escalation on
+`proxy` does not block" below.) **A long-lived stream rides
 that one proof for its entire life** — hours, thousands of messages, all on a
 single proof of possession made at the instant the stream opened. Assume
 per-message binding and you will be wrong about what a captured stream costs
@@ -644,6 +647,43 @@ consequences an operator meets immediately:
 The proof itself never reaches `raw_input` and so never reaches the audit
 chain, exactly like `authorization` — a credential hashed into an
 append-only chain cannot be edited back out of it.
+
+### An escalation on `proxy` does not block — it degrades
+
+`proxy` is a blocking surface (spec §4.6): for an ordinary bearer token it
+holds the caller's stream open across a human approval, unlike `extauthz`,
+which cannot. **A sender-constrained token is the exception, and this is the
+one place §4.6's split has one.**
+
+> **A surface can block only while the credential it would wait with outlives
+> the wait.** A DPoP proof does not: it is single-use and short-lived, and a
+> human approval is neither.
+
+So when an escalating call presents a bound token, `proxy` returns
+`PERMISSION_DENIED` immediately, carrying the pending approval's id in two
+places:
+
+- **trailing metadata** under `stratium-approval-id` — the key a retry tool
+  reads deterministically, and the same name `extauthz` uses for its own
+  response header;
+- **the status message** — for a human who captured only the error.
+
+**Once the approval lands, retry the call with a *fresh* proof**, sending the
+approval id back in `stratium-approval-id` request metadata. Both halves
+matter and the failure modes differ:
+
+- Retrying with the **same** proof is refused as a replay — the original call
+  already spent its `jti`. This is why the denial's text says *fresh* rather
+  than "retry after approval".
+- Retrying **without** the approval id does not fail; it escalates again and
+  creates a *second* pending approval. Nothing is broken, but a human is asked
+  to approve the same action twice and the first approval is left unused.
+
+Do not add anything else to the retry's metadata. `proxy` strips
+`stratium-approval-id` before building `raw_input` precisely so the retry
+hashes identically to the escalating call — an approval is bound to that hash,
+so any *other* metadata difference between the two calls makes the approval
+unusable and the retry denies.
 
 ## Reading a denial
 

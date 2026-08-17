@@ -649,7 +649,7 @@ func TestExtractCredentialsFromMetadata(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			token, _, _, err := extractCredentialsFromMetadata(tc.md)
+			token, _, _, _, err := extractCredentialsFromMetadata(tc.md)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("extractCredentialsFromMetadata() error = nil, want an error")
@@ -685,7 +685,7 @@ func TestExtractCredentialsFromMetadata_RepeatedKeys_FirstValueWins(t *testing.T
 		"authorization": {"Bearer " + testProxyBearerToken, "Bearer " + testProxyOtherCredentialValue},
 		"dpop":          {testProxyDPoPProof, testProxyOtherCredentialValue},
 	}
-	token, proof, _, err := extractCredentialsFromMetadata(md)
+	token, proof, _, _, err := extractCredentialsFromMetadata(md)
 	if err != nil {
 		t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil", err)
 	}
@@ -710,7 +710,7 @@ func TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFo
 	for _, headerName := range []string{"authorization", "Authorization", "AUTHORIZATION", "AuthoriZation"} {
 		t.Run(headerName, func(t *testing.T) {
 			md := metadata.MD{headerName: {"Bearer " + testProxyBearerToken}}
-			token, _, _, err := extractCredentialsFromMetadata(md)
+			token, _, _, _, err := extractCredentialsFromMetadata(md)
 			if err != nil {
 				t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil -- a key named %q must still be found", err, headerName)
 			}
@@ -733,7 +733,7 @@ func TestExtractCredentialsFromMetadata_StripsCredentialHeadersCaseInsensitively
 		"PROXY-AUTHORIZATION":       {testProxyOtherCredentialValue},
 		testProxyAuthLikeHeaderName: {testProxyAuthLikeHeaderValue},
 	}
-	_, _, stripped, err := extractCredentialsFromMetadata(md)
+	_, _, _, stripped, err := extractCredentialsFromMetadata(md)
 	if err != nil {
 		t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil", err)
 	}
@@ -766,7 +766,7 @@ func TestAuthorize_MethodBecomesTool(t *testing.T) {
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
 	const method = "/inventory.Inventory/DeleteItem"
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
 	if !allowed {
 		t.Fatalf("authorize() denied (%s), want allowed", reason)
 	}
@@ -851,7 +851,7 @@ func TestAuthorize_RawInputNeverCarriesCredential_AnyHeaderCasing(t *testing.T) 
 
 			md := metadata.MD{headerName: {"Bearer " + testProxyBearerToken}}
 			ctx := metadata.NewIncomingContext(context.Background(), md)
-			allowed, reason := srv.authorize(ctx, "/svc.Svc/Method")
+			allowed, reason, _ := srv.authorize(ctx, "/svc.Svc/Method")
 			if !allowed {
 				t.Fatalf("authorize() denied (%s), want allowed -- extraction must have found this header "+
 					"(see TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFound)", reason)
@@ -895,7 +895,7 @@ func TestAuthorize_RawInputStripsOtherCredentialHeaders(t *testing.T) {
 				headerName:      {testProxyOtherCredentialValue},
 			}
 			ctx := metadata.NewIncomingContext(context.Background(), md)
-			allowed, reason := srv.authorize(ctx, "/svc.Svc/Method")
+			allowed, reason, _ := srv.authorize(ctx, "/svc.Svc/Method")
 			if !allowed {
 				t.Fatalf("authorize() denied (%s), want allowed", reason)
 			}
@@ -922,7 +922,7 @@ func TestAuthorize_RawInputPreservesNonCredentialHeaders(t *testing.T) {
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
 	ctx := incomingBearerCtx(testProxyBearerToken, testProxyAuthLikeHeaderName, testProxyAuthLikeHeaderValue)
-	allowed, reason := srv.authorize(ctx, "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(ctx, "/svc.Svc/Method")
 	if !allowed {
 		t.Fatalf("authorize() denied (%s), want allowed", reason)
 	}
@@ -952,7 +952,7 @@ func TestAuthorize_NeverSendsDeclaredTier(t *testing.T) {
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	if !allowed {
 		t.Fatalf("authorize() denied (%s), want allowed", reason)
 	}
@@ -985,7 +985,7 @@ func TestAuthorize_RepeatedIdenticalCalls_AlwaysCallsPDP(t *testing.T) {
 	const method = "/svc.Svc/Method"
 	const attempts = 5
 	for i := 0; i < attempts; i++ {
-		allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
+		allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
 		if !allowed {
 			t.Fatalf("authorize() attempt %d denied (%s), want allowed", i, reason)
 		}
@@ -1008,7 +1008,7 @@ func TestAuthorize_MissingToken_DeniesWithoutContactingPDP(t *testing.T) {
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-request-id", "req-fixture-does-not-matter"))
-	allowed, reason := srv.authorize(ctx, "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(ctx, "/svc.Svc/Method")
 	if allowed {
 		t.Fatal("authorize() = allowed, want denied -- no credential to send the PDP")
 	}
@@ -1033,7 +1033,7 @@ func TestAuthorize_NoMetadataAtAll_DeniesWithoutContactingPDP(t *testing.T) {
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-	allowed, _ := srv.authorize(context.Background(), "/svc.Svc/Method")
+	allowed, _, _ := srv.authorize(context.Background(), "/svc.Svc/Method")
 	if allowed {
 		t.Fatal("authorize() = allowed, want denied")
 	}
@@ -1061,7 +1061,7 @@ func TestAuthorize_MalformedToken_DeniesWithoutContactingPDP(t *testing.T) {
 			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
 			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", tc.value))
-			allowed, _ := srv.authorize(ctx, "/svc.Svc/Method")
+			allowed, _, _ := srv.authorize(ctx, "/svc.Svc/Method")
 			if allowed {
 				t.Fatalf("authorize() = allowed for %q, want denied", tc.value)
 			}
@@ -1082,7 +1082,7 @@ func TestAuthorize_Deny_ReturnsPDPReasonVerbatim(t *testing.T) {
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	if allowed {
 		t.Fatal("authorize() = allowed, want denied")
 	}
@@ -1100,7 +1100,7 @@ func TestAuthorize_UnreachablePDP_Denies(t *testing.T) {
 	pdpClient := unreachablePDPClient(t)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	if allowed {
 		t.Fatal("authorize() = allowed, want denied -- an unreachable PDP must deny")
 	}
@@ -1129,7 +1129,7 @@ func TestAuthorize_Escalate_ApprovedRetryAllows(t *testing.T) {
 	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: true}
 	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	if !allowed {
 		t.Fatalf("authorize() denied (%s), want allowed after approval", reason)
 	}
@@ -1161,7 +1161,7 @@ func TestAuthorize_EscalationTimeout_Denies(t *testing.T) {
 	var allowed bool
 	var reason string
 	mustReturnWithin(t, 2*time.Second, func() {
-		allowed, reason = srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+		allowed, reason, _ = srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	})
 	if allowed {
 		t.Fatal("authorize() = allowed, want denied (C22: a timeout must deny)")
@@ -1396,6 +1396,13 @@ func tryRecv(stream grpc.ClientStream) <-chan streamRecvResult {
 // decideThenAllowClient/escalateResp/pendingApproval (hook_test.go) unmodified, the same fixtures
 // mcp_authorize_test.go's own escalation tests already share rather than each redefining their
 // own.
+//
+// As of Phase 15 this covers the UNBOUND path only: escalateResp leaves sender_constrained false,
+// and a BOUND escalation degrades instead of blocking (K11 --
+// TestAuthorize_EscalateOnBoundToken_DegradesInsteadOfBlocking, and
+// TestHandleStream_EscalateOnBoundToken_TrailerCarriesApprovalID over this same wire). The
+// blocking behaviour proven here is still §4.6's own and is deliberately kept; see authorize's
+// own comment for why.
 func TestHandleStream_Escalate_BlocksThenForwardsOnApproval(t *testing.T) {
 	targetAddr, target := startCountingEchoTarget(t)
 	approvalID := uuid.NewString()
@@ -1977,7 +1984,7 @@ func TestAuthorize_DPoPProofForwardedVerbatim(t *testing.T) {
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(
+	allowed, reason, _ := srv.authorize(
 		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), "/svc.Svc/Method")
 	if !allowed {
 		t.Fatalf("authorize() denied (%s), want allowed", reason)
@@ -2044,7 +2051,7 @@ func TestAuthorize_ObservedURIIsTheProxysOwnAddress(t *testing.T) {
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
 	const method = "/inventory.Inventory/DeleteItem"
-	allowed, reason := srv.authorize(
+	allowed, reason, _ := srv.authorize(
 		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), method)
 	if !allowed {
 		t.Fatalf("authorize() denied (%s), want allowed", reason)
@@ -2148,7 +2155,7 @@ func TestAuthorize_MethodWithoutLeadingSlash_DeniesWithoutContactingPDP(t *testi
 			pdpClient := startFakePDP(t, fake)
 			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-			allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
+			allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
 			if allowed {
 				t.Fatalf("authorize(%q) allowed, want denied -- a method that is not a gRPC method path "+
 					"cannot be bound to an htu honestly", method)
@@ -2303,7 +2310,7 @@ func TestAuthorize_UnboundToken_DeniedEvenWhenPDPAllows(t *testing.T) {
 			pdpClient := startFakePDP(t, fake)
 			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-			allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+			allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 			if allowed != tc.wantAllowed {
 				t.Fatalf("authorize() allowed = %v (%s), want %v", allowed, reason, tc.wantAllowed)
 			}
@@ -2373,7 +2380,7 @@ func TestAuthorize_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason(t *testing.T
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	if allowed {
 		t.Fatal("authorize() allowed, want denied")
 	}
@@ -2412,7 +2419,7 @@ func TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused(t *testing.T
 	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: false}
 	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
 
-	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	allowed, reason, _ := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
 	if allowed {
 		t.Fatal("authorize() allowed after an approved escalation on an UNBOUND token, want refused (K5)")
 	}
@@ -2487,5 +2494,292 @@ func TestHandleStream_LongLivedStream_OneDecisionOneProof(t *testing.T) {
 	}
 	if got, want := req.GetObservedUri(), testProxyPublicURI+"/chat.Chat/Converse"; got != want {
 		t.Errorf("observed_uri = %q, want %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// K11 (spec §4.7.2): an escalation carrying a SENDER-CONSTRAINED token degrades to a denial
+// naming the pending approval, instead of blocking.
+// ---------------------------------------------------------------------------
+
+// boundEscalateResp is escalateResp (hook_test.go) plus the one field K11 turns on:
+// sender_constrained. Every other proxy escalation fixture in this file leaves it false, which is
+// what makes them exercise the UNBOUND path -- the one that still blocks. The two differ in
+// exactly that field, so a mutation that ignores it, or that inverts it, sends one of the two
+// down the wrong path and fails loudly rather than quietly taking the same branch for both.
+//
+// A real PDP populates sender_constrained truthfully on an ESCALATE: it is set on Decide's tail
+// (server.go), which every three-leg outcome reaches -- allow, leg-denial, and escalation alike --
+// so this fixture is not scripting a shape the PDP cannot produce. See degradeEscalation's own
+// doc comment for why reading it here is the stated exception to the field's "consult it only on
+// an ALLOW" rule rather than a quiet violation of it.
+func boundEscalateResp(approvalID string) *pdpgrpc.DecideResponse {
+	resp := escalateResp(approvalID)
+	resp.SenderConstrained = true
+	return resp
+}
+
+// TestAuthorize_EscalateOnBoundToken_DegradesInsteadOfBlocking is K11's core property.
+//
+// The measured reason it exists: resolveApproval must resend the request byte-identical (the
+// approval binds to input_digest), so it resends the same proof, whose jti the original call
+// already spent -- the PDP refuses that retry with "dpop proof already spent", and a human slower
+// than the freshness window would have invalidated it anyway. This process cannot mint a
+// replacement, because the client holds the key. So the call is handed back to the client, which
+// is the only party that can produce a fresh proof.
+//
+// GetApproval is asserted NEVER CALLED, and that is the assertion that actually distinguishes
+// "degraded" from "blocked and then denied": both end in a denial, and only the poll count tells
+// them apart. Without it a build that still blocked, waited out ApprovalTimeout, and denied would
+// pass this test while taking minutes per call.
+func TestAuthorize_EscalateOnBoundToken_DegradesInsteadOfBlocking(t *testing.T) {
+	approvalID := uuid.NewString()
+	fake := &fakePDP{resp: boundEscalateResp(approvalID), getApprovalResponses: pendingApproval()}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	allowed, reason, gotID := srv.authorize(
+		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), "/svc.Svc/Method")
+	if allowed {
+		t.Fatal("authorize() allowed an escalation, want denied (K11 degrades; it never forwards)")
+	}
+	if gotID != approvalID {
+		t.Errorf("approvalID = %q, want the escalation's own %q -- an operator has to be able to find "+
+			"the pending approval from the denial, or the record helps nobody", gotID, approvalID)
+	}
+	if got := fake.getApprovalCallCount(); got != 0 {
+		t.Errorf("GetApproval called %d times, want 0 -- a bound token must DEGRADE, not block. Both "+
+			"outcomes end in a denial, so the poll count is the only thing that tells a degrade apart "+
+			"from a block that waited out ApprovalTimeout first", got)
+	}
+	if !strings.Contains(reason, approvalID) {
+		t.Errorf("reason = %q, want it to carry approval id %q for a human reading a captured error "+
+			"without knowing to look for a trailer by name", reason, approvalID)
+	}
+	// The instruction has to differ from extauthz's "a retry after approval succeeds": a client
+	// that retried with the SAME proof gets a replay denial, so the text must say fresh.
+	if !strings.Contains(reason, "FRESH") {
+		t.Errorf("reason = %q, want it to tell the caller the retry needs a FRESH proof -- retrying with "+
+			"the one already presented is refused as a replay (K8), and discovering that from a second "+
+			"denial is the failure this wording exists to prevent", reason)
+	}
+	if reason == unboundTokenReason {
+		t.Error("a degraded escalation reads as K5's unbound-token refusal -- they name different defects " +
+			"and the caller's next action differs")
+	}
+}
+
+// TestAuthorize_EscalateOnUnboundToken_StillBlocks is the negative control for the test above,
+// and it differs from it in EXACTLY ONE FIELD: sender_constrained. Same escalation, same approval
+// id, same poll script.
+//
+// It is also the reason authorize's blocking path is kept rather than deleted. K5 refuses the
+// ALLOW an unbound escalation can only resolve to, so nothing reaches a target down this path
+// today -- but the path is correct for the condition it names ("a credential that outlives the
+// wait"), and if K5 is ever relaxed this is already the right behaviour. A suite that let the
+// blocking branch go untested would let it rot silently until the day it mattered.
+func TestAuthorize_EscalateOnUnboundToken_StillBlocks(t *testing.T) {
+	approvalID := uuid.NewString()
+	fake := &fakePDP{
+		resp: escalateResp(approvalID), // sender_constrained false -- the ONLY difference
+		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{
+			{Status: "pending"}, {Status: "pending"}, {Status: "approved"},
+		},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: true}
+	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
+
+	allowed, reason, gotID := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	if !allowed {
+		t.Fatalf("authorize() denied (%s), want allowed after the approval resolved -- an UNBOUND "+
+			"escalation still blocks and still forwards", reason)
+	}
+	if got := fake.getApprovalCallCount(); got != 3 {
+		t.Errorf("GetApproval called %d times, want 3 -- this path must genuinely poll, or it is not the "+
+			"blocking path at all and the control proves nothing", got)
+	}
+	if gotID != "" {
+		t.Errorf("approvalID = %q, want \"\" -- a blocked-then-approved call was not degraded, so there is "+
+			"no pending approval left for the caller to go and find", gotID)
+	}
+}
+
+// TestAuthorize_EscalateOnBoundToken_NoApprovalID_DeniesWithoutClaimingOneExists: a PDP that
+// escalates without attaching an id has violated DecideResponse.approval_id's own contract and
+// left nothing to find. Deny with a reason saying so, rather than pointing an operator at an id
+// that names nothing. Mirrors extauthz's TestCheck_EscalateWithNoApprovalID_... and hook.go's own
+// defence of the identical shape.
+func TestAuthorize_EscalateOnBoundToken_NoApprovalID_DeniesWithoutClaimingOneExists(t *testing.T) {
+	resp := boundEscalateResp("")
+	fake := &fakePDP{resp: resp, getApprovalResponses: pendingApproval()}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	allowed, reason, gotID := srv.authorize(
+		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), "/svc.Svc/Method")
+	if allowed {
+		t.Fatal("authorize() allowed, want denied")
+	}
+	if gotID != "" {
+		t.Errorf("approvalID = %q, want \"\" -- there is no approval to name", gotID)
+	}
+	if !strings.Contains(reason, "no approval id") {
+		t.Errorf("reason = %q, want it to say the PDP returned no approval id, rather than describing a "+
+			"pending approval that does not exist", reason)
+	}
+	if got := fake.getApprovalCallCount(); got != 0 {
+		t.Errorf("GetApproval called %d times, want 0 -- there is nothing to poll for", got)
+	}
+}
+
+// TestHandleStream_EscalateOnBoundToken_TrailerCarriesApprovalID is K11 over the real wire, and
+// it checks the half a direct authorize test cannot: that the approval id actually reaches the
+// caller, machine-readably, on a FAILED RPC.
+//
+// The trailer is the deterministic channel -- a retry tool reads one key rather than parsing prose
+// that may be reworded -- and the status message is the human one. Both are asserted, because
+// each serves a reader the other does not, which is the same two-channel reasoning extauthz's own
+// denyCheckResponse already applies to its response header and denial body.
+//
+// The target's own call count is asserted too: a degraded escalation is a denial, and a denial
+// must never reach the upstream.
+func TestHandleStream_EscalateOnBoundToken_TrailerCarriesApprovalID(t *testing.T) {
+	targetAddr, target := startFakeTarget(t)
+	approvalID := uuid.NewString()
+	fake := &fakePDP{resp: boundEscalateResp(approvalID), getApprovalResponses: pendingApproval()}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	var trailer metadata.MD
+	err := conn.Invoke(bearerCtx(context.Background(), testProxyBearerToken), "/svc.Svc/Method",
+		&proxyFrame{payload: []byte("req")}, &proxyFrame{},
+		grpc.ForceCodec(proxyCodec{}), grpc.Trailer(&trailer))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("Invoke() error = %v, want PermissionDenied -- K11 degrades an escalation on a bound "+
+			"token rather than holding the stream open", err)
+	}
+	if got := trailer.Get(approvalIDHeader); len(got) != 1 || got[0] != approvalID {
+		t.Errorf("trailer %s = %v, want [%q] -- the id has to reach a retry tool deterministically, by key, "+
+			"without parsing the denial's prose", approvalIDHeader, got, approvalID)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, approvalID) {
+		t.Errorf("status message = %q, want it to also carry approval id %q, for a human who captured only "+
+			"the error and does not know a trailer by that name exists", msg, approvalID)
+	}
+	if got := target.count(); got != 0 {
+		t.Errorf("target received %d call(s), want 0 -- a degraded escalation is a denial", got)
+	}
+	if got := fake.getApprovalCallCount(); got != 0 {
+		t.Errorf("GetApproval called %d times, want 0 -- degraded, not blocked", got)
+	}
+}
+
+// TestHandleStream_Deny_SetsNoApprovalTrailer is the converse, and it is what stops the trailer
+// from being set unconditionally: an ordinary denial -- no escalation, nothing pending -- must
+// carry no approval id at all. A trailer naming an approval that does not exist sends an operator
+// looking for a row nobody created.
+func TestHandleStream_Deny_SetsNoApprovalTrailer(t *testing.T) {
+	targetAddr, _ := startFakeTarget(t)
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "policy denies"}}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	var trailer metadata.MD
+	err := conn.Invoke(bearerCtx(context.Background(), testProxyBearerToken), "/svc.Svc/Method",
+		&proxyFrame{payload: []byte("req")}, &proxyFrame{},
+		grpc.ForceCodec(proxyCodec{}), grpc.Trailer(&trailer))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("Invoke() error = %v, want PermissionDenied", err)
+	}
+	if got := trailer.Get(approvalIDHeader); len(got) != 0 {
+		t.Errorf("trailer %s = %v, want it absent -- nothing escalated, so there is no approval to find",
+			approvalIDHeader, got)
+	}
+}
+
+// TestAuthorize_ApprovalIDMetadata_ForwardedAndKeptOutOfRawInput is the consuming half of K11's
+// degrade: a caller retrying an approved escalation sends back the id the denial handed it, and
+// this surface forwards it as DecideRequest.approval_id so the PDP resolves THAT approval instead
+// of creating a second one.
+//
+// The second assertion is the load-bearing one and the reason this key is consumed rather than
+// reported. resolveEscalation binds an approval to sha256(raw_input), so the retry's raw_input has
+// to be byte-identical to the escalating call's. If the id leaked into raw_input, the retry would
+// fail Approval.Verify's digest check and deny -- the approval would be unusable by the exact call
+// it was created for, and the failure would look like a policy denial rather than a plumbing bug.
+// So the test compares the two raw_inputs directly, from two calls that differ ONLY by the
+// presence of the approval-id key.
+func TestAuthorize_ApprovalIDMetadata_ForwardedAndKeptOutOfRawInput(t *testing.T) {
+	approvalID := uuid.NewString()
+
+	fakeEscalating := &fakePDP{resp: allowResponse("")}
+	srvEscalating := &proxyServer{client: startFakePDP(t, fakeEscalating), cfg: testProxyServerCfg()}
+	srvEscalating.authorize(incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), "/svc.Svc/Method")
+
+	fakeRetry := &fakePDP{resp: allowResponse("")}
+	srvRetry := &proxyServer{client: startFakePDP(t, fakeRetry), cfg: testProxyServerCfg()}
+	srvRetry.authorize(
+		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof, approvalIDHeader, approvalID),
+		"/svc.Svc/Method")
+
+	escalating, retry := fakeEscalating.lastRequest(), fakeRetry.lastRequest()
+	if escalating == nil || retry == nil {
+		t.Fatal("PDP never received one of the two requests")
+	}
+	if got := retry.GetApprovalId(); got != approvalID {
+		t.Errorf("approval_id = %q, want %q -- without it the PDP creates a SECOND pending approval "+
+			"instead of resolving the one the caller was just told to go and get approved", got, approvalID)
+	}
+	if escalating.ApprovalId != nil {
+		t.Errorf("approval_id = %v on a call that sent none, want unset -- the proto tracks presence here "+
+			"precisely so \"asking fresh\" stays distinguishable from an explicitly blank id",
+			escalating.GetApprovalId())
+	}
+	if escalating.GetRawInput() != retry.GetRawInput() {
+		t.Errorf("raw_input differs between the escalating call and its retry:\n  escalating: %s\n  retry:      %s\n"+
+			"want byte-identical -- resolveEscalation binds the approval to sha256(raw_input), so an extra "+
+			"metadata key here makes the approval unusable by the very call it was created for",
+			escalating.GetRawInput(), retry.GetRawInput())
+	}
+	if strings.Contains(retry.GetRawInput(), approvalID) {
+		t.Errorf("raw_input carries the approval id verbatim: %s", retry.GetRawInput())
+	}
+}
+
+// TestConsumedMetadataKeys asserts the set directly, rather than only through behaviour, and pins
+// what each entry is there FOR -- the two reasons differ and an editor who conflates them will get
+// the next entry wrong.
+//
+// Asserting the set rather than a count: a mutant that swapped one entry for another keeps the
+// count and changes the meaning. The credential half walks credentialHeaderNames itself so a fifth
+// credential is covered the moment it is added, not whenever someone remembers this test.
+func TestConsumedMetadataKeys(t *testing.T) {
+	for name := range credentialHeaderNames {
+		if !consumedMetadataKey(name) {
+			t.Errorf("consumedMetadataKey(%q) = false, want true -- every credential must be kept out of "+
+				"raw_input (K10)", name)
+		}
+	}
+	if !consumedMetadataKey(approvalIDHeader) {
+		t.Errorf("consumedMetadataKey(%q) = false, want true -- raw_input must stay byte-identical between "+
+			"an escalating call and its approved retry, or the approval cannot be used", approvalIDHeader)
+	}
+	// The boundary: a key that merely looks like this system's own is still ordinary request
+	// metadata an auditor should see.
+	for _, name := range []string{
+		testProxyAuthLikeHeaderName,
+		"stratium-approval",
+		"stratium-approval-id-2",
+		"x-stratium-approval-id",
+		":authority",
+		"user-agent",
+	} {
+		if consumedMetadataKey(name) {
+			t.Errorf("consumedMetadataKey(%q) = true, want false -- an over-broad match silently deletes "+
+				"request metadata from the audit record", name)
+		}
 	}
 }

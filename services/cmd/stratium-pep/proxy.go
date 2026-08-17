@@ -20,13 +20,23 @@
 // (per-message authorization, opaque message bodies -- plan §P3/P4, consequences A and B); Task
 // 4 proves the whole thing against a real service.
 //
-// ESCALATE BLOCKS. Unlike extauthz.go's Check, which cannot hold a call open (Envoy's ext_authz
-// budget is milliseconds, not minutes -- pdpgrpc.DegradeEscalateToDeny) and so degrades
-// EFFECT_ESCALATE straight to a denial, this surface holds the caller's own stream open exactly
-// like hook and mcp already do, by calling escalation.go's resolveApproval -- the same
-// transport-free wait mcp_authorize.go's decideAndRelay already reuses unmodified for its own
-// blocking surface, not a second poll loop written for a third time. See escalation.go's own
-// package doc for what reusing it here required changing in that file, and why.
+// ESCALATE BLOCKS -- EXCEPT FOR A SENDER-CONSTRAINED TOKEN (K11). Unlike extauthz.go's Check,
+// which cannot hold a call open (Envoy's ext_authz budget is milliseconds, not minutes --
+// pdpgrpc.DegradeEscalateToDeny) and so degrades EFFECT_ESCALATE straight to a denial, this
+// surface holds the caller's own stream open exactly like hook and mcp already do, by calling
+// escalation.go's resolveApproval -- the same transport-free wait mcp_authorize.go's
+// decideAndRelay already reuses unmodified for its own blocking surface, not a second poll loop
+// written for a third time. See escalation.go's own package doc for what reusing it here required
+// changing in that file, and why.
+//
+// Phase 15 carved out the one case where it must not: an escalation carrying a BOUND token
+// degrades here too (degradeEscalation, below), because the proof it would have to wait with does
+// not survive the wait -- single-use (K8), short-lived (K9), and unmintable by this process, which
+// does not hold the key. §4.6's split is therefore narrower than it looked: A SURFACE MAY BLOCK
+// ONLY WHILE THE CREDENTIAL IT WOULD WAIT WITH OUTLIVES THE WAIT. Since K5 already refuses an
+// unbound token on this surface, the blocking path is unreachable in practice today -- it is kept
+// anyway, deliberately, because it is still correct for the condition it names; see its own
+// comment in authorize.
 //
 // NO REISSUE ON DENY. hook.go's runHook and mcp_authorize.go's decideAndRelay each attempt
 // exactly one reissueAndRetryDecide on a first EFFECT_DENY, because a session file
@@ -118,6 +128,10 @@
 // per-message authorization is, and for a second reason on top of it: there is nothing to bind a
 // per-message proof TO, since htu is a method path that does not change between messages of one
 // stream. docs/pep.md says the same thing in the operator's own terms.
+//
+// The one place a SECOND proof is genuinely needed is an escalation, and that is exactly why K11
+// degrades one rather than blocking: the retry needs a fresh proof and only the client can mint
+// it, so the client has to be handed the call back to do so.
 //
 // PASSTHROUGH CODEC + UNKNOWN-SERVICE HANDLER. This proxy has no target .proto for anything it
 // forwards -- that is the entire point of "transparent" -- so it cannot register a real service
@@ -529,7 +543,29 @@ func (p *proxyServer) handleStream(_ any, stream grpc.ServerStream) error {
 		return status.Error(codes.Internal, "stratium-pep: proxy: could not determine the called method")
 	}
 
-	if allowed, reason := p.authorize(stream.Context(), fullMethod); !allowed {
+	allowed, reason, approvalID := p.authorize(stream.Context(), fullMethod)
+	if !allowed {
+		if approvalID != "" {
+			// K11's degraded escalation. Two channels for the same id, the same pair and the same
+			// reasoning extauthz's denyCheckResponse already uses for its own HTTP surface: a
+			// trailer is what a retry tool or a wrapper can extract deterministically, key by key,
+			// without parsing prose that might be reworded later; the status MESSAGE below is what
+			// a human staring at a captured error sees -- in a client log, a `grpcurl` transcript,
+			// a stack trace that kept only the message. Neither channel alone serves both readers.
+			//
+			// Trailing metadata rather than status details (google.rpc.Status's own details field):
+			// details would mean choosing a proto message type to carry one string -- either a new
+			// one in this repo's proto, or genproto's errdetails, a dependency and a vocabulary
+			// this binary has no other use for. A trailer is gRPC's own direct analogue of the
+			// response header extauthz already sends, it reuses that surface's own header name
+			// (approvalIDHeader) so an operator sees ONE key across both, and grpc-go delivers
+			// trailers with the status on a failed RPC exactly as it does on a successful one.
+			//
+			// SetTrailer returns nothing to check -- it appends to metadata the transport has not
+			// sent yet -- so there is no failure here that could suppress the denial below. The
+			// denial is returned whether or not an operator ever sees the id.
+			stream.SetTrailer(metadata.Pairs(approvalIDHeader, approvalID))
+		}
 		return status.Error(codes.PermissionDenied, reason)
 	}
 	return p.forward(fullMethod, stream)
@@ -565,10 +601,10 @@ func (p *proxyServer) handleStream(_ any, stream grpc.ServerStream) error {
 // something is permitted, and refusing something the PDP permitted is the direction a PEP is
 // always free to move in, the same direction an unreachable PDP already denies in here. A PEP may
 // narrow; it may never widen.
-func (p *proxyServer) authorize(ctx context.Context, method string) (allowed bool, reason string) {
+func (p *proxyServer) authorize(ctx context.Context, method string) (allowed bool, reason string, approvalID string) {
 	req, err := decideRequestFromStream(ctx, method, p.cfg)
 	if err != nil {
-		return false, fmt.Sprintf("stratium-pep: %s", err)
+		return false, fmt.Sprintf("stratium-pep: %s", err), ""
 	}
 
 	// Derived from ctx, not context.Background() -- the same reason extauthz.go's Check chains
@@ -582,13 +618,31 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 
 	resp, err := p.client.Decide(decideCtx, req)
 	if err != nil {
-		return false, fmt.Sprintf("stratium-pep: %s", describeRPCError(err, agentOrDelegationUnknownMsg))
+		return false, fmt.Sprintf("stratium-pep: %s", describeRPCError(err, agentOrDelegationUnknownMsg)), ""
 	}
 
 	switch resp.GetEffect() {
 	case pdpgrpc.Effect_EFFECT_ALLOW:
-		return allowIfSenderConstrained(resp)
+		allowed, reason := allowIfSenderConstrained(resp)
+		return allowed, reason, ""
 	case pdpgrpc.Effect_EFFECT_ESCALATE:
+		// K11: a bound token does not block here. See degradeEscalation for the whole case.
+		if resp.GetSenderConstrained() {
+			return degradeEscalation(resp)
+		}
+
+		// AN UNBOUND TOKEN STILL BLOCKS, and this path is deliberately kept rather than deleted
+		// even though K5 refuses the ALLOW it can only ever resolve to -- which makes it, today,
+		// unreachable in any deployment that ends in a forwarded call.
+		//
+		// It stays because it is the CORRECT behaviour for the condition it names, and the
+		// condition is not "unbound" but "a credential that outlives the wait". K11's own
+		// reasoning is that a surface may block only while the credential it would wait with
+		// survives the waiting; a bearer token does, a single-use short-lived proof does not.
+		// If K5 is ever relaxed, or a surface class arrives whose credential outlives a human,
+		// blocking is what that case wants and this is already it. Deleting it would leave the
+		// next person to rediscover both the mechanism and the rule.
+		//
 		// resolveApproval (escalation.go) owns everything from here: it polls GetApproval and
 		// either retries Decide with the resolved approval id or reports why not, bounding the
 		// wait at p.cfg.ApprovalTimeout AT THE LATEST -- the same bound hook.go's and
@@ -602,16 +656,15 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 		// approval both fall out of resolveApproval's own reason text; this function adds nothing
 		// case-specific on top of it.
 		//
-		// K5 is applied to the RETRY's own response, not to resp: an escalation is not an
-		// ALLOW, and DecideResponse.sender_constrained's proto comment says in capitals to
-		// consult it only when effect is EFFECT_ALLOW. resolveApproval hands back the response
-		// it resolved to for exactly this reason -- it is the response this function is about
-		// to act on, and the only one entitled to answer whether the token was bound.
+		// K5 is applied to the RETRY's own response, not to resp: the retry is the ALLOW this
+		// function is about to act on, and sender_constrained is only meaningful on an ALLOW.
+		// resolveApproval hands the resolved response back for exactly that.
 		effect, escReason, resolved := resolveApproval(ctx, p.client, p.cfg.ConnectTimeout, p.cfg.ApprovalPollInterval, p.cfg.ApprovalTimeout, req, resp)
 		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
-			return allowIfSenderConstrained(resolved)
+			allowed, reason := allowIfSenderConstrained(resolved)
+			return allowed, reason, ""
 		}
-		return false, escReason
+		return false, escReason, ""
 	default:
 		// EFFECT_DENY, and any value this build does not recognize (the proto documents
 		// EFFECT_DENY as the zero value for exactly this case -- see hook.go's identical default
@@ -619,8 +672,80 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 		// this process is synthesizing -- the same convention hook.go's and extauthz.go's own
 		// default DENY cases follow, so a human reading a denial can tell at a glance whether the
 		// PDP refused the call or this process failed before ever asking it one.
-		return false, resp.GetReason()
+		return false, resp.GetReason(), ""
 	}
+}
+
+// degradeEscalation is spec §4.7.2 K11: on this surface, an escalation carrying a
+// SENDER-CONSTRAINED token degrades to a denial naming the pending approval, exactly as
+// extauthz's checkResponseFromDecide does for every escalation on its own surface. The client
+// retries once approved, with a FRESH proof, minted by the only party that can mint one.
+//
+// # Why a blocking surface stops blocking for this one credential
+//
+// spec §4.6 splits the surfaces into blocking (hook, mcp, proxy) and non-blocking (extauthz), and
+// until Phase 15 that split was purely about whether the transport could hold a call open for a
+// human. K11 narrows it, and the narrowing is the useful part to carry: A SURFACE MAY BLOCK ONLY
+// WHILE THE CREDENTIAL IT WOULD WAIT WITH OUTLIVES THE WAIT. A bearer token does. A DPoP proof
+// does not -- it is single-use (K8) and short-lived (K9), and a human approval is neither.
+//
+// Concretely, and this was measured rather than predicted (Task 6's own integration run):
+// resolveApproval must resend req BYTE-IDENTICAL, because resolveEscalation binds the approval to
+// input_digest -- so it resends the same dpop_proof, whose jti the ORIGINAL call already spent,
+// and the PDP refuses the retry with "store: dpop proof already spent". Had it not, a human
+// slower than STRATIUM_DPOP_FRESHNESS_WINDOW would have put the same proof outside the window
+// instead. This process cannot mint a replacement: the client holds the private key, and a
+// blocking surface has by definition not returned to the client.
+//
+// # The alternative that was rejected, and why it is worse than the deny
+//
+// Skipping the proof check on a retry carrying an approval_id was considered and refused.
+// Approvals are NOT consumed (resolveEscalation, internal/pdpgrpc/escalation.go), so anyone
+// holding the token plus the approval id could re-execute the approved action for the approval's
+// entire TTL WITHOUT EVER PROVING POSSESSION -- which is exactly what K5 exists to close on this
+// surface. Degrading costs one extra round trip; that costs the property.
+//
+// # Reading sender_constrained on an ESCALATE
+//
+// The field's proto comment leads with "CONSULT IT ONLY WHEN effect IS EFFECT_ALLOW", and this
+// reads it on an ESCALATE, so the exception is stated rather than taken quietly. That headline
+// rests on a stated premise -- "a surface refuses a denied decision anyway, so an ALLOW is the
+// only case in which this field has to be asked at all" -- and K11 is a second case, which did
+// not exist when that sentence was written. The comment's own enumeration directly below it
+// already sanctions this read in as many words: a decision that REACHED the three-leg evaluation
+// carries the real answer, "or that escalates -- reports true". An escalation always reaches it
+// (server.go sets the field on Decide's tail, which the escalate branch flows through), so the
+// value here is the real one, never the "not established" false that the six early denials
+// report. The rule the headline is really protecting -- do not read this on a DENIAL -- is
+// untouched: this reads it on an escalation and nowhere else.
+//
+// req.GetDpopProof() != "" was weighed as an alternative condition needing no exception at all,
+// and rejected as the wrong fact: it says the caller SENT something, where what makes the retry
+// impossible is that the PDP VERIFIED and SPENT it. Those differ for an unbound token that
+// attached a proof anyway -- matchProof ignores it and spends nothing, so that call could safely
+// have blocked -- and picking the caller-shaped proxy for a PDP-shaped fact is how a surface ends
+// up enforcing something subtly other than the rule it cites.
+//
+// A PDP that escalates without attaching an id has violated DecideResponse.approval_id's own
+// contract and left nothing to find; that denies with a reason saying so rather than pointing an
+// operator at an id that names nothing, mirroring extauthz's checkResponseFromDecide and hook.go's
+// resolveApproval, which both defend the identical shape.
+func degradeEscalation(resp *pdpgrpc.DecideResponse) (allowed bool, reason string, approvalID string) {
+	approvalID = resp.GetApprovalId()
+	if approvalID == "" {
+		return false, fmt.Sprintf(
+			"stratium-pep: PDP escalated this call but returned no approval id to attach; denying (PDP reason: %s)",
+			resp.GetReason()), ""
+	}
+	// The reason names what the caller must actually DO, and the instruction is not the same one
+	// extauthz gives: "retry after approval" would send a client back with the proof it already
+	// used, which the PDP refuses as a replay (K8). A FRESH proof is the whole point of the
+	// ruling, so the text says so rather than leaving it to be discovered from a second denial.
+	return false, fmt.Sprintf(
+		"stratium-pep: this call requires approval and is pending (approval id %s); once approved, retry it "+
+			"with a FRESH DPoP proof -- the proof presented with this call is single-use (RFC 9449, spec K8) "+
+			"and cannot be replayed on the retry -- PDP: %s",
+		approvalID, resp.GetReason()), approvalID
 }
 
 // allowIfSenderConstrained is K5: this surface forwards only a call whose token was bound to a
@@ -733,7 +858,7 @@ type proxyRequestMetadata struct {
 func decideRequestFromStream(ctx context.Context, method string, cfg proxyConfig) (*pdpgrpc.DecideRequest, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 
-	token, proof, stripped, err := extractCredentialsFromMetadata(md)
+	token, proof, approvalID, stripped, err := extractCredentialsFromMetadata(md)
 	if err != nil {
 		return nil, err
 	}
@@ -760,7 +885,7 @@ func decideRequestFromStream(ctx context.Context, method string, cfg proxyConfig
 		return nil, fmt.Errorf("could not serialize request metadata: %w", err)
 	}
 
-	return &pdpgrpc.DecideRequest{
+	req := &pdpgrpc.DecideRequest{
 		AgentId:  cfg.AgentID,
 		Subject:  cfg.Subject,
 		Tool:     method, // P1: the full method IS the tool identity.
@@ -775,7 +900,22 @@ func decideRequestFromStream(ctx context.Context, method string, cfg proxyConfig
 		// can be influenced by the caller except the method path itself, which is the part of
 		// htu that is SUPPOSED to vary per call.
 		ObservedUri: cfg.PublicURI + method,
-	}, nil
+	}
+	// The consuming half of K11's degrade: a caller retrying an approved escalation sends back the
+	// id the denial handed it, and this forwards it so the PDP resolves that approval instead of
+	// creating a second one. Set only when non-empty -- approval_id is `optional` in the proto
+	// precisely so "asking fresh" stays distinguishable from an explicitly-blank id, which its own
+	// doc comment calls a caller bug worth an InvalidArgument.
+	//
+	// Accepting it from the caller is safe, and it is not this process trusting anything: the PDP
+	// re-verifies the approval in full (resolveEscalation -> Approval.Verify) against the tenant,
+	// root principal, agent, delegation, tool, verb, tier, input_digest, expiry, and status. A
+	// forged, expired, or borrowed id fails there and denies. Nothing about the request's own
+	// authorization is decided here, which is what D1 forbids.
+	if approvalID != "" {
+		req.ApprovalId = &approvalID
+	}
+	return req, nil
 }
 
 // grpcObservedMethod is DecideRequest.observed_method's value on this surface, always: gRPC is
@@ -837,22 +977,22 @@ const grpcObservedMethod = "POST"
 // partial result a careless caller could mistake for a usable one. A MISSING dpop key is not one
 // of those errors: proof comes back "" and DecideRequest.dpop_proof carries the empty string,
 // which its own proto doc defines as "the caller presented none".
-func extractCredentialsFromMetadata(md metadata.MD) (token, proof string, stripped map[string][]string, err error) {
+func extractCredentialsFromMetadata(md metadata.MD) (token, proof, approvalID string, stripped map[string][]string, err error) {
 	stripped = make(map[string][]string, len(md))
-	// creds is the ONLY thing the reads below draw from, and it is populated only for names in
-	// credentialHeaderNames -- see this function's own doc comment for why that containment is
-	// the whole of K10's strip-by-omission for the proof.
+	// consumed is the ONLY thing the reads below draw from, and it is populated only for names
+	// consumedMetadataKey reports -- see this function's own doc comment for why that containment
+	// is the whole of K10's strip-by-omission for the proof.
 	//
-	// A key present with no values at all is not stored: it carries no credential, and leaving it
-	// out keeps "an entry exists" and "a value exists" the same fact, so the reads below can index
-	// [0] without a second length check each. It is still consumed by the loop, so it is still
-	// absent from stripped.
-	creds := make(map[string][]string, len(credentialHeaderNames))
+	// A key present with no values at all is not stored: it carries nothing, and leaving it out
+	// keeps "an entry exists" and "a value exists" the same fact, so the reads below can index [0]
+	// without a second length check each. It is still consumed by the loop, so it is still absent
+	// from stripped.
+	consumed := make(map[string][]string, len(credentialHeaderNames)+1)
 	for name, values := range md {
 		lower := strings.ToLower(name)
-		if credentialHeaderNames[lower] {
+		if consumedMetadataKey(lower) {
 			if len(values) > 0 {
-				creds[lower] = values
+				consumed[lower] = values
 			}
 			continue
 		}
@@ -864,22 +1004,46 @@ func extractCredentialsFromMetadata(md metadata.MD) (token, proof string, stripp
 	// a shape this function has grounds to prefer the LAST of over the first. The first is also
 	// what every one of those values would have contributed FIRST on the wire, so taking it here
 	// is consistent with how a normal single-valued header is read.
-	if v, ok := creds[dpopHeaderName]; ok {
+	if v, ok := consumed[dpopHeaderName]; ok {
 		proof = v[0]
 	}
-	authValues, found := creds[authorizationHeaderName]
+	if v, ok := consumed[approvalIDHeader]; ok {
+		approvalID = v[0]
+	}
+	authValues, found := consumed[authorizationHeaderName]
 	if !found {
-		return "", "", nil, errors.New("no authorization metadata")
+		return "", "", "", nil, errors.New("no authorization metadata")
 	}
 	authValue := authValues[0]
 	if !strings.HasPrefix(authValue, bearerPrefix) {
-		return "", "", nil, errors.New("authorization metadata is not a Bearer token")
+		return "", "", "", nil, errors.New("authorization metadata is not a Bearer token")
 	}
 	token = strings.TrimPrefix(authValue, bearerPrefix)
 	if token == "" {
-		return "", "", nil, errors.New("authorization metadata carries an empty Bearer token")
+		return "", "", "", nil, errors.New("authorization metadata carries an empty Bearer token")
 	}
-	return token, proof, stripped, nil
+	return token, proof, approvalID, stripped, nil
+}
+
+// consumedMetadataKey reports whether lower -- already lower-cased -- names metadata this surface
+// READS AND REMOVES rather than reports as part of the request it describes. Two kinds qualify,
+// for two different reasons that happen to demand the same treatment:
+//
+//   - Every credentialHeaderNames entry (extauthz.go), because raw_input is hashed into an
+//     append-only audit chain and a credential written there cannot be edited out (K10).
+//   - approvalIDHeader, which is not a credential at all. It is removed because raw_input must
+//     stay BYTE-IDENTICAL between an escalating call and its approved retry: resolveEscalation
+//     (internal/pdpgrpc/escalation.go) binds the approval to sha256(raw_input), so a retry
+//     carrying one extra metadata key would fail Approval.Verify's digest check -- the approval
+//     would be unusable by the exact call it was created for. Reporting it would also make
+//     raw_input describe this system's own control plane rather than the caller's request.
+//
+// One predicate, one loop, one place a key stops being part of the request -- rather than the
+// separate "also delete this one" pass credentialHeaderNames' own doc comment argues against. The
+// containment property is unchanged and still structural: everything the reads above draw from is
+// a key this returns true for, so everything read is also absent from stripped.
+func consumedMetadataKey(lower string) bool {
+	return credentialHeaderNames[lower] || lower == approvalIDHeader
 }
 
 // forward relays fullMethod between serverStream (the caller handleStream accepted) and

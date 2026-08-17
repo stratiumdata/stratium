@@ -482,144 +482,132 @@ func TestIntegration_Proxy_RevokedDelegationDeniesAtDelegationLeg(t *testing.T) 
 	}
 }
 
-// TestIntegration_Proxy_EscalateBlocksThenResolves is proof 5: an escalating
-// call BLOCKS -- proxy is a blocking surface (spec §4.6), unlike extauthz's
-// own non-blocking degrade (Phase 10 Task 4's proof 5) -- and then, once an
-// out-of-band approval resolves it, the call ends rather than hanging. This
-// is the blocking counterpart to Phase 10's non-blocking degrade, and it is
-// the distinction spec §4.6 draws between the two surface classes.
+// TestIntegration_Proxy_EscalateDegradesThenFreshProofRetrySucceeds is proof
+// 5, and as of spec §4.7.2 K11 it proves the OPPOSITE of what it proved
+// through Phase 11: an escalating call carrying a sender-constrained token
+// does NOT block here. It degrades to a denial naming the pending approval,
+// exactly as extauthz does -- and the client, once the approval lands,
+// retries with a FRESH proof and is forwarded.
 //
-// *** WHAT THIS PROOF NO LONGER SHOWS, AND WHY. Until Phase 15 this test
-// ended by asserting the call was FORWARDED after approval. It is not, as of
-// this task, and the change is a DEFECT this task surfaced rather than a
-// property anyone designed:
+// WHY THE BLOCKING BEHAVIOUR HAD TO GO, measured rather than argued (this is
+// what the pre-K11 version of this test actually failed with):
+// escalation.go's resolveApproval must resend the request byte-identical,
+// because resolveEscalation binds the approval to input_digest -- so it
+// resends the same dpop_proof, whose jti the ORIGINAL call already spent, and
+// the PDP refuses the retry with "store: dpop proof already spent" (K8). Had
+// it not, a human slower than STRATIUM_DPOP_FRESHNESS_WINDOW would have put
+// the same proof outside the window instead (K9). pep-proxy cannot mint a
+// replacement: the client holds the private key, and a blocking surface has
+// by definition not returned to the client. So §4.6's blocking/non-blocking
+// split is narrower than it looked -- A SURFACE MAY BLOCK ONLY WHILE THE
+// CREDENTIAL IT WOULD WAIT WITH OUTLIVES THE WAIT -- and a DPoP proof does
+// not.
 //
-// An escalation's approved retry is a SECOND Decide call about the SAME
-// request. escalation.go's resolveApproval must resend req byte-identical
-// (resolveEscalation binds the approval to input_digest), so it resends the
-// same dpop_proof -- and the PDP spends a jti per Decide CALL, so the retry
-// is refused with "store: dpop proof already spent" (K8). Even if it were
-// not, a human taking longer than STRATIUM_DPOP_FRESHNESS_WINDOW would put
-// the same retry outside the window (K9). A bound token therefore cannot
-// survive an escalation on this surface at all, and an UNBOUND one cannot
-// either, because K5 refuses the resulting ALLOW.
+// THE SECOND HALF IS THE POINT. Proving the degrade alone would only prove
+// that escalation fails. What makes K11 a workable ruling rather than a
+// closed door is that the approved retry, carrying a proof the client minted
+// after approval, actually reaches the upstream -- with proof of possession
+// intact end to end and no approval ever consumed without a live proof. That
+// is the second half below, and it is checked against grpc-target's own call
+// counter rather than the caller's own success.
 //
-// Both candidate resolutions are RULINGS rather than implementation details,
-// which is why this task does not pick one: (a) treat an approved retry as a
-// continuation and skip the proof check when approval_id resolves to an
-// approved row bound to this exact request -- but approvals are not consumed
-// (resolveEscalation, internal/pdpgrpc/escalation.go), so anyone holding the
-// token plus the approval id could then re-execute the approved action for
-// the approval's whole TTL without ever proving possession; or (b) make the
-// caller re-prove after approval, which needs a caller-visible retry this
-// surface's blocking design does not have. See task-6-report.md.
-//
-// The assertion below therefore states the CURRENT behaviour and says so.
-// Invert it when the ruling lands; do not delete it, because the blocking
-// half above is spec §4.6's own property and is unaffected.
-//
-// The Fetch call runs on its own goroutine because it blocks: pep-proxy
-// holds the caller's own stream open (escalation.go's resolveApproval,
-// reused unmodified from hook/mcp -- proxy.go's own package doc, ESCALATE
-// BLOCKS) rather than returning immediately the way extauthz's Check must.
-// The main goroutine polls for the pending approval row
-// (waitForPendingProxyApproval) and approves it out of band, exactly as the
-// control plane would -- a direct UPDATE, since the PDP's own serving role
-// has no UPDATE grant on approvals (E7, TestIntegration_Approvals_
-// ServingRoleCannotUpdate) -- while the call is still blocked. context.
-// Background(), not t.Context(), backs the blocked call deliberately: it
-// must keep running on its own goroutine independent of anything this test
-// function's own context lifecycle does, the same choice proxy_test.go's
-// own wire-level escalation test makes.
-func TestIntegration_Proxy_EscalateBlocksThenResolves(t *testing.T) {
+// The retry carries the approval id in "stratium-approval-id" metadata, the
+// same key the degraded denial hands back in its trailer. See
+// decideRequestFromStream (cmd/stratium-pep/proxy.go) for why this surface
+// consumes that key instead of reporting it: raw_input must stay
+// byte-identical to the escalating call's, since that is what the approval is
+// bound to.
+func TestIntegration_Proxy_EscalateDegradesThenFreshProofRetrySucceeds(t *testing.T) {
 	ensureProxyAgent(t)
 	ensureProxyCatalog(t)
 	ensureProxyPermitPolicy(t)
 
 	escalateAt := models.ActionTierExternalComms
-	delegation := newProxyDelegation(t, "proxy proof 5: an escalating call blocks, then forwards on approval",
+	delegation := newProxyDelegation(t, "proxy proof 5 (K11): an escalation degrades, and a fresh-proof retry is forwarded",
 		models.ActionTierDestructive, &escalateAt)
-	// Bound, unlike extauthz's own proof 5, and the difference is exactly the
-	// difference between the two surfaces: extauthz DEGRADES an escalation to
-	// a denial, so its escalating call never reaches the branch K5 guards.
-	// proxy BLOCKS and then forwards, so the approved retry ends in a real
-	// ALLOW -- which allowIfSenderConstrained refuses for an unbound token
-	// (TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused,
-	// proxy_test.go). ONE proof, minted once, carries the whole escalation:
-	// the retry is an internal Decide call reusing the same request, so its
-	// jti is spent exactly once no matter how long the human took.
+	// ONE token, TWO proofs -- which is the whole ruling in one line. The
+	// client keeps its key and mints a second proof after approval; nothing
+	// re-presents the first.
 	key := dpopKey(t)
 	token := mintProxyBoundToken(t, delegation.ID, key)
-	proof := proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)
 
-	type fetchResult struct {
-		resp *grpctarget.EchoResponse
-		err  error
-	}
-	done := make(chan fetchResult, 1)
-	go func() {
-		ctx := boundOutgoingCtx(context.Background(), token, proof)
-		resp, err := proxyTargetClient.Fetch(ctx, &grpctarget.EchoRequest{Message: "proof5-payload"})
-		done <- fetchResult{resp: resp, err: err}
-	}()
-
-	// BLOCKS: nothing arrives yet, checked well before pep-proxy's own 30s
-	// ApprovalTimeout (docker-compose.yml) could fire.
-	select {
-	case res := <-done:
-		t.Fatalf("Fetch() returned early (resp=%v err=%v) -- the call must still be blocked on escalation", res.resp, res.err)
-	case <-time.After(500 * time.Millisecond):
-	}
-
-	beforeApprove, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	before, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
 	if err != nil {
-		t.Fatalf("CallCount() before-approve error = %v", err)
+		t.Fatalf("CallCount() before error = %v", err)
 	}
 
+	// DEGRADES, and returns promptly rather than holding the stream open.
+	// t.Context() with no goroutine is itself part of the assertion: through
+	// Phase 11 this call blocked and had to run on one.
+	var trailer metadata.MD
+	_, err = proxyTargetClient.Fetch(
+		boundOutgoingCtx(t.Context(), token, proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)),
+		&grpctarget.EchoRequest{Message: "proof5-escalating"}, grpc.Trailer(&trailer))
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want PermissionDenied -- K11 degrades an escalation on a bound token")
+	}
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Errorf("status code = %s, want %s", got, want)
+	}
+	approvalID := ""
+	if got := trailer.Get(approvalIDHeaderName); len(got) == 1 {
+		approvalID = got[0]
+	}
+	if approvalID == "" {
+		t.Fatalf("trailer %s is empty -- K11 requires the denial to carry enough to FIND the pending "+
+			"approval; without it the degrade is a dead end. status: %s", approvalIDHeaderName, status.Convert(err).Message())
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, approvalID) {
+		t.Errorf("status message = %q, want it to also carry approval id %q, for a human who captured only "+
+			"the error", msg, approvalID)
+	}
+	if afterDegrade, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{}); err != nil {
+		t.Fatalf("CallCount() after-degrade error = %v", err)
+	} else if afterDegrade.GetCount() != before.GetCount() {
+		t.Errorf("grpc-target's own call count = %d -> %d, want unchanged -- a degraded escalation is a "+
+			"denial and must never reach the upstream", before.GetCount(), afterDegrade.GetCount())
+	}
+
+	// The id names a real pending row belonging to the right principal --
+	// checked against the database, not merely echoed back.
+	approvalUUID, err := uuid.Parse(approvalID)
+	if err != nil {
+		t.Fatalf("trailer %s = %q, want a UUID: %v", approvalIDHeaderName, approvalID, err)
+	}
 	pending := waitForPendingProxyApproval(t, delegation.ID)
+	if pending.ID != approvalUUID {
+		t.Fatalf("pending approval id = %s, want the one the denial named (%s)", pending.ID, approvalUUID)
+	}
 	if pending.RootPrincipal != proxySubject {
 		t.Errorf("pending approval RootPrincipal = %q, want %q", pending.RootPrincipal, proxySubject)
 	}
+
+	// Out of band, exactly as the control plane would -- a direct UPDATE,
+	// since the PDP's own serving role has no UPDATE grant on approvals (E7,
+	// TestIntegration_Approvals_ServingRoleCannotUpdate).
 	approveApproval(t, proxyTenant, pending.ID, proxySubject)
 
-	// THEN RESOLVES: once approved, pep-proxy's own poll loop notices
-	// (STRATIUM_PEP_APPROVAL_POLL_INTERVAL: 200ms, docker-compose.yml) and
-	// the blocked call ends. That it ends AT ALL -- promptly, on the
-	// approval, rather than by hitting the 30s ApprovalTimeout -- is the half
-	// of §4.6 this proof still establishes end to end.
-	select {
-	case res := <-done:
-		// See this test's own doc comment. Today the retry is refused
-		// because the proof it must resend has a single-use jti that the
-		// ORIGINAL call already spent. Asserted precisely, so that when the
-		// ruling lands this fails loudly rather than passing on a new
-		// behaviour it was never checked against.
-		if res.err == nil {
-			t.Fatalf("Fetch() succeeded after approval (resp=%v) -- if the escalation/DPoP interaction has "+
-				"been ruled on, invert this assertion and restore the target-call-count check below; do not "+
-				"leave the proof asserting behaviour that has changed", res.resp)
-		}
-		if got, want := status.Code(res.err), codes.PermissionDenied; got != want {
-			t.Errorf("status code = %s, want %s", got, want)
-		}
-		if msg := status.Convert(res.err).Message(); !strings.Contains(msg, "already spent") {
-			t.Errorf("status message = %q, want the spent-jti wording -- any OTHER denial means the "+
-				"escalation failed for a reason this proof has not accounted for, which is worth "+
-				"investigating rather than absorbing", msg)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("Fetch() did not return within 20s after approval -- want the blocked call to end promptly " +
-			"on the approval rather than on ApprovalTimeout; that promptness is what §4.6 buys")
+	// THE RETRY: same token, same method, same payload, a FRESH proof, and
+	// the approval id. This is the half that makes K11 a workable ruling.
+	retryCtx := metadata.AppendToOutgoingContext(
+		boundOutgoingCtx(t.Context(), token, proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)),
+		approvalIDHeaderName, approvalID)
+	resp, err := proxyTargetClient.Fetch(retryCtx, &grpctarget.EchoRequest{Message: "proof5-escalating"})
+	if err != nil {
+		t.Fatalf("retry after approval error = %v, want success -- proof of possession has to survive an "+
+			"approval end to end, or K11 leaves an escalating call with no way to ever complete", err)
+	}
+	if resp.GetMessage() != "proof5-escalating" {
+		t.Errorf("response message = %q, want the target's own echoed %q", resp.GetMessage(), "proof5-escalating")
 	}
 
-	afterApprove, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	after, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
 	if err != nil {
-		t.Fatalf("CallCount() after-approve error = %v", err)
+		t.Fatalf("CallCount() after error = %v", err)
 	}
-	if afterApprove.GetCount() != beforeApprove.GetCount() {
-		t.Errorf("grpc-target's own call count = %d -> %d, want unchanged -- the retry was refused, and a "+
-			"refused call must never reach the upstream",
-			beforeApprove.GetCount(), afterApprove.GetCount())
+	if after.GetCount() != before.GetCount()+1 {
+		t.Errorf("grpc-target's own call count = %d -> %d, want exactly +1 -- reached exactly once, only "+
+			"on the approved retry", before.GetCount(), after.GetCount())
 	}
 }
 
