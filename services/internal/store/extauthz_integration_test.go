@@ -464,11 +464,21 @@ func TestIntegration_Envoy_PermittedActionReachesUpstream(t *testing.T) {
 
 	// A 200 here is now two properties at once, and the second is the one
 	// only a live stack can establish: the action is permitted, AND the htu
-	// this test signed independently ("http://"+envoyAddr+path) equals the
-	// observed_uri extauthz reconstructed from what real Envoy reported. Any
-	// disagreement -- a scheme read from the wrong place, an authority taken
-	// from the upstream rather than the downstream, a query string left on --
-	// denies at the PDP's htu comparison instead.
+	// this test signed independently ("http://" + extauthzPublicAuthority +
+	// path) equals the observed_uri extauthz reconstructed from what real
+	// Envoy reported. Any disagreement -- a scheme read from the wrong place,
+	// an authority taken from the upstream rather than the downstream, a query
+	// string left on -- denies at the PDP's htu comparison instead.
+	//
+	// The signed authority is deliberately NOT envoyAddr. Compose publishes
+	// Envoy on an ephemeral port, so no static allowlist could name the dialed
+	// address; envoyDo sets http.Request.Host to extauthzPublicAuthority and
+	// this proof signs the same value. That is what a real client does -- it
+	// dials whatever DNS resolves and addresses a stable hostname, and RFC
+	// 9449 §4.3 binds htu to the URI the client USED, never to the socket.
+	// It also makes the two strings genuinely different, which is what lets
+	// this proof show that Envoy reports the caller's Host rather than the
+	// address it was reached on -- the hazard the allowlist exists to close.
 	status, body, _, _ := envoyDo(t, http.MethodGet, path, token,
 		map[string]string{"DPoP": extauthzProof(t, key, http.MethodGet, path)})
 	if status != http.StatusOK {
