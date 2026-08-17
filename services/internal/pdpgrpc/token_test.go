@@ -6,15 +6,18 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -96,12 +99,20 @@ var identifyingClaimKeys = []string{expiryClaim, issuedAtClaim, tokenIDClaim, su
 // classification_caps, resource_constraints, or a name nobody has thought
 // of yet). This is the test the brief calls for explicitly: "assert that
 // explicitly, since it is the property K3 rests on."
+//
+// The empty jkt is what an unbound token is minted with, so this exact-set
+// comparison ALSO fails if cnf appears when no key was supplied — the named
+// Phase 15 mutation. It is not the primary guard against that (see
+// TestTokenClaims_NoThumbprint_OmitsConfirmationClaimEntirely, which names
+// the property, and TestIssueToken_NoJWK_TokenCarriesNoConfirmationClaim,
+// which proves it through the real RPC on a real signed token), because
+// this test's failure message would blame K3 for a Phase 15 defect.
 func TestTokenClaims_CarriesExactlyTheIdentifyingFields(t *testing.T) {
 	delegationID := uuid.New()
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	expiresAt := now.Add(time.Hour)
 
-	claims := tokenClaims(delegationID, "tenant-xyz", now, expiresAt)
+	claims := tokenClaims(delegationID, "tenant-xyz", "", now, expiresAt)
 
 	if got := claimKeys(claims); !slices.Equal(got, identifyingClaimKeys) {
 		t.Fatalf("claim keys = %v, want exactly %v", got, identifyingClaimKeys)
@@ -127,11 +138,99 @@ func TestTokenClaims_TokenIDUniquePerCall(t *testing.T) {
 	delegationID := uuid.New()
 	now := time.Now()
 
-	a := tokenClaims(delegationID, "tenant-xyz", now, now.Add(time.Hour))
-	b := tokenClaims(delegationID, "tenant-xyz", now, now.Add(time.Hour))
+	a := tokenClaims(delegationID, "tenant-xyz", "", now, now.Add(time.Hour))
+	b := tokenClaims(delegationID, "tenant-xyz", "", now, now.Add(time.Hour))
 
 	if a[tokenIDClaim] == b[tokenIDClaim] {
 		t.Errorf("jti = %v for both calls, want two distinct token ids", a[tokenIDClaim])
+	}
+}
+
+// --- Key binding: cnf.jkt (spec §4.7.2 K6) -------------------------------
+
+// rfc9449ExampleJWK and rfc9449ExampleThumbprint are transcribed from RFC
+// 9449: §4.2's example proof carries this key in its jwk header, and §6.1
+// publishes the cnf.jkt of the access token that proof is bound to — the RFC
+// publishing, for one key, exactly the input and the output of the operation
+// under test here.
+//
+// The expectation therefore does not share a code path with the code that
+// produces it. Asserting instead that the issued token's cnf.jkt equals
+// dpop.Thumbprint(sameJWK) would agree with itself no matter how wrong the
+// thumbprint was, and would go on agreeing after a mutation that replaced
+// the whole computation — the value is only meaningful because a verifier
+// somewhere else, following the same RFC, arrives at it independently.
+//
+// Duplicated from internal/dpop's own test file rather than shared: it is a
+// constant published by an RFC, and a fixture exported from one package's
+// tests so another can reuse it is a coupling with no upside here.
+const (
+	rfc9449ExampleJWK = `{
+  "kty":"EC",
+  "x":"l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
+  "y":"9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA",
+  "crv":"P-256"
+}`
+	rfc9449ExampleThumbprint = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+)
+
+// tokenConfirmation returns the cnf claim of a VERIFIED token's claim set,
+// and whether it was present at all. The claims have been through a JSON
+// round trip by the time Verify hands them back, so cnf arrives as
+// map[string]any regardless of what tokenClaims put in — asserting on the
+// decoded shape is the point: it is what a verifier on another surface, and
+// in Task 4, will actually see.
+func tokenConfirmation(t *testing.T, claims jwt.MapClaims) (map[string]any, bool) {
+	t.Helper()
+	raw, present := claims[confirmationClaim]
+	if !present {
+		return nil, false
+	}
+	cnf, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("cnf claim = %#v (%T), want a JSON object", raw, raw)
+	}
+	return cnf, true
+}
+
+// The named mutation, at the layer that decides it: no thumbprint must mean
+// NO cnf claim, never a cnf carrying an empty jkt. A present-but-empty cnf
+// would satisfy any "is this token bound?" test a surface can cheaply make
+// while being matchable by no key in existence — a token that looks bound
+// and binds nothing, which is worse than an honest bearer token (which the
+// network surfaces refuse under K5) and worse than an honest bound one.
+//
+// Asserts on presence, not on the value: `claims[confirmationClaim] == nil`
+// would pass for a cnf explicitly set to nil, which is the same defect
+// wearing a different type.
+func TestTokenClaims_NoThumbprint_OmitsConfirmationClaimEntirely(t *testing.T) {
+	claims := tokenClaims(uuid.New(), "tenant-xyz", "", time.Now(), time.Now().Add(time.Hour))
+
+	if raw, present := claims[confirmationClaim]; present {
+		t.Fatalf("cnf claim is present (= %#v) on a token minted with no thumbprint, want it absent "+
+			"entirely: a cnf carrying an empty jkt looks bound and binds nothing", raw)
+	}
+}
+
+// The other half: a thumbprint yields cnf.jkt and changes nothing else. The
+// key set is compared exactly, against the same identifyingClaimKeys the K3
+// test uses plus cnf — so a change that bound the token AND smuggled in a
+// scope field fails here too, rather than passing a narrow "does cnf.jkt
+// look right?" check.
+func TestTokenClaims_WithThumbprint_CarriesConfirmationAndNothingElseNew(t *testing.T) {
+	claims := tokenClaims(uuid.New(), "tenant-xyz", rfc9449ExampleThumbprint, time.Now(), time.Now().Add(time.Hour))
+
+	want := append([]string{confirmationClaim}, identifyingClaimKeys...)
+	slices.Sort(want)
+	if got := claimKeys(claims); !slices.Equal(got, want) {
+		t.Fatalf("claim keys = %v, want exactly %v", got, want)
+	}
+	cnf, ok := claims[confirmationClaim].(map[string]string)
+	if !ok {
+		t.Fatalf("cnf claim = %#v (%T), want a map[string]string", claims[confirmationClaim], claims[confirmationClaim])
+	}
+	if len(cnf) != 1 || cnf[thumbprintKey] != rfc9449ExampleThumbprint {
+		t.Fatalf("cnf = %v, want exactly one member %q = %q", cnf, thumbprintKey, rfc9449ExampleThumbprint)
 	}
 }
 
@@ -490,4 +589,255 @@ func TestIssueToken_SigningFailure_Internal(t *testing.T) {
 		t.Fatalf("IssueToken() response = %+v, want nil: no token may escape a signing failure", resp)
 	}
 	wantCode(t, err, codes.Internal)
+}
+
+// --- Key binding over the real RPC ---------------------------------------
+
+// issueTokenWithJWK runs one IssueToken call against an active delegation
+// and a real signer, returning the response, the error, the signer needed to
+// decode the token, and the fakeStore so a caller can assert on how far the
+// call got. jwk is sent as-is when non-nil and omitted entirely when nil —
+// the distinction the whole optional field rests on, so the helper preserves
+// it rather than papering over it with an empty string.
+func issueTokenWithJWK(t *testing.T, jwk *string) (*IssueTokenResponse, *token.Signer, *fakeStore, error) {
+	t.Helper()
+	signer := testSigner(t)
+	delegationID := uuid.New()
+	fs := &fakeStore{delegation: activeDelegation(delegationID, time.Now())}
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), signer)
+
+	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
+		DelegationId: delegationID.String(),
+		TtlSeconds:   600,
+		DpopJwk:      jwk,
+	})
+	return resp, signer, fs, err
+}
+
+// K6, end to end: a public JWK in, a token whose cnf.jkt is that key's RFC
+// 7638 thumbprint out — checked against the value RFC 9449 §6.1 publishes
+// for the key in §4.2, not against a second run of this system's own
+// thumbprint code (see rfc9449ExampleJWK's comment). A token bound to a
+// thumbprint a verifier following the RFC would not reproduce is a token
+// nobody can ever use, and only an externally published expectation can
+// catch that.
+func TestIssueToken_WithJWK_BindsTokenToRFC7638Thumbprint(t *testing.T) {
+	jwk := rfc9449ExampleJWK
+	resp, signer, _, err := issueTokenWithJWK(t, &jwk)
+	if err != nil {
+		t.Fatalf("IssueToken() error = %v, want success", err)
+	}
+
+	claims, err := signer.Verify(resp.GetToken())
+	if err != nil {
+		t.Fatalf("Verify() of the issued token = %v, want success", err)
+	}
+	cnf, present := tokenConfirmation(t, claims)
+	if !present {
+		t.Fatalf("issued token carries no cnf claim, want one bound to the supplied key")
+	}
+	if got := cnf[thumbprintKey]; got != rfc9449ExampleThumbprint {
+		t.Fatalf("cnf.jkt = %v, want %q — the thumbprint RFC 9449 §6.1 publishes for the §4.2 key. "+
+			"A value this system computes but a verifier does not reproduce binds the token to nothing usable",
+			got, rfc9449ExampleThumbprint)
+	}
+}
+
+// The named mutation, proven where it would actually do damage: on a real
+// signed token, decoded the way every verifier will decode it. The unit-level
+// TestTokenClaims_NoThumbprint_OmitsConfirmationClaimEntirely pins the claim
+// builder; this pins the whole path from "no dpop_jwk on the request" to
+// "no cnf in the token a caller receives," which is the property the network
+// surfaces' K5 check reads.
+//
+// This is also half the bearer-compatibility proof: the token verifies and
+// names the delegation exactly as it did before this field existed. The
+// other half — that such a token still authenticates at Decide — is
+// TestIssueToken_UnboundTokenStillAuthenticatesAtDecide below.
+func TestIssueToken_NoJWK_TokenCarriesNoConfirmationClaim(t *testing.T) {
+	resp, signer, _, err := issueTokenWithJWK(t, nil)
+	if err != nil {
+		t.Fatalf("IssueToken() error = %v, want success", err)
+	}
+
+	claims, err := signer.Verify(resp.GetToken())
+	if err != nil {
+		t.Fatalf("Verify() of the issued token = %v, want success: a caller that sends no JWK must get "+
+			"exactly the bearer token it got before Phase 15", err)
+	}
+	if _, present := tokenConfirmation(t, claims); present {
+		t.Fatalf("issued token carries a cnf claim (= %#v) though no JWK was supplied, want none at all: "+
+			"a cnf with an empty jkt looks bound to a surface checking for one and is matchable by no key",
+			claims[confirmationClaim])
+	}
+	if got := claims[subjectClaim]; got != resp.GetToken() && got == nil {
+		t.Fatalf("token sub = %v, want the delegation id", got)
+	}
+}
+
+// A JWK this system cannot thumbprint is refused at issuance, loudly, and
+// before the delegation lookup — the same "invalid input must not proceed to
+// a lookup" discipline TestIssueToken_InvalidInput_InvalidArgument holds the
+// other request fields to.
+//
+// On what these cases prove and what they do not: the property under test is
+// "IssueToken surfaces a refused JWK as InvalidArgument without touching the
+// store", and every case below differs from a JWK that succeeds
+// (rfc9449ExampleJWK, above) in exactly that respect — dpop.Thumbprint
+// refuses it. WHICH of dpop's checks refuses each one is that package's
+// property and is tested there against its own inputs; asserting it a second
+// time here would be this test claiming to prove something it cannot
+// distinguish, since all four arrive as the same code with the same shape.
+// The private-key case gets its own test below, because for that one the
+// difference from an accepted input can be isolated exactly.
+func TestIssueToken_UnusableJWK_InvalidArgument(t *testing.T) {
+	cases := map[string]string{
+		"not JSON at all":         "not-a-jwk",
+		"explicitly empty":        "",
+		"JSON, but not a key":     "{}",
+		"symmetric key":           `{"kty":"oct","k":"c2VjcmV0LXNoYXJlZC1rZXktbm90LWEtcHVibGljLW9uZQ"}`,
+		"unknown key type":        `{"kty":"NOPE","x":"AA"}`,
+		"EC key missing a member": `{"kty":"EC","crv":"P-256","x":"l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs"}`,
+	}
+	for name, jwk := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp, _, fs, err := issueTokenWithJWK(t, &jwk)
+			if resp != nil {
+				t.Fatalf("IssueToken() response = %+v, want nil: a token bound to a thumbprint nobody "+
+					"can reproduce can never be used", resp)
+			}
+			wantCode(t, err, codes.InvalidArgument)
+			if fs.calls != 0 {
+				t.Errorf("store was called %d times, want 0 — an unusable JWK must not proceed to a lookup", fs.calls)
+			}
+		})
+	}
+}
+
+// The mutation "compute the thumbprint over the private key," isolated: ONE
+// keypair, two requests differing by exactly the private material. The public
+// half is accepted and binds; the same key with its "d" member present is
+// refused. Nothing else about the two inputs differs — same curve, same x,
+// same y — so the refusal is attributable to the private material and to
+// nothing else, and an implementation that thumbprinted whatever it was
+// handed would be caught by the second call succeeding.
+//
+// Refusing it is not pedantry. A caller that sends its private key has
+// already lost the property binding exists to provide (the server now holds
+// a copy of the only thing that made the token unusable by a thief), and the
+// cheapest moment to tell it so is before it starts relying on that token.
+func TestIssueToken_PrivateKeyJWK_RefusedWhileItsPublicHalfIsAccepted(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate EC key: %v", err)
+	}
+	publicJWK, err := (&jose.JSONWebKey{Key: priv.Public()}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal public JWK: %v", err)
+	}
+	privateJWK, err := (&jose.JSONWebKey{Key: priv}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal private JWK: %v", err)
+	}
+
+	public := string(publicJWK)
+	resp, signer, _, err := issueTokenWithJWK(t, &public)
+	if err != nil {
+		t.Fatalf("IssueToken() with the PUBLIC half = %v, want success — if this fails the private-key "+
+			"case below proves nothing, because both inputs would be refused", err)
+	}
+	claims, err := signer.Verify(resp.GetToken())
+	if err != nil {
+		t.Fatalf("Verify() of the issued token = %v, want success", err)
+	}
+	if cnf, present := tokenConfirmation(t, claims); !present || cnf[thumbprintKey] == "" {
+		t.Fatalf("the public half produced no cnf.jkt (claims %v), want a bound token", claims)
+	}
+
+	private := string(privateJWK)
+	resp, _, fs, err := issueTokenWithJWK(t, &private)
+	if resp != nil {
+		t.Fatalf("IssueToken() response = %+v, want nil: a JWK carrying private key material must be "+
+			"refused, never thumbprinted", resp)
+	}
+	wantCode(t, err, codes.InvalidArgument)
+	if fs.calls != 0 {
+		t.Errorf("store was called %d times, want 0", fs.calls)
+	}
+}
+
+// A caller CAN send private key material to this field — that is exactly
+// what the test above refuses — so the refusal must not echo it. Same
+// property, and same reason, as
+// TestAuthenticateToken_ErrorNeverContainsTheTokenString one file over, and
+// the phase's own "never log a token, a key, or a key path's contents"
+// constraint: an InvalidArgument message is the most likely thing in this
+// method to reach a log, a trace, or a client's stderr.
+//
+// Asserts on the "d" member's VALUE, not on the substring "d" — a
+// single-character search would match half the message by accident and pass
+// no matter what.
+func TestIssueToken_PrivateKeyJWK_ErrorNeverEchoesTheKeyMaterial(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate EC key: %v", err)
+	}
+	privateJWK, err := (&jose.JSONWebKey{Key: priv}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal private JWK: %v", err)
+	}
+	var parsed struct {
+		D string `json:"d"`
+	}
+	if err := json.Unmarshal(privateJWK, &parsed); err != nil || parsed.D == "" {
+		t.Fatalf("fixture JWK carries no d member (err %v) — this test would pass vacuously", err)
+	}
+
+	jwk := string(privateJWK)
+	_, _, _, err = issueTokenWithJWK(t, &jwk)
+	if err == nil {
+		t.Fatal("IssueToken() error = nil, want a refusal")
+	}
+	if strings.Contains(err.Error(), parsed.D) {
+		t.Fatalf("the refusal echoes the private scalar back to the caller: %v", err)
+	}
+}
+
+// Bearer compatibility, end to end and over two RPCs: a token minted with no
+// JWK — what cmd/stratium-pep's reissueAndRetryDecide has always sent and
+// still sends — authenticates at Decide and reaches the real three-leg
+// evaluation, exactly as TestDecide_ValidToken_ReachesNormalDecision's own
+// hand-built token does.
+//
+// Reaching DeniedLeg "principal" is what makes this a proof rather than an
+// assertion: that leg is reachable ONLY after authentication succeeds and
+// the agent load, chain load, tier derivation, and policy evaluation all
+// run (see that test's own comment). A token that failed to verify would
+// deny at "delegation", the structural pre-leg bucket, and a test that only
+// checked "IssueToken returned something" could not tell the two apart.
+func TestIssueToken_UnboundTokenStillAuthenticatesAtDecide(t *testing.T) {
+	fs, req, delegationID := decideTokenFixture(t)
+	fs.delegation = fs.chain[0] // the same root the fixture's chain describes, for IssueToken's own load
+	signer := testSigner(t)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), signer)
+
+	issued, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
+		DelegationId: delegationID.String(),
+		TtlSeconds:   600,
+		// No DpopJwk, deliberately: this is the existing caller's exact shape.
+	})
+	if err != nil {
+		t.Fatalf("IssueToken() error = %v, want success", err)
+	}
+
+	req.Token = issued.GetToken()
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v, want a decision", err)
+	}
+	if resp.GetDeniedLeg() != "principal" {
+		t.Fatalf("DeniedLeg = %q (reason %q), want %q: a re-issued bearer token must authenticate and "+
+			"reach the full three-leg evaluation exactly as it did before cnf existed",
+			resp.GetDeniedLeg(), resp.GetReason(), "principal")
+	}
 }

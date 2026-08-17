@@ -227,7 +227,13 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	// == d.ExpiresAt: a freshly created delegation's token has no
 	// independently requested lifetime, so mintToken's clamp is structurally
 	// a no-op here — see IssueToken (token.go) for the path where it is not.
-	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, now, d.ExpiresAt, d.ExpiresAt)
+	// jkt is empty: CreateDelegation mints a bearer token, unchanged by Phase
+	// 15. Binding is asked for at IssueToken, where a caller that has just
+	// generated a keypair presents the public half (spec §4.7.2 K6) — this
+	// call has no JWK to bind to and CreateDelegationRequest deliberately
+	// does not carry one, since the caller creating a delegation is not
+	// necessarily the party that will later hold and use its token.
+	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, "", now, d.ExpiresAt, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}

@@ -36,9 +36,14 @@ func decideTokenFixture(t *testing.T) (*fakeStore, *DecideRequest, uuid.UUID) {
 // over tokenClaims+Sign (token.go) so every test below that needs a real
 // token states only what varies (which signer, which delegation, which
 // window) rather than repeating the three-line claim-building dance.
+//
+// Always UNBOUND (empty jkt, hence no cnf claim): every test in this file is
+// about authentication, which Phase 15 did not change — a bearer token
+// authenticates exactly as it did before cnf existed. Binding is exercised
+// where it is decided, in token_test.go.
 func signRealToken(t *testing.T, signer *token.Signer, delegationID uuid.UUID, issuedAt, expiresAt time.Time) string {
 	t.Helper()
-	tok, err := signer.Sign(tokenClaims(delegationID, testTenant, issuedAt, expiresAt))
+	tok, err := signer.Sign(tokenClaims(delegationID, testTenant, "", issuedAt, expiresAt))
 	if err != nil {
 		t.Fatalf("Sign() error = %v, want success", err)
 	}

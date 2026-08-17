@@ -368,6 +368,36 @@ message IssueTokenRequest {
   // what was actually granted, and clamped_to_delegation_expiry says
   // whether that differed from what was requested here.
   int64 ttl_seconds = 2;
+
+  // dpop_jwk is the caller's PUBLIC key as a JWK document (RFC 7517), and it
+  // asks for a token bound to that key: the issued token then carries a
+  // "cnf" claim whose "jkt" member is the key's RFC 7638 thumbprint (spec
+  // §4.7.2 K6, RFC 9449 §6.1), so only whoever holds the matching private
+  // half — which never leaves the caller and is never sent here — can
+  // produce a DPoP proof for it. That is what turns a stolen token from a
+  // usable credential into an inert string on the surfaces that check.
+  //
+  // Optional, and its absence is NOT an error: this RPC cannot know which
+  // enforcement surface will present the token it mints, so it is not in a
+  // position to decide whether binding is required. No JWK yields a bearer
+  // token, exactly as before this field existed. K5 is what makes an unbound
+  // token useless where it matters — proxy and extauthz refuse one — so an
+  // agent that intends to use either surface must supply a JWK and learns
+  // otherwise on its first call, not here. Deliberately NOT a "surface" or
+  // "intended use" field: that would be a client declaring how its own
+  // credential ought to be treated, which is the shape of spec defect D1.
+  //
+  // optional, following approval_id (DecideRequest) rather than
+  // parent_delegation_id's plain-string convention, and for the same reason
+  // that field states: an explicitly-sent empty string is a caller bug —
+  // meant to bind, sent nothing — and earns its own InvalidArgument instead
+  // of being silently reinterpreted as "no JWK, issue a bearer token," which
+  // would hand back a credential its holder believes is bound and every
+  // network surface will refuse. A malformed, symmetric, or private-key JWK
+  // is InvalidArgument here for the same reason, rather than a token bound
+  // to a thumbprint nobody can reproduce: that failure costs one call to
+  // diagnose at issuance and every subsequent call to diagnose later.
+  optional string dpop_jwk = 3;
 }
 
 // IssueTokenResponse is the re-issued token and its actual, possibly

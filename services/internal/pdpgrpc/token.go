@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"stratium/internal/dpop"
 	"stratium/internal/store"
 )
 
@@ -31,12 +32,20 @@ import (
 // exp is required, not merely conventional here — internal/token.Verify
 // calls jwt.WithExpirationRequired(), so a token minted without it would
 // fail to verify at all, at every future call, not just fail to expire.
+//
+// cnf is the sixth and is the only OPTIONAL one: present on a key-bound
+// token and absent entirely on a bearer token, never present-but-empty. See
+// tokenClaims for why that distinction is the whole point of the claim.
 const (
 	subjectClaim  = "sub"       // the delegation this token names (models.Delegation.ID)
 	tenantIDClaim = "tenant_id" // the tenant the delegation belongs to
 	issuedAtClaim = "iat"
 	expiryClaim   = "exp"
 	tokenIDClaim  = "jti" // unique per issuance, including a re-issuance naming the same delegation
+	// confirmationClaim is RFC 7800 §3.1's "cnf", carrying exactly one
+	// member: thumbprintKey, RFC 9449 §6.1's "jkt".
+	confirmationClaim = "cnf"
+	thumbprintKey     = "jkt"
 )
 
 // tokenClaims builds the claim set for a token naming delegationID: the
@@ -51,14 +60,35 @@ const (
 // cached at mint time. Nothing here should grow a new field without
 // re-reading K3 first — see TestTokenClaims_CarriesNoScopeFields, which
 // exists specifically to make that mistake fail loudly instead of silently.
-func tokenClaims(delegationID uuid.UUID, tenantID string, issuedAt, expiresAt time.Time) jwt.MapClaims {
-	return jwt.MapClaims{
+//
+// jkt is the one field that has since been added, and it is not an exception
+// to any of the above: it is the RFC 7638 thumbprint of a key the CALLER
+// holds, not a copy of anything the delegation row says. It cannot go stale
+// the way a cached scope field would, because it describes no authority at
+// all — the delegation is still loaded and asked, exactly as K3 requires —
+// and it can only ever narrow what a token is good for, never widen it: a
+// token carrying cnf is refused on the network surfaces unless the presenter
+// also proves possession of that key (spec §4.7.2 K5/K6, RFC 9449 §6.1).
+//
+// An empty jkt produces NO cnf claim, not a cnf claim carrying "". That is
+// not tidiness. A token whose cnf.jkt is the empty string looks bound to
+// every reader and binds nothing — it would satisfy a "does this token
+// carry cnf.jkt?" check on a surface that requires binding while being
+// matchable by no key at all, which is strictly worse than either honest
+// alternative. Absent means bearer; present means bound; there is no third
+// state (TestTokenClaims_NoThumbprint_OmitsConfirmationClaimEntirely).
+func tokenClaims(delegationID uuid.UUID, tenantID, jkt string, issuedAt, expiresAt time.Time) jwt.MapClaims {
+	claims := jwt.MapClaims{
 		subjectClaim:  delegationID.String(),
 		tenantIDClaim: tenantID,
 		issuedAtClaim: issuedAt.Unix(),
 		expiryClaim:   expiresAt.Unix(),
 		tokenIDClaim:  uuid.New().String(),
 	}
+	if jkt != "" {
+		claims[confirmationClaim] = map[string]string{thumbprintKey: jkt}
+	}
+	return claims
 }
 
 // clampTokenExpiry returns the earlier of requested and delegationExpiresAt,
@@ -89,11 +119,18 @@ func clampTokenExpiry(requested, delegationExpiresAt time.Time) (expiry time.Tim
 // CreateDelegationResponse.token's own doc comment in the proto) — fail
 // closed applies to "could not mint a credential" exactly as it does to
 // every other failure mode this package fails closed on.
+//
+// jkt is threaded through rather than computed here: it is an empty string
+// for every unbound token, and the one caller that can produce a non-empty
+// one (IssueToken) has to reject a malformed JWK with InvalidArgument before
+// it touches the store at all, which is a decision about a REQUEST and
+// belongs at the RPC boundary. This function stays what it has always been —
+// clamp, build claims, sign — with no notion of what a JWK is.
 func (s *Server) mintToken(
-	delegationID uuid.UUID, tenantID string, now, requestedExpiry, delegationExpiresAt time.Time,
+	delegationID uuid.UUID, tenantID, jkt string, now, requestedExpiry, delegationExpiresAt time.Time,
 ) (token string, expiry time.Time, clamped bool, err error) {
 	expiry, clamped = clampTokenExpiry(requestedExpiry, delegationExpiresAt)
-	claims := tokenClaims(delegationID, tenantID, now, expiry)
+	claims := tokenClaims(delegationID, tenantID, jkt, now, expiry)
 	token, err = s.signer.Sign(claims)
 	if err != nil {
 		// err is wrapped, never the claims or the (empty, on this path)
@@ -133,6 +170,38 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 		return nil, status.Error(codes.InvalidArgument, "ttl_seconds must be positive")
 	}
 
+	// The optional binding (spec §4.7.2 K6). Three properties, all deliberate:
+	//
+	// Presence, not emptiness: `req.DpopJwk != nil`, the same idiom server.go
+	// uses for DecideRequest.approval_id. A caller that set the field to ""
+	// meant to bind and sent nothing, and falls into Thumbprint below, which
+	// refuses it — collapsing that into "no JWK" would hand back a bearer
+	// token to a caller who believes it is holding a bound one, and the
+	// discovery would be a denial on some later request instead of an error
+	// on this one.
+	//
+	// dpop.Thumbprint, never a local RFC 7638 implementation: it is exported
+	// for exactly this call site (see its doc comment) so that the value
+	// bound here is produced by the same code that will recompute it from a
+	// proof in Task 4. Two implementations would be two chances to disagree,
+	// and a token bound to a thumbprint the verifier cannot reproduce is a
+	// token that can never be used by anyone.
+	//
+	// InvalidArgument and BEFORE the store, alongside the checks above: a
+	// malformed, symmetric, or private-key JWK is a bad request, not a
+	// server fault, and refusing it here costs one call to diagnose where
+	// binding to a garbage thumbprint would cost every later call. The error
+	// carries dpop's own text and never the JWK — a caller can send a
+	// document with a private "d" member, which is one of the things
+	// Thumbprint refuses, and the refusal must not echo it back into a log
+	// line (the phase's "never log a token or a key" constraint).
+	var jkt string
+	if req.DpopJwk != nil {
+		if jkt, err = dpop.Thumbprint([]byte(req.GetDpopJwk())); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "dpop_jwk: %s", err)
+		}
+	}
+
 	epoch, err := s.loadEpochOrDeny(ctx)
 	if err != nil {
 		return nil, err
@@ -169,7 +238,7 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 	}
 
 	requested := now.Add(time.Duration(req.GetTtlSeconds()) * time.Second)
-	tok, expiry, clamped, err := s.mintToken(d.ID, s.cfg.TenantID, now, requested, d.ExpiresAt)
+	tok, expiry, clamped, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, requested, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}
