@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 var requiredExtauthzEnvVars = []string{
 	"STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR", "STRATIUM_PEP_PDP_ADDR",
 	"STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT", "STRATIUM_PEP_CONNECT_TIMEOUT",
+	"STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS",
 }
 
 // clearExtauthzEnv clears every variable loadExtauthzConfigFromEnv reads, so
@@ -51,6 +53,10 @@ func setAllExtauthzEnv(t *testing.T, overrides map[string]string) {
 		"STRATIUM_PEP_AGENT_ID":             "agent-1",
 		"STRATIUM_PEP_SUBJECT":              "alice@example.com",
 		"STRATIUM_PEP_CONNECT_TIMEOUT":      "5s",
+		// Two entries, not one: a loader that returned only the first, or
+		// only the last, is a live mutation and a single-entry baseline
+		// cannot see it.
+		"STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS": "gw-a.example:10000,gw-b.example",
 	}
 	for k, v := range overrides {
 		values[k] = v
@@ -74,8 +80,13 @@ func TestLoadExtauthzConfigFromEnv_AllRequiredValuesPresent_ReturnsPopulatedConf
 		AgentID:        "agent-1",
 		Subject:        "alice@example.com",
 		ConnectTimeout: 5 * time.Second,
+		AllowedHosts:   []string{"gw-a.example:10000", "gw-b.example"},
 	}
-	if cfg != want {
+	// reflect.DeepEqual rather than ==: extauthzConfig stopped being
+	// comparable when AllowedHosts made it carry a slice. Compared whole, not
+	// field by field, so a field added to extauthzConfig and never loaded
+	// still fails here -- which is the whole point of asserting the struct.
+	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("loadExtauthzConfigFromEnv() = %+v, want %+v", cfg, want)
 	}
 }
@@ -305,11 +316,18 @@ func allowResponse(reason string) *pdpgrpc.DecideResponse {
 // choice hook_test.go's testCfg makes for hookConfig). ListenAddr/PDPAddr
 // are left zero-valued: nothing in these tests calls runExtauthzCmd, so
 // nothing ever reads them.
+// AllowedHosts carries every authority any fixture below sends, so the
+// allowlist is never what a test about something else trips over. The tests
+// that are ABOUT the allowlist build their own cfg.
 func testExtauthzServerCfg() extauthzConfig {
 	return extauthzConfig{
 		AgentID:        testAgentIDFixture,
 		Subject:        testSubjectFixture,
 		ConnectTimeout: 5 * time.Second,
+		AllowedHosts: []string{
+			testHost,
+			"gateway.example:10000", "gateway.example", "gateway.example:8443",
+		},
 	}
 }
 
@@ -787,9 +805,17 @@ func TestCheck_NeverSendsDeclaredTier(t *testing.T) {
 // that header does, never panics chasing a nil Attributes/Request/Http
 // pointer.
 func TestDecideRequestFromCheck_NilAttributes_ErrorsWithoutPanicking(t *testing.T) {
-	_, err := decideRequestFromCheck(&authv3.CheckRequest{}, testAgentIDFixture, testSubjectFixture)
+	_, err := decideRequestFromCheck(&authv3.CheckRequest{}, testExtauthzServerCfg())
 	if err == nil {
 		t.Fatal("decideRequestFromCheck() error = nil, want an error (no HTTP attributes means no authorization header)")
+	}
+	// Specifically the CREDENTIAL error, not the authority one: an empty
+	// CheckRequest also has no host, and both checks would refuse it. The
+	// credential check runs first on purpose (see decideRequestFromCheck's
+	// own doc comment), so K4's own integration proof keeps asserting the
+	// text it was written for.
+	if !strings.Contains(err.Error(), "no authorization header") {
+		t.Errorf("error = %q, want the credential error -- the authority check must not preempt it", err)
 	}
 }
 
@@ -961,29 +987,56 @@ func TestExtractCredentials_StripsCredentialHeadersCaseInsensitively(t *testing.
 	}
 }
 
-// TestCredentialHeaderNames_CoversEveryHeaderExtractCredentialsReads is the
-// structural half of K10, and it is deliberately NOT a behavioural test: it
-// asserts that the one map is the only place a credential is named, by
-// checking that both headers extractCredentials READS are also in the set it
-// STRIPS BY.
+// TestEveryCredentialHeaderIsStrippedFromRawInput walks credentialHeaderNames
+// ITSELF and proves each entry is stripped, in two casings. Iterating the map
+// rather than a written-out list matters: a hardcoded list is a second copy of
+// the set, which is the exact drift this whole arrangement exists to prevent,
+// one level up. A fifth credential added to the map with no test of its own
+// is covered here the moment it is added.
 //
-// The failure it exists to catch cannot be caught downstream. Everything else
-// in this file observes the effect of the map -- a value absent from
-// raw_input, a token present on the wire -- and a second mechanism (a
-// separate delete, a hard-coded "also drop dpop" line) would satisfy every
-// one of those observations while re-opening exactly the drift the single
-// loop exists to prevent: a set read from that is not the set stripped by.
-func TestCredentialHeaderNames_CoversEveryHeaderExtractCredentialsReads(t *testing.T) {
-	for _, name := range []string{"authorization", dpopHeaderName} {
-		if !credentialHeaderNames[name] {
-			t.Errorf("credentialHeaderNames[%q] = false -- extractCredentials reads this header's value, so "+
-				"it must be in the set stripped from raw_input by the same loop, not stripped by some "+
-				"second mechanism that can drift from it (K10)", name)
+// What this does NOT do is check the READ side, and the previous version of
+// this test claimed to. It iterated a hardcoded {"authorization", dpop} and
+// asserted both were in the map -- which a fifth credential READ WITHOUT a
+// map entry passes, since the hardcoded list would not have named it either.
+// That hole is now closed in the code rather than by a test:
+// extractCredentials draws every credential value out of a local map it fills
+// only from this one, so a header absent here has no value for any read to
+// find. See its own doc comment.
+func TestEveryCredentialHeaderIsStrippedFromRawInput(t *testing.T) {
+	for name := range credentialHeaderNames {
+		if name != strings.ToLower(name) {
+			t.Errorf("credentialHeaderNames[%q] is not lower-cased -- extractCredentials folds an incoming "+
+				"header name to lower case before every lookup, so this entry can never match", name)
 		}
-	}
-	if dpopHeaderName != strings.ToLower(dpopHeaderName) {
-		t.Errorf("dpopHeaderName = %q, want it lower-cased -- extractCredentials folds an incoming header "+
-			"name to lower case before every lookup, so a mixed-case entry here can never match", dpopHeaderName)
+		for _, sent := range []string{name, strings.ToUpper(name)} {
+			t.Run(sent, func(t *testing.T) {
+				fake := &fakePDP{resp: allowResponse("")}
+				pdpClient := startFakePDP(t, fake)
+				client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+				// The authorization header is always sent well-formed, so a
+				// request never dies before raw_input is built; when the entry
+				// under test IS authorization, this is that same header
+				// carrying the marker instead of a token, which still parses.
+				headers := map[string]string{"authorization": "Bearer " + testBearerToken}
+				headers[sent] = testOtherCredentialValue
+				if strings.EqualFold(sent, "authorization") {
+					headers[sent] = "Bearer " + testOtherCredentialValue
+				}
+
+				if _, err := client.Check(context.Background(),
+					checkRequest("GET", "/svc.Svc/Method", headers)); err != nil {
+					t.Fatalf("Check() error = %v", err)
+				}
+				req := fake.lastRequest()
+				if req == nil {
+					t.Fatal("PDP never received a request")
+				}
+				if raw := req.GetRawInput(); strings.Contains(raw, testOtherCredentialValue) {
+					t.Errorf("raw_input contains the value of credential header %q verbatim: %s", sent, raw)
+				}
+			})
+		}
 	}
 }
 
@@ -1502,6 +1555,13 @@ func TestCheck_ObservedURIUsesTheTypedFields_NotThePseudoHeaders(t *testing.T) {
 			"x-forwarded-proto": "http",
 			":authority":        "attacker.example",
 			":path":             "/somewhere-else",
+			// ":method" disagrees too. Without this entry, a build reading
+			// observed_method out of the headers map got the zero value and
+			// failed for the wrong reason -- the same fixture-omission kill
+			// the authority half already had. Real Envoy sends ":method"
+			// equal to the typed field, so only a disagreeing fixture can
+			// pin which one is read.
+			":method": "POST",
 		}))
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -1517,6 +1577,10 @@ func TestCheck_ObservedURIUsesTheTypedFields_NotThePseudoHeaders(t *testing.T) {
 			"AttributeContext_HttpRequest fields, which a real Envoy populates (measured, see observedURI's "+
 			"doc comment), never from \":scheme\", \"x-forwarded-proto\", \":authority\", or \":path\", which "+
 			"are entries in a map a caller also writes into", got, want)
+	}
+	if got := req.GetObservedMethod(); got != "GET" {
+		t.Errorf("observed_method = %q, want \"GET\" -- it comes from "+
+			"AttributeContext_HttpRequest.Method, never from the \":method\" pseudo-header", got)
 	}
 	// The headers are not credentials, so the same request that must not
 	// TRUST them must still record them.
@@ -1725,8 +1789,17 @@ func TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason(t *testing.T) {
 			"this caller's token IS bound, and telling them to request a bound one is unactionable",
 			resp.GetStatus().GetMessage())
 	}
+	// What this last check does and does not cover, stated plainly because it
+	// looks stronger than it is. pdpReason is a LOCAL COPY of pdpgrpc's
+	// errNoProof text -- that error is unexported, so this package cannot
+	// reference the real one -- which means this fires if someone edits
+	// unboundTokenReason toward this literal, and NOT if the PDP's own text
+	// drifts toward unboundTokenReason. The verbatim-passthrough assertion
+	// above is the real one: it proves whatever the PDP says arrives
+	// unaltered, whatever that turns out to be. This is a guard on the half
+	// of the pair this package actually owns.
 	if pdpReason == unboundTokenReason {
-		t.Error("C25's reason and K5's reason are the same string -- the two halves name opposite defects " +
+		t.Error("K5's reason has been edited to equal C25's -- the two halves name opposite defects " +
 			"(no proof for a bound token, versus a token that was never bound) and an operator has to be " +
 			"able to tell which one they hit")
 	}
@@ -1760,9 +1833,11 @@ func TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound(t *testing.T) 
 		t.Fatalf("Check() error = %v", err)
 	}
 	if got := resp.GetStatus().GetMessage(); got == unboundTokenReason {
-		t.Fatalf("Status.Message = K5's unbound-token reason, but this response was an ESCALATE: "+
-			"sender_constrained is populated inconsistently on anything that is not an ALLOW, so reading "+
-			"it here discards a real pending approval (%s) for a fact that was never established", approvalID)
+		t.Fatalf("Status.Message = K5's unbound-token reason, but this response was an ESCALATE. The "+
+			"proto's rule is CONSULT IT ONLY WHEN effect IS EFFECT_ALLOW, and it is honored literally "+
+			"rather than approximately: an escalate that reached the three-leg evaluation does carry the "+
+			"real answer, but the six pre-decision denials do not, and this surface cannot tell the two "+
+			"apart from the response. Reading it here discards a real pending approval (%s)", approvalID)
 	}
 	if !strings.Contains(resp.GetStatus().GetMessage(), approvalID) {
 		t.Errorf("Status.Message = %q, want it to carry the pending approval id %q", resp.GetStatus().GetMessage(), approvalID)
@@ -1774,5 +1849,256 @@ func TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound(t *testing.T) 
 	if len(denied.DeniedResponse.GetHeaders()) != 1 {
 		t.Errorf("DeniedResponse.Headers = %v, want the approval-id header -- degrading an escalation must "+
 			"still hand back the id a retry needs", denied.DeniedResponse.GetHeaders())
+	}
+}
+
+// TestCheck_UnservedAuthority_DeniesWithoutContactingPDP is the fix for the
+// hazard review round 1 found: Envoy's AttributeContext_HttpRequest.Host is
+// documented as "The HTTP request Host or :authority header value" -- the
+// caller's own header, read from a typed field rather than the headers map.
+// Without validation, htu's authority is whatever the presenter claimed, and
+// the authority component of the binding contributes nothing.
+//
+// The replay it closes: capture a bound token and its proof in flight to
+// gw-a.example and DROP the request so the jti stays unspent, then replay both
+// at a SECOND gateway fronting different upstreams, sending "Host:
+// gw-a.example". Every check downstream passes, because the second gateway
+// dutifully reports the authority it was told.
+//
+// The two rows differ in exactly one thing -- the observed Host -- against one
+// fixed allowlist. The served row is what proves the denial is attributable to
+// the allowlist and not to some unrelated failure the fixture also has.
+func TestCheck_UnservedAuthority_DeniesWithoutContactingPDP(t *testing.T) {
+	cfg := testExtauthzServerCfg()
+	cfg.AllowedHosts = []string{"gw-b.example"}
+
+	for _, tc := range []struct {
+		name     string
+		host     string
+		wantCode int32
+	}{
+		{name: "an authority this surface serves", host: "gw-b.example", wantCode: int32(rpccode.Code_OK)},
+		{name: "an authority it does not", host: "gw-a.example", wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: cfg})
+
+			resp, err := client.Check(context.Background(), checkRequestFull("http", tc.host, "GET", "/p",
+				map[string]string{"authorization": "Bearer " + testBearerToken, "dpop": testDPoPProof}))
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			if got := resp.GetStatus().GetCode(); got != tc.wantCode {
+				t.Fatalf("Status.Code = %d, want %d", got, tc.wantCode)
+			}
+			if tc.wantCode == int32(rpccode.Code_OK) {
+				if got := fake.lastRequest().GetObservedUri(); got != "http://gw-b.example/p" {
+					t.Errorf("observed_uri = %q, want %q", got, "http://gw-b.example/p")
+				}
+				return
+			}
+
+			// Denied before the PDP is dialed, the same shape a missing
+			// credential already has: there is nothing a round trip could
+			// add, since this surface does not serve the authority at all.
+			if got := fake.requestCount(); got != 0 {
+				t.Errorf("PDP received %d Decide call(s), want 0 -- an authority this surface does not "+
+					"serve is refused before the PDP is dialed", got)
+			}
+			body := resp.GetStatus().GetMessage()
+			if !strings.Contains(body, errUnservedAuthority.Error()) {
+				t.Errorf("Status.Message = %q, want it to carry %q", body, errUnservedAuthority.Error())
+			}
+			// Neither side of the comparison may be echoed: the observed value
+			// would be request metadata in a denial body (the package doc's
+			// NEVER LOG REQUEST METADATA rule), and the configured list would
+			// hand an arbitrary caller the set of hostnames this deployment
+			// answers for.
+			if strings.Contains(body, tc.host) {
+				t.Errorf("denial body %q echoes the observed authority", body)
+			}
+			for _, allowed := range cfg.AllowedHosts {
+				if strings.Contains(body, allowed) {
+					t.Errorf("denial body %q names a configured host (%q) -- free reconnaissance for a "+
+						"caller probing what this deployment serves", body, allowed)
+				}
+			}
+		})
+	}
+}
+
+// TestCheck_ObservedURIUsesTheMatchedHost_NotTheObservedSpelling is the
+// property that makes the allowlist more than a gate: htu is built from the
+// CONFIGURED value, so no residue of the caller's spelling reaches the string
+// the PDP compares.
+//
+// It also pins the normalization, which is not free choice. dpop.canonicalURI
+// applies RFC 3986 §6.2.2.1 case normalization and §6.2.3 default-port
+// removal to the same authority one hop later, so an allowlist that compared
+// raw strings would deny traffic the binding itself would have accepted --
+// two different notions of host equality inside one binding path. Each row
+// below is a spelling RFC 3986 makes equivalent to the configured entry.
+func TestCheck_ObservedURIUsesTheMatchedHost_NotTheObservedSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured string
+		scheme     string
+		observed   string
+		wantURI    string
+	}{
+		{
+			name: "case differs", configured: "gw.example", scheme: "http", observed: "GW.Example",
+			wantURI: "http://gw.example/p",
+		},
+		{
+			name: "observed carries http's default port", configured: "gw.example", scheme: "http",
+			observed: "gw.example:80", wantURI: "http://gw.example/p",
+		},
+		{
+			name: "observed carries https's default port", configured: "gw.example", scheme: "https",
+			observed: "gw.example:443", wantURI: "https://gw.example/p",
+		},
+		{
+			// The converse: the operator wrote the explicit port and the
+			// caller omitted it. htu still comes back as the operator's own
+			// spelling, which is what "built from the matched value" means.
+			name: "configured carries the default port, observed omits it", configured: "gw.example:443",
+			scheme: "https", observed: "gw.example", wantURI: "https://gw.example:443/p",
+		},
+		{
+			// A NON-default port is not equivalent and must not be trimmed --
+			// the row that catches a normalizer stripping any port at all.
+			name: "non-default port is preserved and must match", configured: "gw.example:8443",
+			scheme: "https", observed: "gw.example:8443", wantURI: "https://gw.example:8443/p",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testExtauthzServerCfg()
+			cfg.AllowedHosts = []string{tc.configured}
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: cfg})
+
+			resp, err := client.Check(context.Background(), checkRequestFull(tc.scheme, tc.observed, "GET", "/p",
+				map[string]string{"authorization": "Bearer " + testBearerToken, "dpop": testDPoPProof}))
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_OK); got != want {
+				t.Fatalf("Status.Code = %d, want %d -- RFC 3986 makes %q and %q the same authority, and the "+
+					"PDP's own htu comparison already treats them that way",
+					got, want, tc.observed, tc.configured)
+			}
+			if got := fake.lastRequest().GetObservedUri(); got != tc.wantURI {
+				t.Errorf("observed_uri = %q, want %q -- htu's authority is the CONFIGURED value, so no "+
+					"residue of the caller's own spelling survives into what the PDP compares", got, tc.wantURI)
+			}
+		})
+	}
+}
+
+// TestMatchAllowedHost_NonDefaultPortAndSchemeMismatchesAreRefused is the
+// negative half of the normalization above: a fold wider than RFC 3986
+// sanctions is a wider allowlist than the operator wrote, and every row here
+// is a pair a too-eager normalizer would wrongly accept.
+func TestMatchAllowedHost_NonDefaultPortAndSchemeMismatchesAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		scheme    string
+		observed  string
+		allowed   []string
+		wantMatch string
+	}{
+		{name: "exact", scheme: "http", observed: "gw.example", allowed: []string{"gw.example"}, wantMatch: "gw.example"},
+		{name: "different host entirely", scheme: "http", observed: "evil.example", allowed: []string{"gw.example"}},
+		{name: "subdomain is not the parent", scheme: "http", observed: "a.gw.example", allowed: []string{"gw.example"}},
+		{name: "suffix is not a match", scheme: "http", observed: "notgw.example", allowed: []string{"gw.example"}},
+		{name: "non-default port is significant", scheme: "http", observed: "gw.example:8080", allowed: []string{"gw.example"}},
+		{
+			// :443 is only the default under https. Under http it is an
+			// ordinary port and must not be trimmed -- the row that catches a
+			// normalizer stripping default ports without checking the scheme.
+			name: "https default port under http is not trimmed", scheme: "http",
+			observed: "gw.example:443", allowed: []string{"gw.example"},
+		},
+		{
+			name: "http default port under https is not trimmed", scheme: "https",
+			observed: "gw.example:80", allowed: []string{"gw.example"},
+		},
+		{
+			// U+212A KELVIN SIGN folds to "k" under Unicode case folding
+			// (strings.ToLower, strings.EqualFold) but not under RFC 3986
+			// §6.2.2.1, which is ASCII-only. A wider fold here is a wider
+			// allowlist than the operator wrote.
+			name: "unicode fold does not widen the allowlist", scheme: "http",
+			observed: "gKw.example", allowed: []string{"gkw.example"},
+		},
+		{
+			name: "empty observed authority matches nothing", scheme: "http",
+			observed: "", allowed: []string{"gw.example"},
+		},
+		{
+			name: "the second entry matches", scheme: "http", observed: "gw-b.example",
+			allowed: []string{"gw-a.example", "gw-b.example"}, wantMatch: "gw-b.example",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := matchAllowedHost(tc.scheme, tc.observed, tc.allowed)
+			if tc.wantMatch == "" {
+				if !errors.Is(err, errUnservedAuthority) {
+					t.Fatalf("matchAllowedHost(%q, %q, %v) = (%q, %v), want errUnservedAuthority",
+						tc.scheme, tc.observed, tc.allowed, got, err)
+				}
+				if got != "" {
+					t.Errorf("matched host = %q on the error path, want \"\"", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("matchAllowedHost(%q, %q, %v) error = %v, want nil",
+					tc.scheme, tc.observed, tc.allowed, err)
+			}
+			if got != tc.wantMatch {
+				t.Errorf("matched host = %q, want %q", got, tc.wantMatch)
+			}
+		})
+	}
+}
+
+// TestParseAllowedHosts covers the shapes an operator can actually write into
+// a compose file or a Helm value.
+func TestParseAllowedHosts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{name: "one host", raw: "gw.example", want: []string{"gw.example"}},
+		{name: "several", raw: "a.example,b.example:8443", want: []string{"a.example", "b.example:8443"}},
+		{name: "surrounding whitespace is trimmed", raw: " a.example , b.example ", want: []string{"a.example", "b.example"}},
+		// A typo, not a shorter list: silently dropping it is how an
+		// allowlist ends up different from what its author read back.
+		{name: "an empty entry is a typo", raw: "a.example,,b.example", wantErr: true},
+		{name: "a lone comma", raw: ",", wantErr: true},
+		{name: "whitespace-only entry", raw: "a.example,   ", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAllowedHosts(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseAllowedHosts(%q) error = nil, want an error", tc.raw)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseAllowedHosts(%q) error = %v, want nil", tc.raw, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("parseAllowedHosts(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
 	}
 }

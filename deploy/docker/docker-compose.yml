@@ -273,6 +273,25 @@ services:
       STRATIUM_PEP_AGENT_ID: 72d38ebe-2e5c-4918-9e73-b0de3607fbfa
       STRATIUM_PEP_SUBJECT: extauthz-integration@example.com
       STRATIUM_PEP_CONNECT_TIMEOUT: 5s
+      # The authorities this surface serves (spec §4.7.2 K7, Phase 15). Envoy
+      # reports the caller's own Host/:authority header, so without this list
+      # a DPoP proof captured in flight to one gateway replays at any other
+      # gateway the attacker can reach -- see matchAllowedHost's doc comment
+      # in cmd/stratium-pep/extauthz.go. Required, no default: a deployment
+      # that has not stated which hostnames it answers for cannot validate
+      # the one component of htu that separates it from its neighbours.
+      #
+      # A stable name, NOT the host:port the integration suite dials. This
+      # service's own port 10000 is published on an ephemeral host port
+      # (see the envoy service's `ports:`), so the dialed address changes
+      # every run and could never appear in a static list. That is not a test
+      # workaround -- it is the ordinary deployment shape: an agent behind a
+      # load balancer dials whatever address resolves and ADDRESSES a stable
+      # public hostname, which is what lands in Host, what the surface
+      # validates, and what the agent signs into htu.
+      # extauthz_integration_test.go sets that Host explicitly and signs the
+      # same value; extauthzPublicAuthority there is this string.
+      STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS: envoy.stratium.test
 
   # The trivial upstream envoy's ALLOW path routes to — see
   # Dockerfile.echo-upstream and echo-upstream/main.go, both this directory.

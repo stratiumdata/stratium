@@ -114,6 +114,23 @@ const (
 	extauthzTestAcceptEncoding = "identity"
 )
 
+// extauthzPublicAuthority is the authority every request in this file
+// ADDRESSES, as distinct from envoyAddr, which is the host:port it DIALS. It
+// must equal docker-compose.yml's own pep-extauthz
+// STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS exactly (Phase 15, K7): extauthz refuses
+// an authority it is not configured to serve, and builds htu from the
+// configured spelling rather than the observed one.
+//
+// The two differ on purpose, and not only because compose publishes envoy's
+// 10000 on an ephemeral host port no static allowlist could name. It is the
+// ordinary deployment shape: an agent behind a load balancer connects to
+// whatever address resolves and addresses a stable public hostname, and it is
+// that hostname -- not the socket -- that lands in Host, that the surface
+// validates, and that the agent signs into its proof's htu. envoyDo sets it
+// via http.Request.Host (which overrides the URL's own authority on the
+// wire), and extauthzProof signs the same string.
+const extauthzPublicAuthority = "envoy.stratium.test"
+
 // approvalIDHeaderName mirrors cmd/stratium-pep/extauthz.go's own
 // unexported approvalIDHeader constant exactly. Duplicated, not imported:
 // package main cannot be imported, and re-deriving the value from a live
@@ -179,15 +196,17 @@ func mintExtauthzBoundToken(t *testing.T, delegationID uuid.UUID, key *ecdsa.Pri
 // calling proof is actually about.
 //
 // htu is stated INDEPENDENTLY here rather than read back from anything the
-// PEP computed: "http://" + envoyAddr + path is the URI this test's own
-// client addressed, which is what a real agent minting a proof would use. So
+// PEP computed: "http://" + extauthzPublicAuthority + path is the URI this
+// test's own client addressed (see that constant's doc comment for why the
+// addressed authority is not the dialed one), which is what a real agent
+// minting a proof would use. So
 // a request that reaches the upstream is the end-to-end evidence that
 // cmd/stratium-pep/extauthz.go's observedURI reconstructs the SAME string
 // from what real Envoy reports -- scheme, authority, and path, from three
 // separate accessors -- and a reconstruction that differed in any of the
 // three would deny instead. That is the only way this property can be
 // checked: the PDP compares the two, and neither side is visible to the other.
-func extauthzProof(t *testing.T, key *ecdsa.PrivateKey, method, path string) string {
+func mustDPoPSigner(t *testing.T, key *ecdsa.PrivateKey) jose.Signer {
 	t.Helper()
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.ES256, Key: key},
@@ -196,9 +215,14 @@ func extauthzProof(t *testing.T, key *ecdsa.PrivateKey, method, path string) str
 	if err != nil {
 		t.Fatalf("new jose signer: %v", err)
 	}
-	proof, err := josejwt.Signed(signer).Claims(map[string]any{
+	return signer
+}
+
+func extauthzProof(t *testing.T, key *ecdsa.PrivateKey, method, path string) string {
+	t.Helper()
+	proof, err := josejwt.Signed(mustDPoPSigner(t, key)).Claims(map[string]any{
 		"htm": method,
-		"htu": "http://" + envoyAddr + path,
+		"htu": "http://" + extauthzPublicAuthority + path,
 		"jti": uuid.NewString(),
 		"iat": time.Now().Unix(),
 	}).Serialize()
@@ -245,10 +269,24 @@ func seedExtauthzAgentOnce(t *testing.T) {
 // RECONSTRUCTION.
 func envoyDo(t *testing.T, method, path, token string, extra map[string]string) (status int, body string, respHeader http.Header, sentHeader map[string]string) {
 	t.Helper()
+	return envoyDoAs(t, extauthzPublicAuthority, method, path, token, extra)
+}
+
+// envoyDoAs is envoyDo with the ADDRESSED authority as a parameter, for the
+// one proof that needs to address an authority this surface does not serve.
+func envoyDoAs(t *testing.T, authority, method, path, token string, extra map[string]string) (status int, body string, respHeader http.Header, sentHeader map[string]string) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), method, "http://"+envoyAddr+path, nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
+	// The authority this request ADDRESSES, overriding the dialed host:port
+	// the URL carries. Go puts req.Host on the wire as the Host header when
+	// it is non-empty, so this is what Envoy reports and what extauthz
+	// validates -- see extauthzPublicAuthority's own doc comment. Not in
+	// req.Header, and therefore not in sentHeader below: reconstructHeaders
+	// adds ":authority" explicitly instead.
+	req.Host = authority
 	req.Header.Set("User-Agent", extauthzTestUserAgent)
 	req.Header.Set("Accept-Encoding", extauthzTestAcceptEncoding)
 	for name, value := range extra {
@@ -369,7 +407,8 @@ func reconstructHeaders(method, path string, sentHeader map[string]string, inclu
 	if includeCredentials {
 		headers = lowercaseHeaders(sentHeader)
 	}
-	headers[":authority"] = envoyAddr
+	// The ADDRESSED authority, not the dialed one -- envoyDo overrides Host.
+	headers[":authority"] = extauthzPublicAuthority
 	headers[":method"] = method
 	headers[":path"] = path
 	headers[":scheme"] = envoyForwardedProto
@@ -893,5 +932,72 @@ func TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted(t *testing.T) {
 	if strings.Contains(body, "carried no dpop proof") {
 		t.Errorf("body = %q carries C25's own reason, which names the opposite defect: this caller's token "+
 			"is not bound at all, so producing a proof for it is impossible", body)
+	}
+}
+
+// TestIntegration_Envoy_UnservedAuthorityRefused is the live half of the
+// hazard review round 1 found, and the property that makes htu's authority
+// mean anything at all.
+//
+// Envoy reports the caller's own Host/:authority header as
+// AttributeContext_HttpRequest.Host. Before this check existed, an attacker
+// who captured a bound token and its proof in flight to one gateway -- and
+// dropped the request, leaving the jti unspent -- could replay both at any
+// other gateway reachable to them, sending the original Host. Every check
+// downstream passed, because the second gateway reported the authority it was
+// told. This is that replay, executed for real against the live stack: the
+// same request, differing from the passing one in exactly one property, the
+// addressed authority.
+//
+// It is a genuinely different request from proof 1's, not a mangled one: the
+// bound token is real and unexpired, the proof is freshly signed and its jti
+// unspent, the delegation permits the action, and the policy allows it.
+// Everything an attacker would hold, they hold here.
+func TestIntegration_Envoy_UnservedAuthorityRefused(t *testing.T) {
+	seedExtauthzAgentOnce(t)
+	seedExtauthzPermitPolicy(t)
+
+	const path = "/proof-k7-unserved-authority"
+	seedToolCatalogEntry(t, envoyTenant, path, tierPtr(models.ActionTierReadOnly), "read", nil, nil)
+	delegation := newExtauthzDelegation(t, "extauthz K7: an authority this surface does not serve is refused",
+		models.ActionTierReadOnly, nil)
+	key := dpopKey(t)
+	token := mintExtauthzBoundToken(t, delegation.ID, key)
+
+	// The proof binds to the OTHER gateway, exactly as a captured one would.
+	const otherGateway = "gw-elsewhere.stratium.test"
+	proof, err := josejwt.Signed(mustDPoPSigner(t, key)).Claims(map[string]any{
+		"htm": http.MethodGet, "htu": "http://" + otherGateway + path,
+		"jti": uuid.NewString(), "iat": time.Now().Unix(),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("serialize proof: %v", err)
+	}
+
+	status, body, _, _ := envoyDoAs(t, otherGateway, http.MethodGet, path, token,
+		map[string]string{"DPoP": proof})
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 -- a request addressing an authority this surface is not "+
+			"configured to serve must be refused, however good its token and proof are; body: %s", status, body)
+	}
+	if !strings.Contains(body, "not one this surface is configured to serve") {
+		t.Errorf("body = %q, want extauthz's own unserved-authority wording -- any other denial means the "+
+			"403 came from somewhere else and this replay is unproven", body)
+	}
+	if strings.Contains(body, otherGateway) || strings.Contains(body, extauthzPublicAuthority) {
+		t.Errorf("body = %q echoes an authority -- neither the caller's claim (request metadata in a "+
+			"denial body) nor this deployment's own configured set (reconnaissance) belongs there", body)
+	}
+
+	// The positive control: the SAME token and key, differing only in the
+	// authority addressed and signed, is forwarded. Without it a 403 above
+	// would be consistent with the fixture being broken in some way that has
+	// nothing to do with authorities.
+	okStatus, okBody, _, _ := envoyDo(t, http.MethodGet, path, token,
+		map[string]string{"DPoP": extauthzProof(t, key, http.MethodGet, path)})
+	if okStatus != http.StatusOK {
+		t.Fatalf("control request status = %d, want 200 -- the same token and key addressed at the served "+
+			"authority must be forwarded, or the 403 above is not attributable to the authority; body: %s",
+			okStatus, okBody)
 	}
 }

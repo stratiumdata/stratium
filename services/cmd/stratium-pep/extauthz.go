@@ -42,7 +42,7 @@
 // the surface where the request arrives from the party being policed. This
 // surface now requires proof of possession.
 //
-// Three things change here, and only here -- the verification itself stays in
+// Four things change here, and only here -- the verification itself stays in
 // the PDP (K2/D1), so this file gained no crypto:
 //
 //   - extractCredentials also reads the RFC 9449 "dpop" header, and
@@ -50,6 +50,13 @@
 //     alongside observed_method and observed_uri, the request pair the
 //     proof's htm/htu claims bind to (K7). observedURI is where that pair is
 //     reconstructed and where the measurements behind it are recorded.
+//   - The request's AUTHORITY is validated against a configured allowlist
+//     (STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS, required, no default) before it
+//     becomes htu's authority, and an unserved one denies before the PDP is
+//     dialed. Envoy's Host field is the caller's own Host/:authority header,
+//     so without this the authority component of the binding contributes
+//     nothing and a proof captured in flight to one gateway replays at
+//     another. matchAllowedHost's doc comment carries the full case.
 //   - The proof is stripped from raw_input by the same omission that already
 //     strips authorization (K10), because raw_input is hashed into an
 //     append-only audit chain and a credential written there cannot be edited
@@ -198,12 +205,17 @@ import (
 // rather than polling for a human, so there is nothing here to bound a wait
 // for. That degrade lives in checkResponseFromDecide, not in this config --
 // extauthzConfig needed no new field to serve it, then or now.
+// AllowedHosts is Phase 15's one addition, and unlike the five above it
+// exists to close a specific attack rather than to name a dependency -- see
+// matchAllowedHost's own doc comment for the replay it stops and why
+// GetHost() alone could not.
 type extauthzConfig struct {
 	ListenAddr     string
 	PDPAddr        string
 	AgentID        string
 	Subject        string
 	ConnectTimeout time.Duration
+	AllowedHosts   []string
 }
 
 // loadExtauthzConfigFromEnv reads extauthzConfig from the environment, or
@@ -221,6 +233,7 @@ func loadExtauthzConfigFromEnv() (extauthzConfig, error) {
 		Subject:    requiredEnv("STRATIUM_PEP_SUBJECT", &missing),
 	}
 	timeoutRaw := requiredEnv("STRATIUM_PEP_CONNECT_TIMEOUT", &missing)
+	hostsRaw := requiredEnv("STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS", &missing)
 	if len(missing) > 0 {
 		return extauthzConfig{}, missingConfigError(missing)
 	}
@@ -231,7 +244,37 @@ func loadExtauthzConfigFromEnv() (extauthzConfig, error) {
 	}
 	cfg.ConnectTimeout = timeout
 
+	hosts, err := parseAllowedHosts(hostsRaw)
+	if err != nil {
+		return extauthzConfig{}, err
+	}
+	cfg.AllowedHosts = hosts
+
 	return cfg, nil
+}
+
+// parseAllowedHosts splits STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS -- already
+// confirmed non-empty by requiredEnv -- into the authorities this surface
+// serves, trimming surrounding whitespace so a readable, spaced-out compose
+// value works. An entry that is empty after trimming is an error rather than
+// a silently dropped one: "a.example,,b.example" is a typo, and quietly
+// accepting it is how a list ends up shorter than its author believed.
+//
+// The result is NOT normalized here. matchAllowedHost normalizes both sides
+// at comparison time with one function, because normalizing at load would put
+// the rule in two places and this file has already been bitten by a set read
+// from that was not the set compared against.
+func parseAllowedHosts(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	hosts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		host := strings.TrimSpace(part)
+		if host == "" {
+			return nil, errors.New("STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS contains an empty entry")
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, nil
 }
 
 // runExtauthzCmd loads configuration, binds cfg.ListenAddr, and serves the
@@ -361,6 +404,12 @@ const bearerPrefix = "Bearer "
 // entry below and the read inside extractCredentials cannot drift.
 const dpopHeaderName = "dpop"
 
+// authorizationHeaderName is the same, for the credential that was here
+// first: named rather than inlined once extractCredentials started reading
+// its value out of a map keyed by these constants, so the key it reads and
+// the credentialHeaderNames entry it strips by cannot be spelled differently.
+const authorizationHeaderName = "authorization"
+
 // credentialHeaderNames is every HTTP header extractCredentials treats as
 // carrying live authority rather than descriptive request metadata, matched
 // against an incoming header's name case-insensitively -- see that
@@ -392,11 +441,18 @@ const dpopHeaderName = "dpop"
 // adding dpop here is the whole of K10's strip-by-omission for it. A second
 // mechanism -- a separate "also delete this one" pass -- is exactly the
 // drift this map's single-loop consumer exists to prevent.
+//
+// That containment is structural, not a convention someone has to keep:
+// extractCredentials reads credential VALUES only out of the local map it
+// fills from this one, so a header not listed here has no value for any read
+// to find. An earlier version read them out of a switch inside the same loop,
+// where a fifth credential could have been read without an entry here and
+// nothing would have noticed.
 var credentialHeaderNames = map[string]bool{
-	"authorization":       true,
-	"cookie":              true,
-	"proxy-authorization": true,
-	dpopHeaderName:        true,
+	authorizationHeaderName: true,
+	"cookie":                true,
+	"proxy-authorization":   true,
+	dpopHeaderName:          true,
 }
 
 // extractCredentials reads headers (an AttributeContext_HttpRequest's own
@@ -454,22 +510,24 @@ var credentialHeaderNames = map[string]bool{
 // pre-judge it.
 func extractCredentials(headers map[string]string) (token, proof string, stripped map[string]string, err error) {
 	stripped = make(map[string]string, len(headers))
-	var authValue string
-	found := false
+	// creds is the ONLY thing the reads below draw from, and it is populated
+	// only for names in credentialHeaderNames. That is what makes "everything
+	// this function reads is also stripped" true by construction rather than
+	// by a test: a future credential read straight off headers would need a
+	// second traversal to get at it, which is visible in a diff, where an
+	// added case in a switch over the same loop was not.
+	creds := make(map[string]string, len(credentialHeaderNames))
 	for name, value := range headers {
 		lower := strings.ToLower(name)
 		if credentialHeaderNames[lower] {
-			switch lower {
-			case "authorization":
-				authValue, found = value, true
-			case dpopHeaderName:
-				proof = value
-			}
+			creds[lower] = value
 			continue
 		}
 		stripped[name] = value
 	}
 
+	proof = creds[dpopHeaderName]
+	authValue, found := creds[authorizationHeaderName]
 	if !found {
 		return "", "", nil, errors.New("no authorization header")
 	}
@@ -483,49 +541,158 @@ func extractCredentials(headers map[string]string) (token, proof string, strippe
 	return token, proof, stripped, nil
 }
 
+// errUnservedAuthority is what matchAllowedHost returns for a request whose
+// authority this deployment does not serve. Named, so its text is pinned in
+// one place a test can assert against, the same convention errNoProof
+// (internal/pdpgrpc) follows.
+//
+// It deliberately echoes NEITHER the observed authority nor the configured
+// list. The observed value is the caller's own, so it is not a secret from
+// them -- but this string is also the denial BODY, and handing an arbitrary
+// caller the set of hostnames this deployment answers for is free
+// reconnaissance, the same reasoning matchProof's own errors use for not
+// naming which thumbprint would have worked. The package doc's NEVER LOG
+// REQUEST METADATA rule covers the other half.
+var errUnservedAuthority = errors.New("request authority is not one this surface is configured to serve")
+
+// asciiLowerHost lowercases A-Z and leaves every other rune alone -- RFC 3986
+// §6.2.2.1 case normalization, over US-ASCII, exactly as internal/dpop's own
+// asciiLower does for the same job on the other side of this comparison.
+//
+// Not strings.ToLower and not strings.EqualFold: both apply full Unicode
+// case folding, under which U+212A KELVIN SIGN folds to "k". Harmless in
+// dpop, where both sides of the comparison describe the same signed endpoint
+// either way -- but NOT harmless here, where this fold decides whether an
+// attacker-supplied authority matches an operator's allowlist. A fold wider
+// than the RFC sanctions is a wider allowlist than the operator wrote.
+func asciiLowerHost(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
+}
+
+// canonicalAuthority reduces an authority to the form matchAllowedHost
+// compares in: ASCII case-normalized, with a default port for the scheme
+// removed (RFC 3986 §6.2.3 scheme-based normalization).
+//
+// It mirrors what internal/dpop's canonicalURI already applies to the same
+// authority one hop later, and that is the entire reason it exists rather
+// than a bare string compare: the PDP will treat "gw.example" and
+// "gw.example:443" as the same host when it checks htu, so an allowlist here
+// that treated them as different would deny traffic the binding itself would
+// have accepted -- two different notions of host equality inside one binding
+// path, which is the drift this codebase keeps removing. Duplicated rather
+// than imported because canonicalURI is unexported and takes a whole URI;
+// exporting it for this would widen a reviewed package's surface for one
+// caller.
+func canonicalAuthority(scheme, host string) string {
+	scheme, host = asciiLowerHost(scheme), asciiLowerHost(host)
+	switch {
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		return strings.TrimSuffix(host, ":80")
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		return strings.TrimSuffix(host, ":443")
+	}
+	return host
+}
+
+// matchAllowedHost returns the configured authority the request's observed
+// authority matches, or errUnservedAuthority.
+//
+// # Why this exists: GetHost() is caller-supplied, and htu's authority is not
+//
+// Envoy's own generated doc defines AttributeContext_HttpRequest.Host as "The
+// HTTP request Host or :authority header value" -- the SAME caller-written
+// value the pseudo-headers carry, read from a different place. An earlier
+// version of this file preferred the typed field over ":authority" on the
+// stated grounds that a header is caller-writable and the typed field is not.
+// That was simply false, and it was false for the component with the most at
+// stake, so the reasoning is recorded here rather than quietly deleted.
+//
+// The concrete replay it left open, which the deploy/docker listener's own
+// domains: ["*"] does not foreclose: capture a bound token and its proof in
+// flight to gw-a.example and DROP the request, so the jti is never spent.
+// Replay both at a SECOND Envoy -- fronting different upstreams -- sending
+// "Host: gw-a.example" and the same path. observedURI reconstructs
+// "http://gw-a.example/...", the PDP's htu equality passes, and the second
+// gateway forwards. Not a fail-open -- a valid bound token and an unspent
+// proof are still required -- but the authority component of the binding
+// contributes nothing, which is precisely what DecideRequest.observed_uri's
+// own proto comment forbids: it must be what "the ENFORCEMENT SURFACE saw,
+// never anything the caller asserted about its own request."
+//
+// Validating against configured hosts is what turns the caller's assertion
+// back into the surface's own fact. An attacker cannot claim an authority
+// this deployment does not serve, so a proof minted for gw-a.example is
+// refused at a gateway that serves only gw-b.example. This mirrors K7's
+// reasoning for the sibling surface, where htu is the PROXY's own address
+// precisely so a proof for one target cannot be replayed at another behind
+// it.
+//
+// The MATCHED value is what htu is built from, never the observed one. That
+// is not cosmetic: it means htu's authority is a string the operator wrote,
+// so no residue of the caller's spelling survives into the value the PDP
+// compares.
+//
+// Configured hosts are canonicalized on every call rather than once at load.
+// The lists are single-digit in every real deployment, this runs per request
+// on a path that is about to make a network round trip, and one function
+// applying the rule to both sides is worth more than the saved comparisons --
+// a normalization applied at load and re-derived at match is exactly the
+// two-copies drift this file's credentialHeaderNames comment already argues
+// against.
+func matchAllowedHost(scheme, host string, allowed []string) (string, error) {
+	observed := canonicalAuthority(scheme, host)
+	// An empty observed authority can never match: parseAllowedHosts rejects
+	// an empty entry, so there is nothing in allowed for it to equal. Stated
+	// rather than guarded, because a guard here would be a second place the
+	// invariant lives.
+	for _, candidate := range allowed {
+		if canonicalAuthority(scheme, candidate) == observed {
+			return candidate, nil
+		}
+	}
+	return "", errUnservedAuthority
+}
+
 // observedURI reconstructs the absolute target URI this server observed, for
 // DecideRequest.observed_uri -- the value the PDP compares a proof's htu claim
 // against (spec §4.7.2 K7). Scheme, authority, and path, with query and
 // fragment excluded, which is what RFC 9449 §4.3 item 9 defines htu comparison
 // over.
 //
-// WHICH FIELD SUPPLIES WHICH PIECE, and how that was settled. Envoy hands a
-// CheckRequest four overlapping descriptions of the same request -- the typed
-// AttributeContext_HttpRequest fields, the ":scheme"/":authority"/":path"
+// authority is matchAllowedHost's return, never httpReq.GetHost() directly.
+// See that function's doc comment for the replay this closes and why the
+// caller-supplied Host cannot be trusted on its own.
+//
+// WHICH FIELD SUPPLIES THE OTHER TWO PIECES. Envoy hands a CheckRequest
+// overlapping descriptions of the same request -- the typed
+// AttributeContext_HttpRequest fields, the ":scheme"/":method"/":path"
 // pseudo-headers it also copies into the headers map, and the
-// "x-forwarded-proto" header it injects -- and a hand-built CheckRequest
-// fixture agrees with whichever one the person who wrote it chose. So this
-// was measured against the real Envoy in deploy/docker (v1.37.0, the version
-// go.mod pins), by printing every accessor for a live request:
+// "x-forwarded-proto" header it injects. The typed accessors are read here,
+// for a reason that survives the correction above: they are Envoy's own
+// normalized view, so reading them is one decision made once, where picking
+// among several headers carrying the same fact would be this server deciding
+// which of its inputs to believe (the package doc's D1 rule). It is also the
+// only choice that stays correct if a future Envoy stops copying the
+// pseudo-headers, which its own proto doc warns can happen (the
+// encode_raw_headers note). What that choice does NOT buy is trust: every one
+// of these values originates with the caller, which is why the authority --
+// the only one whose value carries security weight on its own -- is validated
+// rather than read.
 //
-//	scheme="http" host="localhost:53166" path="/svc.Svc/Method?a=1&b=two"
-//	query="" fragment="" method="GET"
-//	headers=[":authority":"localhost:53166" ":method":"GET"
-//	         ":path":"/svc.Svc/Method?a=1&b=two" ":scheme":"http"
-//	         "authorization":"Bearer ..." "dpop":"..." "user-agent":"curl/8.7.1"
-//	         "x-forwarded-proto":"http" ...]
-//
-// Two facts in there are not guessable, and both change what this function
-// has to do:
-//
-//   - GetPath() INCLUDES the query string, and GetQuery() is EMPTY. Both
-//     accessors exist, which settles nothing on its own; the real Envoy
-//     populates the first and leaves the second alone. So the query has to be
-//     cut off here -- reading GetPath() and trusting GetQuery() to hold the
-//     query separately would put "?a=1&b=two" inside htu.
-//   - GetScheme() IS populated, and equals both ":scheme" and
-//     "x-forwarded-proto". Phase 10's own finding that Envoy injects
-//     x-forwarded-proto could be read as "the scheme only arrives as a
-//     header"; it does not. The typed field carries it too.
-//
-// Given all three agree, this reads the typed accessors: they are Envoy's own
-// normalized view of the request, whereas ":scheme" and "x-forwarded-proto"
-// are entries in a map a caller also writes into, and choosing between two
-// headers on the strength of which one a deployment is more likely to have
-// spoofed would be this server classifying its own inputs (the package doc's
-// D1 rule). It is also the only choice that stays correct if a future Envoy
-// stops copying the pseudo-headers, which its own proto doc already warns can
-// happen (the encode_raw_headers note).
+// THE QUERY. GetPath() includes the query string and GetQuery() is always
+// empty. That is not a local observation, it is Envoy's stated contract:
+// Path is "the request target, as it appears in the first line of the HTTP
+// request... includes the URL path and query-string", and Query is "always
+// empty, and exists for compatibility reasons. The HTTP URL query is included
+// in path field" (attribute_context.pb.go, v1.37.0). Confirmed live against
+// the deploy/docker Envoy, which returned path="/svc.Svc/Method?a=1&b=two"
+// with query="" -- but the proto is what makes it a contract rather than an
+// observation of one deployment. Either way the query has to be cut off here.
 //
 // NOT A TRUSTED INPUT, in either direction. observed_uri can only ever NARROW
 // what a proof satisfies (the proto's own doc comment on the field): htm/htu
@@ -534,32 +701,39 @@ func extractCredentials(headers map[string]string) (token, proof string, strippe
 // deployment where this reconstruction is wrong denies its own traffic
 // loudly; it cannot make a proof minted for somewhere else pass.
 //
-// No error return and no validation. An empty scheme or host yields a
-// relative string, which dpop.canonicalURI rejects as "not an absolute URI"
-// and the PDP denies on -- fail-closed, at the one place in this system
-// entitled to decide whether a credential is genuine (K2/D1). A local guard
-// here could only produce the same denial with a worse reason, and only for
-// the subset of malformed URIs it happened to anticipate.
-func observedURI(httpReq *authv3.AttributeContext_HttpRequest) string {
+// No error return: the one piece that can fail has already failed by the time
+// this runs (matchAllowedHost, in decideRequestFromCheck). An empty scheme
+// yields a relative string, which dpop.canonicalURI rejects as "not an
+// absolute URI" and the PDP denies on -- fail-closed, at the one place in this
+// system entitled to decide whether a credential is genuine (K2/D1).
+func observedURI(httpReq *authv3.AttributeContext_HttpRequest, authority string) string {
 	// strings.Cut, not a split-and-index: it says "everything before the
 	// first ?" in one expression, and returns the whole string unchanged when
 	// there is no ? at all, which is the ordinary case.
 	path, _, _ := strings.Cut(httpReq.GetPath(), "?")
-	return httpReq.GetScheme() + "://" + httpReq.GetHost() + path
+	return httpReq.GetScheme() + "://" + authority + path
 }
 
 // decideRequestFromCheck maps req to the DecideRequest Check sends the PDP,
-// or an error naming why req cannot be mapped to one at all. The only two
-// ways this function fails are the two extractCredentials itself can fail
-// with (no credential, or a malformed one): every other field req can carry
-// maps unconditionally, because req's own Get* accessors are nil-safe all
-// the way down -- a nil Attributes, Request, or Http yields "" for
-// method/path and a nil headers map, never a panic. A CheckRequest with no
-// HTTP attributes at all (Task 1's own TestCheck_NoDecisionLogicYet_
+// or an error naming why req cannot be mapped to one at all. It fails in
+// three ways: the two extractCredentials itself can fail with (no credential,
+// or a malformed one), and an authority this deployment does not serve
+// (matchAllowedHost, Phase 15). Every other field req can carry maps
+// unconditionally, because req's own Get* accessors are nil-safe all the way
+// down -- a nil Attributes, Request, or Http yields "" for method/path and a
+// nil headers map, never a panic. A CheckRequest with no HTTP attributes at
+// all (Task 1's own TestCheck_NoDecisionLogicYet_
 // DeniesEveryRequestUnconditionally fixture, still exercised today) is
-// therefore not a third failure mode -- it is simply a request with an
+// therefore not a fourth failure mode -- it is simply a request with an
 // empty path and no headers, which already fails the SAME "no authorization
 // header" check extractCredentials applies to any other request.
+//
+// The authority check runs AFTER credential extraction, so a request with no
+// credential still denies with the credential reason it always did rather
+// than with a new one, and K4's own integration proof
+// (TestIntegration_Envoy_NoTokenDeniedNoFallback) keeps asserting the text it
+// was written for. Both denials happen before the PDP is dialed; neither
+// order is fail-open, since both refuse.
 //
 // dpop_proof/observed_method/observed_uri (Phase 15, spec §4.7.2 K7) are the
 // three fields this surface adds for proof-of-possession, and none of them is
@@ -576,10 +750,15 @@ func observedURI(httpReq *authv3.AttributeContext_HttpRequest) string {
 // does not need. resource is left unset for the same reason those two
 // files leave it unset: nothing in this repo extracts it locally anymore
 // (spec §4.4.2 T3).
-func decideRequestFromCheck(req *authv3.CheckRequest, agentID, subject string) (*pdpgrpc.DecideRequest, error) {
+func decideRequestFromCheck(req *authv3.CheckRequest, cfg extauthzConfig) (*pdpgrpc.DecideRequest, error) {
 	httpReq := req.GetAttributes().GetRequest().GetHttp()
 
 	token, proof, headers, err := extractCredentials(httpReq.GetHeaders())
+	if err != nil {
+		return nil, err
+	}
+
+	authority, err := matchAllowedHost(httpReq.GetScheme(), httpReq.GetHost(), cfg.AllowedHosts)
 	if err != nil {
 		return nil, err
 	}
@@ -599,8 +778,8 @@ func decideRequestFromCheck(req *authv3.CheckRequest, agentID, subject string) (
 	}
 
 	return &pdpgrpc.DecideRequest{
-		AgentId:  agentID,
-		Subject:  subject,
+		AgentId:  cfg.AgentID,
+		Subject:  cfg.Subject,
 		Tool:     httpReq.GetPath(), // M1: the request path IS the tool identity.
 		RawInput: string(rawInput),
 		Token:    token,
@@ -614,7 +793,7 @@ func decideRequestFromCheck(req *authv3.CheckRequest, agentID, subject string) (
 		// make a proof minted for "get" satisfy a request Envoy reported as
 		// "GET".
 		ObservedMethod: httpReq.GetMethod(),
-		ObservedUri:    observedURI(httpReq),
+		ObservedUri:    observedURI(httpReq, authority),
 	}, nil
 }
 
@@ -674,7 +853,7 @@ const approvalIDHeader = "stratium-approval-id"
 // separately: a mutation could plausibly catch one and not the other, since
 // they take different branches inside describeRPCError (hook.go).
 func (s *extauthzServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
-	decideReq, err := decideRequestFromCheck(req, s.cfg.AgentID, s.cfg.Subject)
+	decideReq, err := decideRequestFromCheck(req, s.cfg)
 	if err != nil {
 		return denyCheckResponse(fmt.Sprintf("stratium-pep: %s", err), ""), nil
 	}
@@ -772,7 +951,7 @@ const unboundTokenReason = "stratium-pep: this surface requires a sender-constra
 // otherwise have been forwarded.
 //
 // TestCheck_UnboundToken_DeniedEvenWhenPDPAllows and
-// TestCheck_BoundTokenWithNoProof_DeniedByPDPReasonNotK5 are the two halves
+// TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason are the two halves
 // C25 needs and the pair a suite written only from C25's own sentence would
 // leave at one.
 //
