@@ -174,11 +174,18 @@ func TestVerify_ValidProof(t *testing.T) {
 	if got.htm != testHTM || got.htu != testHTU {
 		t.Fatalf("htm/htu reported as %q/%q, want %q/%q", got.htm, got.htu, testHTM, testHTU)
 	}
-	if got.JTI != "proof-0001" {
-		t.Fatalf("jti reported as %q", got.JTI)
+	// jkt, jti and iat are reachable only through MatchesRequest — a proof
+	// that has not been shown to be for the request in hand yields nothing a
+	// caller could bind or spend. See Proof's own doc comment.
+	matched, err := got.MatchesRequest(testHTM, testHTU)
+	if err != nil {
+		t.Fatalf("the proof must match the request it was made for: %v", err)
 	}
-	if !got.IssuedAt.Equal(now) {
-		t.Fatalf("iat reported as %v, want %v", got.IssuedAt, now)
+	if matched.JTI != "proof-0001" {
+		t.Fatalf("jti reported as %q", matched.JTI)
+	}
+	if !matched.IssuedAt.Equal(now) {
+		t.Fatalf("iat reported as %v, want %v", matched.IssuedAt, now)
 	}
 	pub, err := (&jose.JSONWebKey{Key: key.Public()}).MarshalJSON()
 	if err != nil {
@@ -188,8 +195,8 @@ func TestVerify_ValidProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Thumbprint: %v", err)
 	}
-	if got.JKT != want {
-		t.Fatalf("jkt %q does not match the header key's thumbprint %q", got.JKT, want)
+	if matched.JKT != want {
+		t.Fatalf("jkt %q does not match the header key's thumbprint %q", matched.JKT, want)
 	}
 }
 
@@ -224,7 +231,7 @@ func TestVerify_RejectsAlgNone(t *testing.T) {
 // key can mint proofs.
 //
 // READ THE NEXT SENTENCE BEFORE TRUSTING THIS TEST. Like TestVerify_RejectsAlgNone
-// below it, this test passes for a reason other than the one it is named for,
+// above it, this test passes for a reason other than the one it is named for,
 // verified by mutation: adding jose.HS256/384/512 to allowedAlgorithms leaves
 // all three subtests GREEN. The header JWK parses to an *ecdsa.PublicKey, and
 // go-jose's HMAC verifier refuses a non-[]byte key a layer deeper, so the
@@ -330,7 +337,11 @@ func TestVerify_AcceptsEveryAdvertisedAlgorithm(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a proof signed with the advertised alg %s must verify: %v", alg, err)
 			}
-			if got.JKT == "" {
+			matched, err := got.MatchesRequest(testHTM, testHTU)
+			if err != nil {
+				t.Fatalf("a %s proof must match the request it was made for: %v", alg, err)
+			}
+			if matched.JKT == "" {
 				t.Fatalf("no thumbprint computed for a %s proof", alg)
 			}
 		})
@@ -564,7 +575,7 @@ func TestMatchesRequest_IgnoresQueryAndFragmentButNotPath(t *testing.T) {
 		"https://pdp.example.com/v1/decide?a=1#section",
 	}
 	for _, uri := range matching {
-		if err := p.MatchesRequest("GET", uri); err != nil {
+		if _, err := p.MatchesRequest("GET", uri); err != nil {
 			t.Errorf("%s should match (query and fragment are ignored): %v", uri, err)
 		}
 	}
@@ -578,7 +589,7 @@ func TestMatchesRequest_IgnoresQueryAndFragmentButNotPath(t *testing.T) {
 		"http://pdp.example.com/v1/decide",    // different scheme
 	}
 	for _, uri := range notMatching {
-		if err := p.MatchesRequest("GET", uri); err == nil {
+		if _, err := p.MatchesRequest("GET", uri); err == nil {
 			t.Errorf("%s must not match", uri)
 		}
 	}
@@ -588,14 +599,14 @@ func TestMatchesRequest_IgnoresQueryAndFragmentButNotPath(t *testing.T) {
 // query has to be ignored from whichever side carries it.
 func TestMatchesRequest_IgnoresQueryOnTheClaimSideToo(t *testing.T) {
 	p := Proof{htm: "GET", htu: "https://pdp.example.com/v1/decide?stale=1#frag"}
-	if err := p.MatchesRequest("GET", "https://pdp.example.com/v1/decide"); err != nil {
+	if _, err := p.MatchesRequest("GET", "https://pdp.example.com/v1/decide"); err != nil {
 		t.Fatalf("a query in the htu claim must be ignored: %v", err)
 	}
 }
 
 func TestMatchesRequest_SchemeAndHostAreCaseInsensitive(t *testing.T) {
 	p := Proof{htm: "POST", htu: "HTTPS://PDP.Example.COM/v1/decide"}
-	if err := p.MatchesRequest("POST", "https://pdp.example.com/v1/decide"); err != nil {
+	if _, err := p.MatchesRequest("POST", "https://pdp.example.com/v1/decide"); err != nil {
 		t.Fatalf("scheme and host compare case-insensitively (RFC 3986 §6.2.2.1): %v", err)
 	}
 }
@@ -612,7 +623,7 @@ func TestMatchesRequest_DropsTheDefaultPort(t *testing.T) {
 	for name, pair := range cases {
 		t.Run(name, func(t *testing.T) {
 			p := Proof{htm: "POST", htu: pair[0]}
-			if err := p.MatchesRequest("POST", pair[1]); err != nil {
+			if _, err := p.MatchesRequest("POST", pair[1]); err != nil {
 				t.Fatalf("%s and %s name the same resource: %v", pair[0], pair[1], err)
 			}
 		})
@@ -622,17 +633,17 @@ func TestMatchesRequest_DropsTheDefaultPort(t *testing.T) {
 // A non-default port is part of the authority and must still be compared.
 func TestMatchesRequest_KeepsANonDefaultPort(t *testing.T) {
 	p := Proof{htm: "POST", htu: "https://pdp.example.com:8443/v1/decide"}
-	if err := p.MatchesRequest("POST", "https://pdp.example.com/v1/decide"); err == nil {
+	if _, err := p.MatchesRequest("POST", "https://pdp.example.com/v1/decide"); err == nil {
 		t.Fatal("a non-default port must not be dropped")
 	}
 }
 
 func TestMatchesRequest_MethodIsExact(t *testing.T) {
 	p := Proof{htm: "POST", htu: testHTU}
-	if err := p.MatchesRequest("GET", testHTU); err == nil {
+	if _, err := p.MatchesRequest("GET", testHTU); err == nil {
 		t.Fatal("a different method must not match")
 	}
-	if err := p.MatchesRequest("post", testHTU); err == nil {
+	if _, err := p.MatchesRequest("post", testHTU); err == nil {
 		t.Fatal("HTTP methods are case-sensitive (RFC 9110 §9.1)")
 	}
 }
@@ -640,13 +651,23 @@ func TestMatchesRequest_MethodIsExact(t *testing.T) {
 // A relative or schemeless htu is an error, not a match. Comparing bare paths
 // would let a proof minted for one origin satisfy a request to another.
 func TestMatchesRequest_RejectsNonAbsoluteURI(t *testing.T) {
-	if err := (Proof{htm: "GET", htu: "/v1/decide"}).MatchesRequest("GET", "/v1/decide"); err == nil {
+	if _, err := (Proof{htm: "GET", htu: "/v1/decide"}).MatchesRequest("GET", "/v1/decide"); err == nil {
 		t.Fatal("a relative htu must be an error, not a match")
 	}
-	if err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", "/v1/decide"); err == nil {
+	// Deliberately NOT self-matched, and it cannot be: isolating the observed
+	// side needs a valid htu, which is inherently a mismatch. So this case
+	// would still error with the absolute-URI guard removed entirely — from
+	// the mismatch, not the guard. What it does assert, and what no other case
+	// covers, is that the OBSERVED side is validated at all rather than only
+	// the claim. Do not "strengthen" it by self-matching; that would delete
+	// the one property it holds.
+	if _, err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", "/v1/decide"); err == nil {
 		t.Fatal("a relative observed URI must be an error")
 	}
-	if err := (Proof{htm: "GET", htu: "pdp.example.com/v1/decide"}).MatchesRequest("GET", testHTU); err == nil {
+	// Self-matched, so a plain mismatch cannot produce the error: with the
+	// guard removed these two canonicalize identically and the call succeeds.
+	if _, err := (Proof{htm: "GET", htu: "pdp.example.com/v1/decide"}).
+		MatchesRequest("GET", "pdp.example.com/v1/decide"); err == nil {
 		t.Fatal("a schemeless htu must be an error")
 	}
 }
@@ -656,12 +677,12 @@ func TestMatchesRequest_RejectsNonAbsoluteURI(t *testing.T) {
 // RFC 3986 §6.2.3 does not authorize. Reject instead (RFC 9110 §4.2.1).
 func TestMatchesRequest_RejectsUserinfo(t *testing.T) {
 	withUser := "https://alice:secret@pdp.example.com/v1/decide"
-	if err := (Proof{htm: "GET", htu: withUser}).MatchesRequest("GET", testHTU); err == nil {
+	if _, err := (Proof{htm: "GET", htu: withUser}).MatchesRequest("GET", testHTU); err == nil {
 		t.Fatal("userinfo in the htu claim must be refused, not dropped")
 	} else if strings.Contains(err.Error(), "secret") {
 		t.Fatalf("the error echoed the userinfo password: %v", err)
 	}
-	if err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", withUser); err == nil {
+	if _, err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", withUser); err == nil {
 		t.Fatal("userinfo in the observed URI must be refused")
 	}
 }
@@ -670,11 +691,11 @@ func TestMatchesRequest_RejectsUserinfo(t *testing.T) {
 // full Unicode case mapping, under which U+212A KELVIN SIGN folds to "k".
 func TestMatchesRequest_CaseFoldIsASCIIOnly(t *testing.T) {
 	p := Proof{htm: "GET", htu: "https://Kelvin.example.com/p"}
-	if err := p.MatchesRequest("GET", "https://kelvin.example.com/p"); err == nil {
+	if _, err := p.MatchesRequest("GET", "https://kelvin.example.com/p"); err == nil {
 		t.Fatal("U+212A must not fold to ASCII 'k': RFC 3986 §6.2.2.1 is ASCII-only")
 	}
 	// The ASCII fold itself must still work.
-	if err := (Proof{htm: "GET", htu: "https://KELVIN.example.com/p"}).
+	if _, err := (Proof{htm: "GET", htu: "https://KELVIN.example.com/p"}).
 		MatchesRequest("GET", "https://kelvin.example.com/p"); err != nil {
 		t.Fatalf("ASCII case folding must still apply: %v", err)
 	}
@@ -691,7 +712,7 @@ func TestMatchesRequest_CaseFoldIsASCIIOnly(t *testing.T) {
 // cannot be the reason, so only the guard can be.
 func TestMatchesRequest_RejectsEmptyHostAfterPortTrim(t *testing.T) {
 	for _, bad := range []string{"https://:443/p", "http://:80/p", "https:///p"} {
-		if err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", bad); err == nil {
+		if _, err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", bad); err == nil {
 			t.Errorf("%q has no host and must be refused even against itself", bad)
 		}
 	}
@@ -699,10 +720,10 @@ func TestMatchesRequest_RejectsEmptyHostAfterPortTrim(t *testing.T) {
 
 func TestMatchesRequest_RejectsUnparseableURI(t *testing.T) {
 	bad := "https://pdp.example.com/\x7f\x00" // control characters: url.Parse fails
-	if err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", testHTU); err == nil {
+	if _, err := (Proof{htm: "GET", htu: bad}).MatchesRequest("GET", testHTU); err == nil {
 		t.Fatal("an unparseable htu must be an error")
 	}
-	if err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", bad); err == nil {
+	if _, err := (Proof{htm: "GET", htu: testHTU}).MatchesRequest("GET", bad); err == nil {
 		t.Fatal("an unparseable observed URI must be an error")
 	}
 }
@@ -711,7 +732,7 @@ func TestMatchesRequest_RejectsUnparseableURI(t *testing.T) {
 // path separator, which is a different resource on any segment-routing server.
 func TestMatchesRequest_DoesNotDecodePercentEncodedPath(t *testing.T) {
 	p := Proof{htm: "GET", htu: "https://pdp.example.com/a%2Fb"}
-	if err := p.MatchesRequest("GET", "https://pdp.example.com/a/b"); err == nil {
+	if _, err := p.MatchesRequest("GET", "https://pdp.example.com/a/b"); err == nil {
 		t.Fatal("%2F must not compare equal to /")
 	}
 }
@@ -727,10 +748,10 @@ func TestVerifyThenMatchesRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if err := p.MatchesRequest(testHTM, testHTU+"?trace=1"); err != nil {
+	if _, err := p.MatchesRequest(testHTM, testHTU+"?trace=1"); err != nil {
 		t.Fatalf("the verified proof should match the request it was made for: %v", err)
 	}
-	if err := p.MatchesRequest(testHTM, "https://pdp.example.com/v1/other"); err == nil {
+	if _, err := p.MatchesRequest(testHTM, "https://pdp.example.com/v1/other"); err == nil {
 		t.Fatal("the verified proof must not match a different path")
 	}
 }

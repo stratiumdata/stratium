@@ -102,12 +102,6 @@ const minRSABits = 2048
 // Proof is what a verified proof asserts. Every field is a fact about the
 // proof itself; none of them is a decision.
 type Proof struct {
-	// JKT is the RFC 7638 thumbprint of the proof's public key: SHA-256 over
-	// the key's required members, ordered lexicographically with no
-	// whitespace, base64url-encoded without padding. It is the value the PDP
-	// compares against the presented token's cnf.jkt.
-	JKT string
-
 	// htm and htu are the HTTP method and target URI the proof was made for
 	// (RFC 9449 §4.2). They are UNEXPORTED on purpose, and the purpose is not
 	// encapsulation for its own sake: MatchesRequest is the only correct way
@@ -123,6 +117,35 @@ type Proof struct {
 	// if a real need appears; do not re-export these.
 	htm string
 	htu string
+
+	// jkt, jti and issuedAt are established by Verify but are reachable only
+	// through MatchesRequest, which hands them back in a Matched. That is the
+	// point: a caller that never matches the proof against a request cannot
+	// obtain the thumbprint, so `p, _ := dpop.Verify(...); use(p.JKT)` — the
+	// shape that verifies a proof, binds the key, and silently accepts a
+	// proof minted for a different endpoint — does not compile.
+	//
+	// Unexporting htm/htu alone did not achieve that: it stopped a caller
+	// re-implementing the comparison, but not a caller skipping it. The
+	// ordering this imposes is the intended one anyway. RFC 9449 §4.3 lists
+	// htm and htu among the MUSTs of validating a proof, peers of the
+	// signature and typ checks, while binding the key to the token is §6.1 —
+	// a later step with no mandated precedence. Nothing needs the thumbprint
+	// before the match.
+	jkt      string
+	jti      string
+	issuedAt time.Time
+}
+
+// Matched is what a proof yields once it has been shown to be for the request
+// in hand. Its fields exist nowhere else, which is what makes the request
+// check unskippable rather than merely documented.
+type Matched struct {
+	// JKT is the RFC 7638 thumbprint of the proof's public key: SHA-256 over
+	// the key's required members, ordered lexicographically with no
+	// whitespace, base64url-encoded without padding. It is the value the PDP
+	// compares against the presented token's cnf.jkt.
+	JKT string
 
 	// JTI is the proof's unique identifier. Replay prevention is the caller's
 	// (spec §4.7.2 K8); this package only reports the value.
@@ -231,11 +254,11 @@ func Verify(proof string, now time.Time, window time.Duration) (Proof, error) {
 	}
 
 	return Proof{
-		JKT:      jkt,
 		htm:      claims.HTM,
 		htu:      claims.HTU,
-		JTI:      claims.JTI,
-		IssuedAt: issuedAt,
+		jkt:      jkt,
+		jti:      claims.JTI,
+		issuedAt: issuedAt,
 	}, nil
 }
 
@@ -252,26 +275,26 @@ func Verify(proof string, now time.Time, window time.Duration) (Proof, error) {
 // §9.1), so "get" is not "GET". uri is compared under the normalization
 // described in the package doc, which is not string equality. Both arguments
 // are what the surface observed, never what the client asserted.
-func (p Proof) MatchesRequest(method, uri string) error {
+func (p Proof) MatchesRequest(method, uri string) (Matched, error) {
 	if p.htm != method {
-		return fmt.Errorf("dpop: htm %q does not match the observed method %q", p.htm, method)
+		return Matched{}, fmt.Errorf("dpop: htm %q does not match the observed method %q", p.htm, method)
 	}
 	claimed, err := canonicalURI(p.htu)
 	if err != nil {
-		return fmt.Errorf("dpop: htu claim: %w", err)
+		return Matched{}, fmt.Errorf("dpop: htu claim: %w", err)
 	}
 	observed, err := canonicalURI(uri)
 	if err != nil {
-		return fmt.Errorf("dpop: observed uri: %w", err)
+		return Matched{}, fmt.Errorf("dpop: observed uri: %w", err)
 	}
 	if claimed != observed {
 		// The canonical forms, not the raw ones: they are what actually
 		// differed, and they carry no query string — which the comparison
 		// discarded anyway and which is the part most likely to hold a
 		// credential or personal data if a caller logs this.
-		return fmt.Errorf("dpop: htu %q does not match the observed uri %q", claimed, observed)
+		return Matched{}, fmt.Errorf("dpop: htu %q does not match the observed uri %q", claimed, observed)
 	}
-	return nil
+	return Matched{JKT: p.jkt, JTI: p.jti, IssuedAt: p.issuedAt}, nil
 }
 
 // Thumbprint returns the RFC 7638 thumbprint of a JSON JWK document, in the
