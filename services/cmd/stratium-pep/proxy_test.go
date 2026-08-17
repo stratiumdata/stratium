@@ -549,7 +549,7 @@ func incomingBearerCtx(token string, extra ...string) context.Context {
 
 // TestExtractBearerTokenFromMetadata is the direct, wire-free table of every shape
 // extractBearerTokenFromMetadata must accept or reject -- mirrors extauthz_test.go's
-// TestExtractBearerToken for the analogous gRPC-metadata shape, faster and more exhaustive than
+// TestExtractCredentials for the analogous gRPC-metadata shape, faster and more exhaustive than
 // routing every case through a real dial.
 func TestExtractBearerTokenFromMetadata(t *testing.T) {
 	for _, tc := range []struct {

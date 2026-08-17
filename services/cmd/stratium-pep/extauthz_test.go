@@ -1416,6 +1416,22 @@ func TestCheck_ObservedMethodAndURI(t *testing.T) {
 			scheme: "https", host: "gateway.example:8443", method: "DELETE", path: "/a/b",
 			wantURI: "https://gateway.example:8443/a/b",
 		},
+		{
+			// The row that catches a method silently case-normalized on its
+			// way out. Every other row here sends an already-uppercase method,
+			// so an added strings.ToUpper is invisible to all of them -- it
+			// was, and it survived a mutation run until this row existed.
+			//
+			// It is not cosmetic. RFC 9110 §9.1 makes methods case-sensitive
+			// and dpop.Proof.MatchesRequest compares htm the same way, so
+			// upcasing here would make a proof minted for "GET /a/b" satisfy a
+			// request Envoy actually reported as "get /a/b" -- two different
+			// requests, one proof, which is precisely the binding this
+			// mechanism exists to make exact.
+			name:   "method is forwarded verbatim, never case-normalized",
+			scheme: "http", host: "gateway.example", method: "get", path: "/a/b",
+			wantURI: "http://gateway.example/a/b",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakePDP{resp: allowResponse("")}
@@ -1451,20 +1467,29 @@ func TestCheck_ObservedMethodAndURI(t *testing.T) {
 	}
 }
 
-// TestCheck_ObservedURIUsesTheRequestScheme_NotAForwardedProtoHeader pins the
-// one choice observedURI had to make that a passing test would otherwise
-// leave undetermined. In the live stack every source agrees -- GetScheme(),
-// the ":scheme" pseudo-header, and "x-forwarded-proto" all read "http" -- so
-// a test built from a realistic fixture cannot tell which one the code read.
+// TestCheck_ObservedURIUsesTheTypedFields_NotThePseudoHeaders pins the one
+// choice observedURI had to make that a passing test would otherwise leave
+// undetermined. In the live stack every source agrees -- GetScheme() equals
+// ":scheme" equals "x-forwarded-proto", and GetHost() equals ":authority" --
+// so a test built from a realistic fixture cannot tell which one the code
+// read, and a mutation swapping them would be invisible.
 //
-// This fixture disagrees on purpose: the typed field says https, both headers
-// say http. Only one answer is correct, and it is the typed field -- a header
-// is an entry in a map a caller also writes into, and preferring one on the
-// strength of which a deployment is less likely to have spoofed would be this
-// server classifying its own inputs (D1). The headers here are also the
-// positive control for the opposite mutation: they must still reach raw_input,
-// since neither is a credential.
-func TestCheck_ObservedURIUsesTheRequestScheme_NotAForwardedProtoHeader(t *testing.T) {
+// This fixture disagrees on purpose, on BOTH pieces at once: the typed fields
+// say https and gateway.example, while every header says http and
+// attacker.example. Only one answer is correct, and it is the typed fields --
+// a header is an entry in a map a caller also writes into, and preferring one
+// on the strength of which a deployment is less likely to have spoofed would
+// be this server classifying its own inputs (D1). The headers here are also
+// the positive control for the opposite mutation: they must still reach
+// raw_input, since none of them is a credential.
+//
+// The authority half is the one with teeth. htu's authority is what
+// distinguishes a proof minted for this gateway from one minted for another,
+// so an authority read from a header a caller controls would let a proof made
+// for anywhere satisfy a request made here -- collapsing the binding into a
+// value the presenter supplies, which the observed_uri field's own proto doc
+// comment says it must never be.
+func TestCheck_ObservedURIUsesTheTypedFields_NotThePseudoHeaders(t *testing.T) {
 	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
@@ -1475,6 +1500,8 @@ func TestCheck_ObservedURIUsesTheRequestScheme_NotAForwardedProtoHeader(t *testi
 			"dpop":              testDPoPProof,
 			":scheme":           "http",
 			"x-forwarded-proto": "http",
+			":authority":        "attacker.example",
+			":path":             "/somewhere-else",
 		}))
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -1486,9 +1513,21 @@ func TestCheck_ObservedURIUsesTheRequestScheme_NotAForwardedProtoHeader(t *testi
 	}
 	const want = "https://gateway.example/p"
 	if got := req.GetObservedUri(); got != want {
-		t.Errorf("observed_uri = %q, want %q -- htu's scheme comes from AttributeContext_HttpRequest.Scheme, "+
-			"which a real Envoy populates (measured, see observedURI's doc comment), not from \":scheme\" or "+
-			"\"x-forwarded-proto\", which are entries in a map a caller also writes into", got, want)
+		t.Errorf("observed_uri = %q, want %q -- every piece of htu comes from the typed "+
+			"AttributeContext_HttpRequest fields, which a real Envoy populates (measured, see observedURI's "+
+			"doc comment), never from \":scheme\", \"x-forwarded-proto\", \":authority\", or \":path\", which "+
+			"are entries in a map a caller also writes into", got, want)
+	}
+	// The headers are not credentials, so the same request that must not
+	// TRUST them must still record them.
+	var meta requestMetadata
+	if err := json.Unmarshal([]byte(req.GetRawInput()), &meta); err != nil {
+		t.Fatalf("raw_input is not well-formed JSON: %v", err)
+	}
+	if meta.Headers[":authority"] != "attacker.example" {
+		t.Errorf("raw_input.headers[\":authority\"] = %q, want it preserved -- a pseudo-header that must not "+
+			"be trusted as htu's authority is still ordinary request metadata an auditor should see",
+			meta.Headers[":authority"])
 	}
 }
 

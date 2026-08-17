@@ -435,7 +435,7 @@ var credentialHeaderNames = map[string]bool{
 // observedURI's doc comment), and a case-sensitive match written against what
 // Envoy sends would miss a conformant client behind any other intermediary.
 // TestExtractCredentials_HeaderNameCaseDiffers_CredentialsStillFound and
-// TestCheck_RawInputNeverCarriesCredentials_AnyHeaderCasing both send headers
+// TestCheck_RawInputNeverCarriesDPoPProof_AnyHeaderCasing both send headers
 // this function would silently miss, or silently fail to strip, if it ever
 // trusted that guarantee instead.
 //
