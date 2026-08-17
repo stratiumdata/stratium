@@ -104,6 +104,19 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-narrow-registry-integration
       STRATIUM_LISTEN_ADDR: :50051
+      # The ONLY service that overrides the 5m default, and it is not an
+      # arbitrary choice of service: TestIntegration_SpentProofReaper_
+      # RunsOnASchedule (internal/store) plants an already-expired row for
+      # this tenant and waits for this container's own reaper to delete it.
+      # That is the only test in the suite that can fail if the shipped
+      # binary stops SCHEDULING the reaper at all -- reaper.go's unit tests
+      # prove the loop behaves, and nothing else proves anything calls it.
+      #
+      # pdp-narrow rather than `pdp`, because this service exists only to
+      # register one policy language short and is otherwise idle, so a sweep
+      # every 2s costs nothing and races nothing. Every other PDP here leaves
+      # the default in place, so `make integration` still exercises it.
+      STRATIUM_SPENT_PROOF_REAP_INTERVAL: 2s
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem

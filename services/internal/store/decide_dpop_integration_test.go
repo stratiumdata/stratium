@@ -31,6 +31,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"database/sql"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -349,4 +350,50 @@ func TestIntegration_Decide_UnboundToken_AllowsAndSpendsNothing(t *testing.T) {
 		t.Errorf("spent_proofs = %v, want none: nothing was bound, so the accompanying proof substantiates "+
 			"no claim and there is no jti worth burning", got)
 	}
+}
+
+// The shipped PDP binary actually SCHEDULES the reaper — the one property
+// no unit test in this repo can reach.
+//
+// cmd/stratium-pdp/reaper_test.go proves the loop behaves: it logs failures,
+// keeps sweeping after one, reports its count, bounds each sweep. Every one
+// of those passes just as happily when nothing ever calls reapSpentProofs,
+// because run() needs a database and is not unit tested. That gap was found
+// by mutation: deleting the `go reapSpentProofs(...)` line from main.go left
+// the entire unit gate green. It is exactly the "mechanism plumbed and never
+// populated" pattern this project has now found nine times, and K8's "reaped
+// on a schedule" is the requirement it would have hollowed out.
+//
+// So this observes the EFFECT, in the database, produced by a real container
+// running the real binary: an already-expired row planted for pdp-narrow's
+// tenant must vanish on its own. No log scraping and no docker CLI — just
+// the row, which is the thing that actually has to disappear.
+//
+// pdp-narrow is configured with a 2s interval (docker-compose.yml); every
+// other PDP in the file keeps the 5m default, so the default path stays
+// exercised too.
+func TestIntegration_SpentProofReaper_RunsOnASchedule(t *testing.T) {
+	jti := "reaper-schedule-" + uuid.NewString()
+	// Already expired, so it is reapable on the very next sweep. A future
+	// expiry would make this test pass by never being deleted, which is the
+	// same observation as a reaper that never ran.
+	spend(t, narrowTenant, jti, time.Now().Add(-time.Hour))
+
+	if got := spentProofJTIs(t, narrowTenant); !slices.Contains(got, jti) {
+		t.Fatalf("planted jti %s is not in spent_proofs (%v) before the wait: without the row present "+
+			"first, its later absence proves nothing", jti, got)
+	}
+
+	// Generous relative to the 2s interval — this waits on the row, not on
+	// the clock, and returns as soon as it is gone.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if !slices.Contains(spentProofJTIs(t, narrowTenant), jti) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("expired spent_proofs row %s survived 30s against pdp-narrow's 2s reap interval: the PDP "+
+		"binary is not scheduling ReapSpentProofs at all, so K8's table grows on the decision path forever",
+		jti)
 }
