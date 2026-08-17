@@ -281,6 +281,17 @@ type decideThenAllowClient struct {
 	// correctly rejects snapshotting the whole struct -- the token string is
 	// the one field this type actually needs to remember past the retry.
 	firstDecideReqToken string
+	// senderConstrained is what the RETRY's own response reports for
+	// DecideResponse.sender_constrained (Phase 15). Only proxy_test.go reads
+	// it: proxy applies spec §4.7.2 K5 to the response an escalation RESOLVES
+	// to, not to the escalation itself, so the two proxy tests that pin that
+	// -- an approved retry on a bound token forwards, an approved retry on an
+	// unbound one is refused -- have to differ in this field and nothing else.
+	// Left false by hook_test.go's own callers, which is the right default for
+	// them: K5 binds the two network surfaces only, and a bearer token is
+	// legitimate on hook (the caller already holds the session file it lives
+	// in), so nothing here ever reads the field.
+	senderConstrained bool
 }
 
 func (c *decideThenAllowClient) Decide(ctx context.Context, req *pdpgrpc.DecideRequest, opts ...grpc.CallOption) (*pdpgrpc.DecideResponse, error) {
@@ -290,7 +301,11 @@ func (c *decideThenAllowClient) Decide(ctx context.Context, req *pdpgrpc.DecideR
 		c.firstDecideReqToken = req.GetToken()
 		return c.first, nil
 	}
-	return &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Reason: "escalation approved"}, nil
+	return &pdpgrpc.DecideResponse{
+		Effect:            pdpgrpc.Effect_EFFECT_ALLOW,
+		Reason:            "escalation approved",
+		SenderConstrained: c.senderConstrained,
+	}, nil
 }
 
 // Required fail-closed test 1/5: the deadline passes while still pending.

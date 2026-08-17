@@ -79,7 +79,7 @@ func awaitApproval(
 	// disconnect mid-poll -- see resolveApproval's own doc comment for why passing anything else
 	// here (in particular runHook's own ConnectTimeout-scoped ctx variable, were it threaded this
 	// far) would be actively wrong, not merely unnecessary.
-	effect, reason := resolveApproval(context.Background(), client, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout, req, resp)
+	effect, reason, _ := resolveApproval(context.Background(), client, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout, req, resp)
 	if effect == pdpgrpc.Effect_EFFECT_ALLOW {
 		return 0
 	}
@@ -144,13 +144,26 @@ func awaitApproval(
 // long-standing "independent of connectTimeout" contract (below) exists to
 // prevent. Each caller passes what it actually has to offer, not whatever
 // context.Context value happens to be lying around in its own scope.
+//
+// resolved is the retry's OWN DecideResponse, and it is non-nil ONLY when effect is
+// EFFECT_ALLOW: on every deny path there either is no retry response (the poll timed out, the
+// id was missing, the retry RPC failed) or there is one this function has already reduced to
+// its reason. It exists for one caller. proxy.go's authorize must apply spec §4.7.2 K5 -- refuse
+// an allow whose token was never bound to a key -- and DecideResponse.sender_constrained's own
+// proto comment says in capitals to consult that field only when effect is EFFECT_ALLOW. The
+// escalation this function was handed is not an ALLOW; the retry it resolved to is, and that is
+// the response the caller is about to act on, so it is the only one entitled to answer. Returning
+// it rather than a bool keeps this function free of any knowledge of K5: it hands back what the
+// PDP said and lets each surface apply its own rule. hook.go's awaitApproval and
+// mcp_authorize.go's decideAndRelay discard it -- a bearer token is legitimate on both of those
+// surfaces (K5 binds the two network surfaces only), so neither has a rule to apply.
 func resolveApproval(
 	ctx context.Context,
 	client pdpgrpc.PDPServiceClient,
 	connectTimeout, pollInterval, approvalTimeout time.Duration,
 	req *pdpgrpc.DecideRequest,
 	resp *pdpgrpc.DecideResponse,
-) (effect pdpgrpc.Effect, reason string) {
+) (effect pdpgrpc.Effect, reason string, resolved *pdpgrpc.DecideResponse) {
 	approvalID := resp.GetApprovalId()
 	if approvalID == "" {
 		// DecideResponse.approval_id's own doc comment guarantees this is
@@ -160,7 +173,7 @@ func resolveApproval(
 		// this file follows for a response it cannot act on.
 		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf(
 			"stratium-pep: PDP returned ESCALATE with no approval_id to poll; denying (PDP reason: %s)",
-			resp.GetReason())
+			resp.GetReason()), nil
 	}
 
 	// pollCtx bounds the wait at approvalTimeout AT THE LATEST -- independent
@@ -175,7 +188,7 @@ func resolveApproval(
 
 	ok, pollReason := pollApproval(pollCtx, client, pollInterval, approvalID)
 	if !ok {
-		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason)
+		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason), nil
 	}
 
 	// The retry: req, unchanged, plus the now-approved id. Reusing req rather
@@ -196,11 +209,11 @@ func resolveApproval(
 	retryResp, err := client.Decide(retryCtx, req)
 	if err != nil {
 		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: retry after approval: %s",
-			describeRPCError(err, agentOrDelegationUnknownMsg))
+			describeRPCError(err, agentOrDelegationUnknownMsg)), nil
 	}
 
 	if retryResp.GetEffect() == pdpgrpc.Effect_EFFECT_ALLOW {
-		return pdpgrpc.Effect_EFFECT_ALLOW, ""
+		return pdpgrpc.Effect_EFFECT_ALLOW, "", retryResp
 	}
 	// EFFECT_DENY — a leg the approval does not cover started refusing
 	// between the escalation and this retry (a revoked delegation, a policy
@@ -212,7 +225,7 @@ func resolveApproval(
 	// top-level DENY case, this is the PDP's own verdict text, not a local
 	// diagnostic this process is synthesizing, and the two must stay visually
 	// distinguishable to a human reading the denial.
-	return pdpgrpc.Effect_EFFECT_DENY, retryResp.GetReason()
+	return pdpgrpc.Effect_EFFECT_DENY, retryResp.GetReason(), nil
 }
 
 // pollApproval blocks until approvalID resolves to "approved" or "denied",

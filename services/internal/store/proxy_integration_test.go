@@ -12,8 +12,11 @@
 // gRPC client at this process instead of the real target" (proxy.go's own
 // package doc) describes.
 //
-// Six independent top-level tests, one per proof the brief asks for, rather
-// than one test with six t.Run subtests -- the same convention
+// Nine independent top-level tests, one per proof -- six from Phase 11 Task 4
+// and three added by Phase 15 Task 6 for sender-constrained tokens (K5's
+// refusal of an unbound token, K7's refusal of a proof bound to the TARGET's
+// address, and K10's exclusion of the proof from the audit digest) -- rather
+// than one test with nine t.Run subtests -- the same convention
 // extauthz_integration_test.go's own package doc establishes: conformance_
 // test.go's own provenElsewhere pointer (C22, corrected by this task) needs
 // a top-level Go function it can verify by name (conformance_pointer_
@@ -48,14 +51,18 @@ package store_test
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -63,6 +70,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"stratium/internal/grpctarget"
+	"stratium/internal/pdpgrpc"
 	"stratium/internal/store"
 	"stratium/pkg/models"
 )
@@ -88,6 +96,110 @@ const proxyTrailerKey = "x-grpc-target-call"
 // path at all.
 func bearerOutgoingCtx(ctx context.Context, token string) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+}
+
+// proxyPublicURI is the address every proof in this file ADDRESSES, as
+// distinct from the ephemeral host:port it DIALS. It must equal
+// docker-compose.yml's own pep-proxy STRATIUM_PEP_PROXY_PUBLIC_URI exactly
+// (Phase 15, spec §4.7.2 K7): the proxy builds htu from that configured value
+// and from nothing else, so a proof signed against anything but this string
+// is refused at the PDP's htu comparison.
+//
+// The two differ on purpose, and not only because compose publishes 9292 on
+// an ephemeral host port. It is the ordinary deployment shape: an agent
+// connects to whatever address resolves and signs the stable public address
+// into its proof. What makes that gap load-bearing HERE is that the proxy
+// never reads the caller's own ":authority" at all -- unlike extauthz, which
+// validates the caller's Host against an allowlist, this surface takes its
+// identity from configuration and ignores the request entirely. So the live
+// stack demonstrates that directly: every call below dials 127.0.0.1:<random>
+// and signs proxy.stratium.test:9292, and it is the SIGNED value that has to
+// match what the PEP reported for the call to be forwarded at all.
+const proxyPublicURI = "http://proxy.stratium.test:9292"
+
+// mintProxyBoundToken mints a token bound to key's public half (spec §4.7.2
+// K6) through the real IssueToken RPC, so the containerized PDP's own
+// verifier is what decides the token is genuine.
+//
+// Every proof below that expects to REACH the upstream has to use this rather
+// than mintToken: proxy refuses an unbound token outright (K5,
+// allowIfSenderConstrained), so a bearer token now produces PermissionDenied
+// no matter how permissive the policy behind it is.
+// TestIntegration_Proxy_UnboundTokenRefusedEvenWhenPermitted is the proof of
+// exactly that.
+//
+// The proofs that expect a DENIAL deliberately keep calling mintToken, and
+// that is not laziness: a denial they attribute to a revoked delegation or a
+// tier ceiling must be attributable to THAT and not to a binding requirement
+// that would have refused the call anyway. Each one asserts the PDP's own
+// reason text, so a K5 refusal arriving instead fails them loudly rather than
+// passing on the right status code for the wrong reason. Mirrors
+// mintExtauthzBoundToken (extauthz_integration_test.go) exactly.
+func mintProxyBoundToken(t *testing.T, delegationID uuid.UUID, key *ecdsa.PrivateKey) string {
+	t.Helper()
+	doc, err := (&jose.JSONWebKey{Key: key.Public()}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal public jwk: %v", err)
+	}
+	jwk := string(doc)
+	const ttlSeconds = 10 * 365 * 24 * 60 * 60 // always clamped to the delegation's own expiry; see mintToken
+	resp, err := proxyPdpClient.IssueToken(t.Context(), &pdpgrpc.IssueTokenRequest{
+		DelegationId: delegationID.String(),
+		TtlSeconds:   ttlSeconds,
+		DpopJwk:      &jwk,
+	})
+	if err != nil {
+		t.Fatalf("mint bound token for delegation %s: %v", delegationID, err)
+	}
+	return resp.GetToken()
+}
+
+// proxyProof builds an RFC 9449 proof for the gRPC call this file is about to
+// make through pep-proxy, signed by key. jti is fresh per call because K8
+// makes it single-use in the database: two proofs sharing one would collide,
+// and the second call would deny for replay rather than for whatever the
+// calling proof is actually about.
+//
+// htm is POST unconditionally -- gRPC is HTTP/2 POST (K7) -- and htu is
+// stated INDEPENDENTLY here rather than read back from anything the PEP
+// computed: proxyPublicURI + fullMethod is the URI a real agent minting a
+// proof for this call would use. So a call that reaches the upstream is the
+// end-to-end evidence that cmd/stratium-pep/proxy.go built the SAME string
+// from its own configuration and the method it was asked for, and that it did
+// NOT build it from the address the client dialled, from the caller's
+// ":authority", or from grpc-target's address. That is the only way this
+// property can be checked from outside: the PDP compares the two, and neither
+// side is visible to the other.
+func proxyProof(t *testing.T, key *ecdsa.PrivateKey, fullMethod string) string {
+	t.Helper()
+	return proxyProofFor(t, key, proxyPublicURI+fullMethod)
+}
+
+// proxyProofFor is proxyProof with htu supplied outright, for the one proof
+// that has to mint a deliberately WRONG one
+// (TestIntegration_Proxy_ProofBoundToTheTargetsAddressIsRefused).
+func proxyProofFor(t *testing.T, key *ecdsa.PrivateKey, htu string) string {
+	t.Helper()
+	proof, err := josejwt.Signed(mustDPoPSigner(t, key)).Claims(map[string]any{
+		"htm": http.MethodPost,
+		"htu": htu,
+		"jti": uuid.NewString(),
+		"iat": time.Now().Unix(),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("serialize proof: %v", err)
+	}
+	return proof
+}
+
+// boundOutgoingCtx attaches both credentials a bound call needs -- the token
+// in "authorization" and the RFC 9449 proof in "dpop" -- as OUTGOING gRPC
+// metadata, which is what a real caller stub sends. The key is spelled
+// "DPoP", the RFC's own spelling: grpc-go lower-cases metadata keys on the
+// way out, so this also demonstrates that the casing the PEP actually
+// receives is not the casing a client wrote.
+func boundOutgoingCtx(ctx context.Context, token, proof string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token, "DPoP", proof)
 }
 
 // ensureProxyAgent idempotently inserts the one agent identity every proof
@@ -220,9 +332,18 @@ func TestIntegration_Proxy_PermittedActionReachesUpstream(t *testing.T) {
 
 	delegation := newProxyDelegation(t, "proxy proof 1: a permitted action reaches the upstream, trailers included",
 		models.ActionTierDestructive, nil)
-	token := mintToken(t, proxyPdpClient, delegation.ID)
+	// Bound, with a proof, and that is now the ONLY shape this surface
+	// forwards (K5). It also establishes something only a live stack can:
+	// the htu this test signed independently (proxyPublicURI +
+	// TargetService_Fetch_FullMethodName) is byte-identical to the one
+	// pep-proxy built from its own configuration -- a proxy that reported
+	// grpc-target's address, the address this client dialled, or the
+	// ":authority" grpc-go put on the wire would deny at the PDP's htu
+	// comparison instead of reaching the upstream at all.
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
 
-	ctx := bearerOutgoingCtx(t.Context(), token)
+	ctx := boundOutgoingCtx(t.Context(), token, proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName))
 	var trailer metadata.MD
 	resp, err := proxyTargetClient.Fetch(ctx, &grpctarget.EchoRequest{Message: "proof1-payload"}, grpc.Trailer(&trailer))
 	if err != nil {
@@ -311,7 +432,7 @@ func TestIntegration_Proxy_NoTokenDeniesNoFallback(t *testing.T) {
 	}
 	const wantReason = "no authorization metadata"
 	if msg := status.Convert(err).Message(); !strings.Contains(msg, wantReason) {
-		t.Errorf("status message = %q, want extractBearerTokenFromMetadata's own K4 wording (%q) -- anything "+
+		t.Errorf("status message = %q, want extractCredentialsFromMetadata's own K4 wording (%q) -- anything "+
 			"else risks masking a fallback path this surface must not have", msg, wantReason)
 	}
 }
@@ -361,13 +482,41 @@ func TestIntegration_Proxy_RevokedDelegationDeniesAtDelegationLeg(t *testing.T) 
 	}
 }
 
-// TestIntegration_Proxy_EscalateBlocksThenForwardsOnApproval is proof 5: an
-// escalating call BLOCKS -- proxy is a blocking surface (spec §4.6), unlike
-// extauthz's own non-blocking degrade (Phase 10 Task 4's proof 5) -- then
-// forwards once an out-of-band approval resolves it. This is the blocking
-// counterpart to Phase 10's non-blocking degrade, and it is the distinction
-// spec §4.6 draws between the two surface classes -- proving both halves is
-// what makes that distinction real rather than asserted.
+// TestIntegration_Proxy_EscalateBlocksThenResolves is proof 5: an escalating
+// call BLOCKS -- proxy is a blocking surface (spec §4.6), unlike extauthz's
+// own non-blocking degrade (Phase 10 Task 4's proof 5) -- and then, once an
+// out-of-band approval resolves it, the call ends rather than hanging. This
+// is the blocking counterpart to Phase 10's non-blocking degrade, and it is
+// the distinction spec §4.6 draws between the two surface classes.
+//
+// *** WHAT THIS PROOF NO LONGER SHOWS, AND WHY. Until Phase 15 this test
+// ended by asserting the call was FORWARDED after approval. It is not, as of
+// this task, and the change is a DEFECT this task surfaced rather than a
+// property anyone designed:
+//
+// An escalation's approved retry is a SECOND Decide call about the SAME
+// request. escalation.go's resolveApproval must resend req byte-identical
+// (resolveEscalation binds the approval to input_digest), so it resends the
+// same dpop_proof -- and the PDP spends a jti per Decide CALL, so the retry
+// is refused with "store: dpop proof already spent" (K8). Even if it were
+// not, a human taking longer than STRATIUM_DPOP_FRESHNESS_WINDOW would put
+// the same retry outside the window (K9). A bound token therefore cannot
+// survive an escalation on this surface at all, and an UNBOUND one cannot
+// either, because K5 refuses the resulting ALLOW.
+//
+// Both candidate resolutions are RULINGS rather than implementation details,
+// which is why this task does not pick one: (a) treat an approved retry as a
+// continuation and skip the proof check when approval_id resolves to an
+// approved row bound to this exact request -- but approvals are not consumed
+// (resolveEscalation, internal/pdpgrpc/escalation.go), so anyone holding the
+// token plus the approval id could then re-execute the approved action for
+// the approval's whole TTL without ever proving possession; or (b) make the
+// caller re-prove after approval, which needs a caller-visible retry this
+// surface's blocking design does not have. See task-6-report.md.
+//
+// The assertion below therefore states the CURRENT behaviour and says so.
+// Invert it when the ruling lands; do not delete it, because the blocking
+// half above is spec §4.6's own property and is unaffected.
 //
 // The Fetch call runs on its own goroutine because it blocks: pep-proxy
 // holds the caller's own stream open (escalation.go's resolveApproval,
@@ -382,7 +531,7 @@ func TestIntegration_Proxy_RevokedDelegationDeniesAtDelegationLeg(t *testing.T) 
 // must keep running on its own goroutine independent of anything this test
 // function's own context lifecycle does, the same choice proxy_test.go's
 // own wire-level escalation test makes.
-func TestIntegration_Proxy_EscalateBlocksThenForwardsOnApproval(t *testing.T) {
+func TestIntegration_Proxy_EscalateBlocksThenResolves(t *testing.T) {
 	ensureProxyAgent(t)
 	ensureProxyCatalog(t)
 	ensureProxyPermitPolicy(t)
@@ -390,7 +539,18 @@ func TestIntegration_Proxy_EscalateBlocksThenForwardsOnApproval(t *testing.T) {
 	escalateAt := models.ActionTierExternalComms
 	delegation := newProxyDelegation(t, "proxy proof 5: an escalating call blocks, then forwards on approval",
 		models.ActionTierDestructive, &escalateAt)
-	token := mintToken(t, proxyPdpClient, delegation.ID)
+	// Bound, unlike extauthz's own proof 5, and the difference is exactly the
+	// difference between the two surfaces: extauthz DEGRADES an escalation to
+	// a denial, so its escalating call never reaches the branch K5 guards.
+	// proxy BLOCKS and then forwards, so the approved retry ends in a real
+	// ALLOW -- which allowIfSenderConstrained refuses for an unbound token
+	// (TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused,
+	// proxy_test.go). ONE proof, minted once, carries the whole escalation:
+	// the retry is an internal Decide call reusing the same request, so its
+	// jti is spent exactly once no matter how long the human took.
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
+	proof := proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)
 
 	type fetchResult struct {
 		resp *grpctarget.EchoResponse
@@ -398,7 +558,7 @@ func TestIntegration_Proxy_EscalateBlocksThenForwardsOnApproval(t *testing.T) {
 	}
 	done := make(chan fetchResult, 1)
 	go func() {
-		ctx := bearerOutgoingCtx(context.Background(), token)
+		ctx := boundOutgoingCtx(context.Background(), token, proof)
 		resp, err := proxyTargetClient.Fetch(ctx, &grpctarget.EchoRequest{Message: "proof5-payload"})
 		done <- fetchResult{resp: resp, err: err}
 	}()
@@ -422,31 +582,44 @@ func TestIntegration_Proxy_EscalateBlocksThenForwardsOnApproval(t *testing.T) {
 	}
 	approveApproval(t, proxyTenant, pending.ID, proxySubject)
 
-	// THEN FORWARDS: once approved, pep-proxy's own poll loop notices
+	// THEN RESOLVES: once approved, pep-proxy's own poll loop notices
 	// (STRATIUM_PEP_APPROVAL_POLL_INTERVAL: 200ms, docker-compose.yml) and
-	// forwards to the real target.
+	// the blocked call ends. That it ends AT ALL -- promptly, on the
+	// approval, rather than by hitting the 30s ApprovalTimeout -- is the half
+	// of §4.6 this proof still establishes end to end.
 	select {
 	case res := <-done:
-		if res.err != nil {
-			t.Fatalf("Fetch() error = %v, want success after approval", res.err)
+		// See this test's own doc comment. Today the retry is refused
+		// because the proof it must resend has a single-use jti that the
+		// ORIGINAL call already spent. Asserted precisely, so that when the
+		// ruling lands this fails loudly rather than passing on a new
+		// behaviour it was never checked against.
+		if res.err == nil {
+			t.Fatalf("Fetch() succeeded after approval (resp=%v) -- if the escalation/DPoP interaction has "+
+				"been ruled on, invert this assertion and restore the target-call-count check below; do not "+
+				"leave the proof asserting behaviour that has changed", res.resp)
 		}
-		if res.resp.GetMessage() != "proof5-payload" {
-			t.Errorf("response message = %q, want the target's own echoed %q", res.resp.GetMessage(), "proof5-payload")
+		if got, want := status.Code(res.err), codes.PermissionDenied; got != want {
+			t.Errorf("status code = %s, want %s", got, want)
 		}
-		if res.resp.GetCallNumber() <= 0 {
-			t.Errorf("response call_number = %d, want > 0 -- the target's own counter", res.resp.GetCallNumber())
+		if msg := status.Convert(res.err).Message(); !strings.Contains(msg, "already spent") {
+			t.Errorf("status message = %q, want the spent-jti wording -- any OTHER denial means the "+
+				"escalation failed for a reason this proof has not accounted for, which is worth "+
+				"investigating rather than absorbing", msg)
 		}
 	case <-time.After(20 * time.Second):
-		t.Fatal("Fetch() did not return within 20s after approval -- want the call to unblock and forward")
+		t.Fatal("Fetch() did not return within 20s after approval -- want the blocked call to end promptly " +
+			"on the approval rather than on ApprovalTimeout; that promptness is what §4.6 buys")
 	}
 
 	afterApprove, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
 	if err != nil {
 		t.Fatalf("CallCount() after-approve error = %v", err)
 	}
-	if afterApprove.GetCount() != beforeApprove.GetCount()+1 {
-		t.Errorf("grpc-target's own call count = %d -> %d, want exactly +1 -- the target must be reached "+
-			"exactly once, only after approval", beforeApprove.GetCount(), afterApprove.GetCount())
+	if afterApprove.GetCount() != beforeApprove.GetCount() {
+		t.Errorf("grpc-target's own call count = %d -> %d, want unchanged -- the retry was refused, and a "+
+			"refused call must never reach the upstream",
+			beforeApprove.GetCount(), afterApprove.GetCount())
 	}
 }
 
@@ -464,11 +637,20 @@ func TestIntegration_Proxy_StreamAuthorizedOnceForwardsBothDirections(t *testing
 
 	delegation := newProxyDelegation(t, "proxy proof 6: a stream is authorized once, at open, and forwards both ways",
 		models.ActionTierReadOnly, nil)
-	token := mintToken(t, proxyPdpClient, delegation.ID)
+	// ONE bound token and ONE proof for the whole stream, which is P4 stated
+	// in Phase 15's terms: the stream is authorized once, at open, so it gets
+	// one Decide call carrying one proof, whose single-use jti (K8) is spent
+	// once. Every message below rides that. There is deliberately no second
+	// proof minted here, and a build that asked for one per message would
+	// fail this test twice over -- on the audit-row count below, and against
+	// the real jti table, which would refuse the second presentation of the
+	// same proof outright.
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
 
 	before := fetchAuditChain(t, proxyTenant)
 
-	ctx := bearerOutgoingCtx(t.Context(), token)
+	ctx := boundOutgoingCtx(t.Context(), token, proxyProof(t, key, grpctarget.TargetService_Chat_FullMethodName))
 	stream, err := proxyTargetClient.Chat(ctx)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
@@ -500,5 +682,226 @@ func TestIntegration_Proxy_StreamAuthorizedOnceForwardsBothDirections(t *testing
 	}
 	if last := after[len(after)-1]; last.Decision != "ALLOW" {
 		t.Errorf("most recent audit row Decision = %q, want %q", last.Decision, "ALLOW")
+	}
+}
+
+// TestIntegration_Proxy_UnboundTokenRefusedEvenWhenPermitted is proof 7 and
+// spec §4.7.2 K5's own live proof on this surface: a token minted WITHOUT
+// dpop_jwk is refused here, against a delegation and a policy that permit the
+// action outright.
+//
+// It is the converse half of C25 and the migration hole a suite written from
+// C25's own sentence leaves wide open: C25 says a BOUND token presented
+// without a proof is denied, and says nothing at all about a token that was
+// never bound. An attacker who simply asks for an ordinary bearer token never
+// has to defeat a binding at all.
+//
+// The delegation is the same shape proof 1 uses -- DESTRUCTIVE ceiling, no
+// EscalateAt, the same permit policy -- so the ONLY difference between this
+// call and one that is forwarded is that the token is minted with no
+// dpop_jwk. That is what makes this a real negative test rather than a call
+// that denies for something it happens to also have wrong. The refusal is
+// checked against grpc-target's OWN call counter, not merely against the
+// caller's error: a proxy that forwards and then errors has already leaked
+// the request.
+func TestIntegration_Proxy_UnboundTokenRefusedEvenWhenPermitted(t *testing.T) {
+	ensureProxyAgent(t)
+	ensureProxyCatalog(t)
+	ensureProxyPermitPolicy(t)
+
+	before, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	if err != nil {
+		t.Fatalf("CallCount() before error = %v", err)
+	}
+
+	delegation := newProxyDelegation(t, "proxy proof 7 (K5): an unbound token is refused even when permitted",
+		models.ActionTierDestructive, nil)
+	// mintToken, not mintProxyBoundToken: no dpop_jwk, so the PDP mints an
+	// ordinary bearer token, allows the action, and reports
+	// sender_constrained=false. The refusal is the PEP's.
+	token := mintToken(t, proxyPdpClient, delegation.ID)
+
+	_, err = proxyTargetClient.Fetch(bearerOutgoingCtx(t.Context(), token), &grpctarget.EchoRequest{Message: "proof7-payload"})
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want PermissionDenied -- an unbound token must be refused on this surface (K5)")
+	}
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Errorf("status code = %s, want %s", got, want)
+	}
+	msg := status.Convert(err).Message()
+	if !strings.Contains(msg, "dpop_jwk") {
+		t.Errorf("status message = %q, want it to name dpop_jwk -- the only action available to a caller "+
+			"holding an unbound token, and what makes this actionable rather than a wall", msg)
+	}
+	if strings.Contains(msg, "carried no dpop proof") {
+		t.Errorf("status message = %q reads as C25's denial (a BOUND token with no proof), not K5's -- the "+
+			"two name opposite defects and an operator has to act differently on each", msg)
+	}
+
+	after, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	if err != nil {
+		t.Fatalf("CallCount() after error = %v", err)
+	}
+	if after.GetCount() != before.GetCount() {
+		t.Errorf("grpc-target's own call count = %d -> %d, want unchanged -- a refused call must never "+
+			"reach the upstream", before.GetCount(), after.GetCount())
+	}
+}
+
+// TestIntegration_Proxy_ProofBoundToTheTargetsAddressIsRefused is proof 8 and
+// the live demonstration of the replay spec §4.7.2 K7 exists to close:
+// "Reporting the TARGET's address instead would let a proof minted for one
+// target be replayed at another behind the same proxy."
+//
+// The call is identical to proof 1 in every respect -- same catalog, same
+// permit policy, same DESTRUCTIVE-ceiling delegation, same bound token, same
+// method -- except that its proof's htu names grpc-target's own address
+// rather than the proxy's. If cmd/stratium-pep/proxy.go reported the target's
+// address, this call would be FORWARDED, and one captured proof would be good
+// at every target behind this proxy. It denies, which is what makes the
+// authority component of the binding load-bearing rather than decorative.
+//
+// The second half is the control, and it is what stops this from being a test
+// that passes because the fixture is broken in some unrelated way: the SAME
+// key, the SAME token, and the SAME delegation, with only htu corrected, is
+// forwarded. Without it, a proof that denied for a bad signature, an expired
+// delegation, or a mis-seeded catalog would look identical to a proof denied
+// for its htu.
+func TestIntegration_Proxy_ProofBoundToTheTargetsAddressIsRefused(t *testing.T) {
+	ensureProxyAgent(t)
+	ensureProxyCatalog(t)
+	ensureProxyPermitPolicy(t)
+
+	delegation := newProxyDelegation(t, "proxy proof 8 (K7): a proof minted for the target's address is refused",
+		models.ActionTierDestructive, nil)
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
+
+	// docker-compose.yml's own STRATIUM_PEP_PROXY_TARGET_ADDR, spelled as a
+	// URI an agent would sign if it believed htu named where the call ends up
+	// rather than where it was sent.
+	const targetHTU = "http://grpc-target:50051" + grpctarget.TargetService_Fetch_FullMethodName
+	_, err := proxyTargetClient.Fetch(
+		boundOutgoingCtx(t.Context(), token, proxyProofFor(t, key, targetHTU)),
+		&grpctarget.EchoRequest{Message: "proof8-wrong-htu"})
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want PermissionDenied -- a proof bound to the TARGET's address must " +
+			"not be usable at the proxy, or one captured proof is good at every target behind it")
+	}
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Errorf("status code = %s, want %s", got, want)
+	}
+	// The denial must be attributable to htu SPECIFICALLY -- not to the
+	// signature, the freshness window, the thumbprint, or the jti -- or this
+	// proof would pass for a call that was refused for some reason having
+	// nothing to do with the target's address.
+	msg := status.Convert(err).Message()
+	if !strings.Contains(msg, "htu") || !strings.Contains(msg, "does not match the observed uri") {
+		t.Errorf("status message = %q, want internal/dpop's own htu-mismatch wording -- anything else means "+
+			"this call was refused for a reason other than the authority its proof was minted for, which is "+
+			"the one thing this proof is about", msg)
+	}
+	// NOT asserted here, and recorded as a finding rather than quietly
+	// tolerated: that denial echoes BOTH canonical URIs back to the caller,
+	// so it hands an arbitrary caller the exact htu that WOULD have matched.
+	// That is the same free reconnaissance extauthz's own errUnservedAuthority
+	// (cmd/stratium-pep/extauthz.go) deliberately refuses to give, and it is
+	// pre-existing behaviour of internal/dpop's MatchesRequest -- shared with
+	// hook and mcp, where the caller IS the operator and the text is genuinely
+	// the diagnostic that makes a misconfigured client fixable. Narrowing it
+	// for the network surfaces only is a change to a Task 1 file with two
+	// audiences to weigh, not something this task decides in passing. See
+	// task-6-report.md.
+
+	// The control: same key, same token, same everything, htu corrected.
+	resp, err := proxyTargetClient.Fetch(
+		boundOutgoingCtx(t.Context(), token, proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)),
+		&grpctarget.EchoRequest{Message: "proof8-right-htu"})
+	if err != nil {
+		t.Fatalf("Fetch() with the correct htu error = %v, want success -- without this the denial above "+
+			"could have been about the key, the token, the delegation, or the catalog rather than about htu", err)
+	}
+	if resp.GetMessage() != "proof8-right-htu" {
+		t.Errorf("response message = %q, want the target's own echoed %q", resp.GetMessage(), "proof8-right-htu")
+	}
+}
+
+// TestIntegration_Proxy_ProofExcludedFromAuditDigest is proof 9 and spec
+// §4.7.2 K10's own live proof on this surface: the DPoP proof never reaches
+// raw_input, and therefore never reaches the append-only audit chain that
+// commits to it.
+//
+// It is proved by DIFFERENCE rather than by reconstruction, unlike extauthz's
+// own proof 6. Reconstructing this surface's raw_input would mean
+// enumerating every metadata key grpc-go itself puts on the wire
+// (content-type, user-agent, grpc-accept-encoding, :authority, ...), which is
+// a list this test would silently fall behind. Two calls that are identical
+// except for their PROOF are enough, and are stronger against the mutation
+// that matters: two proofs are two entirely different JWT strings (fresh jti,
+// fresh signature, and they must be fresh -- K8 makes a jti single-use), so
+// if either one reached raw_input the two audit rows' input_digests could not
+// possibly agree. They must agree exactly.
+//
+// The control is the second half, and it is what stops the agreement from
+// being vacuous: a third call differing only in an ORDINARY metadata value
+// must produce a DIFFERENT digest. Without it, "the digests match" would also
+// be satisfied by a raw_input that carried no metadata at all, or by a digest
+// computed over something that ignores metadata entirely.
+//
+// context.Background(), not t.Context(): a context carrying a deadline makes
+// grpc-go send a "grpc-timeout" header that counts DOWN, which would differ
+// between two otherwise identical calls and break the comparison for a reason
+// that has nothing to do with K10.
+func TestIntegration_Proxy_ProofExcludedFromAuditDigest(t *testing.T) {
+	ensureProxyAgent(t)
+	ensureProxyCatalog(t)
+	ensureProxyPermitPolicy(t)
+
+	delegation := newProxyDelegation(t, "proxy proof 9 (K10): no proof reaches the audit digest source",
+		models.ActionTierDestructive, nil)
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
+
+	digestAfter := func(ctx context.Context, payload string) [32]byte {
+		t.Helper()
+		if _, err := proxyTargetClient.Fetch(ctx, &grpctarget.EchoRequest{Message: payload}); err != nil {
+			t.Fatalf("Fetch(%q) error = %v, want success", payload, err)
+		}
+		rows := fetchAuditChain(t, proxyTenant)
+		if len(rows) == 0 {
+			t.Fatalf("no audit rows for proxyTenant after %q", payload)
+		}
+		return rows[len(rows)-1].InputDigest
+	}
+
+	proofA := proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)
+	proofB := proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)
+	if proofA == proofB {
+		t.Fatal("the two proofs are identical -- this proof compares two calls that differ ONLY in their " +
+			"proof, so identical proofs would make the comparison below vacuous")
+	}
+
+	// The message body differs between the two calls on purpose: this surface
+	// never parses a message (P3), so it cannot reach raw_input either, and a
+	// digest that changed here would be a different defect worth failing on.
+	digestA := digestAfter(boundOutgoingCtx(context.Background(), token, proofA), "proof9-call-a")
+	digestB := digestAfter(boundOutgoingCtx(context.Background(), token, proofB), "proof9-call-b")
+	if digestA != digestB {
+		t.Fatalf("two calls to the same method with DIFFERENT proofs produced different audit input_digests "+
+			"(%x vs %x) -- something that varies per call, and the only thing that did vary, is reaching "+
+			"raw_input. A credential hashed into an append-only chain cannot be edited back out (K10)",
+			digestA, digestB)
+	}
+
+	// The control: an ordinary, non-credential metadata value DOES change the
+	// digest, so the agreement above is a fact about what raw_input contains
+	// rather than about it containing nothing.
+	marked := metadata.AppendToOutgoingContext(
+		boundOutgoingCtx(context.Background(), token, proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)),
+		"x-proof9-marker", "proof9-marker-value")
+	if digestMarked := digestAfter(marked, "proof9-call-c"); digestMarked == digestA {
+		t.Errorf("adding an ordinary metadata key left the audit input_digest unchanged (%x) -- raw_input "+
+			"either carries no metadata at all or the digest does not commit to it, so the equality above "+
+			"proves nothing about the proof specifically", digestMarked)
 	}
 }

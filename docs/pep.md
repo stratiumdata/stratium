@@ -547,6 +547,22 @@ promptly — the same `ttl_seconds`/`STRATIUM_PEP_APPROVAL_TIMEOUT` bound that
 already governs how long any other surface's decision can outlive a change
 nobody can take back once it has been made.
 
+**One stream, one proof.** `proxy` requires a sender-constrained token (RFC
+9449 DPoP — see "Sender-constrained tokens on `proxy`" below), and the same
+"once, at open" rule governs it: one stream gets one `Decide` call carrying
+one proof, whose single-use `jti` is spent once. **A long-lived stream rides
+that one proof for its entire life** — hours, thousands of messages, all on a
+single proof of possession made at the instant the stream opened. Assume
+per-message binding and you will be wrong about what a captured stream costs
+you.
+
+This is not a gap awaiting an implementation. Binding a per-message proof
+would need something per-message to bind it *to*, and there is nothing:
+`htu` is a method path, identical for every message of one stream, so a
+second proof would be a second signature over the same statement rather than
+a fresh assertion about a new request. A short stream is the control here,
+exactly as a short-lived token is the control for revocation above.
+
 ### Authorization cannot see message contents
 
 `raw_input` here is the called method and the caller's own gRPC metadata,
@@ -597,6 +613,37 @@ audit digest that commits to `raw_input` and would then be hashing bytes
 nobody could ever usefully re-derive the meaning of. The fix for an
 under-classified method is the same as for any uncatalogued tool: add a
 catalog row, not a scan of something this surface cannot make sense of.
+
+### Sender-constrained tokens on `proxy`
+
+`proxy` and `extauthz` are the two surfaces where the request arrives from
+the party being policed, so a token that leaks — from a log, a sidecar, a
+captured connection — is fully usable by whoever picked it up. Both
+therefore require **proof of possession** (RFC 9449 DPoP, spec §4.7.2). Two
+consequences an operator meets immediately:
+
+- **A bearer token is refused here, even when policy would allow the
+  call.** Mint tokens for this surface with `dpop_jwk` set on `IssueToken`,
+  and send a proof on every call, in `dpop` gRPC metadata alongside
+  `authorization`. A token minted without `dpop_jwk` is refused with a
+  reason that says so; it is not a policy denial and no policy change fixes
+  it. Bearer tokens stay legitimate on `hook` and `mcp`, where the caller
+  already holds the session file the token lives in.
+- **Sign the proof's `htu` against the address you *addressed*, not the one
+  you dialled, and never the target's.** `htu` here is
+  `STRATIUM_PEP_PROXY_PUBLIC_URI` plus the full method path
+  (`https://proxy.example:9292/pkg.Svc/Method`), with `htm` as `POST` — gRPC
+  is HTTP/2 POST. That variable is required, has no default, and the process
+  refuses to start without it, because it is the one component of the
+  binding that separates this proxy from any other. The proxy never reads it
+  from the request: not from the caller's `:authority`, and not from
+  `STRATIUM_PEP_PROXY_TARGET_ADDR` — binding to the target's address would
+  make a proof minted for one target replayable at another behind the same
+  proxy.
+
+The proof itself never reaches `raw_input` and so never reaches the audit
+chain, exactly like `authorization` — a credential hashed into an
+append-only chain cannot be edited back out of it.
 
 ## Reading a denial
 

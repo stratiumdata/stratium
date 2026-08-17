@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +31,7 @@ import (
 // (extauthz_test.go) plays for extauthzConfig, so a field added to proxyConfig without a
 // matching entry here goes untested for its own absence rather than failing loudly.
 var requiredProxyEnvVars = []string{
-	"STRATIUM_PEP_PROXY_LISTEN_ADDR", "STRATIUM_PEP_PROXY_TARGET_ADDR",
+	"STRATIUM_PEP_PROXY_LISTEN_ADDR", "STRATIUM_PEP_PROXY_TARGET_ADDR", "STRATIUM_PEP_PROXY_PUBLIC_URI",
 	"STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
 	"STRATIUM_PEP_CONNECT_TIMEOUT", "STRATIUM_PEP_APPROVAL_POLL_INTERVAL", "STRATIUM_PEP_APPROVAL_TIMEOUT",
 }
@@ -53,6 +54,7 @@ func setAllProxyEnv(t *testing.T, overrides map[string]string) {
 	values := map[string]string{
 		"STRATIUM_PEP_PROXY_LISTEN_ADDR":      "127.0.0.1:9292",
 		"STRATIUM_PEP_PROXY_TARGET_ADDR":      "localhost:9393",
+		"STRATIUM_PEP_PROXY_PUBLIC_URI":       "https://proxy.example:9292",
 		"STRATIUM_PEP_PDP_ADDR":               "localhost:50051",
 		"STRATIUM_PEP_AGENT_ID":               "agent-1",
 		"STRATIUM_PEP_SUBJECT":                "alice@example.com",
@@ -79,6 +81,7 @@ func TestLoadProxyConfigFromEnv_AllRequiredValuesPresent_ReturnsPopulatedConfig(
 	want := proxyConfig{
 		ListenAddr:           "127.0.0.1:9292",
 		TargetAddr:           "localhost:9393",
+		PublicURI:            "https://proxy.example:9292",
 		PDPAddr:              "localhost:50051",
 		AgentID:              "agent-1",
 		Subject:              "alice@example.com",
@@ -114,7 +117,7 @@ func TestLoadProxyConfigFromEnv_MissingVariable_NamesIt(t *testing.T) {
 // TestLoadProxyConfigFromEnv_MissingMultipleRequired_NamesAllAtOnce is the mutation-testing
 // anchor for "report only the first missing config key": every required variable left unset at
 // once -- a freshly configured proxy deployment with none of its environment set yet is exactly
-// this case -- must produce ONE error naming all eight, not just whichever requiredEnv call
+// this case -- must produce ONE error naming all nine, not just whichever requiredEnv call
 // happened to run first. See proxyConfig's own doc comment for why this loader is one group,
 // not two composed loaders, which is what keeps it out of the failure mode a recent task
 // (mcp.go's combineConfigErrors) found and fixed for a genuinely two-loader case. Mirrors
@@ -491,7 +494,7 @@ func TestForward_RelaysMessagesBothDirections(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 2: the real decision -- extractBearerTokenFromMetadata, direct and wire-free.
+// Task 2: the real decision -- extractCredentialsFromMetadata, direct and wire-free.
 // ---------------------------------------------------------------------------
 
 // Fixture values below are deliberately distinctive strings sharing no substring with one another
@@ -506,16 +509,48 @@ const (
 	testProxyAuthLikeHeaderValue  = "proxy-authlike-header-5f92de19-fixture"
 	testProxyAgentIDFixture       = "proxy-agent-7b3f1c24-fixture"
 	testProxySubjectFixture       = "proxy-subject-7b3f1c24-fixture@example.com"
+	testProxyDPoPProof            = "proxy-dpop-proof-c52f8a03-fixture"
+)
+
+// The three authorities involved in every htu this file builds, all distinct, all distinctive.
+// Only the first may ever appear in observed_uri (spec §4.7.2 K7).
+//
+// They are ALL THREE supplied by the baseline fixture below and by incomingBearerCtx, on every
+// test in this file, not only on the tests that are about htu. That is deliberate and it is the
+// standing rule of this phase: a conflict test must supply every competing source, not the subset
+// the current implementation happens to consult. A fixture that left TargetAddr zero, or sent no
+// ":authority", could not distinguish "the code ignores that source" from "that source was not
+// there" -- the mutant dies, the report credits the control, and the property is unproven. Both
+// wrong sources are therefore always present and always disagree.
+const (
+	// testProxyPublicURI is the surface's own configured address -- the ONLY correct source.
+	testProxyPublicURI = "https://proxy-public-2c7d81af-fixture.example:9292"
+	// testProxyTargetAddr is where this proxy forwards to. Reporting it as htu's authority is
+	// the defect K7 names outright: a proof minted for one target would replay at another
+	// behind the same proxy.
+	testProxyTargetAddr = "proxy-target-e05b9c36-fixture.example:50051"
+	// testProxyCallerAuthority is what the CALLER claims in its own ":authority" metadata --
+	// grpc-go passes that pseudo-header straight through into incoming metadata
+	// (isWhitelistedHeader, http2_server.go), so it is genuinely reachable here. It is the same
+	// hazard Task 5 found one layer out, where extauthz was reading Envoy's Host field.
+	testProxyCallerAuthority = "proxy-caller-claimed-9a4d17be-fixture.example"
 )
 
 // testProxyServerCfg returns a valid baseline proxyConfig: AgentID/Subject identity, a generous
 // ConnectTimeout, and small (millisecond) escalation timing -- mirrors testExtauthzServerCfg
 // (extauthz_test.go) and testCfg (hook_test.go) for the identical reason: most tests below are not
 // themselves about timing and want their escalation fixtures to resolve or time out in well under
-// a second. ListenAddr/TargetAddr are left zero-valued: nothing below calls runProxyCmd, so
-// nothing ever reads them.
+// a second. ListenAddr is left zero-valued: nothing below calls runProxyCmd, so nothing ever reads
+// it.
+//
+// PublicURI and TargetAddr are both populated, and both matter. PublicURI is what every htu below
+// must be built from (K7). TargetAddr is the competing source that must never appear in one, and
+// it is set HERE rather than only in the test that is about htu so that no test in this file can
+// accidentally become a fixture-omission kill -- see the constants above.
 func testProxyServerCfg() proxyConfig {
 	return proxyConfig{
+		TargetAddr:           testProxyTargetAddr,
+		PublicURI:            testProxyPublicURI,
 		AgentID:              testProxyAgentIDFixture,
 		Subject:              testProxySubjectFixture,
 		ConnectTimeout:       5 * time.Second,
@@ -542,13 +577,24 @@ func testProxyServerCfg() proxyConfig {
 // TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound, and others) build
 // their own metadata.MD as a raw map literal instead, specifically to avoid Pairs' own
 // normalization laundering away the exact case variation those tests exist to exercise.
+//
+// Every context this returns also carries a ":authority" naming testProxyCallerAuthority, which
+// disagrees with cfg.PublicURI and with cfg.TargetAddr. That is not scenery: grpc-go passes the
+// caller's own ":authority" pseudo-header into incoming metadata (isWhitelistedHeader,
+// http2_server.go), so it is a real, caller-written source of an authority sitting right next to
+// the one htu is supposed to come from. Supplying it unconditionally is what makes every htu
+// assertion in this file a genuine conflict rather than a fixture that simply omitted the field a
+// mutant would have read -- see the constants above for the standing rule this follows.
 func incomingBearerCtx(token string, extra ...string) context.Context {
-	pairs := append([]string{"authorization", "Bearer " + token}, extra...)
+	pairs := append([]string{
+		"authorization", "Bearer " + token,
+		":authority", testProxyCallerAuthority,
+	}, extra...)
 	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(pairs...))
 }
 
 // TestExtractBearerTokenFromMetadata is the direct, wire-free table of every shape
-// extractBearerTokenFromMetadata must accept or reject -- mirrors extauthz_test.go's
+// extractCredentialsFromMetadata must accept or reject -- mirrors extauthz_test.go's
 // TestExtractCredentials for the analogous gRPC-metadata shape, faster and more exhaustive than
 // routing every case through a real dial.
 func TestExtractBearerTokenFromMetadata(t *testing.T) {
@@ -603,18 +649,18 @@ func TestExtractBearerTokenFromMetadata(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			token, _, err := extractBearerTokenFromMetadata(tc.md)
+			token, _, _, err := extractCredentialsFromMetadata(tc.md)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("extractBearerTokenFromMetadata() error = nil, want an error")
+					t.Fatalf("extractCredentialsFromMetadata() error = nil, want an error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("extractBearerTokenFromMetadata() error = %v, want nil", err)
+				t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil", err)
 			}
 			if token != tc.wantToken {
-				t.Errorf("extractBearerTokenFromMetadata() token = %q, want %q", token, tc.wantToken)
+				t.Errorf("extractCredentialsFromMetadata() token = %q, want %q", token, tc.wantToken)
 			}
 		})
 	}
@@ -624,7 +670,7 @@ func TestExtractBearerTokenFromMetadata(t *testing.T) {
 // survives a metadata key that differs only in case, using a metadata.MD built as a raw map
 // literal rather than via metadata.Pairs/New -- both of those already force keys to lower case at
 // construction (verified directly against this module's own vendored grpc-go source; see
-// extractBearerTokenFromMetadata's own doc comment), which would silently launder away the exact
+// extractCredentialsFromMetadata's own doc comment), which would silently launder away the exact
 // case variation this test exists to exercise. A raw literal is the only way to hand this function
 // a metadata.MD shaped the way a non-normalizing client or an interceptor could actually produce
 // one.
@@ -632,12 +678,12 @@ func TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound(t 
 	for _, headerName := range []string{"authorization", "Authorization", "AUTHORIZATION", "AuthoriZation"} {
 		t.Run(headerName, func(t *testing.T) {
 			md := metadata.MD{headerName: {"Bearer " + testProxyBearerToken}}
-			token, _, err := extractBearerTokenFromMetadata(md)
+			token, _, _, err := extractCredentialsFromMetadata(md)
 			if err != nil {
-				t.Fatalf("extractBearerTokenFromMetadata() error = %v, want nil -- a key named %q must still be found", err, headerName)
+				t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil -- a key named %q must still be found", err, headerName)
 			}
 			if token != testProxyBearerToken {
-				t.Errorf("extractBearerTokenFromMetadata() token = %q, want %q", token, testProxyBearerToken)
+				t.Errorf("extractCredentialsFromMetadata() token = %q, want %q", token, testProxyBearerToken)
 			}
 		})
 	}
@@ -655,9 +701,9 @@ func TestExtractBearerTokenFromMetadata_StripsCredentialHeadersCaseInsensitively
 		"PROXY-AUTHORIZATION":       {testProxyOtherCredentialValue},
 		testProxyAuthLikeHeaderName: {testProxyAuthLikeHeaderValue},
 	}
-	_, stripped, err := extractBearerTokenFromMetadata(md)
+	_, _, stripped, err := extractCredentialsFromMetadata(md)
 	if err != nil {
-		t.Fatalf("extractBearerTokenFromMetadata() error = %v, want nil", err)
+		t.Fatalf("extractCredentialsFromMetadata() error = %v, want nil", err)
 	}
 	for _, credHeader := range []string{"authorization", "Cookie", "PROXY-AUTHORIZATION"} {
 		if v, ok := stripped[credHeader]; ok {
@@ -683,7 +729,7 @@ func TestExtractBearerTokenFromMetadata_StripsCredentialHeadersCaseInsensitively
 // extauthz_test.go's TestCheck_PathBecomesTool folds its own identity check into a differently-
 // named test rather than giving it a whole test of its own.
 func TestAuthorize_MethodBecomesTool(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -709,7 +755,7 @@ func TestAuthorize_MethodBecomesTool(t *testing.T) {
 // TestAuthorize_TokenExtractedFromBearerMetadata defends P2's other half: the token named in
 // "authorization: Bearer <token>" reaches DecideRequest.Token, scheme stripped, unaltered.
 func TestAuthorize_TokenExtractedFromBearerMetadata(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -727,7 +773,7 @@ func TestAuthorize_TokenExtractedFromBearerMetadata(t *testing.T) {
 // TestAuthorize_RawInputCarriesMethod defends P3's positive half: raw_input decodes as JSON
 // carrying the called method.
 func TestAuthorize_RawInputCarriesMethod(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -767,7 +813,7 @@ func TestAuthorize_RawInputCarriesMethod(t *testing.T) {
 func TestAuthorize_RawInputNeverCarriesCredential_AnyHeaderCasing(t *testing.T) {
 	for _, headerName := range []string{"authorization", "Authorization", "AUTHORIZATION", "AuthoriZation"} {
 		t.Run(headerName, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			fake := &fakePDP{resp: allowResponse("")}
 			pdpClient := startFakePDP(t, fake)
 			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -808,7 +854,7 @@ func TestAuthorize_RawInputNeverCarriesCredential_AnyHeaderCasing(t *testing.T) 
 func TestAuthorize_RawInputStripsOtherCredentialHeaders(t *testing.T) {
 	for _, headerName := range []string{"cookie", "Cookie", "proxy-authorization", "Proxy-Authorization"} {
 		t.Run(headerName, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			fake := &fakePDP{resp: allowResponse("")}
 			pdpClient := startFakePDP(t, fake)
 			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -839,7 +885,7 @@ func TestAuthorize_RawInputStripsOtherCredentialHeaders(t *testing.T) {
 // either. testProxyAuthLikeHeaderName is chosen specifically to also guard against a substring
 // match on "auth" instead of an exact match against credentialHeaderNames.
 func TestAuthorize_RawInputPreservesNonCredentialHeaders(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -870,7 +916,7 @@ func TestAuthorize_RawInputPreservesNonCredentialHeaders(t *testing.T) {
 // proto3 omits a zero-value/unset optional field from the wire entirely, so checking
 // req.DeclaredTier after fakePDP decodes a real message proves the WIRE never carried it.
 func TestAuthorize_NeverSendsDeclaredTier(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -900,7 +946,7 @@ func TestAuthorize_NeverSendsDeclaredTier(t *testing.T) {
 // a future edit that wired a cache into this file would make the second and later calls below
 // short-circuit before ever reaching fake.Decide, which is exactly what requestCount() catches.
 func TestAuthorize_RepeatedIdenticalCalls_AlwaysCallsPDP(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -925,7 +971,7 @@ func TestAuthorize_RepeatedIdenticalCalls_AlwaysCallsPDP(t *testing.T) {
 // own received-call count, mirroring extauthz_test.go's identical
 // TestCheck_MissingAuthorizationHeader_DeniesWithoutContactingPDP.
 func TestAuthorize_MissingToken_DeniesWithoutContactingPDP(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -951,7 +997,7 @@ func TestAuthorize_MissingToken_DeniesWithoutContactingPDP(t *testing.T) {
 // must not panic chasing a nil map either way; ranging over a nil map is defined and safe in Go,
 // which is what this test actually proves rather than merely asserts in a comment.
 func TestAuthorize_NoMetadataAtAll_DeniesWithoutContactingPDP(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -978,7 +1024,7 @@ func TestAuthorize_MalformedToken_DeniesWithoutContactingPDP(t *testing.T) {
 		{"lowercase bearer scheme", "bearer " + testProxyBearerToken},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			fake := &fakePDP{resp: allowResponse("")}
 			pdpClient := startFakePDP(t, fake)
 			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
 
@@ -1045,7 +1091,10 @@ func TestAuthorize_Escalate_ApprovedRetryAllows(t *testing.T) {
 		},
 	}
 	client := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
+	// senderConstrained on the RETRY, because that is the response K5 is applied to -- see
+	// TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused, which is this test with
+	// that one field flipped and nothing else changed.
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: true}
 	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
 
 	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
@@ -1102,7 +1151,7 @@ func TestAuthorize_EscalationTimeout_Denies(t *testing.T) {
 // the two are not interchangeable). metadata.AppendToOutgoingContext always lower-cases the key
 // it sends -- exactly what a normal, conformant client does, and exactly why none of the tests
 // below use this helper to probe case sensitivity; that property is proven at the
-// extractBearerTokenFromMetadata/authorize direct-call layer instead, where a raw metadata.MD
+// extractCredentialsFromMetadata/authorize direct-call layer instead, where a raw metadata.MD
 // literal can actually bypass the normalization every real outgoing-metadata API in this module
 // forces.
 func bearerCtx(ctx context.Context, token string) context.Context {
@@ -1116,7 +1165,7 @@ func bearerCtx(ctx context.Context, token string) context.Context {
 // all the way back to the caller.
 func TestHandleStream_Allow_ReachesTargetAndResponseReturns(t *testing.T) {
 	targetAddr := startEchoTarget(t)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
 	conn := startProxyServer(t, srv)
@@ -1170,7 +1219,7 @@ func TestHandleStream_Deny_NeverReachesTarget(t *testing.T) {
 // property one layer lower).
 func TestHandleStream_MissingToken_DeniesWithoutContactingPDP(t *testing.T) {
 	targetAddr, target := startFakeTarget(t)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
 	conn := startProxyServer(t, srv)
@@ -1199,7 +1248,7 @@ func TestHandleStream_MissingToken_DeniesWithoutContactingPDP(t *testing.T) {
 // proof of P4 (a stream is authorized once, at open, not per message).
 func TestHandleStream_AllowedStream_ForwardsBothDirections(t *testing.T) {
 	targetAddr := startEchoTarget(t)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
 	conn := startProxyServer(t, srv)
@@ -1327,7 +1376,7 @@ func TestHandleStream_Escalate_BlocksThenForwardsOnApproval(t *testing.T) {
 		},
 	}
 	pdpClient := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: pdpClient, first: fake.resp}
+	wrapped := &decideThenAllowClient{PDPServiceClient: pdpClient, first: fake.resp, senderConstrained: true}
 	cfg := testProxyServerCfg()
 	cfg.ApprovalPollInterval = 20 * time.Millisecond // ~6 polls before "approved" lands, ~120ms total
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: wrapped, cfg: cfg}
@@ -1477,7 +1526,7 @@ func startMetadataCapturingTarget(t *testing.T) (addr string, capture *metadataC
 // have shipped undetected without this test.
 func TestHandleStream_Allow_TargetReceivesOriginalCredentials(t *testing.T) {
 	targetAddr, capture := startMetadataCapturingTarget(t)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
 	conn := startProxyServer(t, srv)
@@ -1705,7 +1754,7 @@ func TestForward_RelaysHeadersEvenWhenTargetErrorsBeforeAnyMessage(t *testing.T)
 // refuse, and the established stream is asked anyway not at all.
 func TestHandleStream_AllowedStream_OutlivesRevocationAfterOpen(t *testing.T) {
 	targetAddr := startEchoTarget(t)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	client := startFakePDP(t, fake)
 	wrapped := &decideThenDenyClient{PDPServiceClient: client, first: fake.resp, denyReason: "delegation revoked mid-stream (test)"}
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: wrapped, cfg: testProxyServerCfg()}
@@ -1761,7 +1810,7 @@ func TestHandleStream_AllowedStream_OutlivesRevocationAfterOpen(t *testing.T) {
 // parameter a message frame could reach it through.
 func TestHandleStream_SameMethodDifferentMessageContent_RawInputIdenticalBothCalls(t *testing.T) {
 	targetAddr := startEchoTarget(t)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
 	conn := startProxyServer(t, srv)
@@ -1804,5 +1853,607 @@ func TestHandleStream_SameMethodDifferentMessageContent_RawInputIdenticalBothCal
 	}
 	if got.Method != method {
 		t.Errorf("raw_input method = %q, want %q -- a method-level constraint needs this to be the real, called method", got.Method, method)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15: sender-constrained tokens (spec §4.7.2 K5, K7, K10) and P4's one proof per stream.
+// ---------------------------------------------------------------------------
+
+// TestParsePublicURI is the direct table for the one value K7 rests on. Every accepted row states
+// the exact string observed_uri is prefixed with, because the whole point of the function is that
+// nothing but scheme and authority survives it; every rejected row is a shape that would either
+// deny 100% of this deployment's bound traffic at the PDP's htu comparison (a path, a query, a
+// fragment, userinfo -- which internal/dpop's canonicalURI refuses outright) or produce an htu
+// with no authority at all.
+func TestParsePublicURI(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{name: "host and port", raw: "http://proxy.example:9292", want: "http://proxy.example:9292"},
+		{name: "https, no port", raw: "https://proxy.example", want: "https://proxy.example"},
+		{name: "surrounding whitespace is trimmed", raw: "  https://proxy.example  ", want: "https://proxy.example"},
+		{
+			// Unambiguous, and half of all operators will type it. Dropped rather than refused --
+			// a startup refusal here would be this file inventing a spelling rule with no
+			// security content. It must be DROPPED, not kept: "http://p.example/" + "/pkg.Svc/M"
+			// is "http://p.example//pkg.Svc/M", a different path from what any client signed.
+			name: "bare trailing slash is dropped", raw: "http://proxy.example/", want: "http://proxy.example",
+		},
+		{name: "IPv6 literal", raw: "http://[2001:db8::1]:9292", want: "http://[2001:db8::1]:9292"},
+		{name: "empty", raw: "", wantErr: true},
+		{name: "no scheme", raw: "proxy.example:9292", wantErr: true},
+		{name: "scheme-relative", raw: "//proxy.example", wantErr: true},
+		{name: "grpc scheme", raw: "grpc://proxy.example", wantErr: true},
+		{name: "no host", raw: "http://", wantErr: true},
+		{name: "userinfo", raw: "http://alice:secret@proxy.example", wantErr: true},
+		{name: "path", raw: "http://proxy.example/api", wantErr: true},
+		{name: "query", raw: "http://proxy.example?a=1", wantErr: true},
+		{name: "bare question mark", raw: "http://proxy.example?", wantErr: true},
+		{name: "fragment", raw: "http://proxy.example#f", wantErr: true},
+		{name: "not a URI at all", raw: "http://prox y.example", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePublicURI(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parsePublicURI(%q) = %q, want an error", tc.raw, got)
+				}
+				if !strings.Contains(err.Error(), "STRATIUM_PEP_PROXY_PUBLIC_URI") {
+					t.Errorf("parsePublicURI(%q) error = %q, want it to name the variable an operator has to fix",
+						tc.raw, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePublicURI(%q) error = %v, want nil", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Errorf("parsePublicURI(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadProxyConfigFromEnv_InvalidPublicURI_ReturnsError is the loader-level half of the table
+// above: a malformed value stops the process at startup rather than surfacing later as every
+// bound call denying for a reason no operator could trace to a configuration string. Mirrors
+// TestLoadProxyConfigFromEnv_InvalidDuration_ReturnsError, which holds the same line for the
+// three duration fields.
+func TestLoadProxyConfigFromEnv_InvalidPublicURI_ReturnsError(t *testing.T) {
+	for _, bad := range []string{"proxy.example:9292", "http://", "http://proxy.example/api", "grpc://proxy.example"} {
+		t.Run(bad, func(t *testing.T) {
+			clearProxyEnv(t)
+			setAllProxyEnv(t, map[string]string{"STRATIUM_PEP_PROXY_PUBLIC_URI": bad})
+
+			if _, err := loadProxyConfigFromEnv(); err == nil {
+				t.Fatalf("loadProxyConfigFromEnv() with STRATIUM_PEP_PROXY_PUBLIC_URI=%q: error = nil, want an error", bad)
+			}
+		})
+	}
+}
+
+// TestAuthorize_DPoPProofForwardedVerbatim: the "dpop" metadata value reaches
+// DecideRequest.dpop_proof unaltered. The PEP forwards it and verifies nothing (K2/D1) -- so
+// "verbatim" is the entire contract, and any transformation at all would break a signature this
+// process holds no key to re-make.
+func TestAuthorize_DPoPProofForwardedVerbatim(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	allowed, reason := srv.authorize(
+		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), "/svc.Svc/Method")
+	if !allowed {
+		t.Fatalf("authorize() denied (%s), want allowed", reason)
+	}
+
+	req := fake.lastRequest()
+	if req == nil {
+		t.Fatal("PDP never received a request")
+	}
+	if got := req.GetDpopProof(); got != testProxyDPoPProof {
+		t.Errorf("dpop_proof = %q, want the dpop metadata value verbatim (%q)", got, testProxyDPoPProof)
+	}
+}
+
+// TestAuthorize_NoDPoPMetadata_SendsEmptyProofAndStillCallsPDP is the negative control for the
+// test above, differing from it in exactly one thing: no dpop key.
+//
+// It must NOT deny locally. dpop_proof="" is the proto's own encoding of "the caller presented
+// none," and what that means is a question only the PDP can answer -- a bound token with no proof
+// is C25's denial, an unbound token reaches the ALLOW branch and K5 refuses it there. A local "no
+// proof, no entry" shortcut would deny bearer traffic with a reason naming the wrong defect, and
+// would deny it before the PDP ever recorded the attempt in the audit chain.
+func TestAuthorize_NoDPoPMetadata_SendsEmptyProofAndStillCallsPDP(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+
+	if got := fake.requestCount(); got != 1 {
+		t.Fatalf("PDP received %d Decide call(s), want exactly 1 -- a call with no proof must still be "+
+			"decided by the PDP, not refused locally: whether a proof was required is not this process's "+
+			"question to answer", got)
+	}
+	if got := fake.lastRequest().GetDpopProof(); got != "" {
+		t.Errorf("dpop_proof = %q, want \"\" -- an absent dpop key is the proto's \"the caller presented none\"", got)
+	}
+}
+
+// TestAuthorize_ObservedURIIsTheProxysOwnAddress is K7, and it is THE test of this task.
+//
+// htu on this surface is the proxy's own address plus the full method path. Two other authorities
+// are in reach of the code that builds it, and both are wrong:
+//
+//   - cfg.TargetAddr, which K7 names outright: "Reporting the TARGET's address instead would let
+//     a proof minted for one target be replayed at another behind the same proxy."
+//   - the caller's own ":authority" metadata, which grpc-go passes straight through
+//     (isWhitelistedHeader, http2_server.go). This is the identical hazard Task 5 found one layer
+//     out, where extauthz read Envoy's Host field and Envoy's own doc defines that field as the
+//     caller's Host/:authority header -- the authority component of the binding was whatever the
+//     presenter claimed.
+//
+// BOTH are supplied here, disagreeing with the configured value and with each other. That is not
+// decoration. A fixture that omitted either could not distinguish "the code ignores that source"
+// from "that source was not there": the mutant reading it would produce the zero value, the
+// assertion would fail, and the kill would be an artifact of the fixture rather than a property of
+// the code. Every instance of that mistake found in this phase was found exactly this way.
+//
+// observed_method is asserted in the same test rather than in one of its own: it is a constant,
+// and the only interesting thing about it is that it is POST and comes from nowhere.
+func TestAuthorize_ObservedURIIsTheProxysOwnAddress(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	const method = "/inventory.Inventory/DeleteItem"
+	allowed, reason := srv.authorize(
+		incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), method)
+	if !allowed {
+		t.Fatalf("authorize() denied (%s), want allowed", reason)
+	}
+
+	req := fake.lastRequest()
+	if req == nil {
+		t.Fatal("PDP never received a request")
+	}
+
+	want := testProxyPublicURI + method
+	if got := req.GetObservedUri(); got != want {
+		t.Errorf("observed_uri = %q, want %q -- htu is the PROXY'S own configured address plus the full "+
+			"method path (K7), never cfg.TargetAddr (%q, which would make a proof for one target replay at "+
+			"another behind this proxy) and never the caller's own \":authority\" (%q, which is not a fact "+
+			"about this surface at all)", got, want, testProxyTargetAddr, testProxyCallerAuthority)
+	}
+	// Stated separately from the equality above so a failure names WHICH wrong source leaked, and
+	// so a partial leak -- an htu that happened to contain the right prefix and the wrong
+	// authority somewhere else in it -- cannot pass unremarked.
+	if strings.Contains(req.GetObservedUri(), testProxyTargetAddr) {
+		t.Errorf("observed_uri = %q carries the TARGET's address", req.GetObservedUri())
+	}
+	if strings.Contains(req.GetObservedUri(), testProxyCallerAuthority) {
+		t.Errorf("observed_uri = %q carries the CALLER's claimed authority", req.GetObservedUri())
+	}
+	if got := req.GetObservedMethod(); got != "POST" {
+		t.Errorf("observed_method = %q, want \"POST\" -- gRPC is HTTP/2 POST (K7), a constant of this "+
+			"surface rather than anything read off the call", got)
+	}
+
+	// The caller's ":authority" is not a credential, so the same request that must not TRUST it
+	// must still RECORD it. Without this, "htu ignores :authority" would also be satisfied by a
+	// build that dropped the key entirely -- which is a different defect wearing the same result.
+	var meta proxyRequestMetadata
+	if err := json.Unmarshal([]byte(req.GetRawInput()), &meta); err != nil {
+		t.Fatalf("raw_input is not well-formed JSON: %v", err)
+	}
+	if got := meta.Headers[":authority"]; len(got) != 1 || got[0] != testProxyCallerAuthority {
+		t.Errorf("raw_input.headers[\":authority\"] = %v, want [%q] preserved -- a value that must not be "+
+			"trusted as htu's authority is still ordinary request metadata an auditor should see",
+			got, testProxyCallerAuthority)
+	}
+}
+
+// TestAuthorize_ObservedURIVariesOnlyByMethodPath pins the OTHER half of htu: the method path is
+// appended verbatim, and it is the only part of htu that varies between calls.
+//
+// The rows are chosen for what a mutation would most plausibly do to a method path on the way
+// into a URI: lowercase it (a proof minted for /V1/Read would then satisfy /v1/read, which
+// internal/dpop refuses to do on purpose -- see its package doc's "Path case-sensitivity is not
+// an oversight"), or normalize a percent-encoding. Each row states the whole expected string
+// rather than a suffix, so nothing about the prefix can drift unnoticed either.
+func TestAuthorize_ObservedURIVariesOnlyByMethodPath(t *testing.T) {
+	for _, method := range []string{
+		"/svc.Svc/Method",
+		"/Inventory.V1.InventoryService/DeleteItem",
+		"/grpc.health.v1.Health/Check",
+		"/svc.Svc/MiXeDcAsE",
+		"/svc.Svc/Percent%2FEncoded",
+	} {
+		t.Run(method, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+			srv.authorize(incomingBearerCtx(testProxyBearerToken, "dpop", testProxyDPoPProof), method)
+
+			req := fake.lastRequest()
+			if req == nil {
+				t.Fatal("PDP never received a request")
+			}
+			want := testProxyPublicURI + method
+			if got := req.GetObservedUri(); got != want {
+				t.Errorf("observed_uri = %q, want %q -- the method path is appended verbatim, in the "+
+					"caller's own case and encoding", got, want)
+			}
+		})
+	}
+}
+
+// TestAuthorize_MethodWithoutLeadingSlash_DeniesWithoutContactingPDP defends the one thing
+// decideRequestFromStream inspects about a method, and it inspects it only because the method is
+// concatenated onto cfg.PublicURI.
+//
+// "svc.Svc/M" appended to "https://proxy.example:9292" is
+// "https://proxy.example:9292svc.Svc/M" -- an absolute URI whose AUTHORITY the caller chose, which
+// is the exact defect this whole task exists to prevent, reached by a different route. grpc-go's
+// own server rejects such a :path before this handler runs (server.go's
+// strings.CutPrefix(stream.Method(), "/") and its found check), so this is unreachable through a
+// real transport today; that is precisely why it needs a test rather than a comment, because
+// nothing else in this suite would notice if the guard were removed and grpc-go later changed.
+func TestAuthorize_MethodWithoutLeadingSlash_DeniesWithoutContactingPDP(t *testing.T) {
+	for _, method := range []string{
+		"svc.Svc/Method",
+		"evil.example/svc.Svc/Method",
+		"",
+	} {
+		t.Run(method, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+			allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), method)
+			if allowed {
+				t.Fatalf("authorize(%q) allowed, want denied -- a method that is not a gRPC method path "+
+					"cannot be bound to an htu honestly", method)
+			}
+			if reason == "" {
+				t.Error("authorize() denied with an empty reason")
+			}
+			if got := fake.requestCount(); got != 0 {
+				t.Errorf("PDP received %d Decide call(s), want 0 -- there is nothing here worth deciding about", got)
+			}
+		})
+	}
+}
+
+// TestAuthorize_RawInputNeverCarriesDPoPProof_AnyMetadataCasing is K10, and the sibling of
+// TestAuthorize_RawInputNeverCarriesCredential_AnyHeaderCasing for the credential this phase
+// introduces. raw_input is hashed into the append-only audit chain, so a proof that leaks there is
+// a signed possession-of-key assertion written permanently into a record designed to be kept and
+// read, in a chain that cannot be edited to remove it afterwards.
+//
+// Table-driven over five spellings, and the set is not decorative: "dpop" is what
+// metadata.FromIncomingContext hands over after a real transport, "DPoP" is what RFC 9449 itself
+// writes and what a client or interceptor building metadata.MD by hand would send. A strip written
+// case-sensitively against either one leaks for the other. Built as raw metadata.MD literals for
+// the same reason the other casing tests here are: metadata.Pairs lower-cases keys, which would
+// launder away the exact variation under test.
+//
+// Absence is asserted three ways per case: structurally, by unmarshaling raw_input and checking no
+// key case-insensitively equals "dpop"; by substring against the raw bytes, since the fixture
+// value cannot appear there by coincidence; and positively, by confirming a non-credential entry
+// sent on the SAME call did survive -- without which "raw_input contains no proof" would also be
+// satisfied by raw_input containing nothing at all.
+func TestAuthorize_RawInputNeverCarriesDPoPProof_AnyMetadataCasing(t *testing.T) {
+	for _, key := range []string{"dpop", "DPoP", "DPOP", "Dpop", "dPoP"} {
+		t.Run(key, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+			ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{
+				"authorization":             {"Bearer " + testProxyBearerToken},
+				key:                         {testProxyDPoPProof},
+				testProxyAuthLikeHeaderName: {testProxyAuthLikeHeaderValue},
+			})
+			srv.authorize(ctx, "/svc.Svc/Method")
+
+			req := fake.lastRequest()
+			if req == nil {
+				t.Fatal("PDP never received a request")
+			}
+			// The proof still has to have been READ, or this test would pass on a build that
+			// dropped the key entirely -- which strips it from raw_input for the wrong reason and
+			// breaks every bound token on this surface.
+			if got := req.GetDpopProof(); got != testProxyDPoPProof {
+				t.Fatalf("dpop_proof = %q, want %q -- a metadata key spelled %q must still be recognized as "+
+					"the proof; a build that merely DROPPED it would satisfy the absence checks below vacuously",
+					got, testProxyDPoPProof, key)
+			}
+
+			raw := req.GetRawInput()
+			if strings.Contains(raw, testProxyDPoPProof) {
+				t.Errorf("raw_input contains the DPoP proof verbatim: %s", raw)
+			}
+			var got proxyRequestMetadata
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("raw_input is not well-formed JSON: %v\nraw_input: %s", err, raw)
+			}
+			for name := range got.Headers {
+				if strings.EqualFold(name, "dpop") {
+					t.Errorf("raw_input.headers carries key %q -- the DPoP proof must never appear, in any casing (K10)", name)
+				}
+			}
+			if v := got.Headers[testProxyAuthLikeHeaderName]; len(v) != 1 || v[0] != testProxyAuthLikeHeaderValue {
+				t.Errorf("raw_input.headers[%q] = %v, want [%q] -- without this the absence checks above "+
+					"would also pass for a raw_input carrying no metadata at all",
+					testProxyAuthLikeHeaderName, v, testProxyAuthLikeHeaderValue)
+			}
+		})
+	}
+}
+
+// TestEveryCredentialMetadataKeyIsStrippedFromRawInput walks credentialHeaderNames (extauthz.go)
+// ITSELF rather than a second hardcoded copy of it, so a fifth entry added there is covered here
+// the moment it is added rather than whenever someone remembers to extend a list in a test.
+// Mirrors extauthz_test.go's TestEveryCredentialHeaderIsStrippedFromRawInput for the gRPC metadata
+// shape.
+func TestEveryCredentialMetadataKeyIsStrippedFromRawInput(t *testing.T) {
+	md := metadata.MD{
+		"authorization":             {"Bearer " + testProxyBearerToken},
+		testProxyAuthLikeHeaderName: {testProxyAuthLikeHeaderValue},
+	}
+	for name := range credentialHeaderNames {
+		if name == "authorization" {
+			continue // already present, and carrying the one value that must not be malformed
+		}
+		md[name] = []string{testProxyOtherCredentialValue}
+	}
+
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+	srv.authorize(metadata.NewIncomingContext(context.Background(), md), "/svc.Svc/Method")
+
+	req := fake.lastRequest()
+	if req == nil {
+		t.Fatal("PDP never received a request")
+	}
+	var got proxyRequestMetadata
+	if err := json.Unmarshal([]byte(req.GetRawInput()), &got); err != nil {
+		t.Fatalf("raw_input is not well-formed JSON: %v", err)
+	}
+	for name := range credentialHeaderNames {
+		if v, ok := got.Headers[name]; ok {
+			t.Errorf("raw_input.headers still carries credential %q = %v", name, v)
+		}
+	}
+	if strings.Contains(req.GetRawInput(), testProxyOtherCredentialValue) {
+		t.Errorf("raw_input contains a credential value verbatim: %s", req.GetRawInput())
+	}
+	if v := got.Headers[testProxyAuthLikeHeaderName]; len(v) != 1 {
+		t.Errorf("raw_input.headers[%q] = %v, want it preserved -- without this the checks above would "+
+			"also pass for a raw_input carrying nothing", testProxyAuthLikeHeaderName, v)
+	}
+}
+
+// TestAuthorize_UnboundToken_DeniedEvenWhenPDPAllows is K5, the converse half of C25 and the
+// migration hole a suite written from C25's own sentence leaves wide open: C25 says a BOUND token
+// presented without a proof is denied, and says nothing at all about a token that was never bound.
+// An attacker who simply asks for an ordinary bearer token walks straight through that gap.
+//
+// The two rows differ in EXACTLY ONE FIELD -- sender_constrained -- and in nothing else: same
+// method, same metadata, same Effect, same reason. That is what makes the false row a real
+// negative test rather than a call that denies for some other reason it happens to also have.
+// Both directions are asserted, because a mutation that ignores the field entirely (always
+// forward) and one that inverts it (never forward) are different bugs and a one-sided test catches
+// only one of them.
+func TestAuthorize_UnboundToken_DeniedEvenWhenPDPAllows(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		senderConstrained bool
+		wantAllowed       bool
+	}{
+		{name: "bound token, proof verified", senderConstrained: true, wantAllowed: true},
+		{name: "unbound token", senderConstrained: false, wantAllowed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+				Effect:            pdpgrpc.Effect_EFFECT_ALLOW,
+				Reason:            "policy allows",
+				SenderConstrained: tc.senderConstrained,
+			}}
+			pdpClient := startFakePDP(t, fake)
+			srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+			allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+			if allowed != tc.wantAllowed {
+				t.Fatalf("authorize() allowed = %v (%s), want %v", allowed, reason, tc.wantAllowed)
+			}
+			if tc.wantAllowed {
+				return
+			}
+			// The reason has to name the defect well enough that an operator can act on it, and
+			// the only action available to someone holding an unbound token is to obtain a
+			// different one -- which means naming dpop_jwk. Asserted on content, not just on the
+			// denial, because a K5 refusal that read like C25's "you sent no proof" would send an
+			// operator to produce a proof for a token no proof can ever satisfy.
+			if !strings.Contains(reason, "dpop_jwk") {
+				t.Errorf("reason = %q, want it to name dpop_jwk -- the one action available to a caller "+
+					"holding an unbound token", reason)
+			}
+			if reason != unboundTokenReason {
+				t.Errorf("reason = %q, want the shared refusal text %q -- the same K5 refusal on both "+
+					"network surfaces should read identically", reason, unboundTokenReason)
+			}
+		})
+	}
+}
+
+// TestHandleStream_UnboundToken_DeniedAndTargetNeverContacted is the wire-level half of the test
+// above, and it checks the thing that actually matters: a refused call does not reach the target.
+// Asserted against the TARGET'S own received-call count, not merely against the caller's error --
+// see proxy.go's package doc, DENY BY DEFAULT: a proxy that forwards and then errors has already
+// leaked the request, which checking only the caller's own response would miss entirely.
+func TestHandleStream_UnboundToken_DeniedAndTargetNeverContacted(t *testing.T) {
+	targetAddr, target := startFakeTarget(t)
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+		Effect:            pdpgrpc.Effect_EFFECT_ALLOW,
+		Reason:            "policy allows",
+		SenderConstrained: false,
+	}}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	err := conn.Invoke(bearerCtx(context.Background(), testProxyBearerToken), "/svc.Svc/Method",
+		&proxyFrame{payload: []byte("req")}, &proxyFrame{}, grpc.ForceCodec(proxyCodec{}))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("Invoke() error = %v, want PermissionDenied -- the PDP allowed this call, but the token "+
+			"behind it was never bound to a key (K5)", err)
+	}
+	if got := target.count(); got != 0 {
+		t.Errorf("target received %d call(s), want 0", got)
+	}
+	if got := fake.requestCount(); got != 1 {
+		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- the refusal is a narrowing of what the "+
+			"PDP said, so the PDP must still have been asked (and must still have audited the attempt)", got)
+	}
+}
+
+// TestAuthorize_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason is C25's own half, and it exists
+// alongside the K5 test above because the two name OPPOSITE defects that an operator has to act
+// differently on: "the token you hold is bound, and you sent no proof for it" is fixed by
+// producing a proof, while "the token you hold is not bound to anything" can only be fixed by
+// getting a different token.
+//
+// The PDP denies this one -- the proof check is the PDP's (K2/D1) -- so what this proves about
+// THIS process is that it passes the PDP's own verdict text through unaltered rather than
+// substituting its own, which would tell the caller to fix the wrong thing.
+func TestAuthorize_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason(t *testing.T) {
+	const pdpReason = "stratium: the presented token is bound to a key but the request carried no DPoP proof"
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason}}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{client: pdpClient, cfg: testProxyServerCfg()}
+
+	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	if allowed {
+		t.Fatal("authorize() allowed, want denied")
+	}
+	if reason != pdpReason {
+		t.Errorf("reason = %q, want the PDP's own text %q verbatim", reason, pdpReason)
+	}
+	if reason == unboundTokenReason {
+		t.Error("C25's denial and K5's refusal read identically -- they name opposite defects and an " +
+			"operator has to act differently on each")
+	}
+	// The empty dpop_proof still had to reach the PDP, or this denial would be about a request
+	// the PDP never actually saw the shape of.
+	if got := fake.lastRequest().GetDpopProof(); got != "" {
+		t.Errorf("dpop_proof = %q, want \"\"", got)
+	}
+}
+
+// TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused closes the one path on which K5
+// could otherwise be walked around: escalate, get a human to approve, and be forwarded.
+//
+// It is TestAuthorize_Escalate_ApprovedRetryAllows with exactly one field flipped -- the RETRY's
+// own sender_constrained -- and nothing else changed. K5 is applied to the response authorize is
+// about to act on, which on this path is the retry's, not the escalation's:
+// DecideResponse.sender_constrained's proto comment says in capitals to consult it only when
+// effect is EFFECT_ALLOW, and an escalation is not one. That is why resolveApproval hands the
+// resolved response back at all.
+func TestAuthorize_EscalateOnUnboundToken_ApprovedRetryStillRefused(t *testing.T) {
+	approvalID := uuid.NewString()
+	fake := &fakePDP{
+		resp: escalateResp(approvalID),
+		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{
+			{Status: "pending"}, {Status: "pending"}, {Status: "approved"},
+		},
+	}
+	client := startFakePDP(t, fake)
+	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp, senderConstrained: false}
+	srv := &proxyServer{client: wrapped, cfg: testProxyServerCfg()}
+
+	allowed, reason := srv.authorize(incomingBearerCtx(testProxyBearerToken), "/svc.Svc/Method")
+	if allowed {
+		t.Fatal("authorize() allowed after an approved escalation on an UNBOUND token, want refused (K5)")
+	}
+	if reason != unboundTokenReason {
+		t.Errorf("reason = %q, want the K5 refusal %q -- the approval resolved, so the denial must name "+
+			"the binding, not the escalation", reason, unboundTokenReason)
+	}
+	// The escalation genuinely resolved: without this, a refusal that happened for some other
+	// reason (a poll that never resolved, a retry that never happened) would look identical.
+	if got := fake.getApprovalCallCount(); got != 3 {
+		t.Errorf("GetApproval called %d times, want 3 -- the approval must actually have resolved for this "+
+			"to be a test about the RETRY's own response", got)
+	}
+}
+
+// TestHandleStream_LongLivedStream_OneDecisionOneProof is P4 stated in Phase 15's own terms, and
+// it is the property docs/pep.md warns an operator about by name: a stream is authorized ONCE, at
+// open, so it rides ONE proof, whose ONE jti is spent once (K8).
+//
+// Ten messages cross in each direction after that single decision. Exactly one Decide call is
+// made, and it is the one carrying the proof. This is what makes "a long-lived stream rides one
+// proof" a tested fact rather than a sentence in a doc: a build that re-authorized per message
+// would show a request count above one here, and -- against a real PDP rather than this fake --
+// would also fail its second message outright, because the jti it would present again has already
+// been spent.
+func TestHandleStream_LongLivedStream_OneDecisionOneProof(t *testing.T) {
+	targetAddr, target := startCountingEchoTarget(t)
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
+	conn := startProxyServer(t, srv)
+
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		"authorization", "Bearer "+testProxyBearerToken, "dpop", testProxyDPoPProof)
+	stream, err := conn.NewStream(ctx, proxyStreamDesc, "/chat.Chat/Converse", grpc.ForceCodec(proxyCodec{}))
+	if err != nil {
+		t.Fatalf("NewStream() error = %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		payload := []byte("message-" + strconv.Itoa(i))
+		if err := stream.SendMsg(&proxyFrame{payload: payload}); err != nil {
+			t.Fatalf("SendMsg(%d) error = %v", i, err)
+		}
+		var got proxyFrame
+		if err := stream.RecvMsg(&got); err != nil {
+			t.Fatalf("RecvMsg(%d) error = %v", i, err)
+		}
+		if string(got.payload) != string(payload) {
+			t.Fatalf("RecvMsg(%d) payload = %q, want the echoed %q", i, got.payload, payload)
+		}
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("CloseSend() error = %v", err)
+	}
+
+	if got := fake.requestCount(); got != 1 {
+		t.Errorf("PDP received %d Decide call(s) across a 10-message stream, want exactly 1 -- P4: a stream "+
+			"is authorized once, at open, and rides that single decision (and that single proof's single "+
+			"jti) for its whole life", got)
+	}
+	if got := target.count(); got != 1 {
+		t.Errorf("target received %d stream(s), want exactly 1", got)
+	}
+	req := fake.lastRequest()
+	if req == nil {
+		t.Fatal("PDP never received a request")
+	}
+	if got := req.GetDpopProof(); got != testProxyDPoPProof {
+		t.Errorf("dpop_proof = %q, want %q -- the one decision this stream got is the one carrying the "+
+			"one proof", got, testProxyDPoPProof)
+	}
+	if got, want := req.GetObservedUri(), testProxyPublicURI+"/chat.Chat/Converse"; got != want {
+		t.Errorf("observed_uri = %q, want %q", got, want)
 	}
 }

@@ -84,6 +84,41 @@
 // (internal/pdpgrpc/server_test.go) -- necessarily there, not here: there is nothing in this
 // package that computes a tier for this test to call.
 //
+// SENDER-CONSTRAINED TOKENS (Phase 15, spec §4.7.2 K5-K10). Everything above treats the token as
+// a bearer credential, which is what §4.1.1 called out as the gap this surface shipped with: a
+// token that leaks from a log, a sidecar, or a captured connection is fully usable by whoever
+// holds it, on exactly the surface where the request arrives from the party being policed. This
+// surface, like extauthz and unlike hook and mcp, now requires proof of possession. Four things
+// change, and only here -- the verification itself stays in the PDP (K2/D1), so this file gained
+// no crypto:
+//
+//   - extractCredentialsFromMetadata also reads the RFC 9449 "dpop" metadata key, and
+//     decideRequestFromStream forwards it verbatim as DecideRequest.dpop_proof alongside
+//     observed_method and observed_uri, the request pair the proof's htm/htu claims bind to (K7).
+//   - htu is the PROXY'S OWN address (cfg.PublicURI, required configuration with no default) plus
+//     the full method path, with htm the constant "POST" -- gRPC is HTTP/2 POST. Never the
+//     target's address, which would let a proof minted for one target be replayed at another
+//     behind the same proxy, and never the caller's own ":authority", which is the same hazard
+//     one layer in. parsePublicURI's doc comment carries the full case for all three, including
+//     why ListenAddr cannot supply it either.
+//   - The proof is stripped from raw_input by the same omission that already strips
+//     authorization (K10), because raw_input is hashed into an append-only audit chain and a
+//     credential written there cannot be edited out. One map (credentialHeaderNames, extauthz.go)
+//     decides what a credential is; dpop was added to it in Phase 15, which is the whole of the
+//     strip for this surface too.
+//   - authorize REFUSES an ALLOW whose token was never bound to a key (K5, allowIfSenderConstrained),
+//     reading DecideResponse.sender_constrained. That is the one place in this file that narrows
+//     what the PDP said.
+//
+// ONE STREAM, ONE PROOF. P4's "authorized once, at open" (below) is not weakened by any of this,
+// and an operator will assume otherwise, so it is stated here in the terms Phase 15 introduces: a
+// stream gets ONE Decide call, carrying ONE proof, whose ONE jti is spent once (K8). Every message
+// that stream ever carries -- one, or thousands over hours -- rides that single proof. Per-message
+// binding is not merely unimplemented; it is unavailable on this surface for the same reason
+// per-message authorization is, and for a second reason on top of it: there is nothing to bind a
+// per-message proof TO, since htu is a method path that does not change between messages of one
+// stream. docs/pep.md says the same thing in the operator's own terms.
+//
 // PASSTHROUGH CODEC + UNKNOWN-SERVICE HANDLER. This proxy has no target .proto for anything it
 // forwards -- that is the entire point of "transparent" -- so it cannot register a real service
 // or unmarshal a real message for ANY method. Two grpc-go primitives together make that
@@ -196,6 +231,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -276,7 +312,11 @@ var proxyStreamDesc = &grpc.StreamDesc{
 // There is deliberately no SessionFilePath field -- see the package doc's NO SESSION FILE
 // section.
 //
-// Every field is required, with no default: loadProxyConfigFromEnv reads all eight via
+// PublicURI is Phase 15's one addition, and unlike the eight above it exists to close a specific
+// attack rather than to name a dependency -- see parsePublicURI's own doc comment for why neither
+// ListenAddr nor TargetAddr nor anything the caller sends could have supplied it.
+//
+// Every field is required, with no default: loadProxyConfigFromEnv reads all nine via
 // requiredEnv before checking for any error, the same single-loader shape loadHookConfigFromEnv
 // and loadExtauthzConfigFromEnv each already use for their own one group of fields. That
 // singularity matters: a recent task (mcp.go's combineConfigErrors) found that composing TWO
@@ -289,6 +329,7 @@ var proxyStreamDesc = &grpc.StreamDesc{
 type proxyConfig struct {
 	ListenAddr string
 	TargetAddr string
+	PublicURI  string
 
 	PDPAddr        string
 	AgentID        string
@@ -315,6 +356,7 @@ func loadProxyConfigFromEnv() (proxyConfig, error) {
 	timeoutRaw := requiredEnv("STRATIUM_PEP_CONNECT_TIMEOUT", &missing)
 	pollRaw := requiredEnv("STRATIUM_PEP_APPROVAL_POLL_INTERVAL", &missing)
 	approvalTimeoutRaw := requiredEnv("STRATIUM_PEP_APPROVAL_TIMEOUT", &missing)
+	publicURIRaw := requiredEnv("STRATIUM_PEP_PROXY_PUBLIC_URI", &missing)
 	if len(missing) > 0 {
 		return proxyConfig{}, missingConfigError(missing)
 	}
@@ -337,7 +379,101 @@ func loadProxyConfigFromEnv() (proxyConfig, error) {
 	}
 	cfg.ApprovalTimeout = approvalTimeout
 
+	publicURI, err := parsePublicURI(publicURIRaw)
+	if err != nil {
+		return proxyConfig{}, err
+	}
+	cfg.PublicURI = publicURI
+
 	return cfg, nil
+}
+
+// publicURIVar is the one variable name parsePublicURI's errors quote, named rather than repeated
+// so the string an operator greps for cannot drift between the read and the six refusals below.
+const publicURIVar = "STRATIUM_PEP_PROXY_PUBLIC_URI"
+
+// parsePublicURI validates STRATIUM_PEP_PROXY_PUBLIC_URI -- already confirmed non-empty by
+// requiredEnv -- and returns the scheme-and-authority prefix decideRequestFromStream builds
+// observed_uri from. Required, no default, refused at startup rather than per call: a wrong value
+// here denies EVERY bound call this process ever sees, at the PDP's htu comparison, with a reason
+// no operator reading a denial could trace back to a configuration string.
+//
+// # Why a CONFIGURED value, and why none of the three obvious sources could supply it
+//
+// Spec §4.7.2 K7 makes htu on this surface the PROXY'S OWN address plus the full method path.
+// Three things in reach look like that address, and all three are wrong:
+//
+//   - The CALLER'S ":authority" metadata. This is the hazard K7 exists to close, one layer in
+//     from where the sibling surface met it: extauthz built htu's authority from Envoy's Host
+//     field, which Envoy's own generated doc defines as the caller's Host/:authority header, so
+//     the authority component of the binding was whatever the presenter claimed (see
+//     matchAllowedHost, extauthz.go, for the full replay). gRPC hands this process the same
+//     caller-written value in incoming metadata. Reading it would reproduce the same defect
+//     verbatim, and DecideRequest.observed_uri's own proto comment forbids it in as many words:
+//     the pair must be "what the ENFORCEMENT SURFACE saw, never anything the caller asserted."
+//   - TargetAddr. This is the defect K7 names outright: "Reporting the TARGET's address instead
+//     would let a proof minted for one target be replayed at another behind the same proxy."
+//     One proxy fleet fronting two targets would mint proofs interchangeable between them.
+//   - ListenAddr. Not caller-controlled, and still unusable: a listen address is a BIND
+//     specification, not an identity. ":9292" -- this deployment's own shape, and the ordinary
+//     one for a containerized listener -- carries no host at all, so an htu built from it reads
+//     "http://:9292/pkg.Svc/M", whose authority is empty. "0.0.0.0:9292" is worse: it names every
+//     interface and therefore no address a client could have signed.
+//
+// What a client signs into htu is the address it ADDRESSED. That is a fact about this deployment
+// -- which hostname resolves here, whether a load balancer or TLS terminator sits in front, which
+// port that front announces -- and nothing inside this process can observe it. So it is
+// configuration. Unlike extauthz's list, this is ONE value: extauthz MATCHES caller input, and a
+// gateway legitimately fronts several hostnames, so it needs a set to match within. This surface
+// matches nothing. It states its own identity, unconditionally, on every request -- and a set of
+// candidate identities would immediately raise "which one goes in htu?", a question with no
+// answer that does not end in reading the caller's own :authority to choose. A single value has
+// no such question to answer, which is precisely why it is the safe shape here.
+//
+// # What is validated, and why each refusal is a startup failure
+//
+// The scheme must be http or https: those are the only two RFC 9110 defines for HTTP target URIs,
+// and the only two internal/dpop's canonicalURI applies default-port removal to, so any third
+// would compare unequal to itself across the two sides of the binding. The host must be present.
+// Userinfo is refused because canonicalURI refuses it (RFC 9110 §4.2.1) -- accepting it here
+// would move a guaranteed denial from startup to every request. A path, query, or fragment is
+// refused because the method path is appended to this value verbatim: "http://p.example/api" plus
+// "/pkg.Svc/M" is "http://p.example/api/pkg.Svc/M", which is not what any client signed.
+//
+// A bare trailing "/" is accepted and dropped rather than refused. It is unambiguous, it is what
+// half of all operators will type, and a startup refusal for it would be this file inventing a
+// spelling rule with no security content.
+//
+// The returned value is rebuilt from the parsed scheme and host rather than echoed, so what
+// reaches observed_uri provably carries nothing but those two components. It is NOT case- or
+// port-normalized here: canonicalURI applies RFC 3986 §6.2.2.1 and §6.2.3 to both sides of the
+// comparison one hop later, so normalizing again here would be a second, independently
+// maintained copy of a rule that already has one home -- the drift extauthz.go's own
+// credentialHeaderNames comment argues against, in the one place it would be invisible.
+func parsePublicURI(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		// The raw value is deliberately not echoed: it is operator configuration rather than
+		// request data, but url.Parse errors quote their input, and a value carrying userinfo
+		// would put a password in this process's own startup log.
+		return "", fmt.Errorf("%s is not a URI: %w", publicURIVar, err)
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return "", fmt.Errorf("%s must have scheme http or https", publicURIVar)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("%s must name a host, e.g. https://proxy.example:9292", publicURIVar)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("%s must not carry userinfo (RFC 9110 §4.2.1)", publicURIVar)
+	}
+	if path := u.EscapedPath(); path != "" && path != "/" {
+		return "", fmt.Errorf("%s must be scheme and authority only, with no path: the gRPC method path is appended to it", publicURIVar)
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", fmt.Errorf("%s must be scheme and authority only, with no query or fragment", publicURIVar)
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 // proxyServer implements the passthrough handler every accepted connection runs through.
@@ -422,8 +558,15 @@ func (p *proxyServer) handleStream(_ any, stream grpc.ServerStream) error {
 // No reissueAndRetryDecide on EFFECT_DENY -- see the package doc's NO REISSUE ON DENY section for
 // why this surface has no delegation id to reissue against at all, unlike hook.go and
 // mcp_authorize.go.
+//
+// K5 (Phase 15) is the one place this function narrows what the PDP said, and it narrows it in
+// exactly one direction: an ALLOW whose token was never bound to a key is refused
+// (allowIfSenderConstrained, below). That is not a D1 violation -- D1 forbids a PEP DECIDING that
+// something is permitted, and refusing something the PDP permitted is the direction a PEP is
+// always free to move in, the same direction an unreachable PDP already denies in here. A PEP may
+// narrow; it may never widen.
 func (p *proxyServer) authorize(ctx context.Context, method string) (allowed bool, reason string) {
-	req, err := decideRequestFromStream(ctx, method, p.cfg.AgentID, p.cfg.Subject)
+	req, err := decideRequestFromStream(ctx, method, p.cfg)
 	if err != nil {
 		return false, fmt.Sprintf("stratium-pep: %s", err)
 	}
@@ -444,7 +587,7 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 
 	switch resp.GetEffect() {
 	case pdpgrpc.Effect_EFFECT_ALLOW:
-		return true, ""
+		return allowIfSenderConstrained(resp)
 	case pdpgrpc.Effect_EFFECT_ESCALATE:
 		// resolveApproval (escalation.go) owns everything from here: it polls GetApproval and
 		// either retries Decide with the resolved approval id or reports why not, bounding the
@@ -458,9 +601,15 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 		// context.Background() instead, not this same ctx variable). A timed-out or denied
 		// approval both fall out of resolveApproval's own reason text; this function adds nothing
 		// case-specific on top of it.
-		effect, escReason := resolveApproval(ctx, p.client, p.cfg.ConnectTimeout, p.cfg.ApprovalPollInterval, p.cfg.ApprovalTimeout, req, resp)
+		//
+		// K5 is applied to the RETRY's own response, not to resp: an escalation is not an
+		// ALLOW, and DecideResponse.sender_constrained's proto comment says in capitals to
+		// consult it only when effect is EFFECT_ALLOW. resolveApproval hands back the response
+		// it resolved to for exactly this reason -- it is the response this function is about
+		// to act on, and the only one entitled to answer whether the token was bound.
+		effect, escReason, resolved := resolveApproval(ctx, p.client, p.cfg.ConnectTimeout, p.cfg.ApprovalPollInterval, p.cfg.ApprovalTimeout, req, resp)
 		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
-			return true, ""
+			return allowIfSenderConstrained(resolved)
 		}
 		return false, escReason
 	default:
@@ -472,6 +621,56 @@ func (p *proxyServer) authorize(ctx context.Context, method string) (allowed boo
 		// PDP refused the call or this process failed before ever asking it one.
 		return false, resp.GetReason()
 	}
+}
+
+// allowIfSenderConstrained is K5: this surface forwards only a call whose token was bound to a
+// key and whose DPoP proof of possession of that key the PDP verified for this exact request.
+// Both of authorize's two allow paths -- a direct EFFECT_ALLOW and an escalation resolved to one
+// -- go through this, because both end in the same act, forwarding the caller's own stream to the
+// target, and K5 is a property of that act rather than of which branch reached it.
+//
+// # Why the refusal lives here and not in the PDP
+//
+// Spec §4.7.2 K5 requires the two NETWORK surfaces -- proxy and extauthz -- to refuse a token
+// carrying no cnf.jkt, and states outright that the refusal lives at the surface. IssueToken
+// cannot know which surface will present the token it mints, so it cannot decide at issuance
+// whether binding is required; and refusing a bearer token inside Decide would break hook and
+// mcp, where a bearer token is legitimate (the caller already holds the session file it lives in,
+// so binding buys nothing). The PDP therefore REPORTS -- DecideResponse.sender_constrained -- and
+// this is what acts on the report. A PEP cannot read cnf.jkt for itself: that means parsing a
+// token it holds no key to verify, and a PEP that decides a credential is genuine is a PEP making
+// an authorization decision (D1).
+//
+// # This is the converse of C25, not the same property
+//
+// C25 covers a BOUND token presented without a proof, which the PDP itself denies. K5 adds that
+// an UNBOUND token -- one that was never bound to anything, so no proof for it could exist -- is
+// refused here too. A suite written from C25's own sentence leaves the second wide open, and it
+// is the easier of the two to walk through: an attacker who simply asks for an ordinary bearer
+// token never has to defeat a binding at all.
+//
+// # Reading sender_constrained where it means what it says
+//
+// resp is always a response whose effect is EFFECT_ALLOW, which is the only case
+// DecideResponse.sender_constrained's own proto comment permits the field to be read in. On a
+// denial it is populated inconsistently by construction: the PDP sets it on Decide's tail, so
+// every denial that returns early -- a token that failed to verify, a proof that failed, a jti
+// that could not be spent, and three catalog/tier load failures -- reports false regardless of
+// what the caller actually presented. False on a denial means "not established", never "the
+// caller presented a bearer token". Restricting the read to this function costs nothing, because
+// every other path in authorize denies anyway.
+//
+// unboundTokenReason (extauthz.go) is shared verbatim with the sibling surface rather than
+// re-worded here: it is the same refusal, for the same reason, and an operator hitting it on one
+// surface should not have to recognize a second phrasing of it on the other. Its text names
+// dpop_jwk, which is the one action available to a caller holding an unbound token -- the
+// distinction that makes it actionable rather than a wall, and what keeps it distinguishable from
+// C25's own "you sent no proof" denial, which is fixed by producing a proof instead.
+func allowIfSenderConstrained(resp *pdpgrpc.DecideResponse) (allowed bool, reason string) {
+	if !resp.GetSenderConstrained() {
+		return false, unboundTokenReason
+	}
+	return true, ""
 }
 
 // proxyRequestMetadata is raw_input's JSON shape (plan §P3): the called method and the caller's
@@ -502,11 +701,28 @@ type proxyRequestMetadata struct {
 // metadata (P2), not an HTTP header Envoy has already parsed into a CheckRequest for that
 // process.
 //
-// The only failure mode is extractBearerTokenFromMetadata's own: no authorization metadata, or
-// one that is not a well-formed Bearer challenge (P2, spec K4 -- there is no fallback credential
-// this function could use instead). Every other field is unconditional: method is read only to
-// pass through, never inspected for meaning (see authorize's own doc comment on D1), and
-// agentID/subject are this process's own configured identity, never derived from the call.
+// It fails in two ways: extractCredentialsFromMetadata's own (no authorization metadata, or one
+// that is not a well-formed Bearer challenge -- P2, spec K4, there is no fallback credential this
+// function could use instead), and a method name that is not a gRPC method path (see the leading-
+// slash guard below, which exists because that string becomes part of htu). Every other field is
+// unconditional: method is otherwise read only to pass through, never inspected for meaning (see
+// authorize's own doc comment on D1), and cfg supplies this process's own configured identity and
+// address, never anything derived from the call.
+//
+// dpop_proof/observed_method/observed_uri (Phase 15, spec §4.7.2 K7) are the three fields this
+// surface adds for proof-of-possession, and none of them is conditional: a call carrying no proof
+// sends an empty dpop_proof and the pair the PDP then ignores, rather than this function deciding
+// a proof was required. Whether it was required is the PDP's answer for a bound token (C25) and
+// allowIfSenderConstrained's for an unbound one (K5). A local "no proof, no entry" shortcut here
+// would deny bearer traffic with a reason naming the wrong defect, and would deny it before the
+// PDP ever recorded the attempt in the audit chain.
+//
+// observed_method is the constant "POST", not anything read off the call: gRPC is HTTP/2 POST
+// (spec §4.7.2 K7, and DecideRequest.observed_method's own proto comment says so for this surface
+// by name), so there is no per-call variation for a source to be chosen among. Nothing on this
+// wire even carries an HTTP method -- grpc-go's own server refuses a :method other than POST
+// before this handler is ever reached -- so a value read from the request would be a value
+// invented from one.
 //
 // declared_tier and resource are never set on the returned request, the same omission hook.go,
 // mcp_authorize.go, and extauthz.go all make for the identical reason: this process has no real
@@ -514,12 +730,26 @@ type proxyRequestMetadata struct {
 // the tenant's own catalog regardless of what a caller claims -- see any of those three files'
 // own package docs. TestAuthorize_NeverSendsDeclaredTier asserts this on the wire, mirroring the
 // other three surfaces' identical tests.
-func decideRequestFromStream(ctx context.Context, method, agentID, subject string) (*pdpgrpc.DecideRequest, error) {
+func decideRequestFromStream(ctx context.Context, method string, cfg proxyConfig) (*pdpgrpc.DecideRequest, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 
-	token, stripped, err := extractBearerTokenFromMetadata(md)
+	token, proof, stripped, err := extractCredentialsFromMetadata(md)
 	if err != nil {
 		return nil, err
+	}
+
+	// The one thing about method that IS inspected, and only because method is concatenated onto
+	// cfg.PublicURI below. A gRPC method path always begins with "/" and grpc-go's own server
+	// rejects a :path that does not before this handler is reached (server.go's
+	// strings.CutPrefix(stream.Method(), "/") and its found check, v1.83.0) -- so this guard is
+	// unreachable through a real transport today. It is here anyway because the failure it
+	// prevents is the exact one this whole surface exists to prevent: "pkg.Svc/M" appended to
+	// "http://proxy.example" is "http://proxy.examplepkg.Svc/M", an htu whose AUTHORITY the
+	// caller chose. Depending on a dependency's input validation to hold that shut is depending
+	// on it never changing. Denying is the only safe answer: a method this function cannot bind
+	// is a method it cannot honestly report a request pair for.
+	if !strings.HasPrefix(method, "/") {
+		return nil, errors.New("called method is not a gRPC method path")
 	}
 
 	rawInput, err := json.Marshal(proxyRequestMetadata{Method: method, Headers: stripped})
@@ -531,20 +761,56 @@ func decideRequestFromStream(ctx context.Context, method, agentID, subject strin
 	}
 
 	return &pdpgrpc.DecideRequest{
-		AgentId:  agentID,
-		Subject:  subject,
+		AgentId:  cfg.AgentID,
+		Subject:  cfg.Subject,
 		Tool:     method, // P1: the full method IS the tool identity.
 		RawInput: string(rawInput),
 		Token:    token,
+
+		DpopProof:      proof,
+		ObservedMethod: grpcObservedMethod,
+		// K7: the PROXY'S OWN address, from configuration, plus the full method path. Not
+		// cfg.TargetAddr and not the caller's ":authority" -- see parsePublicURI's doc comment
+		// for what each of those would open. Nothing on the right-hand side of this expression
+		// can be influenced by the caller except the method path itself, which is the part of
+		// htu that is SUPPOSED to vary per call.
+		ObservedUri: cfg.PublicURI + method,
 	}, nil
 }
 
-// extractBearerTokenFromMetadata is extauthz.go's extractCredentials adapted to gRPC's own
+// grpcObservedMethod is DecideRequest.observed_method's value on this surface, always: gRPC is
+// carried over HTTP/2 POST (gRPC's own HTTP/2 protocol specification; RFC 9449 §4.2's htm is an
+// HTTP method, and POST is the only one a gRPC call ever uses). Uppercase, and not normalized
+// anywhere: dpop.Proof.MatchesRequest compares htm case-sensitively because RFC 9110 §9.1 makes
+// methods case-sensitive.
+const grpcObservedMethod = "POST"
+
+// extractCredentialsFromMetadata is extauthz.go's extractCredentials adapted to gRPC's own
 // metadata.MD shape (map[string][]string, since a header may repeat) instead of Envoy's flat
 // map[string]string -- the same single-pass extract-and-strip loop, the same case-insensitive
 // match against credentialHeaderNames (extauthz.go), reused directly rather than re-declared:
 // Phase 10 Task 2 already settled which headers count as a credential and why (see that var's own
-// doc comment), and this file adds no fourth header to that list for a fourth surface.
+// doc comment), and this file adds no fifth entry to that list for a fourth surface.
+//
+// Named for the two credentials it reads rather than for one of them (it was
+// extractBearerTokenFromMetadata through Phase 11, when there was only one), the same rename
+// extractCredentials took one file over and for the same reason: a function that silently also
+// returned a proof under the old name would be the kind of misdirection a reader auditing K10 has
+// to defeat before trusting anything else here.
+//
+// STRIP BY OMISSION, not by deletion (K10). stripped is built up from the non-credential entries,
+// so a credential is never written into it in the first place -- there is no window in which the
+// returned map holds a proof, and no delete() call whose absence a future edit could quietly
+// introduce. raw_input is hashed into an append-only audit chain, and a credential written there
+// cannot be edited out afterwards, so "the proof never reaches raw_input" has to be structural
+// rather than a step someone remembers.
+//
+// The read side is structural in the same way: credential VALUES are read only out of the local
+// creds map, which is populated only for names in credentialHeaderNames. A header not listed
+// there has no value for any read below to find, so "everything this function reads is also
+// stripped" holds by construction rather than by a test. An earlier version read authorization
+// out of a conditional inside the same loop, where a second credential could have been read
+// without a credentialHeaderNames entry and nothing would have noticed.
 //
 // md's keys are matched via strings.ToLower, never a direct map lookup on the key as received,
 // for the same reason extractCredentials's own doc comment gives for doing the identical thing to
@@ -556,48 +822,64 @@ func decideRequestFromStream(ctx context.Context, method, agentID, subject strin
 // documented -- which is exactly why relying on it here would look correct in every test that
 // only ever calls this function through that path. This function is called directly, with a
 // hand-built, deliberately NOT lower-cased metadata.MD, by
-// TestExtractBearerTokenFromMetadata_HeaderNameCaseDiffers_TokenStillFound and
-// TestExtractBearerTokenFromMetadata_StripsCredentialHeadersCaseInsensitively specifically
+// TestExtractCredentialsFromMetadata_HeaderNameCaseDiffers_CredentialsStillFound and
+// TestExtractCredentialsFromMetadata_StripsCredentialHeadersCaseInsensitively specifically
 // because routing those cases through a real incoming context would launder them through
 // FromIncomingContext's own normalization before this function ever ran, silently proving nothing
 // about THIS function's own defensiveness -- exercising it directly is the only way to prove it
-// does not merely inherit a guarantee a caller three lines up already happens to provide.
+// does not merely inherit a guarantee a caller three lines up already happens to provide. It
+// matters more for dpop than it ever did for authorization: RFC 9449 spells the metadata key
+// "DPoP", with an interior capital nothing else in HTTP looks like.
 //
 // An error means there is no credential here worth sending to the PDP at all: no authorization
 // metadata, one that is not a Bearer challenge, or one whose token is empty once the scheme is
-// removed. token and stripped are both zero values in every error case -- there is no partial
-// result a careless caller could mistake for a usable one.
-func extractBearerTokenFromMetadata(md metadata.MD) (token string, stripped map[string][]string, err error) {
+// removed. token, proof, and stripped are all zero values in every error case -- there is no
+// partial result a careless caller could mistake for a usable one. A MISSING dpop key is not one
+// of those errors: proof comes back "" and DecideRequest.dpop_proof carries the empty string,
+// which its own proto doc defines as "the caller presented none".
+func extractCredentialsFromMetadata(md metadata.MD) (token, proof string, stripped map[string][]string, err error) {
 	stripped = make(map[string][]string, len(md))
-	var authValue string
-	found := false
+	// creds is the ONLY thing the reads below draw from, and it is populated only for names in
+	// credentialHeaderNames -- see this function's own doc comment for why that containment is
+	// the whole of K10's strip-by-omission for the proof.
+	//
+	// A key present with no values at all is not stored: it carries no credential, and leaving it
+	// out keeps "an entry exists" and "a value exists" the same fact, so the reads below can index
+	// [0] without a second length check each. It is still consumed by the loop, so it is still
+	// absent from stripped.
+	creds := make(map[string][]string, len(credentialHeaderNames))
 	for name, values := range md {
 		lower := strings.ToLower(name)
 		if credentialHeaderNames[lower] {
-			if lower == "authorization" && len(values) > 0 {
-				// RFC 7235 defines exactly one credential per Authorization header; a second,
-				// repeated value is non-conformant, not a shape this function has grounds to
-				// prefer the LAST of over the first. The first is also what every other value in
-				// values, credential or not, would have contributed FIRST on the wire, so taking
-				// it here is consistent with how a normal single-valued header is read.
-				authValue, found = values[0], true
+			if len(values) > 0 {
+				creds[lower] = values
 			}
 			continue
 		}
 		stripped[name] = values
 	}
 
-	if !found {
-		return "", nil, errors.New("no authorization metadata")
+	// values[0], for both credentials. RFC 7235 defines exactly one credential per Authorization
+	// header and RFC 9449 §4.1 the same for DPoP; a second, repeated value is non-conformant, not
+	// a shape this function has grounds to prefer the LAST of over the first. The first is also
+	// what every one of those values would have contributed FIRST on the wire, so taking it here
+	// is consistent with how a normal single-valued header is read.
+	if v, ok := creds[dpopHeaderName]; ok {
+		proof = v[0]
 	}
+	authValues, found := creds[authorizationHeaderName]
+	if !found {
+		return "", "", nil, errors.New("no authorization metadata")
+	}
+	authValue := authValues[0]
 	if !strings.HasPrefix(authValue, bearerPrefix) {
-		return "", nil, errors.New("authorization metadata is not a Bearer token")
+		return "", "", nil, errors.New("authorization metadata is not a Bearer token")
 	}
 	token = strings.TrimPrefix(authValue, bearerPrefix)
 	if token == "" {
-		return "", nil, errors.New("authorization metadata carries an empty Bearer token")
+		return "", "", nil, errors.New("authorization metadata carries an empty Bearer token")
 	}
-	return token, stripped, nil
+	return token, proof, stripped, nil
 }
 
 // forward relays fullMethod between serverStream (the caller handleStream accepted) and
@@ -807,8 +1089,8 @@ func runProxyCmd(stderr io.Writer) int {
 	// This process's own startup configuration, not request data -- see the package doc's NEVER
 	// LOG section, which this line does not touch. Logged once, the same way runExtauthzCmd logs
 	// its own cfg.
-	_, _ = fmt.Fprintf(stderr, "stratium-pep: proxy listening on %s (target %s, PDP %s, agent %s, subject %s, connect timeout %s, approval poll %s, approval timeout %s)\n",
-		cfg.ListenAddr, cfg.TargetAddr, cfg.PDPAddr, cfg.AgentID, cfg.Subject, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout)
+	_, _ = fmt.Fprintf(stderr, "stratium-pep: proxy listening on %s (public URI %s, target %s, PDP %s, agent %s, subject %s, connect timeout %s, approval poll %s, approval timeout %s)\n",
+		cfg.ListenAddr, cfg.PublicURI, cfg.TargetAddr, cfg.PDPAddr, cfg.AgentID, cfg.Subject, cfg.ConnectTimeout, cfg.ApprovalPollInterval, cfg.ApprovalTimeout)
 
 	if err := grpcServer.Serve(lis); err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: proxy server: %s\n", err)

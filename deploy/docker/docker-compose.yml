@@ -502,6 +502,35 @@ services:
     environment:
       STRATIUM_PEP_PROXY_LISTEN_ADDR: :9292
       STRATIUM_PEP_PROXY_TARGET_ADDR: grpc-target:50051
+      # This surface's OWN address, and the whole of htu's authority (spec
+      # §4.7.2 K7, Phase 15). Required, no default.
+      #
+      # Read the three things it is deliberately NOT, because every one of
+      # them is in reach of the code that builds htu and every one of them is
+      # a defect (parsePublicURI's doc comment in cmd/stratium-pep/proxy.go
+      # carries the full case):
+      #   - not STRATIUM_PEP_PROXY_TARGET_ADDR, which is the replay K7 names
+      #     outright: a proof minted for one target would be replayable at any
+      #     other target behind the same proxy;
+      #   - not the caller's own ":authority", which grpc-go passes through
+      #     into metadata -- the same hazard pep-extauthz's ALLOWED_HOSTS
+      #     above exists to close one layer out, where the authority came from
+      #     the caller's Host header;
+      #   - not STRATIUM_PEP_PROXY_LISTEN_ADDR, which is a bind
+      #     specification, not an identity. ":9292" right above carries no
+      #     host at all, so an htu built from it would read
+      #     "http://:9292/pkg.Svc/M".
+      #
+      # A stable name, NOT the host:port the integration suite dials, for the
+      # same reason pep-extauthz's own allowlist is one: 9292 is published on
+      # an ephemeral host port (see `ports:` below), so the dialed address
+      # changes every run. That is the ordinary deployment shape rather than a
+      # test workaround -- an agent connects to whatever address resolves and
+      # signs the stable public address into its proof's htu. Unlike extauthz
+      # this surface never reads the caller's claim at all, so nothing here is
+      # matched against anything: it is simply stated.
+      # proxy_integration_test.go's proxyPublicURI is this string.
+      STRATIUM_PEP_PROXY_PUBLIC_URI: http://proxy.stratium.test:9292
       STRATIUM_PEP_PDP_ADDR: pdp-proxy:50051
       STRATIUM_PEP_AGENT_ID: 04ef809a-849f-404a-9a5c-015b7f73a014
       STRATIUM_PEP_SUBJECT: proxy-integration@example.com

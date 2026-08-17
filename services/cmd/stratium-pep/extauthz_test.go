@@ -291,17 +291,23 @@ const (
 )
 
 // allowResponse is the DecideResponse a real PDP returns for the only case
-// this surface may forward as of Phase 15: a bound token whose DPoP proof
-// verified. Effect alone is no longer enough -- checkResponseFromDecide
-// refuses an ALLOW carrying sender_constrained=false (K5) -- so a fixture
-// that set only Effect would be scripting a response the PDP produces for a
-// BEARER token, and every test below asserting an OK CheckResponse would be
-// asserting the opposite of what it means to.
+// EITHER network surface may forward as of Phase 15: a bound token whose DPoP
+// proof verified. Effect alone is no longer enough -- extauthz's
+// checkResponseFromDecide and proxy's allowIfSenderConstrained both refuse an
+// ALLOW carrying sender_constrained=false (K5) -- so a fixture that set only
+// Effect would be scripting a response the PDP produces for a BEARER token,
+// and every test asserting a forwarded request would be asserting the
+// opposite of what it means to.
+//
+// Shared with proxy_test.go rather than copied into it: K5 is one rule with
+// two enforcement points, and a second, independently maintained fixture is
+// how the two would end up scripting different notions of "the PDP allowed
+// this".
 //
 // One helper rather than the literal repeated per test, because that is the
-// fact worth stating once: on this surface, "the PDP allowed it" and "the
+// fact worth stating once: on these surfaces, "the PDP allowed it" and "the
 // request may be forwarded" are two different claims. reason is a parameter
-// only because two callers assert on it; the rest pass "".
+// only because a few callers assert on it; the rest pass "".
 func allowResponse(reason string) *pdpgrpc.DecideResponse {
 	return &pdpgrpc.DecideResponse{
 		Effect:            pdpgrpc.Effect_EFFECT_ALLOW,
