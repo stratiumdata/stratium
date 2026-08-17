@@ -88,6 +88,34 @@ import (
 // to go looking for.
 var errNoProof = errors.New("token is sender-constrained but the request carried no dpop proof")
 
+// reapSkewMargin is how much longer than strictly necessary a spent-proof row
+// is kept, to absorb disagreement between the two clocks that decide its fate.
+//
+// The two ends of a proof's life are measured on DIFFERENT clocks, and until
+// this constant existed they were set to coincide exactly:
+//
+//   - dpop.Verify refuses a proof once |pdpNow - iat| > window, on this
+//     process's Go clock.
+//   - store.ReapSpentProofs deletes once expires_at <= NOW(), on the DATABASE
+//     clock — deliberately, so every replica sharing one database agrees on
+//     the reaping boundary (its own doc comment).
+//
+// With expires_at set to exactly iat+window, a database clock running δ ahead
+// of the PDP's opens a δ-wide band in which a proof still verifies here and
+// its row has already been deleted there: replayable. The odds per row are
+// roughly δ divided by the reap interval — around 3e-6 at 1ms of skew on the
+// default 5m interval — so this is margin, not a live hole. It is also one
+// constant, which is cheaper than the arithmetic continuing to assume two
+// independent clocks agree to the microsecond.
+//
+// A minute dominates any skew a deployment sharing an NTP source will see,
+// while costing at most one extra minute of rows. Not configuration: an
+// operator has no way to measure their PDP-to-database skew and no reason to
+// tune this, and the value that matters to them — the freshness window — is
+// already configurable. If a deployment ever genuinely needs more, the
+// symptom is a replay that should have collided, and the fix is this line.
+const reapSkewMargin = time.Minute
+
 // tokenThumbprint reads the RFC 7800 cnf.jkt binding out of a verified
 // token's claims, returning "" when the token carries no cnf at all.
 //
@@ -133,16 +161,22 @@ func tokenThumbprint(claims jwt.MapClaims) (string, error) {
 // downgrade either — cnf is covered by the token's signature, so an attacker
 // cannot strip it and land here.
 //
-// Order within the group is dpop's, not this function's: Verify enforces RFC
-// 9449 §4.3's own MUSTs (typ, alg, signature, iat) and MatchesRequest is the
-// only way to reach the thumbprint at all, by construction — dpop.Proof keeps
-// jkt/jti/iat unexported and hands them back only in a Matched, so "verify a
-// proof, bind the key, and never check it was made for this request" does not
-// compile. The one ordering choice left to this function is thumbprint before
-// htm/htu, and it is deliberate: a thumbprint mismatch means the wrong KEY (a
-// stolen token presented with the thief's own proof), while an htm/htu
-// mismatch means the right key aimed at the wrong REQUEST, and naming the
-// first one first is more actionable when both are wrong at once.
+// # Order within the group is dpop's, and this function has no say in it
+//
+// Verify enforces RFC 9449 §4.3's own MUSTs (typ, alg, signature, iat), then
+// htm/htu, THEN the thumbprint. That is the reverse of the order the task
+// brief lists the checks in, and it is not a choice made here: MatchesRequest
+// is the only way to reach the thumbprint at all, by construction —
+// dpop.Proof keeps jkt/jti/iat unexported and hands them back only in a
+// Matched, so "verify a proof, bind the key, and never check it was made for
+// this request" does not compile. There is no ordering left to choose.
+//
+// A reader who finds this comment claiming the opposite and "corrects" the
+// code will find it does not build, and the obvious way to make it build is
+// to export jkt from dpop.Proof — which would undo the compile-time
+// unskippability that design exists to provide. Do not. The consequence of
+// the order is only which mismatch gets NAMED when a proof is both
+// wrong-key and wrong-request: htm/htu wins, and both deny either way.
 func (s *Server) matchProof(req *DecideRequest, jkt string, now time.Time) (*dpop.Matched, error) {
 	if jkt == "" {
 		return nil, nil
@@ -159,10 +193,11 @@ func (s *Server) matchProof(req *DecideRequest, jkt string, now time.Time) (*dpo
 	if err != nil {
 		return nil, err
 	}
-	// AFTER MatchesRequest because there is no way to have it any earlier —
-	// see this function's own doc comment — and the comparison is exact: a
-	// thumbprint is a base64url SHA-256 digest, so there is nothing to
-	// normalize and any tolerance at all would be a way in.
+	// AFTER MatchesRequest because matched is where the thumbprint comes
+	// from — there is no earlier point at which it exists (see this
+	// function's own doc comment). The comparison is exact: a thumbprint is a
+	// base64url SHA-256 digest, so there is nothing to normalize and any
+	// tolerance at all would be a way in.
 	if matched.JKT != jkt {
 		// Neither value is echoed. Both are thumbprints rather than secrets,
 		// but this text lands in the audit chain via DeriveTierDenial, where
@@ -193,11 +228,16 @@ func (s *Server) matchProof(req *DecideRequest, jkt string, now time.Time) (*dpo
 //
 // iat plus the window, not now plus the window: past that instant
 // dpop.Verify refuses this proof for staleness whether or not the table still
-// remembers it, so a row living any longer protects nothing, and one living
+// remembers it, so a row living much longer protects nothing, and one living
 // any shorter leaves a gap in which the same proof both verifies and no
 // longer collides. matched.IssuedAt is the proof's own iat, already checked
 // against this same window by Verify, so it cannot be arbitrarily far in the
 // past.
+//
+// Plus reapSkewMargin, because "that instant" is measured on two different
+// clocks — this process's for freshness, the database's for reaping — and
+// setting them to coincide exactly assumes the two agree to the microsecond.
+// See that constant for the band this closes.
 //
 // A failed write DENIES, and the two failure kinds stay distinguishable in
 // the denial's own text: store.ErrProofSpent is a replay (an attack signature
@@ -206,7 +246,7 @@ func (s *Server) matchProof(req *DecideRequest, jkt string, now time.Time) (*dpo
 // check, exactly as a failed audit write denies (D3) — but an operator
 // watching a spike of denials needs to know which one they are looking at.
 func (s *Server) spendProof(ctx context.Context, matched dpop.Matched) error {
-	expiresAt := matched.IssuedAt.Add(s.cfg.DPoPFreshnessWindow)
+	expiresAt := matched.IssuedAt.Add(s.cfg.DPoPFreshnessWindow + reapSkewMargin)
 	if err := s.store.SpendProof(ctx, matched.JTI, expiresAt); err != nil {
 		if errors.Is(err, store.ErrProofSpent) {
 			// store's own text, unwrapped and un-decorated: it already reads

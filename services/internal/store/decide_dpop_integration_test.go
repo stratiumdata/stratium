@@ -55,6 +55,13 @@ import (
 // value some other mistake would produce.
 const dpopITWindow = 97 * time.Second
 
+// dpopITSkewMargin mirrors pdpgrpc.reapSkewMargin, which is unexported. A
+// literal rather than a second import path: this file asserts the WIRE
+// behaviour of a value that package computes, and if that constant changes,
+// this test failing with both numbers in its message is exactly the right
+// outcome — an expiry the database sees is not something to silently track.
+const dpopITSkewMargin = time.Minute
+
 const (
 	dpopITMethod = "POST"
 	dpopITURI    = "https://pep-proxy.example.com/stratium.pdp.v1.PDPService/Decide"
@@ -255,12 +262,18 @@ func TestIntegration_Decide_SpendsWithAnExpiryOfIATPlusTheWindow(t *testing.T) {
 	}
 
 	got := spentProofExpiry(t, tenant, jti)
-	want := iat.Add(dpopITWindow)
+	// The margin is part of the value under test, not slack in the assertion:
+	// the freshness boundary is measured on the PDP's clock and the reaping
+	// boundary on this database's, and pdpgrpc.reapSkewMargin is what stops a
+	// database clock running ahead from deleting a row while the proof it
+	// records still verifies. Comparing against iat+window alone would have
+	// made this test the thing standing in the way of that fix.
+	want := iat.Add(dpopITWindow + dpopITSkewMargin)
 	if !got.Equal(want) {
-		t.Errorf("spent_proofs.expires_at = %s, want %s (iat %s + the %s window). Past that instant "+
-			"dpop.Verify refuses the proof for staleness anyway, so a row living longer protects nothing "+
-			"and one living less leaves a gap where the proof both verifies and no longer collides",
-			got.UTC(), want.UTC(), iat.UTC(), dpopITWindow)
+		t.Errorf("spent_proofs.expires_at = %s, want %s (iat %s + the %s window + the %s skew margin). "+
+			"Past iat+window dpop.Verify refuses the proof for staleness anyway, so a row living much "+
+			"longer protects nothing and one living less leaves a gap where the proof both verifies and "+
+			"no longer collides", got.UTC(), want.UTC(), iat.UTC(), dpopITWindow, dpopITSkewMargin)
 	}
 	if !got.After(time.Now()) {
 		t.Errorf("spent_proofs.expires_at = %s is not in the future: this row is reapable on the very next "+

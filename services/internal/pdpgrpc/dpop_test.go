@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -497,10 +498,11 @@ func TestDecide_ProofNotSpentWhenAnEarlierCheckFails(t *testing.T) {
 // healthy and the table looked reassuringly small.
 //
 // Exact equality, not "in the future" and not "roughly right". testDPoPWindow
-// is 97s and the fixture's iat is 45s in the past, so the correct answer
-// (iat+97s ≈ now+52s) is distinct from now+97s, from now, from iat, and from
-// the zero time — every value a plausible mistake would produce. A tolerance
-// check would accept at least two of them.
+// is 97s, reapSkewMargin is 60s, and the fixture's iat is 45s in the past, so
+// the correct answer (iat+157s ≈ now+112s) is distinct from now+window, from
+// now+window+margin, from iat+window, from now, from iat, and from the zero
+// time — every value a plausible mistake would produce. A tolerance check
+// would accept several of them.
 func TestDecide_SpendsTheProofWithAnExpiryOfIATPlusTheWindow(t *testing.T) {
 	f := newBoundFixture(t)
 
@@ -512,13 +514,26 @@ func TestDecide_SpendsTheProofWithAnExpiryOfIATPlusTheWindow(t *testing.T) {
 	}
 
 	got := f.fs.spentProofs[0].expiresAt
-	want := f.iat.Add(testDPoPWindow)
+	want := f.iat.Add(testDPoPWindow + reapSkewMargin)
 	if !got.Equal(want) {
-		t.Errorf("SpendProof expiresAt = %s, want %s (the proof's iat %s plus the %s freshness window). "+
-			"Past that instant dpop.Verify refuses this proof for staleness whether or not the table still "+
-			"remembers it, so a row living any longer protects nothing and one living any shorter leaves a "+
-			"gap where the same proof both verifies and no longer collides",
-			got.UTC(), want.UTC(), f.iat.UTC(), testDPoPWindow)
+		t.Errorf("SpendProof expiresAt = %s, want %s (the proof's iat %s, plus the %s freshness window, "+
+			"plus the %s clock-skew margin). Past iat+window dpop.Verify refuses this proof for staleness "+
+			"whether or not the table still remembers it, so a row living much longer protects nothing and "+
+			"one living any shorter leaves a gap where the same proof both verifies and no longer collides",
+			got.UTC(), want.UTC(), f.iat.UTC(), testDPoPWindow, reapSkewMargin)
+	}
+	// Stated as the property the margin exists for, not as arithmetic: the
+	// row must outlive the instant this PDP stops accepting the proof, because
+	// that instant is measured on the PDP's clock and the reaping boundary is
+	// measured on the DATABASE's. Setting them equal assumes the two agree
+	// exactly; a database clock running even slightly ahead would then delete
+	// the row while the proof still verifies here, and the proof becomes
+	// replayable. See reapSkewMargin's own doc comment.
+	if !got.After(f.iat.Add(testDPoPWindow)) {
+		t.Errorf("SpendProof expiresAt = %s does not outlive iat+window (%s): with no margin, a database "+
+			"clock running ahead of this process reaps the row inside the band where the proof still "+
+			"verifies, and a replay of it stops colliding",
+			got.UTC(), f.iat.Add(testDPoPWindow).UTC())
 	}
 	// Named separately because it is the specific failure Task 3's review
 	// handed over, and because it is the one a "the expiry is in the future"
@@ -736,5 +751,151 @@ func TestFakeStore_SpendProofIsSingleUse(t *testing.T) {
 	}
 	if err := fs.SpendProof(context.Background(), "jti-2", time.Now()); err != nil {
 		t.Fatalf("SpendProof() for a different jti = %v, want nil: single-use is per jti", err)
+	}
+}
+
+// --- The control the V3 ordering tests actually rest on -------------------
+
+// Every method on the Store interface increments fakeStore.calls.
+//
+// Both V3 ordering tests — TestDecide_EpochIsTheFirstStoreRead
+// (tier_override_test.go) and TestDecide_EpochIsStillTheFirstStoreCallWhenA
+// ProofIsSpent above — work by comparing LoadTenantEpoch's observed call
+// count against zero. That is only a proof of "the epoch is read first" if
+// EVERY other method counts. Twelve of them do, by convention, and until this
+// test nothing checked it: removing the single `f.calls++` from SpendProof
+// left TestDecide_EpochIsStillTheFirstStoreCallWhenAProofIsSpent GREEN with
+// the spend deliberately moved ahead of the epoch read. Verified, not
+// supposed.
+//
+// That is the same defect class as a reaper with no caller, one level up: the
+// guard depends on a convention no test enforces, so the thirteenth store
+// method added without that line silently hollows out both V3 tests and
+// nothing fails.
+//
+// Driven by reflection over the Store interface rather than by a hand-written
+// list, which is the whole point: a list would have to be extended by the
+// same person who forgot the increment. Zero values for every argument —
+// nothing here reads them, and the fake's error fields are all nil, so each
+// method takes its success path and returns.
+func TestFakeStore_EveryStoreMethodCountsItsCall(t *testing.T) {
+	storeType := reflect.TypeOf((*Store)(nil)).Elem()
+	if storeType.NumMethod() == 0 {
+		t.Fatal("the Store interface has no methods: this test would pass vacuously")
+	}
+
+	fs := &fakeStore{}
+	v := reflect.ValueOf(fs)
+	for i := range storeType.NumMethod() {
+		name := storeType.Method(i).Name
+		t.Run(name, func(t *testing.T) {
+			method := v.MethodByName(name)
+			args := make([]reflect.Value, method.Type().NumIn())
+			for j := range args {
+				args[j] = reflect.New(method.Type().In(j)).Elem()
+			}
+
+			before := fs.calls
+			method.Call(args)
+
+			if fs.calls != before+1 {
+				t.Errorf("fakeStore.%s did not increment calls (%d -> %d). Every store method must, or "+
+					"the two V3 tests that assert \"zero store calls ran before LoadTenantEpoch\" silently "+
+					"stop counting this one and pass for a decision that read it first", name, before, fs.calls)
+			}
+		})
+	}
+}
+
+// --- The audit row a replay leaves behind ---------------------------------
+
+// A denial after the token verified records WHICH delegation's token it was.
+//
+// This is the fix for a real gap, not a hypothetical: a replay denial used to
+// write delegation_id NULL, root_delegation_id NULL, chain_depth 0 — because
+// appendAudit gated DelegationID on `chain`, and chain is not loaded yet at
+// that point. The id was in scope and verified the whole time. An operator
+// investigating a replay storm therefore saw the agent and the actor and
+// nothing tying either to a credential, in the one feature built specifically
+// to make replay visible.
+//
+// Both DPoP denial shapes are covered, because they sit either side of the
+// epoch read and it would be easy to fix one call site and miss the other.
+//
+// RootDelegationID staying nil is asserted too, and is not an oversight: it
+// comes from chain[0] and chain genuinely was not loaded, so claiming a root
+// would be inventing one. DelegationID and the chain-derived fields answer
+// different questions, which is the whole point of the fix.
+func TestDecide_ProofDenial_AuditRowNamesTheDelegationTheTokenIdentified(t *testing.T) {
+	tests := map[string]func(t *testing.T, f *boundFixture){
+		"the proof fails to verify (before the epoch read)": func(t *testing.T, f *boundFixture) {
+			t.Helper()
+			f.req.DpopProof = signProof(t, newProofKey(t), testObservedMethod, testObservedURI, f.jti, f.iat)
+		},
+		"the proof is a replay (after the epoch read)": func(t *testing.T, f *boundFixture) {
+			t.Helper()
+			if resp := f.decide(t); resp.GetEffect() != Effect_EFFECT_ALLOW {
+				t.Fatalf("priming call Effect = %v, want EFFECT_ALLOW", resp.GetEffect())
+			}
+		},
+	}
+	for name, setup := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newBoundFixture(t)
+			// The delegation the fixture's token names, read back from the
+			// fixture's own chain rather than re-derived, so this asserts
+			// against the same row Decide would have loaded.
+			want := f.fs.chain[0].ID
+			setup(t, &f)
+			before := len(f.fs.appended)
+
+			if resp := f.decide(t); resp.GetEffect() != Effect_EFFECT_DENY {
+				t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+			}
+
+			if len(f.fs.appended) != before+1 {
+				t.Fatalf("audit entries appended = %d, want %d", len(f.fs.appended), before+1)
+			}
+			entry := f.fs.appended[before]
+			if entry.DelegationID == nil {
+				t.Fatal("audit entry DelegationID is nil: the token VERIFIED on this path, so the " +
+					"delegation id was known — dropping it leaves an operator investigating a replay " +
+					"storm unable to say which credential is being replayed")
+			}
+			if *entry.DelegationID != want {
+				t.Errorf("audit entry DelegationID = %s, want %s", entry.DelegationID, want)
+			}
+			if entry.RootDelegationID != nil {
+				t.Errorf("audit entry RootDelegationID = %v, want nil: it comes from chain[0] and the "+
+					"chain was never loaded on this path, so any value here would be invented",
+					entry.RootDelegationID)
+			}
+			if entry.ChainDepth != 0 {
+				t.Errorf("audit entry ChainDepth = %d, want 0 for the same reason", entry.ChainDepth)
+			}
+		})
+	}
+}
+
+// The converse, so the fix above cannot have been "always write an id": a
+// token that never verified yields no delegation id at all, and that row must
+// stay honest rather than pointing at the zero UUID. Asserted here alongside
+// its positive counterpart rather than only in authenticate_test.go, because
+// the two are now one decision in appendAudit and a change to either belongs
+// in front of both.
+func TestDecide_TokenFailure_AuditRowNamesNoDelegation(t *testing.T) {
+	f := newBoundFixture(t)
+	f.req.Token = "not-a-token-at-all"
+
+	if resp := f.decide(t); resp.GetEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("Effect = %v, want EFFECT_DENY", resp.GetEffect())
+	}
+
+	if len(f.fs.appended) != 1 {
+		t.Fatalf("audit entries appended = %d, want 1", len(f.fs.appended))
+	}
+	if got := f.fs.appended[0].DelegationID; got != nil {
+		t.Errorf("audit entry DelegationID = %v, want nil: this decision never identified a delegation "+
+			"at all, which is a different fact from identifying the zero UUID", got)
 	}
 }

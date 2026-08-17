@@ -366,7 +366,12 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		// Same shape and same nil epoch as the token failure just above: a
 		// proof that does not verify is a fact about a presented credential,
 		// audited like one, and loadEpochOrDeny still has not run.
-		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, nil)
+		//
+		// delegationID, NOT uuid.Nil, unlike that failure: the token verified
+		// here, so the id is known and correct, and an operator reading this
+		// row needs to know WHICH delegation's token was presented with a bad
+		// proof. Only chain is still nil — nothing has loaded it yet.
+		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, req.GetSubject(), now, err, nil)
 	}
 
 	epoch, err := s.loadEpochOrDeny(ctx)
@@ -382,7 +387,12 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// arguments, one placement.
 	if matched != nil {
 		if err := s.spendProof(ctx, *matched); err != nil {
-			return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, &epoch)
+			// delegationID again, for the reason above and more sharply: a
+			// replay denial that recorded no delegation would leave an
+			// operator watching a replay storm unable to say which
+			// credential is being replayed — in the one feature built to
+			// make replay visible.
+			return s.denyAndAudit(ctx, agentID, delegationID, nil, action, req.GetSubject(), now, err, &epoch)
 		}
 	}
 
@@ -619,16 +629,30 @@ func honoredOverrides(
 }
 
 // appendAudit builds the audit entry for one decision and appends it.
-// chain, and delegationID with it, is empty/uuid.Nil in exactly one case: a
-// token that failed authentication before Decide ever called LoadChain
-// (Decide's own call to authenticateToken; denyAndAudit's doc comment below
-// covers why that failure is routed through this same function rather than
-// its own copy). Every other caller reaches this only after LoadChain has
-// already succeeded — Decide's own success/escalation path, and
-// denyAndAudit's other two callers, a catalog load failure and a DeriveTier
-// failure — so for them chain is non-empty and delegationID is always
-// chain[len(chain)-1].ID by construction; LoadChain guarantees as much on a
-// nil error.
+//
+// chain is empty on the three of Decide's pre-decision denials that happen
+// before LoadChain runs: a token that failed authentication, a DPoP proof
+// that failed verification, and a jti that could not be spent (Decide's own
+// call sites; denyAndAudit's doc comment below covers why all five
+// pre-decision denials route through this same function rather than each
+// inlining its own copy). Every other caller reaches this only after
+// LoadChain has already succeeded — Decide's success/escalation path, plus a
+// catalog load failure and a DeriveTier failure — so for them chain is
+// non-empty and delegationID is always chain[len(chain)-1].ID by
+// construction; LoadChain guarantees as much on a nil error.
+//
+// delegationID and chain are therefore NOT the same question, and this
+// function treats them separately. Only ONE of the five pre-decision paths
+// has no delegation id at all: an authentication failure, where the token
+// never yielded one. On the other two the token verified — the id is known
+// and correct — and the chain simply was not loaded yet. Writing NULL there
+// would lose the single most useful fact about a replay: WHICH delegation's
+// token is being replayed. An operator investigating a replay storm would
+// see the agent and the actor and nothing to connect them to a credential,
+// in the one feature built to make replay visible. So DelegationID is
+// populated whenever it is non-nil, and the chain-derived fields
+// (RootDelegationID, ChainDepth) stay gated on chain, which is the only
+// thing that can supply them.
 //
 // PolicySource/PolicyID are populated from result.Deciding, guarded against
 // nil exactly as toResponse guards it: left at their zero value ("") for the
@@ -678,18 +702,27 @@ func (s *Server) appendAudit(
 		InputDigest:          digest,
 	}
 
-	// DelegationID/RootDelegationID/ChainDepth all derive from chain, and
-	// only make sense when it is non-empty (this function's own doc comment
-	// above). Left at nil/nil/0 otherwise — nil rather than pointing at the
-	// zero UUID, so a token-authentication failure's audit row is honest:
-	// this decision never identified a delegation at all, which is a
-	// different fact than "identified the zero UUID," and DelegationID/
+	// DelegationID is gated on delegationID itself, NOT on chain: the two
+	// answer different questions (this function's own doc comment above). A
+	// proof or spend failure knows exactly which delegation the verified
+	// token named and has simply not loaded the chain yet, and dropping that
+	// id would blind an operator to which credential is being replayed.
+	//
+	// nil rather than a pointer to the zero UUID when it genuinely is not
+	// known — an authentication failure — so that row stays honest: this
+	// decision never identified a delegation at all, which is a different
+	// fact than "identified the zero UUID". DelegationID and
 	// RootDelegationID are nullable columns for exactly this reason
 	// (migrations/000003_audit_chain).
+	if delegationID != uuid.Nil {
+		entry.DelegationID = &delegationID
+	}
+	// RootDelegationID/ChainDepth stay gated on chain, which is the only
+	// thing that can supply either: the root is chain[0] and the depth is the
+	// acting hop's, neither of which a bare id yields.
 	if len(chain) > 0 {
 		acting := chain[len(chain)-1]
 		root := chain[0]
-		entry.DelegationID = &delegationID
 		entry.RootDelegationID = &root.ID
 		entry.ChainDepth = int16(acting.Depth) //nolint:gosec // G115: store.maxChainWalk bounds any chain walk to 64 hops, far under int16's range
 	}
@@ -709,13 +742,14 @@ func (s *Server) appendAudit(
 }
 
 // denyAndAudit builds the DeriveTierDenial-shaped Result for err, appends
-// the audit entry, and returns the wire response. Three failures on
-// Decide's pre-decision path — a token that failed authentication, a tool
-// catalog that could not be loaded, and a DeriveTier failure — resolve
-// through this one function rather than each inlining its own copy of
-// "build the denial, audit it, respond," so they are audited identically
-// and cannot independently drift the way three hand-written copies of the
-// same lines eventually would.
+// the audit entry, and returns the wire response. Five failures on Decide's
+// pre-decision path — a token that failed authentication, a DPoP proof that
+// failed verification, a jti that could not be spent, a tool catalog that
+// could not be loaded, and a DeriveTier failure — resolve through this one
+// function rather than each inlining its own copy of "build the denial,
+// audit it, respond," so they are audited identically and cannot
+// independently drift the way five hand-written copies of the same lines
+// eventually would.
 //
 // DeriveTierDenial attributes every one of these to the "delegation" leg,
 // including a token failure, which is not really about the delegation's own
@@ -731,15 +765,21 @@ func (s *Server) appendAudit(
 // distinguishable and that a revoked delegation is denied by DelegationLeg's
 // own re-evaluation, never by this function standing in for it.
 //
-// delegationID/chain are uuid.Nil/nil on exactly one caller's path — a token
-// that failed authentication, before any delegation was ever loaded — and
-// appendAudit (above) is written to accept that shape; see its own doc
-// comment.
+// delegationID is uuid.Nil on exactly one caller's path — a token that
+// failed authentication, which never yielded an id. The proof and spend
+// failures pass the real, token-verified id even though chain is still nil,
+// and appendAudit (above) is written to treat those two as the separate
+// questions they are; see its own doc comment for why writing NULL there
+// would lose the most useful fact about a replay.
 //
-// epoch is nil on that same one path (Decide's own call site passes nil for
-// exactly this reason: loadEpochOrDeny has not run yet when authentication
-// fails) and non-nil on this function's other two callers, both of which
-// run after a successful epoch read. Forwarded straight to toResponse
+// chain is nil on three paths — those two plus the authentication failure —
+// since none of them has reached LoadChain.
+//
+// epoch is nil on the two that run BEFORE loadEpochOrDeny (authentication
+// and the proof check; Decide's own call sites pass nil for exactly that
+// reason) and non-nil on the other three, all of which run after a
+// successful epoch read — including the spend failure, which is why a replay
+// denial can honestly report an epoch where a bad-proof denial cannot. Forwarded straight to toResponse
 // rather than re-decided here — this function has no opinion of its own on
 // whether an epoch is available, only on how to audit and respond once
 // that has already been decided by the caller.

@@ -380,7 +380,18 @@ type DecideResponse struct {
 	// sender_constrained reports whether the token this call presented was
 	// bound to a key — a cnf.jkt claim, RFC 9449 §6.1 — AND a DPoP proof of
 	// possession of that key was verified for this exact request (spec §4.7.2
-	// K7). False means the caller presented an ordinary bearer token.
+	// K7).
+	//
+	// ONLY MEANINGFUL WHEN effect IS EFFECT_ALLOW. It is false on every denial,
+	// including a denial that came after a bound token's proof verified and its
+	// jti was spent — a decision denied at a leg, or by a catalog or tier
+	// failure, reports false regardless of what the caller presented. That is
+	// the same convention denied_leg and approval_id above already use (empty
+	// unless one specific effect applies), and it costs a K5 surface nothing:
+	// such a surface refuses a denied decision anyway, so the only case in
+	// which it has to ask this question is an ALLOW.
+	//
+	// On an ALLOW, false means the caller presented an ordinary bearer token.
 	//
 	// It REPORTS; it does not refuse. A bearer token is legitimate on the local
 	// surfaces (hook, mcp), where the caller already holds the session file the
