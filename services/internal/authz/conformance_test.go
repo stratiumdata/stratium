@@ -688,20 +688,32 @@ func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	provenElsewhere(t, 24, in("internal/store", "TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry"))
 }
 
-// C25's reason was re-checked the same way in Phase 14 Task 8, and is also
-// still true in substance: the string "DPoP" appears nowhere in services/ or
-// proto/ outside this file and the phase plans that keep deferring it. Phase
-// 9 built real signed delegation tokens, which is the layer DPoP would bind
-// a proof-of-possession key to, but binding is the part that does not exist
-// — a token is presented as a bearer credential today, with nothing proving
-// the presenter holds a matching key.
+// C25's reason was re-checked the same way in Phase 14 Task 8 and REWRITTEN
+// in Phase 15 Task 2, because the version before this one asserted a
+// grep-checkable falsehood — "the string DPoP appears nowhere in services/ or
+// proto/ outside this file" — which stopped being true when Task 1 landed
+// internal/dpop and is doubly untrue now that proto/pdp/v1/pdp.proto carries
+// dpop_jwk. A skip reason that states a verifiable fact and is wrong gets
+// read as fact by whoever audits this suite next, so it is corrected here
+// rather than left for the task that will delete it.
+//
+// The OUTCOME is unchanged and still correct. Two of the three pieces now
+// exist: internal/dpop verifies a proof (Task 1) and IssueToken binds a
+// token to a caller's key as cnf.jkt (Task 2). What C25 asserts is the
+// third — that presenting a sender-constrained token WITHOUT a valid proof
+// is denied — and nothing on the decision path reads a proof or a cnf.jkt
+// yet. DecideRequest does not carry one (Task 4), and neither network
+// surface refuses an unbound token (Tasks 5 and 6). Until then this property
+// is unbuilt, not merely unproven at this layer, which is why it stays
+// notBuilt rather than becoming a provenElsewhere.
 //
 // Same treatment as C17 above for its own stale "Phase 2" prefix.
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
 	markRan(25)
-	notBuilt(t, 25, "no DPoP anywhere in this tree: delegation tokens are presented as bearer "+
-		"credentials with no proof-of-possession binding (spec §8); verification would live in the "+
-		"PDP transport layer")
+	notBuilt(t, 25, "DPoP is half-built: internal/dpop verifies a proof and IssueToken binds a token "+
+		"to a caller's key as cnf.jkt, but nothing on the decision path consumes either — DecideRequest "+
+		"carries no proof and no surface refuses an unbound token, so a sender-constrained token "+
+		"presented without a proof is not yet denied (spec §4.7.2 K5/K7)")
 }
 
 // conformanceNames is the authoritative list of C-numbered properties this

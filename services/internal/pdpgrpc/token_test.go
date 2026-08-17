@@ -683,10 +683,16 @@ func TestIssueToken_WithJWK_BindsTokenToRFC7638Thumbprint(t *testing.T) {
 // "no cnf in the token a caller receives," which is the property the network
 // surfaces' K5 check reads.
 //
-// This is also half the bearer-compatibility proof: the token verifies and
-// names the delegation exactly as it did before this field existed. The
-// other half — that such a token still authenticates at Decide — is
-// TestIssueToken_UnboundTokenStillAuthenticatesAtDecide below.
+// This is also part of the bearer-compatibility proof: the token still
+// verifies under the PDP's own key, exactly as before this field existed.
+// It deliberately stops there. "The token names the delegation" is
+// TestIssueToken_ReturnsVerifiableTokenNamingTheDelegation's property — same
+// no-JWK path, asserted against the id it actually asked for — and "such a
+// token still authenticates at Decide" is
+// TestIssueToken_UnboundTokenStillAuthenticatesAtDecide below. An earlier
+// revision of this test tried to restate the first of those in one line and
+// produced an assertion that could never fire; the fix is to let the test
+// that owns a property be the one that checks it.
 func TestIssueToken_NoJWK_TokenCarriesNoConfirmationClaim(t *testing.T) {
 	resp, signer, _, err := issueTokenWithJWK(t, nil)
 	if err != nil {
@@ -702,9 +708,6 @@ func TestIssueToken_NoJWK_TokenCarriesNoConfirmationClaim(t *testing.T) {
 		t.Fatalf("issued token carries a cnf claim (= %#v) though no JWK was supplied, want none at all: "+
 			"a cnf with an empty jkt looks bound to a surface checking for one and is matchable by no key",
 			claims["cnf"])
-	}
-	if got := claims[subjectClaim]; got != resp.GetToken() && got == nil {
-		t.Fatalf("token sub = %v, want the delegation id", got)
 	}
 }
 

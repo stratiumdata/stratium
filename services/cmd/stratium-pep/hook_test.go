@@ -822,6 +822,19 @@ func TestRunHook_NoCodePathSendsABareDelegationID(t *testing.T) {
 	if got := fake.lastIssueRequest().GetDelegationId(); got != wantDelegationID {
 		t.Fatalf("IssueToken's own delegation_id = %q, want %q", got, wantDelegationID)
 	}
+	// The hook surface is local: the caller already holds the session file
+	// containing a real token, so a DPoP keypair would be cost with no
+	// threat-model gain (spec §4.7.2 K5 — binding is required on proxy and
+	// extauthz, not used here). Presence, not emptiness, because that is the
+	// distinction IssueTokenRequest.dpop_jwk is declared `optional` to make:
+	// a non-nil empty string is a bound-token request this PEP never means to
+	// send, and the PDP refuses it. Not load-bearing today; it becomes so at
+	// Tasks 5 and 6, when the tempting fix for an unbound-token denial on a
+	// NETWORK surface will be to start binding here too — which would hand
+	// the local surfaces a keypair they have no reason to manage.
+	if jwk := fake.lastIssueRequest().DpopJwk; jwk != nil {
+		t.Errorf("IssueToken carried dpop_jwk = %q, want none: the hook surface re-issues bearer tokens", *jwk)
+	}
 	// Call 2 (the retry): Token must be the FRESHLY reissued token, never
 	// the delegation id IssueToken was just asked about.
 	if got := wrapped.lastDecideReq.GetToken(); got == wantDelegationID {
