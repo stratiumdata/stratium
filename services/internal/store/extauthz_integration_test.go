@@ -25,9 +25,10 @@
 //
 // HEADER RECONSTRUCTION. Proofs 5 and 6 both need to know, precisely, the
 // JSON string decideRequestFromCheck (extauthz.go) hashed into the audit
-// chain for a real request -- proof 6 to check "authorization" is not in
-// it, proof 5 to resend the identical value on a direct retry (see that
-// test's own comment for why it cannot go through Envoy a second time).
+// chain for a real request -- proof 6 to check neither "authorization" nor
+// the Phase 15 "dpop" proof is in it (K10), proof 5 to resend the identical
+// value on a direct retry (see that test's own comment for why it cannot go
+// through Envoy a second time).
 // Guessing Envoy's exact behavior from memory was rejected in favor of
 // checking it directly, and it took two attempts to get right -- both real
 // findings about real Envoy behavior a constructed CheckRequest fixture
@@ -74,6 +75,7 @@
 package store_test
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -83,6 +85,8 @@ import (
 	"testing"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 
 	"stratium/internal/pdpgrpc"
@@ -118,12 +122,90 @@ const approvalIDHeaderName = "stratium-approval-id"
 
 // extauthzCredentialHeaderNames mirrors extauthz.go's own credentialHeaderNames
 // exactly -- see that file's own doc comment for why the list stops at
-// exactly these three (RFC-fixed bearer-authority headers only, not a
+// exactly these four (RFC-fixed bearer-authority headers only, not a
 // deployment-specific guess, which would be the PEP classifying something).
+// dpop is the fourth as of Phase 15 (RFC 9449 §4.1): spec §4.7.2 K10 keeps a
+// proof out of raw_input for the same reason the other three stay out, and
+// proof 6 below is what checks it against a real request rather than a
+// constructed one.
 var extauthzCredentialHeaderNames = map[string]bool{
 	"authorization":       true,
 	"cookie":              true,
 	"proxy-authorization": true,
+	"dpop":                true,
+}
+
+// mintExtauthzBoundToken mints a token bound to key's public half (spec
+// §4.7.2 K6) through the real IssueToken RPC, so the containerized PDP's own
+// verifier is what decides the token is genuine -- the same reasoning
+// mintToken's doc comment gives, extended by the one field that makes the
+// token usable on this surface at all as of Phase 15.
+//
+// Every proof below that expects to REACH the upstream has to use this rather
+// than mintToken: extauthz refuses an unbound token outright (K5), so a bearer
+// token now produces a 403 no matter how permissive the policy behind it is.
+// TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted is the proof of
+// exactly that.
+//
+// The proofs that expect a DENIAL deliberately keep calling mintToken, and
+// that is not laziness: a denial they attribute to a revoked delegation or a
+// tier ceiling must be attributable to THAT and not to a binding requirement
+// that would have refused the request anyway. Each one asserts the PDP's own
+// reason text, so a K5 refusal arriving instead fails them loudly rather than
+// passing on the right status code for the wrong reason.
+func mintExtauthzBoundToken(t *testing.T, delegationID uuid.UUID, key *ecdsa.PrivateKey) string {
+	t.Helper()
+	doc, err := (&jose.JSONWebKey{Key: key.Public()}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal public jwk: %v", err)
+	}
+	jwk := string(doc)
+	const ttlSeconds = 10 * 365 * 24 * 60 * 60 // always clamped to the delegation's own expiry; see mintToken
+	resp, err := envoyPdpClient.IssueToken(t.Context(), &pdpgrpc.IssueTokenRequest{
+		DelegationId: delegationID.String(),
+		TtlSeconds:   ttlSeconds,
+		DpopJwk:      &jwk,
+	})
+	if err != nil {
+		t.Fatalf("mint bound token for delegation %s: %v", delegationID, err)
+	}
+	return resp.GetToken()
+}
+
+// extauthzProof builds an RFC 9449 proof for the request this file is about
+// to send through Envoy, signed by key. jti is fresh per call because K8
+// makes it single-use in the database: two proofs sharing one would collide,
+// and the second request would deny for replay rather than for whatever the
+// calling proof is actually about.
+//
+// htu is stated INDEPENDENTLY here rather than read back from anything the
+// PEP computed: "http://" + envoyAddr + path is the URI this test's own
+// client addressed, which is what a real agent minting a proof would use. So
+// a request that reaches the upstream is the end-to-end evidence that
+// cmd/stratium-pep/extauthz.go's observedURI reconstructs the SAME string
+// from what real Envoy reports -- scheme, authority, and path, from three
+// separate accessors -- and a reconstruction that differed in any of the
+// three would deny instead. That is the only way this property can be
+// checked: the PDP compares the two, and neither side is visible to the other.
+func extauthzProof(t *testing.T, key *ecdsa.PrivateKey, method, path string) string {
+	t.Helper()
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.ES256, Key: key},
+		(&jose.SignerOptions{EmbedJWK: true}).WithType("dpop+jwt"),
+	)
+	if err != nil {
+		t.Fatalf("new jose signer: %v", err)
+	}
+	proof, err := josejwt.Signed(signer).Claims(map[string]any{
+		"htm": method,
+		"htu": "http://" + envoyAddr + path,
+		"jti": uuid.NewString(),
+		"iat": time.Now().Unix(),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("serialize proof: %v", err)
+	}
+	return proof
 }
 
 // seedExtauthzAgentOnce idempotently inserts the one agent identity every
@@ -175,6 +257,13 @@ func envoyDo(t *testing.T, method, path, token string, extra map[string]string) 
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	// A proof, when a caller has one, rides in extra under the RFC 9449
+	// header name -- deliberately NOT a dedicated parameter here, because
+	// http.Header.Set canonicalizes "DPoP" to "Dpop" on the wire and that
+	// third casing is itself worth sending: extauthz folds header names to
+	// lower case before matching (extractCredentials), and a proof that only
+	// ever arrived under one spelling would leave that fold unproven against
+	// a real Envoy.
 	sentHeader = make(map[string]string, len(req.Header))
 	for name := range req.Header {
 		sentHeader[name] = req.Header.Get(name)
@@ -331,9 +420,18 @@ func TestIntegration_Envoy_PermittedActionReachesUpstream(t *testing.T) {
 	seedToolCatalogEntry(t, envoyTenant, path, tierPtr(models.ActionTierReadOnly), "read", nil, nil)
 	delegation := newExtauthzDelegation(t, "extauthz proof 1: a permitted action reaches the upstream",
 		models.ActionTierReadOnly, nil)
-	token := mintToken(t, envoyPdpClient, delegation.ID)
+	key := dpopKey(t)
+	token := mintExtauthzBoundToken(t, delegation.ID, key)
 
-	status, body, _, _ := envoyDo(t, http.MethodGet, path, token, nil)
+	// A 200 here is now two properties at once, and the second is the one
+	// only a live stack can establish: the action is permitted, AND the htu
+	// this test signed independently ("http://"+envoyAddr+path) equals the
+	// observed_uri extauthz reconstructed from what real Envoy reported. Any
+	// disagreement -- a scheme read from the wrong place, an authority taken
+	// from the upstream rather than the downstream, a query string left on --
+	// denies at the PDP's htu comparison instead.
+	status, body, _, _ := envoyDo(t, http.MethodGet, path, token,
+		map[string]string{"DPoP": extauthzProof(t, key, http.MethodGet, path)})
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (a permitted action must reach the upstream); body: %s", status, body)
 	}
@@ -447,14 +545,27 @@ func TestIntegration_Envoy_RevokedDelegationDeniedAtDelegationLeg(t *testing.T) 
 }
 
 // TestIntegration_Envoy_AuthorizationHeaderExcludedFromAuditDigest is proof
-// 6: the authorization header does not reach the audit row's input-digest
-// source, checked against a real request through real Envoy rather than a
-// constructed CheckRequest (Task 2's own unit-level proof; see this file's
-// package doc for what real Envoy traffic can do differently). A custom
-// header (x-proof6-marker) is the positive control: it must survive into
-// the reconstruction, or a digest match below would be vacuous -- proof the
+// 6: neither credential header -- authorization, nor the DPoP proof this
+// phase adds (K10) -- reaches the audit row's input-digest source, checked
+// against a real request through real Envoy rather than a constructed
+// CheckRequest (Task 2's own unit-level proof; see this file's package doc
+// for what real Envoy traffic can do differently). A custom header
+// (x-proof6-marker) is the positive control: it must survive into the
+// reconstruction, or a digest match below would be vacuous -- proof the
 // reconstruction preserves content in general, not merely proof that
 // everything gets dropped.
+//
+// The digest match is what makes this structural rather than an inspection
+// of one value. It compares SHA-256 of an INDEPENDENTLY reconstructed
+// raw_input against the digest the PDP actually stored, so it fails if
+// raw_input differs from the reconstruction by so much as one byte in any
+// direction -- a leaked proof under any spelling, a header dropped that
+// should not have been, an addition nobody accounted for.
+//
+// The proof header is sent as "DPoP", which Go's http.Header.Set
+// canonicalizes to "Dpop" -- a third casing, matching neither the RFC's own
+// spelling nor the lower-case form Envoy delivers to ext_authz, and one no
+// unit fixture would have thought to construct.
 func TestIntegration_Envoy_AuthorizationHeaderExcludedFromAuditDigest(t *testing.T) {
 	seedExtauthzAgentOnce(t)
 	seedExtauthzPermitPolicy(t)
@@ -462,11 +573,16 @@ func TestIntegration_Envoy_AuthorizationHeaderExcludedFromAuditDigest(t *testing
 	const path = "/proof6-digest-item"
 	const marker = "proof6-marker-value"
 	seedToolCatalogEntry(t, envoyTenant, path, tierPtr(models.ActionTierReadOnly), "read", nil, nil)
-	delegation := newExtauthzDelegation(t, "extauthz proof 6: authorization must not reach the audit digest source",
+	delegation := newExtauthzDelegation(t, "extauthz proof 6: no credential reaches the audit digest source",
 		models.ActionTierReadOnly, nil)
-	token := mintToken(t, envoyPdpClient, delegation.ID)
+	key := dpopKey(t)
+	token := mintExtauthzBoundToken(t, delegation.ID, key)
+	proof := extauthzProof(t, key, http.MethodGet, path)
 
-	status, body, _, sentHeader := envoyDo(t, http.MethodGet, path, token, map[string]string{"X-Proof6-Marker": marker})
+	status, body, _, sentHeader := envoyDo(t, http.MethodGet, path, token, map[string]string{
+		"X-Proof6-Marker": marker,
+		"DPoP":            proof,
+	})
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body: %s", status, body)
 	}
@@ -482,15 +598,20 @@ func TestIntegration_Envoy_AuthorizationHeaderExcludedFromAuditDigest(t *testing
 	}
 
 	headers := reconstructHeaders(http.MethodGet, path, sentHeader, false)
-	if _, ok := headers["authorization"]; ok {
-		t.Fatalf("reconstruction still carries an authorization key -- reconstructHeaders itself is "+
-			"broken, this proof cannot proceed: %+v", headers)
+	for _, credential := range []string{"authorization", "dpop"} {
+		if _, ok := headers[credential]; ok {
+			t.Fatalf("reconstruction still carries a %q key -- reconstructHeaders itself is "+
+				"broken, this proof cannot proceed: %+v", credential, headers)
+		}
 	}
 	if v, ok := headers["x-proof6-marker"]; !ok || v != marker {
 		t.Fatalf("reconstruction dropped the non-credential positive-control header -- a digest match "+
 			"below would be vacuous (a digest computed over nothing meaningful); got %+v", headers)
 	}
 	reconstructed := rawInputJSON(http.MethodGet, path, headers)
+	if strings.Contains(reconstructed, "dpop") || strings.Contains(reconstructed, proof) {
+		t.Fatalf("reconstructed raw_input carries \"dpop\" or the proof JWT itself (K10): %s", reconstructed)
+	}
 	if strings.Contains(reconstructed, "authorization") || strings.Contains(reconstructed, token) {
 		t.Fatalf("reconstructed raw_input carries \"authorization\" or the bearer token itself: %s", reconstructed)
 	}
@@ -561,7 +682,24 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 		"extauthz proof 5 calibration: same path and headers, no escalation -- self-checks the "+
 			"reconstruction technique before the escalating call below relies on it",
 		models.ActionTierDestructive, nil)
-	calibToken := mintToken(t, envoyPdpClient, calibDelegation.ID)
+	// Bound, with a proof: the calibration call is the only one here that
+	// must actually be FORWARDED, and extauthz refuses an unbound token on
+	// the ALLOW branch (K5). The escalating call below stays unbound
+	// deliberately -- an ESCALATE degrades to a denial before that branch is
+	// ever reached, so its binding is irrelevant to what it proves, and
+	// leaving it unbound keeps the retry a plain direct Decide call with no
+	// proof to re-mint.
+	//
+	// This makes the DPoP header a third difference between the two calls,
+	// on top of EscalateAt and the token value, and the doc comment's claim
+	// that their raw_input is identical still holds for the same reason it
+	// held for the token: a credential header never reaches raw_input (K10,
+	// proof 6). It is not assumed here either -- the calibration
+	// self-consistency check below hashes this call's reconstruction against
+	// its own real audit row, and models.Approval.Verify re-checks the
+	// escalating call's against the same value on the retry.
+	calibKey := dpopKey(t)
+	calibToken := mintExtauthzBoundToken(t, calibDelegation.ID, calibKey)
 
 	escalateAt := models.ActionTierExternalComms
 	escDelegation := newExtauthzDelegation(t,
@@ -569,7 +707,8 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 		models.ActionTierDestructive, &escalateAt)
 
 	// Calibration call: allows outright.
-	calibStatus, calibBody, _, calibSent := envoyDo(t, http.MethodGet, path, calibToken, nil)
+	calibStatus, calibBody, _, calibSent := envoyDo(t, http.MethodGet, path, calibToken,
+		map[string]string{"DPoP": extauthzProof(t, calibKey, http.MethodGet, path)})
 	if calibStatus != http.StatusOK {
 		t.Fatalf("calibration call status = %d, want 200 (no EscalateAt, sufficient ceiling -- must allow "+
 			"outright); body: %s", calibStatus, calibBody)
@@ -703,5 +842,56 @@ func TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRet
 	if retryResp.GetApprovalId() != "" {
 		t.Errorf("retry ApprovalId = %q, want empty: no second approval is created on an approved retry",
 			retryResp.GetApprovalId())
+	}
+}
+
+// TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted is K5's live
+// proof and the converse half of C25 -- the migration hole C25's own wording
+// does not cover. C25 says a bound token presented without a proof is denied;
+// it says nothing about a token that was never bound, and an attacker who
+// simply asks IssueToken for an ordinary bearer token walks through that gap
+// on a surface where the request arrives from the party being policed.
+//
+// It is deliberately the SAME fixture as proof 1 -- same delegation shape,
+// same READ_ONLY catalog entry under a READ_ONLY ceiling, same blanket-permit
+// policy, same method and path shape -- differing in exactly one property:
+// the token is minted with no dpop_jwk, so the PDP allows the action and
+// reports sender_constrained=false, and extauthz refuses it anyway. Without
+// that pairing a 403 here would prove nothing; with it, the 403 is
+// attributable to the binding and to nothing else.
+//
+// The reason is asserted, and specifically asserted NOT to be C25's own: the
+// two name opposite defects, and an operator told "you sent no proof" when
+// the real problem is "your token cannot carry one" has been sent to fix the
+// wrong thing.
+func TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted(t *testing.T) {
+	seedExtauthzAgentOnce(t)
+	seedExtauthzPermitPolicy(t)
+
+	const path = "/proof-k5-unbound-item"
+	seedToolCatalogEntry(t, envoyTenant, path, tierPtr(models.ActionTierReadOnly), "read", nil, nil)
+	delegation := newExtauthzDelegation(t, "extauthz K5: an unbound token is refused on a network surface",
+		models.ActionTierReadOnly, nil)
+	// mintToken, not mintExtauthzBoundToken: no dpop_jwk, so the PDP mints a
+	// plain bearer token exactly as it did before this phase existed. That is
+	// the one difference from proof 1.
+	token := mintToken(t, envoyPdpClient, delegation.ID)
+
+	status, body, _, _ := envoyDo(t, http.MethodGet, path, token, nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 -- an unbound token must be refused on this surface even though the "+
+			"PDP allows the action (K5); body: %s", status, body)
+	}
+	if !strings.Contains(body, "not bound to a key") {
+		t.Errorf("body = %q, want extauthz's own K5 refusal wording (\"... not bound to a key\") -- any other "+
+			"denial means this 403 came from somewhere else and the binding requirement is unproven", body)
+	}
+	if !strings.Contains(body, "dpop_jwk") {
+		t.Errorf("body = %q, want it to name dpop_jwk -- the only action available to a caller holding an "+
+			"unbound token is to request a bound one", body)
+	}
+	if strings.Contains(body, "carried no dpop proof") {
+		t.Errorf("body = %q carries C25's own reason, which names the opposite defect: this caller's token "+
+			"is not bound at all, so producing a proof for it is impossible", body)
 	}
 }

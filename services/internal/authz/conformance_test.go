@@ -697,23 +697,34 @@ func TestC24_ExpiredDelegationDenied(t *testing.T) {
 // read as fact by whoever audits this suite next, so it is corrected here
 // rather than left for the task that will delete it.
 //
-// The OUTCOME is unchanged and still correct. Two of the three pieces now
-// exist: internal/dpop verifies a proof (Task 1) and IssueToken binds a
-// token to a caller's key as cnf.jkt (Task 2). What C25 asserts is the
-// third — that presenting a sender-constrained token WITHOUT a valid proof
-// is denied — and nothing on the decision path reads a proof or a cnf.jkt
-// yet. DecideRequest does not carry one (Task 4), and neither network
-// surface refuses an unbound token (Tasks 5 and 6). Until then this property
-// is unbuilt, not merely unproven at this layer, which is why it stays
-// notBuilt rather than becoming a provenElsewhere.
+// RE-CHECKED AND REWRITTEN AGAIN in Phase 15 Task 5, under the rule the
+// paragraph above states: the previous text asserted "DecideRequest carries
+// no proof and no surface refuses an unbound token," and both halves are now
+// false. Task 4 added dpop_proof/observed_method/observed_uri and made Decide
+// verify a proof and deny a bound token presented without one; Task 5 made
+// extauthz refuse an unbound token (K5). Leaving that sentence in place would
+// be exactly the stale-fact-read-as-fact failure this entry has already had
+// twice.
+//
+// The OUTCOME is still notBuilt, and the reason is narrower than it was.
+// C25's own sentence — a sender-constrained token presented without a valid
+// proof is denied — now holds on the decision path and on ONE of the two
+// network surfaces. §4.7.2 K5 puts the requirement on BOTH: proxy still
+// forwards an unbound token and still sends no proof (Task 6), so an agent
+// that would be refused at extauthz is not refused at proxy. A property that
+// holds on one of the two surfaces it is specified for is half-built, not
+// proven elsewhere. Task 7 is what re-reads this against a live stack and
+// decides between pass and provenElsewhere; this entry deliberately does not
+// pre-empt that.
 //
 // Same treatment as C17 above for its own stale "Phase 2" prefix.
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
 	markRan(25)
-	notBuilt(t, 25, "DPoP is half-built: internal/dpop verifies a proof and IssueToken binds a token "+
-		"to a caller's key as cnf.jkt, but nothing on the decision path consumes either — DecideRequest "+
-		"carries no proof and no surface refuses an unbound token, so a sender-constrained token "+
-		"presented without a proof is not yet denied (spec §4.7.2 K5/K7)")
+	notBuilt(t, 25, "DPoP is half-built across the two surfaces it is specified for: internal/dpop "+
+		"verifies a proof, IssueToken binds a token as cnf.jkt, Decide denies a bound token presented "+
+		"without a valid proof, and extauthz refuses an unbound one — but proxy neither forwards a proof "+
+		"nor refuses an unbound token, so §4.7.2 K5's requirement holds on one network surface and not "+
+		"the other (spec §4.7.2 K5/K7)")
 }
 
 // conformanceNames is the authoritative list of C-numbered properties this

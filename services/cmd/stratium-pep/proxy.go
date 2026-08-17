@@ -539,7 +539,7 @@ func decideRequestFromStream(ctx context.Context, method, agentID, subject strin
 	}, nil
 }
 
-// extractBearerTokenFromMetadata is extauthz.go's extractBearerToken adapted to gRPC's own
+// extractBearerTokenFromMetadata is extauthz.go's extractCredentials adapted to gRPC's own
 // metadata.MD shape (map[string][]string, since a header may repeat) instead of Envoy's flat
 // map[string]string -- the same single-pass extract-and-strip loop, the same case-insensitive
 // match against credentialHeaderNames (extauthz.go), reused directly rather than re-declared:
@@ -547,7 +547,7 @@ func decideRequestFromStream(ctx context.Context, method, agentID, subject strin
 // doc comment), and this file adds no fourth header to that list for a fourth surface.
 //
 // md's keys are matched via strings.ToLower, never a direct map lookup on the key as received,
-// for the same reason extractBearerToken's own doc comment gives for doing the identical thing to
+// for the same reason extractCredentials's own doc comment gives for doing the identical thing to
 // Envoy's headers: a client or an intermediary between it and this process gets one chance to
 // send a metadata key this function must still recognize regardless of how it capitalized the
 // name. google.golang.org/grpc/metadata's own FromIncomingContext (called by

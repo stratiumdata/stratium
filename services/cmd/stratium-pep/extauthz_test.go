@@ -276,7 +276,28 @@ const (
 	testAuthLikeHeaderValue  = "extauthz-authlike-header-4e91cd08-fixture"
 	testAgentIDFixture       = "extauthz-agent-6a2f0b13-fixture"
 	testSubjectFixture       = "extauthz-subject-6a2f0b13-fixture@example.com"
+	testDPoPProof            = "extauthz-dpop-proof-b41e7a92-fixture"
 )
+
+// allowResponse is the DecideResponse a real PDP returns for the only case
+// this surface may forward as of Phase 15: a bound token whose DPoP proof
+// verified. Effect alone is no longer enough -- checkResponseFromDecide
+// refuses an ALLOW carrying sender_constrained=false (K5) -- so a fixture
+// that set only Effect would be scripting a response the PDP produces for a
+// BEARER token, and every test below asserting an OK CheckResponse would be
+// asserting the opposite of what it means to.
+//
+// One helper rather than the literal repeated per test, because that is the
+// fact worth stating once: on this surface, "the PDP allowed it" and "the
+// request may be forwarded" are two different claims. reason is a parameter
+// only because two callers assert on it; the rest pass "".
+func allowResponse(reason string) *pdpgrpc.DecideResponse {
+	return &pdpgrpc.DecideResponse{
+		Effect:            pdpgrpc.Effect_EFFECT_ALLOW,
+		Reason:            reason,
+		SenderConstrained: true,
+	}
+}
 
 // testExtauthzServerCfg is the AgentID/Subject/ConnectTimeout every test
 // below needs to construct an extauthzServer directly (bypassing
@@ -292,16 +313,33 @@ func testExtauthzServerCfg() extauthzConfig {
 	}
 }
 
+// testScheme and testHost are what checkRequest stamps onto every request
+// below, so the default fixture is shaped like something a real Envoy sends
+// rather than like the minimum this file happens to read. Both were measured
+// against the real Envoy in deploy/docker rather than assumed -- see
+// observedURI's own doc comment for the transcript and for what it settled.
+const (
+	testScheme = "http"
+	testHost   = "extauthz-host-9d1c4b70-fixture.example:10000"
+)
+
 // checkRequest builds a CheckRequest carrying method, path, and headers --
 // the same three pieces of an HTTP request every test below needs, without
 // each one repeating the AttributeContext/AttributeContext_Request/
 // AttributeContext_HttpRequest nesting TestCheck_RequestShapeIsIrrelevant_StillDenies
-// above already spells out once.
+// above already spells out once. Scheme and Host come from the two constants
+// above; the tests that vary them (observed_uri's own) call checkRequestFull.
 func checkRequest(method, path string, headers map[string]string) *authv3.CheckRequest {
+	return checkRequestFull(testScheme, testHost, method, path, headers)
+}
+
+func checkRequestFull(scheme, host, method, path string, headers map[string]string) *authv3.CheckRequest {
 	return &authv3.CheckRequest{
 		Attributes: &authv3.AttributeContext{
 			Request: &authv3.AttributeContext_Request{
 				Http: &authv3.AttributeContext_HttpRequest{
+					Scheme:  scheme,
+					Host:    host,
 					Method:  method,
 					Path:    path,
 					Headers: headers,
@@ -322,7 +360,7 @@ func checkRequest(method, path string, headers map[string]string) *authv3.CheckR
 // is the same "carried through from cfg, unmodified" claim on two more
 // fields, on a request this test already built and sent.
 func TestCheck_PathBecomesTool(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	cfg := testExtauthzServerCfg()
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: cfg})
@@ -352,7 +390,7 @@ func TestCheck_PathBecomesTool(t *testing.T) {
 // in "authorization: Bearer <token>" reaches DecideRequest.Token, with the
 // "Bearer " scheme stripped and nothing else altered.
 func TestCheck_BearerTokenExtracted(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -387,7 +425,7 @@ func TestCheck_BearerTokenExtracted(t *testing.T) {
 // the same "still X anyway" discipline the old test used, applied to the
 // new outcome.
 func TestCheck_Allow_ReturnsOkResponse(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Reason: "policy allows"}}
+	fake := &fakePDP{resp: allowResponse("policy allows")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -420,7 +458,7 @@ func TestCheck_Allow_ReturnsOkResponse(t *testing.T) {
 // fake.Decide, which is exactly what requestCount() catches: it would read
 // less than attempts, not equal to it.
 func TestCheck_RepeatedIdenticalRequests_AlwaysCallsPDP(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -488,7 +526,7 @@ func TestCheck_UnreachablePDP_DeniesAsOrdinaryResponse_NotTransportError(t *test
 // the zero asserted here is a real contrast, not a count that would read
 // zero no matter what this server did.
 func TestCheck_MissingAuthorizationHeader_DeniesWithoutContactingPDP(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -524,7 +562,7 @@ func TestCheck_MalformedAuthorizationHeader_DeniesWithoutContactingPDP(t *testin
 		{"lowercase bearer scheme", "bearer " + testBearerToken},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			fake := &fakePDP{resp: allowResponse("")}
 			pdpClient := startFakePDP(t, fake)
 			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -550,7 +588,7 @@ func TestCheck_MalformedAuthorizationHeader_DeniesWithoutContactingPDP(t *testin
 // TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing below defends
 // M3's negative half on the same field.
 func TestCheck_RawInputCarriesMethodAndPath(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -601,7 +639,7 @@ func TestCheck_RawInputCarriesMethodAndPath(t *testing.T) {
 func TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing(t *testing.T) {
 	for _, headerName := range []string{"authorization", "Authorization", "AUTHORIZATION", "AuthoriZation"} {
 		t.Run(headerName, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			fake := &fakePDP{resp: allowResponse("")}
 			pdpClient := startFakePDP(t, fake)
 			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -646,7 +684,7 @@ func TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing(t *testing.T) {
 // exact match against credentialHeaderNames would wrongly strip this one
 // too, even though it carries no credential at all.
 func TestCheck_RawInputPreservesNonCredentialHeaders(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -682,7 +720,7 @@ func TestCheck_RawInputPreservesNonCredentialHeaders(t *testing.T) {
 func TestCheck_RawInputStripsOtherCredentialHeaders(t *testing.T) {
 	for _, headerName := range []string{"cookie", "Cookie", "proxy-authorization", "Proxy-Authorization"} {
 		t.Run(headerName, func(t *testing.T) {
-			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			fake := &fakePDP{resp: allowResponse("")}
 			pdpClient := startFakePDP(t, fake)
 			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -717,7 +755,7 @@ func TestCheck_RawInputStripsOtherCredentialHeaders(t *testing.T) {
 // populates it anymore, and this is a cheap place to prove extauthz is no
 // exception.
 func TestCheck_NeverSendsDeclaredTier(t *testing.T) {
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	fake := &fakePDP{resp: allowResponse("")}
 	pdpClient := startFakePDP(t, fake)
 	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
 
@@ -755,22 +793,47 @@ func TestDecideRequestFromCheck_NilAttributes_ErrorsWithoutPanicking(t *testing.
 	}
 }
 
-// TestExtractBearerToken is the direct, wire-free table of every shape
-// extractBearerToken must accept or reject -- faster and more exhaustive
+// TestExtractCredentials is the direct, wire-free table of every shape
+// extractCredentials must accept or reject -- faster and more exhaustive
 // than routing every case through a real gRPC round trip, which the Check-
 // level tests above already do for the cases that specifically need to
 // prove something about the WIRE (declared_tier, raw_input's JSON shape).
-func TestExtractBearerToken(t *testing.T) {
+//
+// wantProof is asserted on every row, not only the DPoP ones. A missing dpop
+// header must yield "" and NOT a failure -- the token may be unbound, and
+// deciding what a missing proof means belongs to the PDP (C25) and to
+// checkResponseFromDecide (K5), never here -- so every pre-Phase-15 row below
+// doubles as the assertion that adding a second credential did not make the
+// first one's absence-of-the-second fatal.
+func TestExtractCredentials(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		headers   map[string]string
 		wantToken string
+		wantProof string
 		wantErr   bool
 	}{
 		{
 			name:      "well-formed bearer token",
 			headers:   map[string]string{"authorization": "Bearer " + testBearerToken},
 			wantToken: testBearerToken,
+		},
+		{
+			name: "bearer token and dpop proof together",
+			headers: map[string]string{
+				"authorization": "Bearer " + testBearerToken,
+				"dpop":          testDPoPProof,
+			},
+			wantToken: testBearerToken,
+			wantProof: testDPoPProof,
+		},
+		{
+			name: "dpop proof with no authorization is still an error",
+			// A proof names no delegation and authenticates nothing on its
+			// own: K4's "no fallback credential" applies to it exactly as it
+			// does to any other header that is not a bearer token.
+			headers: map[string]string{"dpop": testDPoPProof},
+			wantErr: true,
 		},
 		{
 			name:    "no headers at all",
@@ -799,58 +862,95 @@ func TestExtractBearerToken(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			token, _, err := extractBearerToken(tc.headers)
+			token, proof, stripped, err := extractCredentials(tc.headers)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("extractBearerToken() error = nil, want an error")
+					t.Fatalf("extractCredentials() error = nil, want an error")
+				}
+				// No partial result on the error path, for the proof exactly
+				// as for the token: a caller that ignored err must not find a
+				// usable proof sitting in the second return value.
+				if token != "" || proof != "" || stripped != nil {
+					t.Errorf("extractCredentials() on the error path = (%q, %q, %v), want all zero values",
+						token, proof, stripped)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("extractBearerToken() error = %v, want nil", err)
+				t.Fatalf("extractCredentials() error = %v, want nil", err)
 			}
 			if token != tc.wantToken {
-				t.Errorf("extractBearerToken() token = %q, want %q", token, tc.wantToken)
+				t.Errorf("extractCredentials() token = %q, want %q", token, tc.wantToken)
+			}
+			if proof != tc.wantProof {
+				t.Errorf("extractCredentials() proof = %q, want %q", proof, tc.wantProof)
 			}
 		})
 	}
 }
 
-// TestExtractBearerToken_HeaderNameCaseDiffers_TokenStillFound is the
-// direct-function twin of TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing:
-// this one proves EXTRACTION survives a header name that differs only in
-// case, the other proves STRIPPING does. Both properties live in the same
-// loop inside extractBearerToken (see its own doc comment for why), but a
-// mutation could plausibly break one without the other -- e.g. matching
-// case-insensitively when deciding what to strip but comparing case-
-// sensitively when deciding what to treat as the token -- so both get their
-// own dedicated assertion.
-func TestExtractBearerToken_HeaderNameCaseDiffers_TokenStillFound(t *testing.T) {
-	token, _, err := extractBearerToken(map[string]string{"AUTHORIZATION": "Bearer " + testBearerToken})
-	if err != nil {
-		t.Fatalf("extractBearerToken() error = %v, want nil -- a header named AUTHORIZATION must still be found", err)
-	}
-	if token != testBearerToken {
-		t.Errorf("extractBearerToken() token = %q, want %q", token, testBearerToken)
+// TestExtractCredentials_HeaderNameCaseDiffers_CredentialsStillFound is the
+// direct-function twin of TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing
+// and TestCheck_RawInputNeverCarriesDPoPProof_AnyHeaderCasing: this one proves
+// EXTRACTION survives a header name that differs only in case, the others
+// prove STRIPPING does. Both properties live in the same loop inside
+// extractCredentials (see its own doc comment for why), but a mutation could
+// plausibly break one without the other -- e.g. matching case-insensitively
+// when deciding what to strip but comparing case-sensitively when deciding
+// what to treat as the token -- so both get their own dedicated assertion.
+//
+// The dpop half matters more than the authorization half ever did, and the
+// casings below are chosen to show why: RFC 9449 spells the header "DPoP",
+// with an interior capital, while a real Envoy delivers "dpop". A match
+// written case-sensitively against EITHER spelling silently drops the proof
+// for the other -- and a dropped proof is not a loud failure, it is a
+// DecideRequest carrying dpop_proof="" that denies a legitimate caller for a
+// reason naming the wrong defect entirely.
+func TestExtractCredentials_HeaderNameCaseDiffers_CredentialsStillFound(t *testing.T) {
+	for _, tc := range []struct{ authName, dpopName string }{
+		{"AUTHORIZATION", "DPoP"},
+		{"Authorization", "dpop"},
+		{"authorization", "DPOP"},
+		{"AuthoriZation", "DpOp"},
+	} {
+		t.Run(tc.authName+"/"+tc.dpopName, func(t *testing.T) {
+			token, proof, _, err := extractCredentials(map[string]string{
+				tc.authName: "Bearer " + testBearerToken,
+				tc.dpopName: testDPoPProof,
+			})
+			if err != nil {
+				t.Fatalf("extractCredentials() error = %v, want nil -- a header named %q must still be found",
+					err, tc.authName)
+			}
+			if token != testBearerToken {
+				t.Errorf("extractCredentials() token = %q, want %q", token, testBearerToken)
+			}
+			if proof != testDPoPProof {
+				t.Errorf("extractCredentials() proof = %q, want %q -- a header named %q must still be read as "+
+					"the DPoP proof (RFC 9449 spells it \"DPoP\"; Envoy delivers \"dpop\")",
+					proof, testDPoPProof, tc.dpopName)
+			}
+		})
 	}
 }
 
-// TestExtractBearerToken_StripsCredentialHeadersCaseInsensitively is the
+// TestExtractCredentials_StripsCredentialHeadersCaseInsensitively is the
 // direct-function proof that every entry in credentialHeaderNames -- not
 // just authorization -- is actually removed from the returned headers map,
 // case-insensitively, while a header that merely looks credential-adjacent
 // (testAuthLikeHeaderName) survives untouched.
-func TestExtractBearerToken_StripsCredentialHeadersCaseInsensitively(t *testing.T) {
-	_, stripped, err := extractBearerToken(map[string]string{
+func TestExtractCredentials_StripsCredentialHeadersCaseInsensitively(t *testing.T) {
+	_, _, stripped, err := extractCredentials(map[string]string{
 		"authorization":        "Bearer " + testBearerToken,
 		"Cookie":               testOtherCredentialValue,
 		"PROXY-AUTHORIZATION":  testOtherCredentialValue,
+		"DPoP":                 testDPoPProof,
 		testAuthLikeHeaderName: testAuthLikeHeaderValue,
 	})
 	if err != nil {
-		t.Fatalf("extractBearerToken() error = %v, want nil", err)
+		t.Fatalf("extractCredentials() error = %v, want nil", err)
 	}
-	for _, credHeader := range []string{"authorization", "Cookie", "PROXY-AUTHORIZATION"} {
+	for _, credHeader := range []string{"authorization", "Cookie", "PROXY-AUTHORIZATION", "DPoP"} {
 		if v, ok := stripped[credHeader]; ok {
 			t.Errorf("stripped headers still contain %q = %q", credHeader, v)
 		}
@@ -858,6 +958,32 @@ func TestExtractBearerToken_StripsCredentialHeadersCaseInsensitively(t *testing.
 	if v, ok := stripped[testAuthLikeHeaderName]; !ok || v != testAuthLikeHeaderValue {
 		t.Errorf("stripped[%q] = (%q, %v), want (%q, true) -- not every auth-ish name is a credential",
 			testAuthLikeHeaderName, v, ok, testAuthLikeHeaderValue)
+	}
+}
+
+// TestCredentialHeaderNames_CoversEveryHeaderExtractCredentialsReads is the
+// structural half of K10, and it is deliberately NOT a behavioural test: it
+// asserts that the one map is the only place a credential is named, by
+// checking that both headers extractCredentials READS are also in the set it
+// STRIPS BY.
+//
+// The failure it exists to catch cannot be caught downstream. Everything else
+// in this file observes the effect of the map -- a value absent from
+// raw_input, a token present on the wire -- and a second mechanism (a
+// separate delete, a hard-coded "also drop dpop" line) would satisfy every
+// one of those observations while re-opening exactly the drift the single
+// loop exists to prevent: a set read from that is not the set stripped by.
+func TestCredentialHeaderNames_CoversEveryHeaderExtractCredentialsReads(t *testing.T) {
+	for _, name := range []string{"authorization", dpopHeaderName} {
+		if !credentialHeaderNames[name] {
+			t.Errorf("credentialHeaderNames[%q] = false -- extractCredentials reads this header's value, so "+
+				"it must be in the set stripped from raw_input by the same loop, not stripped by some "+
+				"second mechanism that can drift from it (K10)", name)
+		}
+	}
+	if dpopHeaderName != strings.ToLower(dpopHeaderName) {
+		t.Errorf("dpopHeaderName = %q, want it lower-cased -- extractCredentials folds an incoming header "+
+			"name to lower case before every lookup, so a mixed-case entry here can never match", dpopHeaderName)
 	}
 }
 
@@ -1144,7 +1270,7 @@ func TestCheckResponseFromDecide(t *testing.T) {
 		wantCode   int32
 		wantHeader bool
 	}{
-		{name: "allow", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}, wantCode: int32(rpccode.Code_OK)},
+		{name: "allow", resp: allowResponse(""), wantCode: int32(rpccode.Code_OK)},
 		{name: "deny", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "denied"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
 		{name: "escalate with approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: "id-1"}, wantCode: int32(rpccode.Code_PERMISSION_DENIED), wantHeader: true},
 		{name: "escalate with no approval id", resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ESCALATE}, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
@@ -1168,5 +1294,446 @@ func TestCheckResponseFromDecide(t *testing.T) {
 				t.Errorf("has approval header = %v, want %v", hasHeader, tc.wantHeader)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15 Task 5: sender-constrained tokens (spec §4.7.2 K5, K7, K10).
+// ---------------------------------------------------------------------------
+
+// TestCheck_DPoPProofForwardedVerbatim defends K7's first half: the value of
+// the DPoP header reaches DecideRequest.dpop_proof unaltered, over a real
+// wire round trip. Unaltered matters and is asserted as equality against the
+// exact fixture rather than as "non-empty": a proof is a compact JWS whose
+// signature covers its own encoded header and payload, so any normalization
+// at all -- trimming, re-casing, decoding and re-encoding -- destroys it, and
+// the resulting denial at the PDP names a signature failure rather than the
+// PEP that mangled it.
+func TestCheck_DPoPProofForwardedVerbatim(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	_, err := client.Check(context.Background(), checkRequest("POST", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+		"dpop":          testDPoPProof,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	req := fake.lastRequest()
+	if req == nil {
+		t.Fatal("PDP never received a request")
+	}
+	if got := req.GetDpopProof(); got != testDPoPProof {
+		t.Errorf("dpop_proof = %q, want the DPoP header's value verbatim (%q)", got, testDPoPProof)
+	}
+}
+
+// TestCheck_NoDPoPHeader_SendsEmptyProofAndStillCallsPDP is the negative
+// control for the test above, and it differs from it in exactly one thing:
+// the dpop header is absent. It must NOT deny locally.
+//
+// That is the whole point. dpop_proof="" is the proto's own encoding of "the
+// caller presented none," and what that means is a question only the PDP can
+// answer -- a bound token with no proof is C25's denial, an unbound token
+// reaches the ALLOW branch and K5 refuses it there. A local "no proof, no
+// entry" shortcut here would deny bearer-token traffic with a reason naming
+// the wrong defect, and would deny it before the PDP ever recorded the
+// attempt in the audit chain.
+func TestCheck_NoDPoPHeader_SendsEmptyProofAndStillCallsPDP(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	_, err := client.Check(context.Background(), checkRequest("POST", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	if got := fake.requestCount(); got != 1 {
+		t.Fatalf("PDP received %d Decide call(s), want exactly 1 -- a request with no proof must still be "+
+			"decided by the PDP, not refused locally: whether a proof was required is not this server's "+
+			"question to answer", got)
+	}
+	if got := fake.lastRequest().GetDpopProof(); got != "" {
+		t.Errorf("dpop_proof = %q, want \"\" -- an absent DPoP header is the proto's \"the caller presented none\"", got)
+	}
+}
+
+// TestCheck_ObservedMethodAndURI defends K7's second half: the (method, URI)
+// pair the PDP compares a proof's htm/htu claims against is what THIS server
+// observed, built from the pieces a real Envoy actually populates.
+//
+// The table's rows are the two facts measured against the real Envoy that a
+// hand-built fixture would never have surfaced (see observedURI's own doc
+// comment for the transcript): GetPath() carries the query string inline and
+// GetQuery() is empty, so the query has to be cut here; and GetScheme() is
+// populated, so htu's scheme has a typed source and does not have to be
+// recovered from a header. RFC 9449 §4.3 item 9 defines htu comparison
+// "ignoring any query and fragment parts," which is why the query rows expect
+// it gone rather than preserved.
+//
+// The https rows are not redundant with the http ones: they are the only
+// rows that would catch a hard-coded scheme, which is the shape a mutation
+// building htu from the wrong source most plausibly takes.
+func TestCheck_ObservedMethodAndURI(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		scheme  string
+		host    string
+		method  string
+		path    string
+		wantURI string
+	}{
+		{
+			name:   "plain path",
+			scheme: "http", host: "gateway.example:10000", method: "GET", path: "/svc.Svc/Method",
+			wantURI: "http://gateway.example:10000/svc.Svc/Method",
+		},
+		{
+			name: "query string inline in the path is excluded",
+			// Exactly what the real Envoy sends: GetPath() carries the query,
+			// GetQuery() is empty.
+			scheme: "http", host: "gateway.example:10000", method: "GET", path: "/svc.Svc/Method?a=1&b=two",
+			wantURI: "http://gateway.example:10000/svc.Svc/Method",
+		},
+		{
+			name:   "empty query after a bare question mark is excluded too",
+			scheme: "http", host: "gateway.example:10000", method: "GET", path: "/svc.Svc/Method?",
+			wantURI: "http://gateway.example:10000/svc.Svc/Method",
+		},
+		{
+			name:   "https scheme is taken from the request, not assumed",
+			scheme: "https", host: "gateway.example", method: "POST", path: "/svc.Svc/Method",
+			wantURI: "https://gateway.example/svc.Svc/Method",
+		},
+		{
+			name:   "https on an explicit port",
+			scheme: "https", host: "gateway.example:8443", method: "DELETE", path: "/a/b",
+			wantURI: "https://gateway.example:8443/a/b",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+			_, err := client.Check(context.Background(), checkRequestFull(tc.scheme, tc.host, tc.method, tc.path,
+				map[string]string{"authorization": "Bearer " + testBearerToken, "dpop": testDPoPProof}))
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+
+			req := fake.lastRequest()
+			if req == nil {
+				t.Fatal("PDP never received a request")
+			}
+			if got := req.GetObservedUri(); got != tc.wantURI {
+				t.Errorf("observed_uri = %q, want %q", got, tc.wantURI)
+			}
+			if got := req.GetObservedMethod(); got != tc.method {
+				t.Errorf("observed_method = %q, want %q -- forwarded verbatim, since dpop compares htm "+
+					"case-sensitively (RFC 9110 §9.1)", got, tc.method)
+			}
+			// The tool identity is deliberately NOT the same value: M1 makes
+			// it the request path exactly as Envoy reported it, query string
+			// and all, because that is the string a tenant catalogs against.
+			// Trimming the query for htu must not have trimmed it here too.
+			if got := req.GetTool(); got != tc.path {
+				t.Errorf("tool = %q, want the unmodified request path %q -- excluding the query from htu "+
+					"(RFC 9449 §4.3) must not change what M1 sends as the tool identity", got, tc.path)
+			}
+		})
+	}
+}
+
+// TestCheck_ObservedURIUsesTheRequestScheme_NotAForwardedProtoHeader pins the
+// one choice observedURI had to make that a passing test would otherwise
+// leave undetermined. In the live stack every source agrees -- GetScheme(),
+// the ":scheme" pseudo-header, and "x-forwarded-proto" all read "http" -- so
+// a test built from a realistic fixture cannot tell which one the code read.
+//
+// This fixture disagrees on purpose: the typed field says https, both headers
+// say http. Only one answer is correct, and it is the typed field -- a header
+// is an entry in a map a caller also writes into, and preferring one on the
+// strength of which a deployment is less likely to have spoofed would be this
+// server classifying its own inputs (D1). The headers here are also the
+// positive control for the opposite mutation: they must still reach raw_input,
+// since neither is a credential.
+func TestCheck_ObservedURIUsesTheRequestScheme_NotAForwardedProtoHeader(t *testing.T) {
+	fake := &fakePDP{resp: allowResponse("")}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	_, err := client.Check(context.Background(), checkRequestFull("https", "gateway.example", "GET", "/p",
+		map[string]string{
+			"authorization":     "Bearer " + testBearerToken,
+			"dpop":              testDPoPProof,
+			":scheme":           "http",
+			"x-forwarded-proto": "http",
+		}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	req := fake.lastRequest()
+	if req == nil {
+		t.Fatal("PDP never received a request")
+	}
+	const want = "https://gateway.example/p"
+	if got := req.GetObservedUri(); got != want {
+		t.Errorf("observed_uri = %q, want %q -- htu's scheme comes from AttributeContext_HttpRequest.Scheme, "+
+			"which a real Envoy populates (measured, see observedURI's doc comment), not from \":scheme\" or "+
+			"\"x-forwarded-proto\", which are entries in a map a caller also writes into", got, want)
+	}
+}
+
+// TestCheck_RawInputNeverCarriesDPoPProof_AnyHeaderCasing is K10, and it is
+// the sibling of TestCheck_RawInputNeverCarriesAuthorization_AnyHeaderCasing
+// for the credential this phase introduces. raw_input is hashed into the
+// append-only audit chain, so a proof that leaks there is a signed
+// possession-of-key assertion written permanently into a record designed to
+// be kept and read, in a chain that cannot be edited to remove it.
+//
+// Table-driven over five spellings, and the set is not decorative. "dpop" is
+// what a real Envoy delivers; "DPoP" is what RFC 9449 itself writes and what
+// a conformant client behind any other intermediary sends. A strip written
+// case-sensitively against either one leaks for the other, and a suite testing
+// only the casing its own fixture happens to use would never see it.
+//
+// Every case asserts absence three ways: structurally, by unmarshaling
+// raw_input and checking no header key case-insensitively equals "dpop"; by
+// substring against the raw bytes, since the fixture value cannot appear here
+// by coincidence; and positively, by confirming a non-credential header sent
+// on the SAME request did survive -- without which "raw_input contains no
+// proof" would also be satisfied by raw_input containing nothing at all.
+func TestCheck_RawInputNeverCarriesDPoPProof_AnyHeaderCasing(t *testing.T) {
+	for _, headerName := range []string{"dpop", "DPoP", "DPOP", "Dpop", "dPoP"} {
+		t.Run(headerName, func(t *testing.T) {
+			fake := &fakePDP{resp: allowResponse("")}
+			pdpClient := startFakePDP(t, fake)
+			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+			_, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+				"authorization":        "Bearer " + testBearerToken,
+				headerName:             testDPoPProof,
+				testAuthLikeHeaderName: testAuthLikeHeaderValue,
+			}))
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+
+			req := fake.lastRequest()
+			if req == nil {
+				t.Fatal("PDP never received a request")
+			}
+			// The proof still has to have been READ, or this test would pass
+			// on a build that dropped the header entirely -- which strips it
+			// from raw_input for the wrong reason and breaks every bound
+			// token on this surface.
+			if got := req.GetDpopProof(); got != testDPoPProof {
+				t.Fatalf("dpop_proof = %q, want %q -- a header spelled %q must still be recognized as the "+
+					"proof; a build that merely DROPPED it would satisfy the absence checks below vacuously",
+					got, testDPoPProof, headerName)
+			}
+
+			raw := req.GetRawInput()
+			if strings.Contains(raw, testDPoPProof) {
+				t.Errorf("raw_input contains the DPoP proof verbatim: %s", raw)
+			}
+
+			var got requestMetadata
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("raw_input is not well-formed JSON: %v\nraw_input: %s", err, raw)
+			}
+			for key := range got.Headers {
+				if strings.EqualFold(key, "dpop") {
+					t.Errorf("raw_input.headers carries key %q -- the DPoP proof must never appear, in any casing (K10)", key)
+				}
+			}
+			if v := got.Headers[testAuthLikeHeaderName]; v != testAuthLikeHeaderValue {
+				t.Errorf("raw_input.headers[%q] = %q, want %q -- without this the absence checks above would "+
+					"also pass for a raw_input carrying no headers at all",
+					testAuthLikeHeaderName, v, testAuthLikeHeaderValue)
+			}
+		})
+	}
+}
+
+// TestCheck_UnboundToken_DeniedEvenWhenPDPAllows is K5, the converse half of
+// C25, and the migration hole a suite written from C25's own sentence leaves
+// wide open: C25 says a bound token presented without a proof is denied, and
+// says nothing at all about a token that was never bound. An attacker who
+// simply asks for an ordinary bearer token walks straight through that gap.
+//
+// The two rows differ in EXACTLY ONE FIELD -- sender_constrained -- and in
+// nothing else: same request, same headers, same Effect, same reason. That is
+// what makes the false row a real negative test rather than a request that
+// denies for some other reason it happens to also have. Both directions are
+// asserted, because a mutation that ignores the field entirely (always
+// forward) and one that inverts it (never forward) are different bugs and a
+// one-sided test catches only one of them.
+//
+// The reason text is asserted, not just the code: it has to name the defect
+// well enough that an operator can act, and it has to be DISTINGUISHABLE from
+// C25's own denial -- see TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason
+// below, which holds the other half.
+func TestCheck_UnboundToken_DeniedEvenWhenPDPAllows(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		senderConstained bool
+		wantCode         int32
+	}{
+		{name: "bound token, proof verified", senderConstained: true, wantCode: int32(rpccode.Code_OK)},
+		{name: "unbound token", senderConstained: false, wantCode: int32(rpccode.Code_PERMISSION_DENIED)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+				Effect:            pdpgrpc.Effect_EFFECT_ALLOW,
+				Reason:            "policy allows",
+				SenderConstrained: tc.senderConstained,
+			}}
+			pdpClient := startFakePDP(t, fake)
+			client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+			resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+				"authorization": "Bearer " + testBearerToken,
+			}))
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			if got := resp.GetStatus().GetCode(); got != tc.wantCode {
+				t.Fatalf("Status.Code = %d, want %d -- an ALLOW whose token was never bound to a key must "+
+					"be refused on this surface (K5), and one that was must not be", got, tc.wantCode)
+			}
+			_, isOk := resp.GetHttpResponse().(*authv3.CheckResponse_OkResponse)
+			if wantOk := tc.wantCode == int32(rpccode.Code_OK); isOk != wantOk {
+				t.Errorf("HttpResponse is OkResponse = %v, want %v -- Status.Code and the oneof must agree, "+
+					"or a caller reading only one of them sees the wrong answer", isOk, wantOk)
+			}
+			if tc.senderConstained {
+				return
+			}
+
+			// The refusal must be findable in both channels a denial has, the
+			// same pairing denyCheckResponse already guarantees for every
+			// other reason on this surface.
+			if got := resp.GetStatus().GetMessage(); got != unboundTokenReason {
+				t.Errorf("Status.Message = %q, want %q", got, unboundTokenReason)
+			}
+			denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
+			if !ok {
+				t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+			}
+			if got := denied.DeniedResponse.GetBody(); got != unboundTokenReason {
+				t.Errorf("DeniedResponse.Body = %q, want %q", got, unboundTokenReason)
+			}
+			// Actionable, not merely refusing: the operator's fix is to ask
+			// for a bound token, and the reason has to say so by naming the
+			// field that binds one.
+			if !strings.Contains(unboundTokenReason, "dpop_jwk") {
+				t.Errorf("unboundTokenReason = %q, want it to name dpop_jwk -- the only way a caller can act "+
+					"on this refusal is to request a bound token, and the reason is where that is said", unboundTokenReason)
+			}
+		})
+	}
+}
+
+// TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason is C25 as
+// written -- a bound token presented with no proof -- and it exists as much
+// to hold the two halves APART as to prove the denial.
+//
+// The PDP denies this one itself (pdpgrpc's errNoProof), before any
+// three-leg evaluation, so what arrives here is an ordinary EFFECT_DENY and
+// this surface must pass its reason through verbatim. Substituting K5's text
+// would tell an operator holding a perfectly good bound token to go get a
+// bound token. The distinctness assertion at the end is the one that would
+// fail if a future edit collapsed the two reasons into one shared string.
+//
+// sender_constrained is deliberately FALSE on this fixture, matching what a
+// real PDP sends: the denial happens before Decide's tail, so the field
+// reports "not established" -- NOT "the caller presented a bearer token",
+// which is exactly the misreading the proto's own doc comment warns against.
+// If K5's refusal were keyed off the field outside the ALLOW branch, this
+// request would deny with the wrong reason, and this test is what catches it.
+func TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason(t *testing.T) {
+	const pdpReason = "token is sender-constrained but the request carried no dpop proof"
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+		Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason, SenderConstrained: false,
+	}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got, want := resp.GetStatus().GetCode(), int32(rpccode.Code_PERMISSION_DENIED); got != want {
+		t.Fatalf("Status.Code = %d, want %d", got, want)
+	}
+	if got := resp.GetStatus().GetMessage(); got != pdpReason {
+		t.Errorf("Status.Message = %q, want the PDP's own reason verbatim (%q) -- a denial that already "+
+			"happened at the PDP must not be re-explained by this surface", got, pdpReason)
+	}
+	if strings.Contains(resp.GetStatus().GetMessage(), unboundTokenReason) {
+		t.Errorf("Status.Message = %q carries K5's unbound-token reason, which names the opposite defect: "+
+			"this caller's token IS bound, and telling them to request a bound one is unactionable",
+			resp.GetStatus().GetMessage())
+	}
+	if pdpReason == unboundTokenReason {
+		t.Error("C25's reason and K5's reason are the same string -- the two halves name opposite defects " +
+			"(no proof for a bound token, versus a token that was never bound) and an operator has to be " +
+			"able to tell which one they hit")
+	}
+}
+
+// TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound holds the
+// boundary the proto's "consult it only when effect is EFFECT_ALLOW" rule
+// draws, on the one effect where reading the field early would be tempting
+// and wrong.
+//
+// An EFFECT_ESCALATE degrades to a denial here (E5/M4) and carries a real
+// pending approval id a human is about to act on. Reading sender_constrained
+// before that degrade -- and denying "your token is not bound" instead --
+// would throw the approval id away and send an operator to fix a token whose
+// binding was never the problem. K5 still bites: the approved retry comes
+// back through this same function as an ALLOW, and the ALLOW branch refuses
+// it there.
+func TestCheck_EscalateOnUnboundToken_DeniesAsPendingNotAsUnbound(t *testing.T) {
+	const approvalID = "extauthz-approval-2c7f5e14-fixture"
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{
+		Effect: pdpgrpc.Effect_EFFECT_ESCALATE, ApprovalId: approvalID,
+		Reason: "requires approval", SenderConstrained: false,
+	}}
+	pdpClient := startFakePDP(t, fake)
+	client := startExtauthzServer(t, &extauthzServer{client: pdpClient, cfg: testExtauthzServerCfg()})
+
+	resp, err := client.Check(context.Background(), checkRequest("GET", "/svc.Svc/Method", map[string]string{
+		"authorization": "Bearer " + testBearerToken,
+	}))
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := resp.GetStatus().GetMessage(); got == unboundTokenReason {
+		t.Fatalf("Status.Message = K5's unbound-token reason, but this response was an ESCALATE: "+
+			"sender_constrained is populated inconsistently on anything that is not an ALLOW, so reading "+
+			"it here discards a real pending approval (%s) for a fact that was never established", approvalID)
+	}
+	if !strings.Contains(resp.GetStatus().GetMessage(), approvalID) {
+		t.Errorf("Status.Message = %q, want it to carry the pending approval id %q", resp.GetStatus().GetMessage(), approvalID)
+	}
+	denied, ok := resp.GetHttpResponse().(*authv3.CheckResponse_DeniedResponse)
+	if !ok {
+		t.Fatalf("HttpResponse = %T, want *authv3.CheckResponse_DeniedResponse", resp.GetHttpResponse())
+	}
+	if len(denied.DeniedResponse.GetHeaders()) != 1 {
+		t.Errorf("DeniedResponse.Headers = %v, want the approval-id header -- degrading an escalation must "+
+			"still hand back the id a retry needs", denied.DeniedResponse.GetHeaders())
 	}
 }
