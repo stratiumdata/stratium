@@ -12,11 +12,13 @@
 // gRPC client at this process instead of the real target" (proxy.go's own
 // package doc) describes.
 //
-// Nine independent top-level tests, one per proof -- six from Phase 11 Task 4
-// and three added by Phase 15 Task 6 for sender-constrained tokens (K5's
+// Eleven independent top-level tests, one per proof -- six from Phase 11 Task
+// 4, three added by Phase 15 Task 6 for sender-constrained tokens (K5's
 // refusal of an unbound token, K7's refusal of a proof bound to the TARGET's
-// address, and K10's exclusion of the proof from the audit digest) -- rather
-// than one test with nine t.Run subtests -- the same convention
+// address, and K10's exclusion of the proof from the audit digest), and two by
+// Phase 15 Task 7 (C25 itself, a bound token presented with no proof, and K8's
+// refusal of a replayed one against the shipped PDP binary) -- rather
+// than one test with eleven t.Run subtests -- the same convention
 // extauthz_integration_test.go's own package doc establishes: conformance_
 // test.go's own provenElsewhere pointer (C22, corrected by this task) needs
 // a top-level Go function it can verify by name (conformance_pointer_
@@ -895,5 +897,163 @@ func TestIntegration_Proxy_ProofExcludedFromAuditDigest(t *testing.T) {
 		t.Errorf("adding an ordinary metadata key left the audit input_digest unchanged (%x) -- raw_input "+
 			"either carries no metadata at all or the digest does not commit to it, so the equality above "+
 			"proves nothing about the proof specifically", digestMarked)
+	}
+}
+
+// TestIntegration_Proxy_BoundTokenWithNoProofRefused is C25 itself, live on
+// this surface -- the sibling of extauthz's own
+// TestIntegration_Envoy_BoundTokenWithNoProofRefused, and the second of the two
+// tests C25's proven-elsewhere pointer names. Spec §7: "a delegation token
+// without a valid DPoP proof is denied when the token is sender-constrained."
+//
+// Everything before Task 7 proved this below the level of a real call:
+// internal/pdpgrpc's TestDecide_BoundTokenWithNoProof_Denies against a fake
+// store, cmd/stratium-pep's TestAuthorize_BoundTokenWithNoProof_
+// DeniesWithThePDPsOwnReason and TestHandleStream_BoundTokenWithNoProof_
+// DeniedAndTargetNeverContacted against a fake PDP. None of them is a real
+// bound token, minted by a real PDP, refused on a real wire.
+//
+// Deliberately the SAME fixture as proof 1, differing in exactly one property:
+// the call carries no "dpop" metadata. bearerOutgoingCtx, not
+// boundOutgoingCtx, is what expresses that -- the key is absent, not present
+// and empty.
+//
+// Checked against grpc-target's OWN call counter, not merely the caller's
+// error, for the reason proof 2 states: a proxy that forwards and then errors
+// has already leaked the request, and the caller's own status code looks
+// identical either way.
+func TestIntegration_Proxy_BoundTokenWithNoProofRefused(t *testing.T) {
+	ensureProxyAgent(t)
+	ensureProxyCatalog(t)
+	ensureProxyPermitPolicy(t)
+
+	before, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	if err != nil {
+		t.Fatalf("CallCount() before error = %v", err)
+	}
+
+	delegation := newProxyDelegation(t, "proxy C25: a bound token presented with no proof is denied",
+		models.ActionTierDestructive, nil)
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
+
+	_, err = proxyTargetClient.Fetch(bearerOutgoingCtx(t.Context(), token),
+		&grpctarget.EchoRequest{Message: "c25-no-proof-payload"})
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want PermissionDenied -- a sender-constrained token presented with " +
+			"no proof must be denied (C25), however permitted the action behind it is")
+	}
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Errorf("status code = %s, want %s", got, want)
+	}
+	msg := status.Convert(err).Message()
+	if !strings.Contains(msg, "carried no dpop proof") {
+		t.Errorf("status message = %q, want the PDP's own errNoProof wording (\"... carried no dpop proof\") "+
+			"-- any other denial means this call was refused for something other than the missing proof, "+
+			"and C25 is unproven here", msg)
+	}
+	if strings.Contains(msg, "not bound to a key") || strings.Contains(msg, "dpop_jwk") {
+		t.Errorf("status message = %q carries K5's unbound-token refusal, which names the opposite defect: "+
+			"this caller's token IS bound, so telling them to request a bound one is unactionable", msg)
+	}
+
+	after, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	if err != nil {
+		t.Fatalf("CallCount() after error = %v", err)
+	}
+	if after.GetCount() != before.GetCount() {
+		t.Errorf("grpc-target's own call count = %d -> %d, want unchanged -- a denied call must never "+
+			"reach the upstream", before.GetCount(), after.GetCount())
+	}
+
+	// The control: the same token, the same key, the same delegation, with a
+	// proof. Without it the denial above would be consistent with a token the
+	// PDP rejects outright, a mis-seeded catalog, or an expired delegation.
+	resp, err := proxyTargetClient.Fetch(
+		boundOutgoingCtx(t.Context(), token, proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)),
+		&grpctarget.EchoRequest{Message: "c25-with-proof-payload"})
+	if err != nil {
+		t.Fatalf("Fetch() with a proof error = %v, want success -- the SAME token WITH a proof must be "+
+			"forwarded, or the denial above is not attributable to the proof's absence", err)
+	}
+	if resp.GetMessage() != "c25-with-proof-payload" {
+		t.Errorf("response message = %q, want the target's own echoed %q", resp.GetMessage(), "c25-with-proof-payload")
+	}
+}
+
+// TestIntegration_Proxy_ReplayedProofRefused is K8's own live proof: a proof's
+// jti is single-use, so the SAME proof presented a second time is refused.
+//
+// This is not a duplicate of TestIntegration_Decide_ReplayedProof_Denies
+// (decide_dpop_integration_test.go), and the difference is the whole reason it
+// exists. That one drives an IN-PROCESS pdpgrpc.Server, constructed by the test
+// itself, against a real Postgres -- so it proves the Decide code path spends
+// and collides. It says nothing about the SHIPPED stratium-pdp binary running
+// in a container, or about the proof surviving a real PEP's forwarding
+// verbatim. This phase has already found nine instances of a mechanism plumbed
+// and never populated, and "the container's PDP is not configured to spend at
+// all" is exactly that shape: every other live proof in this file would still
+// pass, because each one mints a fresh jti.
+//
+// A captured proof is precisely what an attacker holds after observing one
+// request. Everything here is genuine -- a real bound token, a real signature,
+// an unexpired iat, an authority this proxy serves -- and the only thing wrong
+// with the second call is that the first already happened.
+//
+// The call counter is asserted to advance by exactly ONE across both calls,
+// which is stronger than the caller's own error: it shows the replay was
+// stopped before the upstream, not merely reported to the caller afterwards.
+func TestIntegration_Proxy_ReplayedProofRefused(t *testing.T) {
+	ensureProxyAgent(t)
+	ensureProxyCatalog(t)
+	ensureProxyPermitPolicy(t)
+
+	before, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	if err != nil {
+		t.Fatalf("CallCount() before error = %v", err)
+	}
+
+	delegation := newProxyDelegation(t, "proxy K8: the same proof presented twice is refused for replay",
+		models.ActionTierDestructive, nil)
+	key := dpopKey(t)
+	token := mintProxyBoundToken(t, delegation.ID, key)
+	// ONE proof, presented twice. Every other proof in this file mints a fresh
+	// jti per call precisely to avoid this collision; this is the one that goes
+	// looking for it.
+	proof := proxyProof(t, key, grpctarget.TargetService_Fetch_FullMethodName)
+
+	// The first call must succeed. If it denied for any reason the second would
+	// deny too, and this would pass without exercising replay at all.
+	if _, err := proxyTargetClient.Fetch(boundOutgoingCtx(t.Context(), token, proof),
+		&grpctarget.EchoRequest{Message: "replay-call-1"}); err != nil {
+		t.Fatalf("first Fetch() error = %v, want success -- without a first call that spends the jti there "+
+			"is no spent row for the second to collide with", err)
+	}
+
+	_, err = proxyTargetClient.Fetch(boundOutgoingCtx(t.Context(), token, proof),
+		&grpctarget.EchoRequest{Message: "replay-call-2"})
+	if err == nil {
+		t.Fatal("second Fetch() with the IDENTICAL proof error = nil, want PermissionDenied -- a captured " +
+			"proof replayed against this surface must not be usable a second time (K8)")
+	}
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Errorf("status code = %s, want %s", got, want)
+	}
+	// Attributable to the replay SPECIFICALLY. A second call refused for a
+	// stale iat, a bad signature, or a tier ceiling would look identical from
+	// the outside and would prove nothing about single use.
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, "already spent") {
+		t.Errorf("status message = %q, want store.ErrProofSpent's own wording (\"... already spent\") -- an "+
+			"operator must be able to tell a replay storm from a database falling over, and a denial for "+
+			"any other reason leaves single use unproven", msg)
+	}
+
+	after, err := directTargetClient.CallCount(t.Context(), &grpctarget.CallCountRequest{})
+	if err != nil {
+		t.Fatalf("CallCount() after error = %v", err)
+	}
+	if got := after.GetCount() - before.GetCount(); got != 1 {
+		t.Errorf("grpc-target's own call count advanced by %d across the two calls, want exactly 1 -- the "+
+			"first must reach the upstream and the replay must not", got)
 	}
 }

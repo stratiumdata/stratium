@@ -12,8 +12,12 @@
 // extauthz, against deploy/docker/docker-compose.yml's own envoy,
 // pep-extauthz, pdp-extauthz, and echo-upstream services.
 //
-// Six independent top-level tests, one per proof the brief asks for, rather
-// than one test with six t.Run subtests: TestIntegration_Escalation_* in
+// Nine independent top-level tests -- six from Phase 10 Task 4, one per proof
+// that brief asks for, plus two added by Phase 15 Task 5 (K5's refusal of an
+// unbound token and K7's refusal of an authority this surface does not serve)
+// and one by Phase 15 Task 7 (C25 itself: a bound token presented with no
+// proof) -- rather than one test with nine t.Run subtests:
+// TestIntegration_Escalation_* in
 // escalation_integration_test.go (this package's closest precedent for
 // proving a live decision end to end) already establishes that convention,
 // and conformance_test.go's own provenElsewhere pointers can only name a
@@ -1071,5 +1075,72 @@ func TestIntegration_Envoy_UnservedAuthorityRefused(t *testing.T) {
 		t.Fatalf("control request status = %d, want 200 -- the same token and key addressed at the served "+
 			"authority must be forwarded, or the 403 above is not attributable to the authority; body: %s",
 			okStatus, okBody)
+	}
+}
+
+// TestIntegration_Envoy_BoundTokenWithNoProofRefused is C25 itself, live on
+// this surface: spec §7's own sentence, "a delegation token without a valid
+// DPoP proof is denied when the token is sender-constrained."
+//
+// Everything before Task 7 proved this at a layer below a real request.
+// internal/pdpgrpc's TestDecide_BoundTokenWithNoProof_Denies proves the PDP
+// produces the denial, against a fake store; cmd/stratium-pep's
+// TestCheck_BoundTokenWithNoProof_DeniesWithThePDPsOwnReason proves this
+// surface relays it, against a fake PDP and a constructed CheckRequest.
+// Neither shows a real Envoy carrying a real bound token to a real PDP and
+// the caller being refused, which is the only form of the claim an operator
+// would recognise -- and the form C25's proven-elsewhere pointer now names.
+//
+// Deliberately the SAME fixture as proof 1, differing in exactly one
+// property: the DPoP header is absent. The token is genuine, bound, and
+// unexpired; the delegation permits the action; the policy allows it; the
+// authority is one this surface serves. Proof 1 sends the identical request
+// WITH a proof and gets 200, so the 403 here is attributable to the missing
+// proof and to nothing else -- and the control below re-establishes that with
+// this test's own token rather than leaning on a sibling test to do it.
+//
+// The reason is asserted, and asserted NOT to be K5's, for the same reason
+// TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted asserts the
+// mirror image: the two name opposite defects. "Your token is bound and you
+// sent no proof" is fixed by sending a proof; "your token was never bound" can
+// only be fixed by obtaining a different token. An operator handed the wrong
+// one of those goes and does the wrong thing.
+func TestIntegration_Envoy_BoundTokenWithNoProofRefused(t *testing.T) {
+	seedExtauthzAgentOnce(t)
+	seedExtauthzPermitPolicy(t)
+
+	const path = "/proof-c25-no-proof-item"
+	seedToolCatalogEntry(t, envoyTenant, path, tierPtr(models.ActionTierReadOnly), "read", nil, nil)
+	delegation := newExtauthzDelegation(t, "extauthz C25: a bound token presented with no proof is denied",
+		models.ActionTierReadOnly, nil)
+	key := dpopKey(t)
+	token := mintExtauthzBoundToken(t, delegation.ID, key)
+
+	// No DPoP header at all -- not an empty one. An empty header value and an
+	// absent header are different requests, and C25 is about the second: a
+	// caller that simply did not send a proof.
+	status, body, _, _ := envoyDo(t, http.MethodGet, path, token, nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 -- a sender-constrained token presented with no proof must be "+
+			"denied (C25), however permitted the action behind it is; body: %s", status, body)
+	}
+	if !strings.Contains(body, "carried no dpop proof") {
+		t.Errorf("body = %q, want the PDP's own errNoProof wording (\"... carried no dpop proof\") -- any "+
+			"other denial means this 403 came from somewhere else and C25 is unproven here", body)
+	}
+	if strings.Contains(body, "not bound to a key") || strings.Contains(body, "dpop_jwk") {
+		t.Errorf("body = %q carries K5's unbound-token refusal, which names the opposite defect: this "+
+			"caller's token IS bound, so telling them to request a bound one is unactionable", body)
+	}
+
+	// The control: the same token, the same key, the same everything, with a
+	// proof. Without it a 403 above would be consistent with the fixture being
+	// broken in some way that has nothing to do with the proof -- a mis-seeded
+	// catalog, an expired delegation, a token the PDP will not accept at all.
+	okStatus, okBody, _, _ := envoyDo(t, http.MethodGet, path, token,
+		map[string]string{"DPoP": extauthzProof(t, key, http.MethodGet, path)})
+	if okStatus != http.StatusOK {
+		t.Fatalf("control request status = %d, want 200 -- the SAME token with a proof must be forwarded, "+
+			"or the 403 above is not attributable to the proof's absence; body: %s", okStatus, okBody)
 	}
 }

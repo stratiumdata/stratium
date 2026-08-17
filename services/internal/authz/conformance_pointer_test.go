@@ -151,7 +151,7 @@ func servicesRoot() (string, error) {
 
 // TestVerifyPointer_FindsRealTestFunctions is the positive case, run
 // against the exact pointers conformance_test.go wires into provenElsewhere
-// for C5, C16, C18, C19, C20, C21, C22, C23, and C24. If a future rename
+// for C5, C16, C18, C19, C20, C21, C22, C23, C24, and C25. If a future rename
 // ever broke one of those pointers, this test — not just a full run of make
 // conformance — names it directly, without needing every one of the 25
 // conformance properties to execute first.
@@ -206,6 +206,18 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 		}},
 		{"C24", "internal/store", []string{
 			"TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry",
+		}},
+		// C25 spans two packages -- the decision layer that produces the
+		// denial and the two live surfaces that deliver it. Separate rows for
+		// the same reason C5's three are.
+		{"C25/pdpgrpc", "internal/pdpgrpc", []string{
+			"TestDecide_BoundTokenWithNoProof_Denies",
+			"TestDecide_ProofSignedByADifferentKey_Denies",
+			"TestDecide_ProofNamingADifferentRequest_Denies",
+		}},
+		{"C25/store", "internal/store", []string{
+			"TestIntegration_Envoy_BoundTokenWithNoProofRefused",
+			"TestIntegration_Proxy_BoundTokenWithNoProofRefused",
 		}},
 	}
 	for _, tt := range tests {

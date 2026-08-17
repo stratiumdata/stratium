@@ -360,12 +360,26 @@ func TestC16_FailedAuditWriteDeniesAction(t *testing.T) {
 }
 
 // C17's reason was re-checked in Phase 14 Task 8 rather than assumed, and
-// its SUBSTANCE still holds: nothing in this tree encrypts an audit row's
-// stored plaintext or has a per-tenant key to destroy. migrations/000003_
-// audit_chain.up.sql and pkg/audit/chain.go both still say so in as many
-// words. internal/token's key (K1) is one process-wide ES256 pair for
-// signing this system's OWN delegation tokens, which is a different
-// subsystem and not a step toward this one.
+// AGAIN in Phase 15 Task 7. Its SUBSTANCE still holds: nothing in this tree
+// encrypts an audit row's stored plaintext or has a per-tenant key to
+// destroy. migrations/000003_audit_chain.up.sql and pkg/audit/chain.go both
+// still say so in as many words, verbatim and unchanged.
+//
+// Two key-shaped subsystems now exist and neither is a step toward this one,
+// which is worth naming because both look like one from a distance:
+//
+//   - internal/token's signing key (K1) is ONE process-wide ES256 pair used
+//     to sign this system's OWN delegation tokens. Not per tenant, not
+//     destroyable without invalidating every tenant at once, and it protects
+//     no stored plaintext. token.go's own doc says it plainly: "this package
+//     does no key management beyond signing and verifying."
+//   - internal/dpop (Phase 15) is the one most likely to be misread as
+//     progress, since it handles JWKs, thumbprints, and a cnf.jkt
+//     confirmation claim. Every key it touches is the CLIENT's, and only its
+//     public half — a jkt is a fingerprint carried inside a token, not a key
+//     this system holds, stores, or could shred. The one table the phase
+//     added, spent_proofs (migration 000018), stores a tenant id, a jti, and
+//     an expiry: no key material, and nothing encrypted.
 //
 // The "Phase 2+" prefix, however, had gone stale twelve phases ago and is
 // dropped: a phase number nobody revisits turns a live reason into an
@@ -373,7 +387,9 @@ func TestC16_FailedAuditWriteDeniesAction(t *testing.T) {
 func TestC17_CryptoShreddingPreservesChain(t *testing.T) {
 	markRan(17)
 	notBuilt(t, 17, "no encrypted audit plaintext and no per-tenant key management exists yet "+
-		"(spec §8; migrations/000003_audit_chain.up.sql and pkg/audit/chain.go both defer it)")
+		"(spec §8; migrations/000003_audit_chain.up.sql and pkg/audit/chain.go both defer it). "+
+		"Neither key-shaped subsystem in this tree is a step toward it: internal/token holds one "+
+		"process-wide signing pair, and internal/dpop only ever sees a client's own public key")
 }
 
 // C18 reads "a cross-tenant read is impossible at the data layer, not
@@ -706,25 +722,71 @@ func TestC24_ExpiredDelegationDenied(t *testing.T) {
 // be exactly the stale-fact-read-as-fact failure this entry has already had
 // twice.
 //
-// The OUTCOME is still notBuilt, and the reason is narrower than it was.
-// C25's own sentence — a sender-constrained token presented without a valid
-// proof is denied — now holds on the decision path and on ONE of the two
-// network surfaces. §4.7.2 K5 puts the requirement on BOTH: proxy still
-// forwards an unbound token and still sends no proof (Task 6), so an agent
-// that would be refused at extauthz is not refused at proxy. A property that
-// holds on one of the two surfaces it is specified for is half-built, not
-// proven elsewhere. Task 7 is what re-reads this against a live stack and
-// decides between pass and provenElsewhere; this entry deliberately does not
-// pre-empt that.
+// RE-READ A THIRD TIME AND CONVERTED in Phase 15 Task 7. The notBuilt reason
+// this entry carried until now — "proxy neither forwards a proof nor refuses
+// an unbound token" — went stale in the OPPOSITE direction the moment Task 6
+// landed: proxy now does both. That is the third time this one entry has
+// stated a checkable fact that later became false, which is why the ruling
+// below is written against the property's own sentence rather than against a
+// summary of what the tree currently contains.
 //
-// Same treatment as C17 above for its own stale "Phase 2" prefix.
+// WHAT C25 ACTUALLY ASSERTS, and what it does not. §7's row reads "a
+// delegation token without a valid DPoP proof is denied when the token is
+// sender-constrained," and §4.7.2 glosses it in as many words: it "covers a
+// bound token presented without a proof." K5's converse — an UNBOUND token
+// refused on the network surfaces — is a different sentence, and §4.7.2 says
+// so explicitly ("K5 adds the converse"). Both of K5's live proofs exist
+// (TestIntegration_Envoy_UnboundTokenRefusedEvenWhenPermitted and
+// TestIntegration_Proxy_UnboundTokenRefusedEvenWhenPermitted) and NEITHER is
+// named below. Padding this pointer with them would make C25 look better
+// supported by counting a property it does not state — the exact overclaim
+// this file has spent the phase correcting.
+//
+// THE POINTER SET, and why each name is load-bearing:
+//
+//   - internal/pdpgrpc names the three ways a proof fails to be valid at the
+//     only layer that decides it (K2: the PDP verifies, nothing else does) —
+//     absent (TestDecide_BoundTokenWithNoProof_Denies, errNoProof itself),
+//     signed by the wrong key, and naming a different request. All three are
+//     literally "a token without a VALID proof," and a pointer naming only
+//     the absent case would check the narrowest reading of C25's own word.
+//   - internal/store names the two surfaces the property is specified for,
+//     live: a real bound token minted by a real containerized PDP, carried by
+//     a real Envoy and a real gRPC proxy, refused when the proof is missing,
+//     each with a control request proving the SAME token WITH a proof is
+//     forwarded. Added by this task; they are what closes the gap between
+//     "the PDP produces this denial" and "a caller actually receives it."
+//
+// Not named, deliberately: cmd/stratium-pep's own TestCheck_/TestAuthorize_/
+// TestHandleStream_BoundTokenWithNoProof_* prove the surfaces relay the PDP's
+// reason VERBATIM against a fake PDP — a message-quality property, and one
+// the two live proofs above now subsume for C25's purposes. Also not named:
+// K8's single-use jti (TestIntegration_Proxy_ReplayedProofRefused,
+// TestIntegration_Decide_ReplayedProof_Denies). A spent proof is arguably
+// "not valid" too, but K8 is its own requirement and folding it in here would
+// blur which sentence this row is accountable for.
+//
+// PROVEN ELSEWHERE, NOT A PASS, and not a close call. C25 is a property about
+// a TOKEN — its signature, its cnf.jkt confirmation claim, and a detached
+// JWS proving possession of the key that claim names. internal/authz has no
+// token. Not "does not check one": authz.Request (types.go) has no token
+// field, no credential of any kind, and this package imports no JWT library,
+// because Decide is a pure function that receives already-loaded facts (this
+// package's own doc comment: "no database handles, no network clients, no
+// ambient clock"). Token verification, matchProof, and the spent-jti store
+// all live in internal/pdpgrpc, which imports THIS package — so the reverse
+// dependency a local proof would need is a genuine build cycle, not merely a
+// purity violation. Same shape as C16/C18/C19/C20/C21/C22/C23/C24 above.
 func TestC25_MissingDPoPProofDenies(t *testing.T) {
 	markRan(25)
-	notBuilt(t, 25, "DPoP is half-built across the two surfaces it is specified for: internal/dpop "+
-		"verifies a proof, IssueToken binds a token as cnf.jkt, Decide denies a bound token presented "+
-		"without a valid proof, and extauthz refuses an unbound one — but proxy neither forwards a proof "+
-		"nor refuses an unbound token, so §4.7.2 K5's requirement holds on one network surface and not "+
-		"the other (spec §4.7.2 K5/K7)")
+	provenElsewhere(t, 25,
+		in("internal/pdpgrpc",
+			"TestDecide_BoundTokenWithNoProof_Denies",
+			"TestDecide_ProofSignedByADifferentKey_Denies",
+			"TestDecide_ProofNamingADifferentRequest_Denies"),
+		in("internal/store",
+			"TestIntegration_Envoy_BoundTokenWithNoProofRefused",
+			"TestIntegration_Proxy_BoundTokenWithNoProofRefused"))
 }
 
 // conformanceNames is the authoritative list of C-numbered properties this
