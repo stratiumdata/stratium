@@ -727,6 +727,39 @@ alternative — letting an approved retry skip the proof check — was rejected:
 approvals are not consumed, so a token plus an approval id would re-execute the
 approved action for the approval's whole TTL with no proof of possession at all.*
 
+**K11 has a wider consequence than it first appeared, settled the same day:
+`proxy` no longer blocks at all, and §4.6's blocking class is now `hook` and
+`mcp` only.**
+
+An unbound escalation was initially left on the blocking path, on the reasoning
+that **K5** would refuse its outcome anyway so the path was inert. It is not
+inert. The PDP has already written a pending approval row; the surface then
+holds the caller's stream and a polling goroutine for the full approval timeout,
+**a human is paged**, and the resolved ALLOW is refused by K5 regardless. During
+a bearer-token migration every legacy caller hitting an escalating action would
+hang and page someone for nothing, and any holder of an unbound token could
+generate unbounded human interrupts at will.
+
+So an unbound escalation is refused immediately. The justification is K11's own
+argument turned around: `sender_constrained` carries the real answer on an
+`ESCALATE`, because escalations reach the tail of `Decide` where it is set — so
+`false` there unambiguously means unbound, and refusing is a **narrowing**,
+always permitted.
+
+Both `ESCALATE` outcomes on `proxy` therefore return, and `resolveApproval`
+became unreachable from this surface — mechanically, not by preference: Go's
+`unreachable` analyzer rejects a call below two returning branches, and an
+uncalled helper fails the unused-code lint. `resolveApproval` itself is
+unchanged and still serves `hook` and `mcp`, including both reshapes `proxy`
+forced on it when it was a caller. **C22's proven-elsewhere pointer narrowed to
+those two surfaces accordingly**, which the conformance gate caught rather than
+a reader.
+
+The rule §4.6 was reaching for is the one K11 states: *a surface can block only
+while the credential it would wait with outlives the wait.* On `proxy` no
+credential does — bound ones expire and are single-use, unbound ones are refused
+on arrival.
+
 **C25 then means two things, and both must be tested.** Its wording — *"a
 delegation token without a valid DPoP proof is denied when the token is
 sender-constrained"* — covers a bound token presented without a proof. **K5**
