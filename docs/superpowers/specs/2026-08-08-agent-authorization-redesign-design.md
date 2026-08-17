@@ -733,12 +733,24 @@ approved action for the approval's whole TTL with no proof of possession at all.
 
 An unbound escalation was initially left on the blocking path, on the reasoning
 that **K5** would refuse its outcome anyway so the path was inert. It is not
-inert. The PDP has already written a pending approval row; the surface then
-holds the caller's stream and a polling goroutine for the full approval timeout,
-**a human is paged**, and the resolved ALLOW is refused by K5 regardless. During
-a bearer-token migration every legacy caller hitting an escalating action would
-hang and page someone for nothing, and any holder of an unbound token could
-generate unbounded human interrupts at will.
+inert: the surface holds the caller's stream and a polling goroutine for the
+full approval timeout, and then refuses the resolved ALLOW regardless — so a
+legacy bearer-token caller hitting an escalating action hangs for the timeout
+and is answered as though it had run out of time rather than as though its
+credential was wrong. Refusing on arrival removes the held stream, the
+goroutine, and the misleading answer, and tells the caller something it can act
+on.
+
+**What it does *not* remove, corrected 2026-08-17:** this ruling first claimed
+the change stopped a human being paged, and that any holder of an unbound token
+could otherwise generate unbounded human interrupts. **Both are false.** `Decide`
+creates the pending approval row itself, inside `resolveEscalation`, *before* the
+tail sets `sender_constrained` — so the row a human acts on already exists by the
+time either surface can read that field. Polling `GetApproval` is not what pages
+anyone. An unbound-token holder can still mint one pending approval per
+escalating call, and closing *that* would mean refusing before the PDP is asked,
+which no enforcement surface may do (**D1**). The behaviour is right; only this
+justification was wrong, and it was wrong in the direction of claiming more.
 
 So an unbound escalation is refused immediately. The justification is K11's own
 argument turned around: `sender_constrained` carries the real answer on an
