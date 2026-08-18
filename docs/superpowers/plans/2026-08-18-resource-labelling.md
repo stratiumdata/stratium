@@ -109,9 +109,30 @@ match nothing.
 **Files:** a migration, `services/internal/store/`, and integration tests.
 
 A tenant-scoped table of rules: prefix, hierarchy, level. **Unique on
-`(tenant_id, prefix, hierarchy)`** — one tenant cannot register two levels for
-the same prefix in the same hierarchy, which is what makes Task 1's "ties
-cannot happen" true rather than assumed.
+`(tenant_id, prefix)` — NOT on `(tenant_id, prefix, hierarchy)`, which is what
+this plan originally said and which Task 1 showed to be wrong before it was
+built.**
+
+`CheckCap` consumes exactly one `classification` and one `hierarchy` per
+resource (`pkg/classification/classification.go`). A resource therefore cannot
+carry a label in two hierarchies at once. Keying on the triple would let a
+tenant register the same prefix under both `nato` and `commercial` — a pair no
+resource can satisfy, which the matcher correctly refuses to resolve, and whose
+**only symptom is total silent denial under that prefix** with nothing naming
+the cause. A table must not be able to express a configuration the decision
+path cannot consume.
+
+Keying on `(tenant_id, prefix)` is what makes Task 1's "ties cannot happen"
+true rather than assumed. Task 1 does not rely on it — it refuses ambiguity
+deterministically and says so at its own boundary — but that is a safety net,
+not a licence to leave the schema loose.
+
+**One hazard the key does NOT close, carried to Task 3:** rules at *different*
+prefix lengths in different hierarchies. A `commercial` PUBLIC carve-out
+beneath a `nato` TOP-SECRET rule makes the resource escape the nato cap
+entirely — arguably worse than a lowering, but it is not one, and reporting it
+as a lowering would put a false claim in **R6**'s log line. Task 3 owns the
+ruling.
 
 `migrations/000013_tool_catalog.up.sql` is the template: `CREATE TABLE`, then
 `ENABLE` and `FORCE ROW LEVEL SECURITY`, a `tenant_isolation` policy, then the
@@ -151,6 +172,15 @@ read. This adds one; it must not displace that, and
 **Log a lowering carve-out** (**R6**). Decide what the line carries — enough
 for an operator to find the rule, not enough to leak a path into a log that
 may be shipped elsewhere — and justify it.
+
+**And rule on the cross-hierarchy case, which Task 1 surfaced and neither R6
+nor Task 2's key resolves.** Rules at different prefix lengths in different
+hierarchies mean a `commercial` PUBLIC carve-out beneath a `nato` TOP-SECRET
+rule makes the resource escape the nato cap entirely. That is arguably worse
+than a lowering — but it **is not** one, and logging it as a lowering would put
+a false claim in the operator's log. Decide whether it is refused, reported
+separately, or accepted with its reasoning recorded; do not let it fall through
+the gap between the two.
 
 **Do not add a fallback.** An unmatched resource gets no classification, and
 `CheckCap` denies (**R2**). The temptation is a default level; resist it and
