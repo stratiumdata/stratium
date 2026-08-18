@@ -34,15 +34,34 @@ const eventTypeResourceLabelRuleCreated = "resource_label_rule_created"
 // the empty-prefix catch-all. The migration's own comment on the absent prefix
 // index says the same thing from the schema's side.
 //
-// ORDER BY prefix, which is a complete and tie-free order — prefix is unique
-// per tenant by this table's own UNIQUE (tenant_id, prefix) — for the same
-// reason loadToolCatalogQuery orders by tool_name. Resolve's winner and its
-// ambiguity verdict do not depend on slice order, but the VALUE it returns can
-// among rules that agree only once case is folded (longestMatch's own doc
-// comment), and that value reaches a denial reason and the audit record. A
-// deterministic order keeps those stable across runs.
+// ORDER BY prefix, hierarchy, level — every selected column, in order, so the
+// result is totally ordered by construction. What that buys is modest and
+// worth stating precisely, because an earlier version of this comment
+// overstated it twice:
+//
+//   - A deterministic slice for anything that consumes the whole set. Resolve
+//     does not need it (its winner and its ambiguity verdict are both
+//     order-independent), but a test can assert an exact slice against it, and
+//     TestIntegration_ResourceLabelRules_RoundTrip does.
+//   - Ordering on all three columns rather than prefix alone, because ordering
+//     on prefix alone would be total only if prefix were unique — which is a
+//     SCHEMA constraint, and this file is otherwise careful that a schema
+//     constraint is not a runtime one (see validateResourceLabelRule below).
+//     Leaning on UNIQUE (tenant_id, prefix) here would be that same mistake
+//     eighty lines earlier: exactly in the three worlds this file keeps naming
+//     — a stale read, an in-flight migration, a direct psql write — two rows
+//     could share a prefix, and ORDER BY prefix would leave them in whatever
+//     order the planner chose. Naming all three columns costs nothing and does
+//     not depend on any constraint holding.
+//
+// It does NOT stabilise which of two same-prefix rules Resolve reports. Two
+// such rules disagree (a prefix carrying two answers), and Resolve refuses
+// ambiguity rather than picking by position — so there is no value here for an
+// order to stabilise. Where casing alone differs, this clause does now settle
+// it, but that is a side effect of ordering on the columns, not the reason for
+// it.
 const loadResourceLabelRulesQuery = `SELECT prefix, hierarchy, level ` +
-	`FROM resource_label_rules ORDER BY prefix`
+	`FROM resource_label_rules ORDER BY prefix, hierarchy, level`
 
 // insertResourceLabelRuleQuery omits id, letting the schema's own
 // uuid_generate_v4() DEFAULT generate it: nothing here needs the value back,

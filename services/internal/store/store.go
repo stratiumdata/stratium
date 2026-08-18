@@ -25,8 +25,9 @@
 // in that list whose trigger is NOT created by 000015 — it did not exist yet;
 // migrations/000019_resource_label_rules attaches 000015's own shared
 // bump_tenant_epoch() function to it, and that migration's own comment records
-// why a labelling change has to invalidate a cached decision. LoadTenantEpoch (tenant_epoch.go) reads it, the
-// same way every other method here reads its own table. Nothing here writes
+// why a labelling change has to invalidate a cached decision. LoadTenantEpoch
+// (tenant_epoch.go) reads it, the same way every other method here reads its
+// own table. Nothing here writes
 // tenant_epoch directly, and nothing here should ever be changed to: a PDP
 // that bumped its own cache-invalidation counter would be a PDP writing
 // authorization configuration, which E7 and T1 exist to prevent (spec

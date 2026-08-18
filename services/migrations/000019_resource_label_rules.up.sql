@@ -111,6 +111,18 @@ CREATE TABLE resource_label_rules (
     -- log line. Task 3 owns that ruling; this key neither creates nor fixes it.
     UNIQUE (tenant_id, prefix)
 );
+-- idx_*_tenant is house precedent, and it is redundant. The UNIQUE constraint
+-- above already builds a btree leading with tenant_id, which serves every
+-- tenant-only lookup this table has -- including the tenant_isolation policy's
+-- own tenant_id = current_tenant() predicate below -- so this index adds a
+-- second structure maintained on every write and read by nothing the first one
+-- could not answer. It is here anyway because agents, tier_overrides and
+-- tool_catalog each pair an idx_*_tenant with their own UNIQUE (tenant_id, x),
+-- and diverging from that to save one index write on an operator-authored,
+-- rarely-written table is not worth the inconsistency. Recorded rather than
+-- left silent so the next reader does not have to re-derive the redundancy --
+-- and so that a future table whose access pattern makes the pairing genuinely
+-- wasteful has a precedent for dropping it deliberately.
 CREATE INDEX idx_resource_label_rules_tenant ON resource_label_rules(tenant_id);
 
 -- No index on prefix, and the omission is deliberate rather than forgotten.

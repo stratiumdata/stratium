@@ -49,9 +49,11 @@ func TestLoadResourceLabelRulesQuery_HasNoTenantIDClauseAndNoMatchingInSQL(t *te
 				loadResourceLabelRulesQuery, matcher)
 		}
 	}
-	if !strings.Contains(loadResourceLabelRulesQuery, "ORDER BY prefix") {
-		t.Errorf("loadResourceLabelRulesQuery = %q, want ORDER BY prefix: a complete, tie-free order (prefix is "+
-			"unique per tenant), so the level Resolve reports is stable across runs", loadResourceLabelRulesQuery)
+	if !strings.Contains(loadResourceLabelRulesQuery, "ORDER BY prefix, hierarchy, level") {
+		t.Errorf("loadResourceLabelRulesQuery = %q, want ORDER BY on all three selected columns: ordering on "+
+			"prefix alone would be total only if prefix were unique, which is a schema constraint and "+
+			"therefore not a runtime one — the exact distinction validateResourceLabelRule's own doc comment "+
+			"insists on", loadResourceLabelRulesQuery)
 	}
 }
 
@@ -363,7 +365,7 @@ func TestStore_CreateResourceLabelRule_InvalidLabelRefusedBeforePersisting(t *te
 // validation would have accepted, because a stale read, an in-flight
 // migration, or a store bug can each produce one. R9 is explicit that
 // write-time validation is a better error message, not the enforcement — and
-// the enforcement (an unreadable label never reaching a permissive branch) is
+// the enforcement (an unrankable label never reaching a permissive branch) is
 // Task 3's, in CheckCap, not this package's.
 func TestStore_LoadResourceLabelRules_ReturnsRowsValidationWouldHaveRefused(t *testing.T) {
 	s, mock := newMockStore(t)
