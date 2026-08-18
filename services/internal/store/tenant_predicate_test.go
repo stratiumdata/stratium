@@ -136,9 +136,12 @@ func (f tenantFilterFinding) String() string {
 // It identifies a query as "a string expression": a string literal, or any
 // chain of them joined by +, which is the form every query in this package
 // takes. Concatenation is folded BEFORE matching, and that is load-bearing
-// rather than tidiness — most queries here are written across several
-// backtick literals, so a predicate split as `... WHERE ` + `tenant_id = $1`
-// would be invisible to a per-literal check.
+// rather than tidiness. Most queries here are written across several backtick
+// literals, and a split that falls between the column name and its operator
+// — `... WHERE tenant_id` + ` = $1` — leaves neither fragment matching on its
+// own. (A split before the name, `... WHERE ` + `tenant_id = $1`, would still
+// be caught fragment-by-fragment; folding is what covers the other one. Both
+// are pinned by TestTenantPredicateScan_CatchesAFilteringQuery.)
 //
 // It walks every string expression rather than only const and var
 // declarations. That costs nothing extra (ast.Inspect already visits them)
@@ -274,30 +277,45 @@ func fixturePackage(t *testing.T, files map[string]string) string {
 // catch a violation, not merely pass on a tree that has none. The finding
 // must name the file and the query, since a failure naming neither leaves an
 // author with nothing to act on.
+// The second case is the one that pins the concatenation fold: the split
+// falls between tenant_id and its operator, so neither literal matches on
+// its own and only the folded string does.
 func TestTenantPredicateScan_CatchesAFilteringQuery(t *testing.T) {
-	const src = `package fixture
+	tick := "`"
+	tests := map[string]string{
+		"predicate inside one literal": `package fixture
 
-const listThingsQuery = ` + "`" + `SELECT id, tenant_id, name ` + "`" + ` +
-	` + "`" + `FROM things WHERE tenant_id = $1 ORDER BY name` + "`" + `
-`
-	dir := fixturePackage(t, map[string]string{"things.go": src})
+const listThingsQuery = ` + tick + `SELECT id, tenant_id, name ` + tick + ` +
+	` + tick + `FROM things WHERE tenant_id = $1 ORDER BY name` + tick + `
+`,
+		"operator split across the concatenation": `package fixture
 
-	findings, examined, err := scanForTenantPredicates(dir)
-	if err != nil {
-		t.Fatalf("scanForTenantPredicates() error = %v", err)
+const listThingsQuery = ` + tick + `SELECT id, tenant_id, name FROM things WHERE tenant_id` + tick + ` +
+	` + tick + ` = $1 ORDER BY name` + tick + `
+`,
 	}
-	if len(findings) != 1 {
-		t.Fatalf("scan found %d findings, want exactly 1: a WHERE tenant_id predicate must be caught, got %v",
-			len(findings), findings)
-	}
-	if examined == 0 {
-		t.Error("scan examined 0 SQL statements while reporting a finding — the count is not tracking the walk")
-	}
-	if !strings.Contains(findings[0].Pos, "things.go") {
-		t.Errorf("finding position = %q, want it to name things.go", findings[0].Pos)
-	}
-	if !strings.Contains(findings[0].Query, "WHERE tenant_id = $1") {
-		t.Errorf("finding query = %q, want the offending query text", findings[0].Query)
+	for name, src := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := fixturePackage(t, map[string]string{"things.go": src})
+
+			findings, examined, err := scanForTenantPredicates(dir)
+			if err != nil {
+				t.Fatalf("scanForTenantPredicates() error = %v", err)
+			}
+			if len(findings) != 1 {
+				t.Fatalf("scan found %d findings, want exactly 1: a WHERE tenant_id predicate must be caught, got %v",
+					len(findings), findings)
+			}
+			if examined == 0 {
+				t.Error("scan examined 0 SQL statements while reporting a finding — the count is not tracking the walk")
+			}
+			if !strings.Contains(findings[0].Pos, "things.go") {
+				t.Errorf("finding position = %q, want it to name things.go", findings[0].Pos)
+			}
+			if !strings.Contains(findings[0].Query, "WHERE tenant_id = $1") {
+				t.Errorf("finding query = %q, want the whole folded query, including the predicate", findings[0].Query)
+			}
+		})
 	}
 }
 
