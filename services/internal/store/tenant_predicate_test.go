@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -149,34 +150,15 @@ func (f tenantFilterFinding) String() string {
 // this package already has one — audit.go's pg_advisory_xact_lock call.
 // Restricting the walk to declarations would leave that shape as an
 // unguarded way to reach the database.
-//
-// A file that will not parse is an error, never a skip. A scan that quietly
-// ignores what it cannot read is the same defect one level up: it would
-// report a clean tree because it never looked.
 func scanForTenantPredicates(dir string) ([]tenantFilterFinding, int, error) {
-	entries, err := os.ReadDir(dir)
+	fset, files, err := parseProductionFiles(dir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("reading %s: %w", dir, err)
+		return nil, 0, err
 	}
 
 	var findings []tenantFilterFinding
 	examined := 0
-	fset := token.NewFileSet()
-	for _, entry := range entries {
-		name := entry.Name()
-		// _test.go is excluded the same way internal/policy's constructor
-		// scan excludes it: a test may legitimately use WHERE tenant_id to
-		// set up or assert against another tenant's rows — catalog_
-		// integration_test.go and pap_role_integration_test.go both do,
-		// and both are proving RLS works rather than relying on it.
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return nil, 0, fmt.Errorf("parsing %s: %w", path, err)
-		}
+	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			expr, ok := n.(ast.Expr)
 			if !ok {
@@ -201,6 +183,42 @@ func scanForTenantPredicates(dir string) ([]tenantFilterFinding, int, error) {
 		})
 	}
 	return findings, examined, nil
+}
+
+// parseProductionFiles parses every non-test .go file in dir and hands back
+// the file set and syntax trees. Both scans in this file share it.
+//
+// _test.go is excluded the same way internal/policy's constructor scan
+// excludes it: a test may legitimately use WHERE tenant_id to set up or
+// assert against another tenant's rows — catalog_integration_test.go and
+// pap_role_integration_test.go both do, and both are proving RLS works
+// rather than relying on it.
+//
+// A file that will not parse is an error, never a skip. A scan that quietly
+// ignores what it cannot read is the same defect one level up: it would
+// report a clean tree because it never looked. Both invariants inherit that
+// refusal from here, so one test
+// (TestTenantPredicateScan_RefusesToSkipAnUnparseableFile) pins it for both.
+func parseProductionFiles(dir string) (*token.FileSet, []*ast.File, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		files = append(files, file)
+	}
+	return fset, files, nil
 }
 
 // stringExprValue folds expr into its string value when expr is a string
@@ -401,5 +419,288 @@ func Oops( {
 	}
 	if !strings.Contains(err.Error(), "broken.go") {
 		t.Errorf("error %q does not name the file it could not parse", err)
+	}
+}
+
+// --- Second invariant: no SQL in this package is assembled at runtime -----
+//
+// This is what makes the scan above mean anything, and it is worth having on
+// its own terms.
+//
+// The tenant scan reads string literals. A query assembled at runtime —
+// fmt.Sprintf("... WHERE tenant_id = %s", tenant), a strings.Builder, a
+// predicate appended behind an if — is not a literal, so the tenant scan
+// cannot see it and reports zero findings anyway. That clean result is what
+// the next author will trust, and it would be a clean result about a package
+// the scan could not fully read: "no violations" and "violations I cannot
+// see" would be indistinguishable. That is precisely the defect the tenant
+// scan exists to remove, one level up — it looked, at the wrong thing, and
+// reported clean.
+//
+// Every other gap in the tenant scan's coverage is visible from outside it: a
+// query in cmd/*, SQL in a migration, a _test.go file. This one is not. It
+// sits inside the scanned package, in scanned files, and produces a green
+// run.
+//
+// So: no SQL here is built at runtime. That also happens to be the property
+// that makes SQL injection structurally impossible in this package — every
+// statement is fixed text with bound parameters — which is why it is stated
+// as its own rule rather than as a footnote to the tenant scan. If you came
+// here wanting to build a query dynamically, this paragraph is the argument
+// to answer, not a mysterious failing test: adding one silently voids
+// TestNoProductionQueryFiltersByTenantID's guarantee for your query.
+
+// dbQueryMethods are the database/sql methods that take a SQL string, mapped
+// to that string's index in the argument list — 1 for the Context variants,
+// which take ctx first.
+//
+// ponytail: matched on method name alone, so an unrelated type with a Query
+// method would be checked too. That is a false positive which fails loudly
+// and is cheap to fix; the alternative is running go/types over the package
+// to resolve receivers, which is a lot of machinery for a guard that needs
+// none of it today.
+var dbQueryMethods = map[string]int{
+	"Exec": 0, "ExecContext": 1,
+	"Query": 0, "QueryContext": 1,
+	"QueryRow": 0, "QueryRowContext": 1,
+	"Prepare": 0, "PrepareContext": 1,
+}
+
+// dbCallFloor is a floor on the number of database calls the scan must find,
+// for the same reason queryFloor exists and under the same floor-never-a-
+// ceiling rule. There are 43 today.
+const dbCallFloor = 30
+
+// runtimeSQLFinding is one database call whose SQL is not fixed at compile
+// time, and the call site that has to change.
+type runtimeSQLFinding struct {
+	Pos    string
+	Method string
+	Arg    string // the offending argument, printed back as Go source
+}
+
+func (f runtimeSQLFinding) String() string {
+	return fmt.Sprintf("%s: %s(..., %s, ...)", f.Pos, f.Method, f.Arg)
+}
+
+// scanForRuntimeSQL returns every database call in dir's production files
+// whose SQL argument is not fixed at compile time, plus the number of
+// database calls it examined.
+//
+// Fixed at compile time means a string literal, a + chain of them, or an
+// identifier naming a Go const. The const case is not a hole: Go's spec
+// requires a const's value to be a constant expression, so a const can never
+// hold a Sprintf result. That is also what keeps this cheap — the check needs
+// no type information, only the set of names declared const in the package.
+//
+// A local variable is deliberately NOT accepted. `q := fmt.Sprintf(...)` two
+// lines above the call is the realistic shape of runtime-assembled SQL, and
+// accepting any identifier would wave exactly that through while looking
+// thorough.
+func scanForRuntimeSQL(dir string) ([]runtimeSQLFinding, int, error) {
+	fset, files, err := parseProductionFiles(dir)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Collected across every file before checking any call site: a call in
+	// agent.go names a const declared in store.go.
+	consts := map[string]bool{}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			decl, ok := n.(*ast.GenDecl)
+			if !ok || decl.Tok != token.CONST {
+				return true
+			}
+			for _, spec := range decl.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					consts[name.Name] = true
+				}
+			}
+			return true
+		})
+	}
+
+	var findings []runtimeSQLFinding
+	examined := 0
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			idx, ok := dbQueryMethods[sel.Sel.Name]
+			if !ok || idx >= len(call.Args) {
+				return true
+			}
+			examined++
+			arg := call.Args[idx]
+			if !staticSQLArg(arg, consts) {
+				findings = append(findings, runtimeSQLFinding{
+					Pos:    fset.Position(arg.Pos()).String(),
+					Method: sel.Sel.Name,
+					Arg:    exprSource(fset, arg),
+				})
+			}
+			return true
+		})
+	}
+	return findings, examined, nil
+}
+
+// staticSQLArg reports whether expr is SQL fixed at compile time: a string
+// literal, an identifier naming a const, or a + chain of those.
+func staticSQLArg(expr ast.Expr, consts map[string]bool) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return e.Kind == token.STRING
+	case *ast.Ident:
+		return consts[e.Name]
+	case *ast.BinaryExpr:
+		return e.Op == token.ADD && staticSQLArg(e.X, consts) && staticSQLArg(e.Y, consts)
+	default:
+		return false
+	}
+}
+
+// exprSource prints expr back as Go source, so a failure shows the argument
+// the author actually wrote instead of an AST node type.
+func exprSource(fset *token.FileSet, expr ast.Expr) string {
+	var buf strings.Builder
+	if err := printer.Fprint(&buf, fset, expr); err != nil {
+		return fmt.Sprintf("<unprintable %T>", expr)
+	}
+	return buf.String()
+}
+
+// TestNoRuntimeAssembledSQL is the second invariant's guard: every database
+// call in this package's production files passes SQL that is fixed at compile
+// time.
+func TestNoRuntimeAssembledSQL(t *testing.T) {
+	findings, examined, err := scanForRuntimeSQL(".")
+	if err != nil {
+		t.Fatalf("scanning internal/store: %v", err)
+	}
+	for _, f := range findings {
+		t.Errorf("%s\n\tthis call builds its SQL at runtime; every query in this package must be fixed text "+
+			"with bound parameters. It is also unreadable to TestNoProductionQueryFiltersByTenantID, which "+
+			"scans string literals — so a tenant predicate hidden in here would make that guard report a "+
+			"clean tree it could not actually see", f)
+	}
+	if examined < dbCallFloor {
+		t.Fatalf("the scan examined %d database calls, want at least %d — a scan that finds no violations "+
+			"because it looked at nothing is the very defect this guard exists to prevent, one level up",
+			examined, dbCallFloor)
+	}
+}
+
+// TestRuntimeSQLScan_CatchesAssembledSQL checks the claim rather than
+// reasoning to it. Both realistic shapes are covered: the Sprintf inline at
+// the call site, and — the one an "argument contains no call expression"
+// check would miss — the Sprintf assigned to a local variable two lines
+// above it.
+func TestRuntimeSQLScan_CatchesAssembledSQL(t *testing.T) {
+	tick := "`"
+	src := `package fixture
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
+func inlineSprintf(ctx context.Context, tx *sql.Tx, tenant string) error {
+	_, err := tx.ExecContext(ctx, fmt.Sprintf(` + tick + `DELETE FROM things WHERE tenant_id = %q` + tick + `, tenant))
+	return err
+}
+
+func viaLocalVariable(ctx context.Context, tx *sql.Tx, tenant string) error {
+	q := fmt.Sprintf(` + tick + `DELETE FROM things WHERE tenant_id = %q` + tick + `, tenant)
+	_, err := tx.ExecContext(ctx, q)
+	return err
+}
+`
+	dir := fixturePackage(t, map[string]string{"things.go": src})
+
+	findings, examined, err := scanForRuntimeSQL(dir)
+	if err != nil {
+		t.Fatalf("scanForRuntimeSQL() error = %v", err)
+	}
+	if examined != 2 {
+		t.Fatalf("scan examined %d database calls, want 2", examined)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("scan found %d findings, want 2 (the inline Sprintf and the one via a local variable), got %v",
+			len(findings), findings)
+	}
+	for _, f := range findings {
+		if !strings.Contains(f.Pos, "things.go") {
+			t.Errorf("finding position = %q, want it to name things.go", f.Pos)
+		}
+		if f.Method != "ExecContext" {
+			t.Errorf("finding method = %q, want ExecContext", f.Method)
+		}
+	}
+	// The two findings must name the two different arguments, so the failure
+	// tells an author which call site to change rather than just that one
+	// exists.
+	if findings[0].Arg == findings[1].Arg {
+		t.Errorf("both findings report the same argument %q; a failure that cannot distinguish the call "+
+			"sites is one an author cannot act on", findings[0].Arg)
+	}
+}
+
+// TestRuntimeSQLScan_AllowsConstantsAndLiterals is the carve-out: the three
+// shapes this package actually uses must pass. The examined-count assertion
+// is load-bearing for the same reason it is in the tenant scan's carve-out
+// test — "nothing was caught" is also what a scan that examined nothing
+// reports.
+func TestRuntimeSQLScan_AllowsConstantsAndLiterals(t *testing.T) {
+	tick := "`"
+	src := `package fixture
+
+import (
+	"context"
+	"database/sql"
+)
+
+const deleteThingQuery = ` + tick + `DELETE FROM things WHERE id = $1` + tick + `
+
+func viaConst(ctx context.Context, tx *sql.Tx, id string) error {
+	_, err := tx.ExecContext(ctx, deleteThingQuery, id)
+	return err
+}
+
+func viaLiteral(ctx context.Context, tx *sql.Tx, tenant string) error {
+	_, err := tx.ExecContext(ctx, ` + tick + `SELECT pg_advisory_xact_lock(hashtext($1))` + tick + `, tenant)
+	return err
+}
+
+func viaConstPlusLiteral(ctx context.Context, tx *sql.Tx, id string) error {
+	return tx.QueryRowContext(ctx, deleteThingQuery+` + tick + ` RETURNING name` + tick + `, id).Err()
+}
+`
+	dir := fixturePackage(t, map[string]string{"things.go": src})
+
+	findings, examined, err := scanForRuntimeSQL(dir)
+	if err != nil {
+		t.Fatalf("scanForRuntimeSQL() error = %v", err)
+	}
+	if examined != 3 {
+		t.Fatalf("scan examined %d database calls, want 3 — this test's claim is that these three were "+
+			"looked at and cleared, which is indistinguishable from never looking if the count is wrong",
+			examined)
+	}
+	if len(findings) != 0 {
+		t.Errorf("scan flagged %v; a named const, a string literal, and a const + literal chain are all "+
+			"fixed at compile time and must pass", findings)
 	}
 }
