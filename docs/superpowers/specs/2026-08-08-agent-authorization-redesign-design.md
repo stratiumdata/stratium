@@ -307,6 +307,78 @@ ever made. Three rulings, recorded here in the register §3.8, §4.1.1, §4.3.1,
 §4.4.1, and §4.6.1 already use: what was believed, what was actually true, and
 why the ruling is what it is.
 
+### 3.9.1 Resource labelling: per-tenant prefix rules (2026-08-18)
+
+**R3** recorded that nothing supplies a resource's classification, so **R2**
+denies every capped decision. This closes it. The shape is **§4.4.2 T1's**,
+applied to resources: per-tenant rows, written through the admin plane, read
+by the PDP on the decision path — the PAP holds the write grant, the PDP holds
+`SELECT` alone.
+
+**R4 — a label comes from a per-tenant rule mapping a resource-id prefix to a
+hierarchy and a level.** Not from the PEP (**R1** forecloses it on principle),
+not from the resource itself (that was ZTDF, removed in §5.1 and backlogged),
+and not from an external service at decision time — that would put a third
+system's availability and honesty on the authorization path, which is the
+opposite of what §4.8 and **W6** are built for.
+
+A row-per-resource table was rejected outright: the resource space is
+unbounded, and a scheme that requires enumerating every file cannot be
+operated.
+
+**Why an agent-influenced identifier is a safe thing to label.** The resource
+id is derived server-side (**T2**) but from client-supplied `raw_input`, via
+the tenant's own `resource_field`. An agent therefore influences it — and that
+is sound here, because **the id is what the tool actually acts on**. Naming a
+different resource changes what you get, not merely what you are permitted;
+lying does not pay. That argument holds exactly as far as the catalog's
+`resource_field` really names the field the tool operates on, which is tenant
+configuration. **A tenant that mis-catalogs `resource_field` labels the wrong
+thing**, and no mechanism here can detect that.
+
+**R5 — prefix matching. Not regex, not glob.** Resource ids here are
+path-shaped, and prefixes are the shape their hierarchies take. Regex on the
+decision path is a denial-of-service surface: the input is attacker-influenced
+per R4 above, and catastrophic backtracking would be reachable by anyone who
+can name a resource. Prefix matching is linear, has no pathological case, and
+an operator can predict what a rule does by reading it. Suffix or glob
+matching is a later extension if evidence demands it, not a guess now.
+
+**R6 — the longest matching prefix wins, and this deliberately departs from
+the raise-only pattern.** §4.4.3 **T5** makes tier overrides raise-only, and
+the reflex here would be "the highest classification wins." That is wrong for
+labels, and the distinction is worth stating because the two rules look alike:
+**a tier override adjusts a control; a classification states what the resource
+is.** A public file inside a secret directory is genuinely public, and an
+operator carving out `/data/public/` beneath a `/data/` SECRET rule is
+recording a fact. Highest-wins would make that carve-out inexpressible.
+
+The mirror risk is real: a mistyped narrow rule silently lowers a subtree.
+**The PDP logs when a longest-prefix match resolves lower than the rule it
+overrides** — that log line is the operator's only signal that a carve-out is
+doing something, and a lowering carve-out is the one case worth seeing.
+
+**R7 — an unlabelled resource still denies, and operators must be told
+plainly.** **R2** is unchanged: a cap that cannot be checked denies. So
+enabling caps means labelling everything reachable, or registering a catch-all
+— which prefix matching gives for free, since the empty prefix matches
+everything. No new mechanism, but a tenant that enables a cap without a
+catch-all will see every action on an unmatched resource denied, and that
+belongs in the operator documentation rather than in a support ticket.
+
+**R8 — two things this deliberately does not do**, recorded so the gap is not
+read as closed:
+
+- **Hierarchies stay hardcoded** (`nato`, `commercial`, in
+  `pkg/classification`). A tenant-defined hierarchy needs an *ordering* to
+  make a cap meaningful, which is its own subsystem, not a table. A tenant
+  whose scheme is neither of these still cannot use caps.
+- **Delegation constraints over a directory** — Phase 7's Finding A — reuse
+  this matcher but are a different table. A small follow-on, kept out so this
+  phase stays one mechanism.
+
+---
+
 ### R1 — the PEP sends resource identity, never classification
 
 A PEP knows a tool call's arguments well enough to extract an identifier from
@@ -323,6 +395,14 @@ than the original, which was only a tier. Implemented in Task 1: `hook` and
 where the field name makes one unambiguous; a structural allowlist test
 asserts `classification` and `hierarchy` are never among the keys either mode
 can produce.
+
+*Implementation note, corrected 2026-08-18: the `type` half of that sentence
+is stale. §4.4.2 **T2**/**T3** moved extraction server-side and retired
+`normalized_input`, and the resource map is now built by
+`internal/authz.resourceFromID`, which produces exactly `{"id": …}` and no
+`type`. The **ruling** is unaffected — the PEP still supplies identity and
+never classification, and the allowlist test still holds — but the map is
+narrower than this paragraph describes.*
 
 ### R2 — a classification cap that cannot be checked denies
 
