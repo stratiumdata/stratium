@@ -999,6 +999,27 @@ func TestIntegration_MCP_E2E_RequestIDSurvivesBothDirections(t *testing.T) {
 	p.send(toolCallFrame(denyStringID, mcpDeniedTool, "proof-4-denied-string"))
 
 	replies := p.nextFrames(3, 20*time.Second)
+
+	// THE AGENT->UPSTREAM DIRECTION IS ASSERTED FIRST, and the ordering is
+	// load-bearing rather than tidy. The upstream echoes back whatever id
+	// reached it, so a corrupted OUTBOUND id shows up in the reply too -- and
+	// a reply assertion placed first fatals there, hiding which direction
+	// actually lost it. Mutation testing showed exactly that: a mutant
+	// re-encoding the frame in forward() (agent->upstream) and one
+	// re-encoding it in passthroughUpstreamFrame (upstream->agent) both died
+	// on the same reply lookup, so the record assertion was never reached and
+	// the two directions were not in fact separated. Read mid-session, which
+	// is safe: mcpupstream records BEFORE it replies, and ReadRecords skips an
+	// unterminated tail rather than mis-decoding one.
+	calls := toolCallRecords(p.records())
+	if len(calls) != 1 {
+		t.Fatalf("upstream recorded %d tools/call, want exactly 1 (the allowed one): %+v", len(calls), calls)
+	}
+	if string(calls[0].ID) != allowBigIntID {
+		t.Fatalf("id that REACHED the upstream = %s, want the exact bytes %s -- this is the agent->upstream "+
+			"direction, read off the upstream's own record", calls[0].ID, allowBigIntID)
+	}
+
 	// replyByID already fails unless a reply carries these EXACT bytes; the
 	// assertions below name the property that makes that failure meaningful.
 	allow := replyByID(t, replies, allowBigIntID)
@@ -1026,14 +1047,8 @@ func TestIntegration_MCP_E2E_RequestIDSurvivesBothDirections(t *testing.T) {
 		t.Errorf("stratium-pep mcp exit = %d, want 0; stderr: %s", code, p.stderr.String())
 	}
 
-	// The agent->upstream direction, read off the upstream's own record.
-	calls := toolCallRecords(p.records())
-	if len(calls) != 1 {
-		t.Fatalf("upstream recorded %d tools/call, want exactly 1 (the allowed one): %+v", len(calls), calls)
-	}
-	if string(calls[0].ID) != allowBigIntID {
-		t.Errorf("id that REACHED the upstream = %s, want the exact bytes %s", calls[0].ID, allowBigIntID)
-	}
+	// Re-read after the session has fully ended: neither denial arrived late.
+	assertRecordedTools(t, p.records(), mcpApprovedTool)
 }
 
 // Proof 5. The proxy launches and reaps its child: the upstream process
