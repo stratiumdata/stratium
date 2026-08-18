@@ -76,16 +76,20 @@ func Index(hierarchy, level string) int {
 // CheckCap enforces a delegation's per-hierarchy classification caps against
 // the resource being accessed.
 //
-// Rules, each fail-closed:
+// Rules, each fail-closed, IN THIS ORDER — the order is part of the contract,
+// not an implementation detail (see R9 at the label-validity check below):
 //   - no caps                                  → allow (no restriction declared)
 //   - no resource classification               → DENY (a configured cap
 //     cannot be evaluated against a resource that says nothing about its
 //     classification; unenforceable must not read as compliant)
 //   - classification without a hierarchy       → DENY (ambiguous; the
 //     bypass-by-omission case)
+//   - unknown hierarchy, or unknown level      → DENY (R9: a label the system
+//     cannot rank is not a permissive label, it is an unreadable one — and
+//     this is checked BEFORE the allow below, not after)
 //   - no cap for the resource's hierarchy      → allow (this cap says nothing
 //     about that hierarchy)
-//   - unknown level or unknown cap             → DENY (never compare as equal)
+//   - unknown cap level                        → DENY (never compare as equal)
 //   - otherwise                                → resource rank ≤ cap rank
 //
 // The first two rules look alike — both see "nothing was declared" — but
@@ -125,6 +129,38 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 		return false, "resource classification declared without a hierarchy attribute (ambiguous)"
 	}
 
+	// R9, and the ordering IS the requirement: the label has to be readable
+	// before any branch below is allowed to allow. Everything past this point
+	// asks a question about RANK — "is the resource at or under the cap", and,
+	// via the !hasCap return, "does this cap speak to the resource's
+	// hierarchy at all" — and neither question has an answer for a label the
+	// system cannot rank. A permissive early return must be reached only by
+	// inputs the system has already established it can evaluate; this is what
+	// establishes it.
+	//
+	// Two unknowns, reported separately, because they are different operator
+	// mistakes and a merged "unknown label" would name neither: Index returns
+	// -1 for both, so an unknown hierarchy is checked first — a level cannot
+	// be ranked within a hierarchy that does not exist, and reporting one as
+	// an unknown LEVEL would send an operator looking in the wrong column.
+	//
+	// This is not the same check as the store's validateResourceLabelRule
+	// (internal/store/resource_label.go), duplicated. That one gives an
+	// operator a good error at the point of the typo and is worth having for
+	// that alone; it is NOT the enforcement, because a stale read, an
+	// in-flight migration, or a direct psql write each hand this function
+	// rows it never saw. R9 says so in as many words.
+	if _, known := Levels[strings.ToLower(resourceHierarchy)]; !known {
+		return false, fmt.Sprintf(
+			"unknown classification hierarchy %q; the delegation's classification cap cannot be evaluated and therefore denies",
+			resourceHierarchy)
+	}
+	resourceIdx := Index(resourceHierarchy, resourceLevel)
+	if resourceIdx < 0 {
+		return false, fmt.Sprintf("unknown classification level %q in hierarchy %q",
+			resourceLevel, resourceHierarchy)
+	}
+
 	capLevel, hasCap, ambiguous := lookupCap(caps, resourceHierarchy)
 	if ambiguous {
 		return false, fmt.Sprintf(
@@ -132,14 +168,17 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 			resourceHierarchy)
 	}
 	if !hasCap {
+		// A KNOWN hierarchy this delegation's caps do not mention. Still an
+		// allow, and deliberately so: a cap on nato says nothing about
+		// commercial, and silence is not a denial. The check above is what
+		// makes that safe — reaching this line now means the label was
+		// readable and simply uncapped, not unreadable. Widening this to a
+		// denial would turn every uncapped hierarchy into a refusal; see
+		// TestCheckCap_NoCapForThisHierarchyAllows, which exists to fail if
+		// R9's fix is ever mistaken for a blanket denial.
 		return true, ""
 	}
 
-	resourceIdx := Index(resourceHierarchy, resourceLevel)
-	if resourceIdx < 0 {
-		return false, fmt.Sprintf("unknown classification level %q in hierarchy %q",
-			resourceLevel, resourceHierarchy)
-	}
 	capIdx := Index(resourceHierarchy, capLevel)
 	if capIdx < 0 {
 		return false, fmt.Sprintf("delegation cap %q is not a known level in hierarchy %q",

@@ -424,6 +424,14 @@ resource `hierarchy` attribute today — **R1**'s extraction guard blocks it fro
 Resource labelling is what makes an operator-typed hierarchy reach this code,
 which is why the fix belongs to this phase and not to a backlog entry.
 
+*Closed 2026-08-18, in the same task that made it reachable.* `CheckCap` now
+validates the label — hierarchy, then level within it — ahead of the cap
+lookup entirely, so every branch after it asks a rank question about a label
+already established as rankable. The still-allows half is unchanged and
+pinned separately (`TestCheckCap_NoCapForThisHierarchyAllows`): a *known*
+hierarchy the caps do not mention allows, because silence is not a denial,
+and that test is what distinguishes this fix from a blanket denial.
+
 ---
 
 ### R1 — the PEP sends resource identity, never classification

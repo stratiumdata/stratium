@@ -197,11 +197,61 @@ func TestCheckCap_AboveCapDenies(t *testing.T) {
 }
 
 // A cap on one hierarchy says nothing about another.
+//
+// This is also the OTHER half of R9, and it is load-bearing in that role: the
+// two R9 tests below deny on a label the system cannot rank, and a fix that
+// simply denied whenever the caps name no matching hierarchy would satisfy
+// both of them while turning silence into denial. Only this test tells the
+// two apart, so it is what must fail for the "deny on any hierarchy the caps
+// do not name" mutant — nato is a real hierarchy and SECRET is a real nato
+// level, so nothing here is unrankable; the cap is merely silent about it.
 func TestCheckCap_NoCapForThisHierarchyAllows(t *testing.T) {
 	caps := map[string]string{"commercial": "INTERNAL"}
 	ok, reason := CheckCap(caps, map[string]string{"classification": "SECRET", "hierarchy": "nato"})
 	if !ok {
 		t.Fatalf("cap on a different hierarchy must not restrict, got: %s", reason)
+	}
+}
+
+// R9: a hierarchy the system does not know must DENY, and it must do so
+// before the "no cap for this hierarchy" allow — which is reachable by one
+// typed character now that a tenant's own resource_label_rules row supplies
+// the hierarchy (spec §3.9.1 R9, and D10: an unevaluable control denies).
+//
+// The caps deliberately DO name a hierarchy, and a real one: the resource's
+// "natoo" is a typo of exactly the cap that would otherwise have bound it, so
+// the old allow here was a capped resource becoming an unconditional allow
+// with no signal anywhere — R6's lowering log stays silent too, because an
+// unrankable hierarchy has no rank to compare.
+//
+// The reason must name the unknown value. An operator seeing only "denied"
+// cannot find a one-character typo in a rule table; the whole cost of this
+// defect was that nothing said which word was wrong.
+func TestCheckCap_UnknownHierarchyDeniesEvenThoughNoCapNamesIt(t *testing.T) {
+	caps := map[string]string{"nato": "CONFIDENTIAL"}
+	ok, reason := CheckCap(caps, map[string]string{"classification": "UNCLASSIFIED", "hierarchy": "natoo"})
+	if ok {
+		t.Fatal("a label naming an unknown hierarchy must deny: the system cannot rank it, " +
+			"so it cannot be shown to satisfy the cap")
+	}
+	if !strings.Contains(reason, "natoo") {
+		t.Errorf("reason = %q, want it to name the unknown hierarchy %q", reason, "natoo")
+	}
+}
+
+// R9's second half: a level unknown WITHIN a known hierarchy, where no cap
+// names that hierarchy either. Distinct from
+// TestCheckCap_UnknownResourceLevelDenies above, which reaches the same
+// verdict through the cap-bearing path — this one is the branch that used to
+// return allow before ever computing an index at all.
+func TestCheckCap_UnknownLevelDeniesEvenThoughNoCapNamesTheHierarchy(t *testing.T) {
+	caps := map[string]string{"nato": "CONFIDENTIAL"}
+	ok, reason := CheckCap(caps, map[string]string{"classification": "MEGA-PUBLIC", "hierarchy": "commercial"})
+	if ok {
+		t.Fatal("a level unknown within its hierarchy must deny even when no cap names that hierarchy")
+	}
+	if !strings.Contains(reason, "MEGA-PUBLIC") {
+		t.Errorf("reason = %q, want it to name the unknown level %q", reason, "MEGA-PUBLIC")
 	}
 }
 
