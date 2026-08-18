@@ -66,6 +66,15 @@ where a label comes from. This builds it.
 - **If you change a fixture other tests route through, re-run every mutation
   those tests were credited with killing.**
 - **A mutation kill that depends on other tests' residue is not a kill.**
+- **Identical output from two different mutants is a signal that one of them
+  did not apply.** Earned in Task 4. A compound shell command that `cd`'d
+  mid-script left the working directory moved; a later `git checkout` silently
+  failed against a relative path, so the previous mutant was still in the tree
+  and the "second" run re-measured the first. `git diff --numstat` was
+  non-empty the whole time — it was just describing the wrong patch. **Use
+  absolute paths in any command that mutates the tree**, and treat two mutants
+  producing byte-identical output as a failure to apply until proven
+  otherwise.
   Earned in Task 2. MS6 (drop `FORCE ROW LEVEL SECURITY`) appeared killed on a
   full-suite run — but the failing assertion was reading twelve *other*
   tenants' rows left behind by earlier tests. Re-run in isolation with `-run`
