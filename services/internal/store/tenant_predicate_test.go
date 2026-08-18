@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,6 +81,14 @@ import (
 // "tenant_id preceded by WHERE/AND/OR/ON" rather than widening this one —
 // that form cannot be used on its own because RETURNING clauses follow
 // WHERE and legitimately name tenant_id (see revokeDelegationQuery).
+//
+// ponytail: `JOIN … USING (tenant_id)` is also missed, and unlike the cast it
+// is a forgetting-class miss — a genuine redundant join predicate someone
+// could write without meaning anything by it. Adding `)` to the operator
+// class is NOT the fix: `USING (tenant_id)` and `ON CONFLICT (tenant_id)` are
+// textually identical at that point, and the second is correct. It needs a
+// keyword anchor on USING itself. No JOIN and no ON CONFLICT exists in this
+// package today, so this is a named limit rather than a pattern.
 var tenantPredicate = regexp.MustCompile(`(?i)(^|[^a-z0-9_])tenant_id\s*(=|<>|!=|<|>|\bIN\s*\()`)
 
 // sqlStatement recognises a string that carries a SQL statement, which is
@@ -166,6 +175,21 @@ func scanForTenantPredicates(dir string) ([]tenantFilterFinding, int, error) {
 			}
 			text, ok := stringExprValue(expr)
 			if !ok {
+				// A chain with a non-literal operand never folds, and this
+				// package writes that shape (loadApprovalForUpdateQuery is
+				// loadApprovalQuery + ` FOR UPDATE`). Its literal parts are
+				// still one contiguous fragment as far as a predicate is
+				// concerned, so a split that lands inside the predicate —
+				// base + ` WHERE tenant_id` + ` = $1` — is caught here and
+				// nowhere else: the full fold cannot see it and neither
+				// literal matches alone.
+				if parts, isChain := literalParts(expr); isChain && tenantPredicate.MatchString(parts) {
+					findings = append(findings, tenantFilterFinding{
+						Pos:   fset.Position(expr.Pos()).String(),
+						Query: parts,
+					})
+					return false
+				}
 				return true
 			}
 			if sqlStatement.MatchString(text) {
@@ -212,7 +236,10 @@ func parseProductionFiles(dir string) (*token.FileSet, []*ast.File, error) {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		// Object resolution is deliberately ON (no SkipObjectResolution).
+		// staticSQLArg needs it to tell a genuine const from a local
+		// variable that shadows a const's name — see its own comment.
+		file, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parsing %s: %w", path, err)
 		}
@@ -310,6 +337,12 @@ const listThingsQuery = ` + tick + `SELECT id, tenant_id, name ` + tick + ` +
 
 const listThingsQuery = ` + tick + `SELECT id, tenant_id, name FROM things WHERE tenant_id` + tick + ` +
 	` + tick + ` = $1 ORDER BY name` + tick + `
+`,
+		"predicate split across a const-append chain": `package fixture
+
+const baseThingsQuery = ` + tick + `SELECT id, tenant_id, name FROM things` + tick + `
+
+const listThingsQuery = baseThingsQuery + ` + tick + ` WHERE tenant_id` + tick + ` + ` + tick + ` = $1` + tick + `
 `,
 	}
 	for name, src := range tests {
@@ -503,9 +536,41 @@ func scanForRuntimeSQL(dir string) ([]runtimeSQLFinding, int, error) {
 		return nil, 0, err
 	}
 
-	// Collected across every file before checking any call site: a call in
-	// agent.go names a const declared in store.go.
+	consts := collectConsts(files)
+
+	var findings []runtimeSQLFinding
+	examined := 0
+	forEachDBCall(files, func(method string, arg ast.Expr) {
+		examined++
+		if !staticSQLArg(arg, consts) {
+			findings = append(findings, runtimeSQLFinding{
+				Pos:    fset.Position(arg.Pos()).String(),
+				Method: method,
+				Arg:    exprSource(fset, arg),
+			})
+		}
+	})
+	return findings, examined, nil
+}
+
+// collectConsts maps every const name declared in files to its folded string
+// value, or "" when the value is not a foldable string literal chain. Names
+// are collected across every file before any call site is checked: a call in
+// agent.go names a const declared in store.go, and go/parser's own
+// resolution does not cross files.
+func collectConsts(files []*ast.File) map[string]bool {
 	consts := map[string]bool{}
+	for name := range constValues(files) {
+		consts[name] = true
+	}
+	return consts
+}
+
+// constValues is collectConsts' underlying map, kept separate because the
+// reconciliation below needs the values and staticSQLArg needs only the
+// names.
+func constValues(files []*ast.File) map[string]string {
+	values := map[string]string{}
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			decl, ok := n.(*ast.GenDecl)
@@ -517,16 +582,25 @@ func scanForRuntimeSQL(dir string) ([]runtimeSQLFinding, int, error) {
 				if !ok {
 					continue
 				}
-				for _, name := range vs.Names {
-					consts[name.Name] = true
+				for i, name := range vs.Names {
+					value := ""
+					if i < len(vs.Values) {
+						value, _ = stringExprValue(vs.Values[i])
+					}
+					values[name.Name] = value
 				}
 			}
 			return true
 		})
 	}
+	return values
+}
 
-	var findings []runtimeSQLFinding
-	examined := 0
+// forEachDBCall calls fn for every database call in files, with the method
+// name and the expression in its SQL-argument position. Shared by the
+// runtime scan and the reconciliation so both agree, by construction, on
+// what "a call this scan examined" means.
+func forEachDBCall(files []*ast.File, fn func(method string, arg ast.Expr)) {
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
@@ -541,34 +615,135 @@ func scanForRuntimeSQL(dir string) ([]runtimeSQLFinding, int, error) {
 			if !ok || idx >= len(call.Args) {
 				return true
 			}
-			examined++
-			arg := call.Args[idx]
-			if !staticSQLArg(arg, consts) {
-				findings = append(findings, runtimeSQLFinding{
-					Pos:    fset.Position(arg.Pos()).String(),
-					Method: sel.Sel.Name,
-					Arg:    exprSource(fset, arg),
-				})
-			}
+			fn(sel.Sel.Name, call.Args[idx])
 			return true
 		})
 	}
-	return findings, examined, nil
+}
+
+// unreachedQueryConsts returns every const in dir holding a SQL statement
+// that no database call the scan examined ever names, plus the number of
+// query constants it reconciled.
+//
+// This is what stops dbQueryMethods from being a remembered list. The map is
+// hand-maintained, and a call whose method name is not in it is not examined
+// and does not exist as far as either scan is concerned — adopting sqlx or
+// pgx incrementally is an ordinary refactor, not an evasion, and it would
+// quietly take call sites out of coverage while both tests stayed green. The
+// floor cannot see that: dropping 12 of 43 calls still clears 30.
+//
+// The cross-check is independent because it is derived from a different part
+// of the syntax tree. The query constants come from string-literal
+// declarations; the reference set comes from call expressions. Renaming a
+// call leaves its query constant exactly where it was, so the constant goes
+// unreferenced and is named here. Both would have to fail in the same
+// direction, at once, to stay silent together.
+//
+// This is the every-run form of the reconciliation migrations_test.go's
+// reconcileTableCount performs, and which the first version of this file did
+// only by hand, once, in a report.
+//
+// ponytail: the alternative considered was asserting that no production file
+// imports a SQL library other than database/sql and lib/pq (today's only
+// non-stdlib imports here are lib/pq and google/uuid). That is fewer lines
+// but strictly weaker: it catches a new dependency, not a hand-rolled
+// wrapper type in this package with a Fetch method. Reconciliation catches
+// both, because it asks where the queries went rather than what was
+// imported.
+func unreachedQueryConsts(dir string) ([]string, int, error) {
+	_, files, err := parseProductionFiles(dir)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	referenced := map[string]bool{}
+	forEachDBCall(files, func(_ string, arg ast.Expr) {
+		// Every identifier in the argument counts, so a const appended to
+		// (loadApprovalQuery + ` FOR UPDATE`) still marks its base used.
+		ast.Inspect(arg, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				referenced[id.Name] = true
+			}
+			return true
+		})
+	})
+
+	var unreached []string
+	queries := 0
+	for name, value := range constValues(files) {
+		if !sqlStatement.MatchString(value) {
+			continue
+		}
+		queries++
+		if !referenced[name] {
+			unreached = append(unreached, name)
+		}
+	}
+	sort.Strings(unreached)
+	return unreached, queries, nil
 }
 
 // staticSQLArg reports whether expr is SQL fixed at compile time: a string
-// literal, an identifier naming a const, or a + chain of those.
+// literal, an identifier that IS a const, or a + chain of those.
+//
+// "Is a const" is asked of the identifier, not of its spelling. Checking the
+// name against the package's const set alone accepts a local variable that
+// shadows the constant it is derived from —
+//
+//	const listQuery = `SELECT id, name FROM things`
+//	listQuery := fmt.Sprintf(`DELETE FROM things WHERE %s = $1`, "tenant_id")
+//	tx.ExecContext(ctx, listQuery, tenant)
+//
+// — which compiles, vets clean, and is what a developer actually types when
+// modifying the query they are looking at. Nothing adversarial about it.
+//
+// go/parser resolves identifiers within a file, so any local declaration —
+// which is always in the same file as its use — comes back with a non-nil
+// Obj naming what it really is. A nil Obj means the identifier is not
+// declared in this file, so it is a package-level name from a sibling file,
+// and only then does the cross-file const set get consulted. That set is
+// still needed: resolution does not cross files.
+//
+// A package-level var holding SQL resolves to ast.Var and is rejected, which
+// is correct rather than incidental — //go:embed writes SQL into a var, and
+// SQL that arrives from outside the scanned source is exactly what neither
+// scan can read.
 func staticSQLArg(expr ast.Expr, consts map[string]bool) bool {
 	switch e := expr.(type) {
 	case *ast.BasicLit:
 		return e.Kind == token.STRING
 	case *ast.Ident:
+		if e.Obj != nil {
+			return e.Obj.Kind == ast.Con
+		}
 		return consts[e.Name]
 	case *ast.BinaryExpr:
 		return e.Op == token.ADD && staticSQLArg(e.X, consts) && staticSQLArg(e.Y, consts)
 	default:
 		return false
 	}
+}
+
+// literalParts concatenates every string literal in a + chain in source
+// order, skipping the operands that are not literals, and reports whether
+// expr was a + chain at all. It is the fallback for what stringExprValue
+// refuses to fold; a chain of one literal is not a chain, so an ordinary
+// string is left to the main path.
+func literalParts(expr ast.Expr) (string, bool) {
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.ADD {
+		return "", false
+	}
+	var out strings.Builder
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if s, err := strconv.Unquote(lit.Value); err == nil {
+				out.WriteString(s)
+			}
+		}
+		return true
+	})
+	return out.String(), true
 }
 
 // exprSource prints expr back as Go source, so a failure shows the argument
@@ -590,10 +765,14 @@ func TestNoRuntimeAssembledSQL(t *testing.T) {
 		t.Fatalf("scanning internal/store: %v", err)
 	}
 	for _, f := range findings {
-		t.Errorf("%s\n\tthis call builds its SQL at runtime; every query in this package must be fixed text "+
-			"with bound parameters. It is also unreadable to TestNoProductionQueryFiltersByTenantID, which "+
-			"scans string literals — so a tenant predicate hidden in here would make that guard report a "+
-			"clean tree it could not actually see", f)
+		t.Errorf("%s\n\tthis call's SQL is not fixed at compile time; every query in this package must be "+
+			"fixed text with bound parameters. It is also unreadable to "+
+			"TestNoProductionQueryFiltersByTenantID, which scans string literals — so a tenant predicate "+
+			"reaching the database this way would make that guard report a clean tree it could not "+
+			"actually see.\n\tIf the argument is a function parameter, this is a shared query helper rather "+
+			"than assembled SQL: the SQL is still fixed, but it is fixed at the helper's call sites, which "+
+			"this scan does not follow. Inline the helper, or teach the scan to resolve it — do not "+
+			"weaken staticSQLArg to accept parameters, which would accept genuine runtime assembly too", f)
 	}
 	if examined < dbCallFloor {
 		t.Fatalf("the scan examined %d database calls, want at least %d — a scan that finds no violations "+
@@ -627,6 +806,14 @@ func viaLocalVariable(ctx context.Context, tx *sql.Tx, tenant string) error {
 	_, err := tx.ExecContext(ctx, q)
 	return err
 }
+
+const listQuery = ` + tick + `SELECT id, name FROM things` + tick + `
+
+func viaLocalShadowingTheConst(ctx context.Context, tx *sql.Tx, tenant string) error {
+	listQuery := fmt.Sprintf(` + tick + `DELETE FROM things WHERE %s = $1` + tick + `, "tenant_id")
+	_, err := tx.ExecContext(ctx, listQuery, tenant)
+	return err
+}
 `
 	dir := fixturePackage(t, map[string]string{"things.go": src})
 
@@ -634,13 +821,15 @@ func viaLocalVariable(ctx context.Context, tx *sql.Tx, tenant string) error {
 	if err != nil {
 		t.Fatalf("scanForRuntimeSQL() error = %v", err)
 	}
-	if examined != 2 {
-		t.Fatalf("scan examined %d database calls, want 2", examined)
+	if examined != 3 {
+		t.Fatalf("scan examined %d database calls, want 3", examined)
 	}
-	if len(findings) != 2 {
-		t.Fatalf("scan found %d findings, want 2 (the inline Sprintf and the one via a local variable), got %v",
-			len(findings), findings)
-	}
+
+	// Asserted per shape, not by count. A count check would let a mutation
+	// that blinds the scan to one shape while it still catches another die on
+	// "wrong number", which is not evidence that the shape in question is
+	// covered — the shape has to be named.
+	seen := map[string]bool{}
 	for _, f := range findings {
 		if !strings.Contains(f.Pos, "things.go") {
 			t.Errorf("finding position = %q, want it to name things.go", f.Pos)
@@ -648,13 +837,21 @@ func viaLocalVariable(ctx context.Context, tx *sql.Tx, tenant string) error {
 		if f.Method != "ExecContext" {
 			t.Errorf("finding method = %q, want ExecContext", f.Method)
 		}
+		switch {
+		case strings.HasPrefix(f.Arg, "fmt.Sprintf("):
+			seen["inline Sprintf"] = true
+		case f.Arg == "q":
+			seen["local variable"] = true
+		case f.Arg == "listQuery":
+			seen["local shadowing a const's name"] = true
+		default:
+			t.Errorf("unexpected finding argument %q", f.Arg)
+		}
 	}
-	// The two findings must name the two different arguments, so the failure
-	// tells an author which call site to change rather than just that one
-	// exists.
-	if findings[0].Arg == findings[1].Arg {
-		t.Errorf("both findings report the same argument %q; a failure that cannot distinguish the call "+
-			"sites is one an author cannot act on", findings[0].Arg)
+	for _, shape := range []string{"inline Sprintf", "local variable", "local shadowing a const's name"} {
+		if !seen[shape] {
+			t.Errorf("the %s shape was not caught; findings were %v", shape, findings)
+		}
 	}
 }
 
@@ -702,5 +899,82 @@ func viaConstPlusLiteral(ctx context.Context, tx *sql.Tx, id string) error {
 	if len(findings) != 0 {
 		t.Errorf("scan flagged %v; a named const, a string literal, and a const + literal chain are all "+
 			"fixed at compile time and must pass", findings)
+	}
+}
+
+// TestEveryQueryConstIsReachedByAScannedCall is what stops dbQueryMethods
+// from being the remembered list the rest of this file exists to delete.
+//
+// A database call whose method name is not in that map is not examined, and
+// does not exist as far as either scan is concerned. Renaming this package's
+// calls to sqlx-style names — an ordinary incremental refactor, not an
+// evasion — took 12 of 43 call sites out of coverage in review with both
+// scans still green, because a floor detects collapse and not erosion: 31
+// still clears 30.
+//
+// Reconciling the query constants against the calls that reference them
+// catches exactly that, every run, with no constant to maintain. A renamed
+// call leaves its query constant untouched and unreferenced, so the constant
+// is named here.
+func TestEveryQueryConstIsReachedByAScannedCall(t *testing.T) {
+	unreached, queries, err := unreachedQueryConsts(".")
+	if err != nil {
+		t.Fatalf("reconciling internal/store: %v", err)
+	}
+	for _, name := range unreached {
+		t.Errorf("query constant %s is never named by a database call this scan examined.\n"+
+			"\tEither it is dead and should be deleted, or it reaches the database through a method "+
+			"dbQueryMethods does not know — in which case TestNoRuntimeAssembledSQL silently stopped "+
+			"covering that call, and the map is what needs updating", name)
+	}
+	// Reconciling nothing against nothing passes; the same trap, one level
+	// down. Shares queryFloor because it counts the same thing from the other
+	// direction — named query constants rather than SQL statements.
+	if queries < queryFloor {
+		t.Fatalf("reconciled %d query constants, want at least %d — a reconciliation with nothing on "+
+			"either side is vacuous", queries, queryFloor)
+	}
+}
+
+// TestQueryConstReconciliation_CatchesAnUnscannedCall checks that claim
+// instead of reasoning to it, using the exact scenario from review: a call
+// renamed to something dbQueryMethods does not know. The scanned query must
+// stay silent, so the fixture proves the reconciliation discriminates rather
+// than simply reporting everything.
+func TestQueryConstReconciliation_CatchesAnUnscannedCall(t *testing.T) {
+	tick := "`"
+	src := `package fixture
+
+import (
+	"context"
+	"database/sql"
+)
+
+const scannedQuery = ` + tick + `SELECT id FROM things WHERE id = $1` + tick + `
+
+const unscannedQuery = ` + tick + `SELECT id, tenant_id FROM things` + tick + `
+
+func scanned(ctx context.Context, tx *sql.Tx, id string) error {
+	return tx.QueryRowContext(ctx, scannedQuery, id).Err()
+}
+
+func unscanned(ctx context.Context, db *sqlxDB, out *[]string) error {
+	return db.SelectContext(ctx, out, unscannedQuery)
+}
+`
+	dir := fixturePackage(t, map[string]string{"things.go": src})
+
+	unreached, queries, err := unreachedQueryConsts(dir)
+	if err != nil {
+		t.Fatalf("unreachedQueryConsts() error = %v", err)
+	}
+	if queries != 2 {
+		t.Fatalf("reconciled %d query constants, want 2 — the fixture declares two, and a reconciliation "+
+			"that saw neither would report nothing unreached for the wrong reason", queries)
+	}
+	if len(unreached) != 1 || unreached[0] != "unscannedQuery" {
+		t.Fatalf("unreached = %v, want exactly [unscannedQuery]: the SelectContext call is invisible to "+
+			"dbQueryMethods, and scannedQuery must not be reported since QueryRowContext is scanned",
+			unreached)
 	}
 }
