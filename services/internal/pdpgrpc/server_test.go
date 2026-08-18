@@ -18,6 +18,7 @@ import (
 	"stratium/internal/policy"
 	"stratium/internal/store"
 	"stratium/pkg/audit"
+	"stratium/pkg/classification"
 	"stratium/pkg/models"
 )
 
@@ -138,6 +139,15 @@ type fakeStore struct {
 	// for "no overrides" without any test having to say so.
 	overrides    map[string]models.ActionTier
 	overridesErr error
+
+	// labelRules/labelRulesErr back LoadResourceLabelRules. A nil slice is
+	// what store.LoadResourceLabelRules returns for a tenant with no rules —
+	// every tenant until an operator registers one — so the default fakeStore
+	// stands in for "nothing is labelled", which is the state every
+	// pre-labelling test in this package was written against and must keep
+	// deciding identically in.
+	labelRules    []classification.Rule
+	labelRulesErr error
 
 	// delegation/delegationErr back LoadDelegation (token.go's IssueToken).
 	// A single fixed value, not a map keyed by id, matching every other
@@ -262,6 +272,14 @@ func (f *fakeStore) LoadTierOverrides(context.Context) (map[string]models.Action
 		return nil, f.overridesErr
 	}
 	return f.overrides, nil
+}
+
+func (f *fakeStore) LoadResourceLabelRules(context.Context) ([]classification.Rule, error) {
+	f.calls++
+	if f.labelRulesErr != nil {
+		return nil, f.labelRulesErr
+	}
+	return f.labelRules, nil
 }
 
 func (f *fakeStore) LoadDelegation(context.Context, uuid.UUID) (*models.Delegation, error) {

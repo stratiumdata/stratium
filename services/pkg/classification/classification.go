@@ -31,6 +31,20 @@ var Levels = map[string][]string{
 	},
 }
 
+// AttrClassification and AttrHierarchy are the two resource-attribute keys
+// CheckCap reads. Named here, in the package that reads them, so the PDP that
+// writes them (internal/pdpgrpc's resource labelling) and the check that
+// consumes them cannot drift into two spellings — a drift whose only symptom
+// would be a label that resolved correctly and then failed to arrive.
+//
+// They are also the two keys R1 forbids anyone but the PDP from supplying:
+// see internal/pdpgrpc/label.go, which strips them from the caller's map
+// before writing its own.
+const (
+	AttrClassification = "classification"
+	AttrHierarchy      = "hierarchy"
+)
+
 // lookupCap finds a hierarchy's cap in a caller-supplied caps map, scanning
 // case-insensitively the way Index scans Levels.
 //
@@ -111,8 +125,8 @@ func CheckCap(caps map[string]string, resourceAttrs map[string]string) (bool, st
 	// Empty strings are treated as absent. A caller that always populates the
 	// keys — building the map from request fields that may be blank — must not
 	// be able to sidestep the ambiguity rule by supplying "".
-	resourceLevel := resourceAttrs["classification"]
-	resourceHierarchy := resourceAttrs["hierarchy"]
+	resourceLevel := resourceAttrs[AttrClassification]
+	resourceHierarchy := resourceAttrs[AttrHierarchy]
 
 	if resourceLevel == "" {
 		// A cap IS configured here — len(caps) == 0 already returned above —

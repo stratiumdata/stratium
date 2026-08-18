@@ -28,6 +28,7 @@ import (
 	"stratium/internal/policy"
 	"stratium/internal/store"
 	"stratium/pkg/audit"
+	"stratium/pkg/classification"
 	"stratium/pkg/models"
 )
 
@@ -76,6 +77,15 @@ type Store interface {
 	// site, and authz.TierTable.Overrides's doc comment for why that check
 	// belongs to the caller that also holds the catalog.
 	LoadTierOverrides(ctx context.Context) (map[string]models.ActionTier, error)
+
+	// LoadResourceLabelRules loads the tenant's resource_label_rules rows
+	// (spec §3.9.1 R4) — the whole set, unfiltered, because the matching is
+	// pkg/classification.Resolve's and a second matcher in SQL would be free
+	// to disagree with it (store.LoadResourceLabelRules's own doc comment).
+	// Called fresh on every Decide, alongside LoadToolCatalog and
+	// LoadTierOverrides and for the same reason: no caching layer, kept
+	// consistent with every other per-tenant read here.
+	LoadResourceLabelRules(ctx context.Context) ([]classification.Rule, error)
 
 	// LoadDelegation loads one delegation row by id, without walking its
 	// parent chain — token.go's IssueToken (re-issuance) is its only
@@ -447,6 +457,28 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// this path can narrow what the evidence check sees.
 	extracted := authz.ExtractFromCatalog(catalogEntries, action)
 	action, resource = authz.ApplyExtraction(extracted, action, resource)
+
+	// The tenant's own resource_label_rules (spec §3.9.1 R4), loaded fresh
+	// for this decision and failing closed exactly as the catalog above does
+	// — same argument, one table over: a row that exists but could not be
+	// read might be the one row that labels this resource, and proceeding as
+	// though the tenant had none would deny it under R2 with nothing in the
+	// audit trail saying the rules were never read. Routed through
+	// denyAndAudit for the same reason too.
+	//
+	// After the epoch (V3 admits no store call ahead of it —
+	// TestDecide_EpochIsTheFirstStoreRead is the guard) and after
+	// ApplyExtraction, which is what produces the resource identity there is
+	// anything to resolve. Before the tier table is built, so the label is on
+	// the resource map every downstream consumer sees: the policy provider's
+	// EvaluationInput, and the delegation leg's own ResourceConstraints and
+	// CheckCap.
+	labelRules, err := s.store.LoadResourceLabelRules(ctx)
+	if err != nil {
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
+			fmt.Errorf("load resource label rules: %w", err), &epoch)
+	}
+	resource = labelResource(labelRules, resource)
 
 	// The catalog step of §4.4's resolution order (override, catalog,
 	// built-in): the tenant's own rows override DefaultCatalog() per tool,

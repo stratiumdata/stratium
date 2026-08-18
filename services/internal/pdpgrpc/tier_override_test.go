@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"stratium/pkg/classification"
 	"stratium/pkg/models"
 )
 
@@ -335,10 +336,18 @@ func TestDecide_TierOverrideLoadFailureDeniesAndAudits(t *testing.T) {
 // ahead of the epoch but behind that hook — the tier override read this task
 // adds, moved one step too early — would leave it passing. Overrides are set
 // here so the new read is genuinely on the path being ordered, not skipped.
+//
+// Label rules are set for the identical reason, one task later (§3.9.1): each
+// read this RPC gains has to be populated here, or "0 reads before the epoch"
+// is satisfied by a read that never ran. A stub returning an empty set is not
+// enough on its own — LoadResourceLabelRules is called unconditionally, so it
+// would count either way — but a fixture that leaves it empty invites the
+// next reader to assume the same of a read that IS conditional.
 func TestDecide_EpochIsTheFirstStoreRead(t *testing.T) {
 	fs, req := wellFormedFixture()
 	fs.epoch = 55123
 	fs.overrides = map[string]models.ActionTier{"Bash": models.ActionTierDestructive}
+	fs.labelRules = []classification.Rule{{Prefix: "/", Hierarchy: "nato", Level: "SECRET"}}
 	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
 
 	if _, err := srv.Decide(context.Background(), req); err != nil {
