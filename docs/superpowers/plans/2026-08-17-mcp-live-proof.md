@@ -52,7 +52,10 @@ unchanged by this work; only what is proven about it changes.
   agent supplied. Any proof that writes a session file must respect that
   asymmetry rather than routing a token through the frames.
 - Never log a token, a session file's contents, or frame payloads.
-- `internal/authz` is not touched.
+- **`internal/authz` is not touched**, except for `conformance_test.go`'s own
+  pointer bookkeeping in Task 2 if a pointer genuinely changes. No production
+  file in that package changes. (Phase 15's plan needed the identical carve-out
+  and omitted it; the pre-flight scan caught it there too.)
 - Strict root `.golangci.yml`. Clean before each commit, from the repo root:
   `make build`, `make vet`, `make test`, `make lint`, `make conformance`,
   `make integration`.
@@ -67,7 +70,8 @@ unchanged by this work; only what is proven about it changes.
 
 ## Task 1 — A purpose-built MCP upstream
 
-**Files:** `services/cmd/mcp-upstream/` (new), and tests.
+**Files:** a new upstream server and its tests. **Where it lives is yours to
+decide** — see below; do not treat this line as having answered it.
 
 A minimal MCP server over stdio, in the same spirit as `deploy/docker/echo-upstream`
 for Envoy and `services/cmd/grpc-target` for the proxy: it exists to be relayed
