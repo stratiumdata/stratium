@@ -1,10 +1,20 @@
 // Package classification is the single source for Stratium's classification
-// hierarchies and per-hierarchy cap enforcement.
+// hierarchies, for what a given resource's classification IS, and for
+// per-hierarchy cap enforcement.
+//
+// The middle clause arrived with spec §3.9.1: resolving a resource id to a
+// level (resolve.go) is stated in this package's own vocabulary — a
+// hierarchy and a level, ranked by Levels — and answering "did this rule
+// lower the classification?" is a question only an ordering can answer. Two
+// packages both constructing a (hierarchy, level) pair would be two places
+// for the fail-closed rules below to be got right.
 //
 // Every rule here fails closed. The recurring attack this defends against is
 // bypass-by-omission: a caller that leaves out an attribute, or supplies a
 // level nobody recognizes, must be denied rather than slipping through a gap
-// in the comparison.
+// in the comparison. Resolve extends that to the rules themselves: a prefix
+// carrying two answers resolves to none, never to whichever the store
+// returned first.
 package classification
 
 import (
