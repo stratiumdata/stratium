@@ -329,10 +329,15 @@ func TestResolve_PrefixMatchingIsCaseSensitive(t *testing.T) {
 
 // Two rules with the same prefix that disagree are ambiguous, and ambiguity
 // resolves to NO label rather than to an arbitrary winner — the same ruling
-// lookupCap already applies to two caps differing only by case. This is
-// reachable configuration, not a contract violation: Task 2's uniqueness key
-// is (tenant_id, prefix, hierarchy), so one prefix in two hierarchies is a
-// legal pair of rows.
+// lookupCap already applies to two caps differing only by case.
+//
+// Task 2's key is now (tenant_id, prefix), narrowed after this very pair was
+// raised as a legal-but-unsatisfiable row set, so these two rows are
+// schema-impossible. The test stays because Resolve does not lean on the
+// schema: a stale read or an in-flight migration delivers rows a constraint
+// has not yet excluded. This fixture varies hierarchy AND level together —
+// the two tests below vary one at a time, which is what pins each half of
+// agree independently.
 func TestResolve_SamePrefixInTwoHierarchiesResolvesToNoLabel(t *testing.T) {
 	rules := []Rule{
 		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
@@ -540,5 +545,81 @@ func TestResolve_OverriddenTieIsBrokenDeterministically(t *testing.T) {
 			t.Errorf("the reported drop must be the larger one, on every ordering: got %q, want TOP-SECRET",
 				m.LoweredFrom.Level)
 		}
+	}
+}
+
+// The canonical ambiguity, and the one classification.go's package comment
+// describes in prose: one prefix carrying two answers. It is the only
+// fixture here that varies LEVEL alone, which is what pins agree's level
+// comparison independently of its hierarchy comparison — every other
+// ambiguity fixture varies both at once, so agree reduced to just the
+// hierarchy check passes all of them.
+//
+// Same-hierarchy duplicates stay reachable after Task 2's (tenant_id,
+// prefix) key in a way the two-hierarchy pair no longer is: a stale read, an
+// in-flight migration, a store bug.
+func TestResolve_SamePrefixAndHierarchyWithTwoLevelsResolvesToNoLabel(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/data/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	if m, ok := Resolve(rules, "/data/x"); ok {
+		t.Errorf("one prefix carrying two levels must not resolve, got %+v", m.Rule)
+	}
+}
+
+// The mirror: varies HIERARCHY alone, pinning agree's other half. The level
+// text is identical on both rows, so a comparison that had dropped the
+// hierarchy clause would call these two rules the same thing and resolve
+// whichever came first.
+//
+// CONFIDENTIAL is a nato level and not a commercial one, which is beside the
+// point twice over: agree is textual and refuses before anything is ranked,
+// and a level filed under the wrong hierarchy is exactly the operator typo
+// that puts this pair in a table in the first place.
+func TestResolve_SamePrefixAndLevelInTwoHierarchiesResolvesToNoLabel(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "CONFIDENTIAL"},
+		{Prefix: "/data/", Hierarchy: "commercial", Level: "CONFIDENTIAL"},
+	}
+	if m, ok := Resolve(rules, "/data/x"); ok {
+		t.Errorf("one prefix carrying two hierarchies must not resolve, got %+v", m.Rule)
+	}
+}
+
+// R7's catch-all is an ordinary rule to the ambiguity check too. Exempting
+// the empty prefix there — `len(r.Prefix) > 0 &&` — is the special-casing
+// the brief rules out, one branch deeper than the matching test looks, and
+// it survived every other test in this file.
+func TestResolve_TwoDisagreeingCatchAllsResolveToNoLabel(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	if m, ok := Resolve(rules, "/anything"); ok {
+		t.Errorf("two catch-alls that disagree must not resolve, got %+v", m.Rule)
+	}
+}
+
+// overriddenBy must ask whether a rule MATCHES the resource, not only
+// whether it is shorter than the winner. Every other fixture here happens to
+// have all its shorter rules match the id under test, so dropping that guard
+// survives the whole suite.
+//
+// The failure it produces is the worst kind for R6: not silence, but a
+// confident log line naming an unrelated rule as the one that got lowered —
+// in the single line the operator is asked to trust.
+func TestResolve_ANonMatchingRuleIsNeverReportedAsOverridden(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/logs/", Hierarchy: "nato", Level: "TOP-SECRET"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	m, ok := Resolve(rules, "/data/x/f")
+	if !ok {
+		t.Fatal("the winner must resolve")
+	}
+	if m.LoweredFrom != nil {
+		t.Errorf("a rule the resource does not match cannot have been overridden by it, got %+v",
+			*m.LoweredFrom)
 	}
 }

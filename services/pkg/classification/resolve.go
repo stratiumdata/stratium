@@ -104,12 +104,17 @@ type Match struct {
 // unresolved resource is R7's ordinary unlabelled case.
 //
 // This deliberately does NOT lean on Task 2's uniqueness key. That key is
-// (tenant_id, prefix, hierarchy), which forbids one prefix carrying two
-// levels in ONE hierarchy but permits the same prefix in two hierarchies —
-// and since CheckCap reads a single hierarchy from a resource, two
-// hierarchies for one resource is an answer nothing downstream can use. So
-// ambiguity is reachable configuration, not a violated invariant, and this
-// function does not require its caller to have prevented it.
+// (tenant_id, prefix) — narrowed from (tenant_id, prefix, hierarchy) after
+// this function's own reasoning showed the wider one permitted a legal pair
+// of rows no resource could ever satisfy, CheckCap reading a single
+// hierarchy per resource. So the key now forbids one prefix carrying two
+// answers at all, and this refusal is defence in depth rather than the only
+// guard.
+//
+// It stays, because a schema constraint is not a runtime one. A stale read,
+// an in-flight migration, and a store bug all hand this function rules the
+// constraint has not excluded, and "whichever row arrived first" is not an
+// answer it should be capable of giving on a decision path.
 //
 // Rules that AGREE are not ambiguous: duplicates, and rules differing only
 // in the case of their hierarchy or level (which Postgres' case-sensitive
@@ -128,8 +133,16 @@ func Resolve(rules []Rule, resourceID string) (Match, bool) {
 // Ambiguity is tracked against the CURRENT winner and cleared whenever a
 // longer rule replaces it, so it describes only the winning length. A rule
 // set that is ambiguous at a shorter prefix is not ambiguous for a resource
-// a longer rule covers, and the result does not depend on the order the
-// rules arrive in.
+// a longer rule covers, and neither the winner's identity nor the ambiguity
+// verdict depends on the order the rules arrive in.
+//
+// The returned VALUE can. Among rules that agree only once case is folded,
+// the first encountered wins, so Match.Rule.Level comes back "SECRET" or
+// "secret" by slice order — a difference that reaches CheckCap's denial
+// reason and the audit record. Left alone deliberately: the decision is
+// identical either way (Index folds too), and normalising would report a
+// level in casing the operator never wrote. The claim above is narrowed to
+// what holds rather than widened to what would sound better.
 func longestMatch(rules []Rule, resourceID string) (*Rule, bool) {
 	var winner *Rule
 	ambiguous := false
@@ -174,6 +187,12 @@ func agree(a, b Rule) bool {
 // otherwise compare as beneath every real level and manufacture a lowering
 // claim out of a typo), and an unrankable rule further out is skipped so the
 // nearest rankable one is still found.
+//
+// The rule named may itself sit at an ambiguous length — two rules on one
+// shorter prefix, disagreeing. That does not suppress the report: the
+// decision is already settled by an unambiguous winner, so only the warning
+// is at stake, and one naming the larger of two drops beats one naming
+// nothing. TestResolve_OverriddenTieIsBrokenDeterministically is that case.
 //
 // This is a second pass rather than a second tracker in longestMatch because
 // the hierarchy that decides which rules are even eligible is not known
