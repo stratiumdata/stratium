@@ -966,41 +966,59 @@ func recordedMethod(recs []mcpupstream.Record, method string) bool {
 // (mcp_authorize.go's jsonrpcErrorFrame), never relayed, so it is the one
 // frame whose id could be reconstructed rather than carried.
 //
-// 9007199254740993 is 2^53+1: the smallest integer that does not survive a
-// float64 round trip (it re-encodes as 9007199254740992). Any implementation
-// that decoded an id into interface{} and re-encoded it -- the exact mistake
-// mcp.go's package doc says it avoids by never decoding ids at all -- fails
-// this assertion and passes a small-integer one. The denial's id is a STRING,
-// a second shape entirely, so a proxy that happened to handle numbers by
-// luck is still caught.
+// TWO DENIALS, WITH DIFFERENT ID SHAPES, AND THAT IS NOT SYMMETRY FOR ITS OWN
+// SAKE -- it closes a hole this proof shipped with and mutation testing found.
+// The first version sent the big integer on the ALLOW and a string id on the
+// denial. A mutant that re-encoded the denial's id through interface{} -- the
+// exact float64 round trip mcp.go's package doc says it avoids by never
+// decoding an id at all -- SURVIVED it, because a JSON string round-trips
+// through interface{} unharmed. The proof named the synthesized denial as the
+// case "where correlation is easiest to lose" and then tested it with the one
+// id shape that cannot lose. The numeric id below is what kills that mutant
+// (it comes back as ...996); the string id stays, because a proxy that
+// special-cased numbers would still have to carry a string through, and
+// covering one shape is not covering ids.
+//
+// 9007199254740993 (2^53+1) and 9007199254740995 (2^53+3) are the two
+// smallest odd integers above float64's exact-integer range: they re-encode
+// as ...992 and ...996 respectively. A small-integer id would pass against
+// every implementation, correct or not.
 func TestIntegration_MCP_E2E_RequestIDSurvivesBothDirections(t *testing.T) {
 	f := newMCPFixture(t, "idfidelity")
 	p := f.start(t)
 
-	const bigIntID = "9007199254740993"     // 2^53+1
-	const stringID = `"denial-correlation"` // a second id SHAPE, not merely a second value
+	const allowBigIntID = "9007199254740993"    // 2^53+1, re-encodes as ...992
+	const denyBigIntID = "9007199254740995"     // 2^53+3, re-encodes as ...996
+	const denyStringID = `"denial-correlation"` // a second id SHAPE, not merely a second value
 
 	p.send(initializeFrame("1"))
 	assertCallSucceededInit(t, decodeReply(t, p.nextFrame(15*time.Second)))
 
-	p.send(toolCallFrame(bigIntID, mcpApprovedTool, "proof-4-permitted"))
-	p.send(toolCallFrame(stringID, mcpDeniedTool, "proof-4-denied"))
+	p.send(toolCallFrame(allowBigIntID, mcpApprovedTool, "proof-4-permitted"))
+	p.send(toolCallFrame(denyBigIntID, mcpDeniedTool, "proof-4-denied-number"))
+	p.send(toolCallFrame(denyStringID, mcpDeniedTool, "proof-4-denied-string"))
 
-	replies := p.nextFrames(2, 20*time.Second)
+	replies := p.nextFrames(3, 20*time.Second)
 	// replyByID already fails unless a reply carries these EXACT bytes; the
 	// assertions below name the property that makes that failure meaningful.
-	allow := replyByID(t, replies, bigIntID)
-	deny := replyByID(t, replies, stringID)
+	allow := replyByID(t, replies, allowBigIntID)
+	denyNumber := replyByID(t, replies, denyBigIntID)
+	denyString := replyByID(t, replies, denyStringID)
 	assertCallSucceeded(t, allow, mcpApprovedTool)
-	assertDenied(t, deny, mcpDeniedTool)
+	assertDenied(t, denyNumber, mcpDeniedTool)
+	assertDenied(t, denyString, mcpDeniedTool)
 
-	if string(allow.ID) != bigIntID {
+	if string(allow.ID) != allowBigIntID {
 		t.Errorf("allowed reply id = %s, want the exact bytes %s -- a float64 round trip yields 9007199254740992",
-			allow.ID, bigIntID)
+			allow.ID, allowBigIntID)
 	}
-	if string(deny.ID) != stringID {
+	if string(denyNumber.ID) != denyBigIntID {
 		t.Errorf("denial id = %s, want the exact bytes %s -- a denial is synthesized by the proxy, so this is "+
-			"where correlation is easiest to lose", deny.ID, stringID)
+			"where correlation is easiest to lose, and a re-encoded number is how it loses it",
+			denyNumber.ID, denyBigIntID)
+	}
+	if string(denyString.ID) != denyStringID {
+		t.Errorf("denial id = %s, want the exact bytes %s", denyString.ID, denyStringID)
 	}
 
 	p.closeStdin()
@@ -1013,8 +1031,8 @@ func TestIntegration_MCP_E2E_RequestIDSurvivesBothDirections(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("upstream recorded %d tools/call, want exactly 1 (the allowed one): %+v", len(calls), calls)
 	}
-	if string(calls[0].ID) != bigIntID {
-		t.Errorf("id that REACHED the upstream = %s, want the exact bytes %s", calls[0].ID, bigIntID)
+	if string(calls[0].ID) != allowBigIntID {
+		t.Errorf("id that REACHED the upstream = %s, want the exact bytes %s", calls[0].ID, allowBigIntID)
 	}
 }
 
