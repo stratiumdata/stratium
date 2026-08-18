@@ -240,7 +240,65 @@ fires).
 
 ---
 
-## Task 4 — The PAP's CRUD
+## Task 4 — Make "no `WHERE tenant_id`" structural instead of remembered
+
+**Files:** `services/internal/store/`, one new test file.
+
+**Why this is a task and not a footnote.** The Task 2 review established — and I
+confirmed — that this constraint has **no structural enforcement**. It is six
+hand-written, opt-in, per-query text assertions. A new query is covered only if
+its author remembers to write one, and nothing fails if they do not. Task 5
+adds three more queries for this table, which is three more chances to forget.
+
+**And a behavioural test cannot cover it.** `pap_task6_list_integration_test.go`
+already worked this out and wrote it down: adding a redundant `WHERE tenant_id`
+"changes no observable behaviour — it only moves the apparent source of the
+guarantee somewhere it is not." A predicate redundant with the RLS policy is
+invisible to every runtime test that exists. The text assertions are not
+belt-and-braces; they are the *only* thing that can see this.
+
+That is the whole defect class this project keeps finding: **the check that
+could catch it shares a blind spot with the thing it checks.**
+
+**The measurement that makes this cheap.** I checked before writing this task:
+there are 51 query constants in `internal/store/`, and **not one of them
+carries a `WHERE tenant_id`**. Every current match on that string is a comment
+asserting the absence. So the invariant holds today with **zero legitimate
+exceptions** — which means the scan needs no allowlist, and you must not add
+one. An exception list that is easy to append to is how this constraint decays
+back into "remembered".
+
+**Build:** a test that finds every SQL query string in the package's
+non-test Go files and fails on any that filters by `tenant_id`. Decide and
+justify how you identify a query string — an AST walk over string-valued
+constants and vars is the obvious route, and `migrations/migrations_test.go`
+already sets the house precedent for a structural scan that needs no edit per
+new file. Study it before choosing.
+
+**Do not** hand-list the 51 queries; a scan that enumerates what it covers is
+the opt-in problem with extra steps. The test must pick up a new query in a new
+file with no edit — that property is the entire deliverable.
+
+**Two things to get right.** An INSERT naming `tenant_id` as a *column* is
+correct and must pass; that is how a row acquires its tenant, and RLS's
+`WITH CHECK` validates it. And a query in a `_test.go` file may legitimately
+use `WHERE tenant_id` for setup and assertions — scope the scan to production
+files, exactly as the `internal/authz` purity check already does.
+
+**Tests:** the scan passes on the tree as it stands (51 queries, 0 findings —
+assert the count it examined is non-zero, or a scan that finds nothing because
+it *looked at* nothing passes silently); a fixture query carrying
+`WHERE tenant_id = $1` is caught; an INSERT naming `tenant_id` as a column is
+**not** caught; the scan reports which query and which file, since a failure
+naming nothing is a failure an author cannot act on.
+
+**Mutation-test and report survivors:** make the scan skip files it cannot
+parse rather than failing; make it examine zero queries; drop the INSERT
+carve-out and confirm the carve-out test catches it, not merely the suite.
+
+---
+
+## Task 5 — The PAP's CRUD
 
 **Files:** `services/cmd/stratium-pap/`, and tests.
 
@@ -259,7 +317,7 @@ write; accept a level outside its hierarchy.
 
 ---
 
-## Task 5 — Prove it live, and write the cliff down
+## Task 6 — Prove it live, and write the cliff down
 
 **Files:** the integration suite, `docs/pep.md` or the operator docs.
 
