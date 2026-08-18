@@ -2063,6 +2063,32 @@ Three places where two sound decisions rub. None blocks implementation; each nee
    integrity, and an explicit trade: the audit store becomes a hard dependency of authorization.
    Its availability target must match the PDP's.
 
+4. **A `ResourceConstraint` on an uncatalogued tool is caller-satisfiable.**
+   Surfaced 2026-08-18 by the Task 3 re-review, as **R11**'s neighbour one
+   table over. `ApplyExtraction` replaces the resource map only for a
+   catalogued tool; otherwise the caller's own map reaches
+   `checkResourceConstraints` verbatim, so a delegation scoped by
+   `ResourceConstraints{"id": …}` on an uncatalogued tool is satisfied by the
+   caller asserting the value the constraint asks for.
+
+   **R11 closed this for classification and left it open for constraints.**
+   The two label keys are stripped and the label is now resolved only from a
+   server-derived id, so a caller can no longer reach `CheckCap`. Every *other*
+   key a constraint might name still arrives from the caller untouched.
+
+   Pre-existing, and documented as the model at `internal/authz/delegation.go`
+   — a constraint compares only the keys it names, and an uncatalogued tool has
+   no server-derived identity to compare against. So this is a scoping
+   question, not a regression: **should a delegation be allowed to carry a
+   resource constraint that the system cannot independently evaluate?** **D10**
+   says an unevaluable policy denies, which argues no. The cheap answer is the
+   same shape as R11's: evaluate a constraint only against an identity the PDP
+   produced, and let an unevaluable constraint deny.
+
+   Not folded into the resource-labelling phase: it changes the meaning of
+   existing delegations, needs its own migration story for any tenant already
+   relying on it, and the labelling work does not depend on it.
+
 ---
 
 ## 9. Sequencing
