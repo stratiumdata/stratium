@@ -148,8 +148,10 @@ exists to prevent.
 it with a test, as Task 2 of Phase 14 did for the grants it withheld.
 
 **Tests** (integration — RLS and a uniqueness constraint need a database):
-rules round-trip; a duplicate `(tenant, prefix, hierarchy)` collides; the same
-prefix in two tenants does not; a level not in its hierarchy is refused;
+rules round-trip; a duplicate `(tenant, prefix)` collides **even when the two
+rows name different hierarchies** — that second case is the whole point of the
+corrected key and the one a `(tenant, prefix, hierarchy)` key would have let
+through; the same prefix in two tenants does not; a level not in its hierarchy is refused;
 `stratium_app` can read and cannot write; the epoch bumps on a write, if the
 Phase 12 trigger covers this table — **check whether it does and say so**,
 because a labelling change that does not invalidate a cached decision is a

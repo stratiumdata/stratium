@@ -550,10 +550,13 @@ func TestResolve_OverriddenTieIsBrokenDeterministically(t *testing.T) {
 
 // The canonical ambiguity, and the one classification.go's package comment
 // describes in prose: one prefix carrying two answers. It is the only
-// fixture here that varies LEVEL alone, which is what pins agree's level
-// comparison independently of its hierarchy comparison — every other
-// ambiguity fixture varies both at once, so agree reduced to just the
-// hierarchy check passes all of them.
+// dedicated fixture for varying LEVEL alone, which is what pins agree's level
+// comparison independently of its hierarchy comparison — the ambiguity
+// fixtures that predate it vary both at once, so agree reduced to just the
+// hierarchy check passes all of those. (The two-disagreeing-catch-alls test
+// added alongside this one also varies level alone, so it would catch that
+// mutant too; this one is where the property is stated deliberately rather
+// than incidentally.)
 //
 // Same-hierarchy duplicates stay reachable after Task 2's (tenant_id,
 // prefix) key in a way the two-hierarchy pair no longer is: a stale read, an
