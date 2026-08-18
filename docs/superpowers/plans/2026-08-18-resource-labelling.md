@@ -159,7 +159,8 @@ stale authorization decision.
 
 ## Task 3 — Wire it into the decision path
 
-**Files:** `services/internal/pdpgrpc/`, and tests.
+**Files:** `services/internal/pdpgrpc/`,
+`services/pkg/classification/classification.go`, and tests.
 
 Load the tenant's rules, resolve the resource id's label, and put it where
 `CheckCap` will find it — `resource["classification"]` and its hierarchy
@@ -182,6 +183,36 @@ a false claim in the operator's log. Decide whether it is refused, reported
 separately, or accepted with its reasoning recorded; do not let it fall through
 the gap between the two.
 
+**Close the unknown-hierarchy fail-open first** (**R9** — read it in the spec
+before writing anything else in this task). `CheckCap` returns **allow** when
+the delegation's caps name no hierarchy matching the resource's. That is right
+for a hierarchy a cap simply does not mention, and wrong for a hierarchy that
+does not exist — and this task is what first lets an operator-typed hierarchy
+reach that branch, so it is this task's defect to close, not an inherited one.
+
+```
+rules: /data/    nato    SECRET
+       /data/x/  natoo   UNCLASSIFIED     <- one typed character
+caps:  {"nato": "CONFIDENTIAL"}
+```
+
+The carve-out wins on length, no cap matches `natoo`, `CheckCap` allows, and
+**R6**'s lowering log stays silent because an unrankable hierarchy has no rank
+to compare. A capped resource becomes an unconditional allow with no signal.
+
+`Index` already returns `-1` for an unknown hierarchy (**R8** keeps them
+hardcoded), and `CheckCap` computes it only *after* the `!hasCap` early return.
+Move the validity check ahead of that return: an unknown hierarchy, or a level
+unknown within its hierarchy, denies with a reason naming the unknown value.
+**D10** — an unevaluable policy denies — applies to a label the system cannot
+rank.
+
+Two things to get right. A *known* hierarchy that the caps do not mention must
+still allow; do not turn silence into denial. And 25 existing `CheckCap` tests
+run through this function — read them before moving the check, and if any
+asserted the old allow, work out whether it encoded this defect deliberately
+before changing it.
+
 **Do not add a fallback.** An unmatched resource gets no classification, and
 `CheckCap` denies (**R2**). The temptation is a default level; resist it and
 say why in the code.
@@ -192,9 +223,18 @@ with a reason distinguishing "no rule matched" from an ordinary cap failure; a
 carve-out that lowers is honoured and logged; an uncapped decision is
 unaffected by the rules entirely; V3's ordering still holds.
 
+**Tests for R9 specifically:** a resource labelled with an unknown hierarchy
+denies, and the reason names the unknown value; a resource labelled with a
+known hierarchy the caps do not mention still **allows**; a level unknown
+within a known hierarchy denies. The first and second must both be present —
+one without the other cannot distinguish the fix from a blanket denial.
+
 **Mutation-test and report survivors:** default an unmatched resource to the
 lowest level; default it to the highest; read the rules before the epoch; drop
-the lowering log.
+the lowering log; **restore `!hasCap` to an unconditional allow**; **weaken the
+R9 check to deny on any hierarchy the caps do not name** (this one must be
+killed by the still-allows test, not by the denies test — check which assertion
+fires).
 
 ---
 
