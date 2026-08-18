@@ -511,3 +511,34 @@ func TestResolve_FeedsCheckCap(t *testing.T) {
 		t.Error("an unlabelled resource under a configured cap must deny (R2/R7)")
 	}
 }
+
+// The rule set below is one Task 2's uniqueness key will forbid — one
+// tenant, one prefix, one hierarchy, two levels — and Task 1 ships before
+// that key exists. Resolve's doc comment claims it does not lean on the
+// constraint; this pins the half of that claim the tests above do not reach.
+//
+// The winner is unambiguous, so the DECISION is settled either way and only
+// the lowering report is at stake. Reporting the larger drop is the choice,
+// because a report is a warning and the worse of two readings is the one
+// worth showing. What matters more than which is that it is the same on
+// every run: found by mutation, where reversing the tie-break survived the
+// whole suite.
+func TestResolve_OverriddenTieIsBrokenDeterministically(t *testing.T) {
+	lower := Rule{Prefix: "/data", Hierarchy: "nato", Level: "CONFIDENTIAL"}
+	higher := Rule{Prefix: "/data", Hierarchy: "nato", Level: "TOP-SECRET"}
+	winner := Rule{Prefix: "/data/x", Hierarchy: "nato", Level: "UNCLASSIFIED"}
+
+	for _, rules := range [][]Rule{{lower, higher, winner}, {higher, lower, winner}} {
+		m, ok := Resolve(rules, "/data/x/file")
+		if !ok {
+			t.Fatal("the winning prefix is unambiguous and must resolve")
+		}
+		if m.LoweredFrom == nil {
+			t.Fatal("a lowering carve-out must be reported")
+		}
+		if m.LoweredFrom.Level != "TOP-SECRET" {
+			t.Errorf("the reported drop must be the larger one, on every ordering: got %q, want TOP-SECRET",
+				m.LoweredFrom.Level)
+		}
+	}
+}
