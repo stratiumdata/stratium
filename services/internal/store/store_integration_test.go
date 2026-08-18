@@ -305,6 +305,24 @@ var (
 	cacheTenant string
 	cacheAddr   string
 
+	// mcpAddr and mcpTenant back the `mcp` enforcement surface's live proofs
+	// (mcp_e2e_integration_test.go): a ninth, independently configured PDP
+	// (deploy/docker/docker-compose.yml's pdp-mcp service) and its own
+	// tenant, for the same reason every dedicated PDP above has one — those
+	// proofs seed policies, create delegations through the real
+	// "session-start" subcommand, and revoke one of them, which bumps
+	// tenant_epoch for anything sharing the tenant.
+	//
+	// An ADDRESS, not a client, and that is the whole difference from every
+	// entry above: nothing in this package ever calls pdp-mcp directly. The
+	// `mcp` proxy is a subprocess that dials it for itself, from
+	// STRATIUM_PEP_PDP_ADDR, so what those proofs need from here is the
+	// string to hand it — the same thing cacheAddr is for, minus the
+	// connection (nothing there ever stops or restarts pdp-mcp). runTestMain
+	// still dials it once, to wait for SERVING, and drops the client.
+	mcpAddr   string
+	mcpTenant string
+
 	// papPdpClient and papTenant back Phase 14 Task 8's live admin-plane
 	// proofs (pap_e2e_integration_test.go): a ninth, independently
 	// configured PDP (deploy/docker/docker-compose.yml's pdp-pap service)
@@ -360,10 +378,13 @@ func runTestMain(m *testing.M) int {
 	epochTenant = os.Getenv("STRATIUM_IT_EPOCH_TENANT_ID")
 	pdpCacheAddr := os.Getenv("STRATIUM_IT_PDP_CACHE_ADDR")
 	cacheTenant = os.Getenv("STRATIUM_IT_CACHE_TENANT_ID")
+	mcpAddr = os.Getenv("STRATIUM_IT_PDP_MCP_ADDR")
+	mcpTenant = os.Getenv("STRATIUM_IT_MCP_TENANT_ID")
 	if dbURL == "" || servingDBURL == "" || papDBURL == "" || pdpAddr == "" || configuredTenant == "" || narrowPdpAddr == "" || narrowTenant == "" ||
 		resourcePdpAddr == "" || resourceTenant == "" || envoyPdpAddr == "" || envoyTenant == "" || envoyAddr == "" ||
 		pdpProxyAddr == "" || proxyTenant == "" || grpcTargetAddr == "" || pepProxyAddr == "" ||
-		epochPdpAddr == "" || epochTenant == "" || pdpCacheAddr == "" || cacheTenant == "" {
+		epochPdpAddr == "" || epochTenant == "" || pdpCacheAddr == "" || cacheTenant == "" ||
+		mcpAddr == "" || mcpTenant == "" {
 		fmt.Fprintln(os.Stderr,
 			"STRATIUM_IT_DATABASE_URL, STRATIUM_IT_SERVING_DATABASE_URL, STRATIUM_IT_PAP_DATABASE_URL, "+
 				"STRATIUM_IT_PDP_ADDR, STRATIUM_IT_TENANT_ID, "+
@@ -371,7 +392,8 @@ func runTestMain(m *testing.M) int {
 				"STRATIUM_IT_RESOURCE_TENANT_ID, STRATIUM_IT_PDP_EXTAUTHZ_ADDR, STRATIUM_IT_EXTAUTHZ_TENANT_ID, "+
 				"STRATIUM_IT_ENVOY_ADDR, STRATIUM_IT_PDP_PROXY_ADDR, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_GRPC_TARGET_ADDR, "+
 				"STRATIUM_IT_PEP_PROXY_ADDR, STRATIUM_IT_PDP_EPOCH_ADDR, STRATIUM_IT_EPOCH_TENANT_ID, STRATIUM_IT_PDP_CACHE_ADDR, "+
-				"and STRATIUM_IT_CACHE_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
+				"STRATIUM_IT_CACHE_TENANT_ID, STRATIUM_IT_PDP_MCP_ADDR, "+
+				"and STRATIUM_IT_MCP_TENANT_ID must all be set — run via `make integration`, not `go test` directly")
 		return 1
 	}
 	// Phase 14 Task 8's own five, checked here rather than by lengthening the
@@ -406,13 +428,13 @@ func runTestMain(m *testing.M) int {
 
 	tenants := map[string]bool{
 		configuredTenant: true, narrowTenant: true, resourceTenant: true, secondTenantID: true, envoyTenant: true, proxyTenant: true,
-		epochTenant: true, cacheTenant: true, papTenant: true,
+		epochTenant: true, cacheTenant: true, papTenant: true, mcpTenant: true,
 	}
-	if len(tenants) != 9 {
+	if len(tenants) != 10 {
 		fmt.Fprintln(os.Stderr, "STRATIUM_IT_TENANT_ID, STRATIUM_IT_NARROW_TENANT_ID, STRATIUM_IT_RESOURCE_TENANT_ID, "+
 			"STRATIUM_IT_EXTAUTHZ_TENANT_ID, STRATIUM_IT_PROXY_TENANT_ID, STRATIUM_IT_EPOCH_TENANT_ID, "+
-			"STRATIUM_IT_CACHE_TENANT_ID, STRATIUM_IT_PAP_TENANT_ID, and the test's hardcoded second tenant "+
-			"must all be distinct from one another")
+			"STRATIUM_IT_CACHE_TENANT_ID, STRATIUM_IT_PAP_TENANT_ID, STRATIUM_IT_MCP_TENANT_ID, and the test's "+
+			"hardcoded second tenant must all be distinct from one another")
 		return 1
 	}
 
@@ -572,6 +594,22 @@ func runTestMain(m *testing.M) int {
 	fmt.Fprintf(os.Stdout, "%s reported SERVING after %s (this is the measured wait, not an assumption)\n", pdpCacheAddr, waited)
 	cacheConn = cacheGRPCConn
 	cacheAddr = pdpCacheAddr
+
+	// Dialed only to WAIT, and the client is dropped on the floor: nothing in
+	// this package ever calls pdp-mcp directly (see mcpAddr's own doc comment
+	// -- the `mcp` proxy subprocess dials it for itself). Waiting still has to
+	// happen here, before any test runs: `compose up --wait` returns when the
+	// container is RUNNING, which is before migrations.Up() and net.Listen
+	// have finished, and a proof whose FIRST act is exec'ing a subprocess
+	// against an address nothing is listening on yet would fail as an
+	// unreachable-PDP denial -- indistinguishable, from the test's side, from
+	// the surface genuinely failing closed.
+	_, closeMCPConn, err := dialAndWaitForServing(ctx, mcpAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pdp-mcp: %v\n", err)
+		return 1
+	}
+	defer closeMCPConn()
 
 	papClient, closePAPConn, err := dialAndWaitForServing(ctx, papPdpAddr)
 	if err != nil {

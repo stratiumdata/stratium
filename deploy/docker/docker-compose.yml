@@ -594,6 +594,61 @@ services:
     ports:
       - "50051"
 
+  # The PDP behind the `mcp` enforcement surface's live proofs
+  # (internal/store/mcp_e2e_integration_test.go) -- the LAST of the four
+  # surfaces §3.2 A2 claims to ship to be run against a real PDP at all.
+  # Unlike every other surface, `mcp` has no container of its own here: it is
+  # a stdio proxy, launched BY the test process with the upstream it wraps
+  # (services/cmd/mcp-upstream) as its own child. Only the PDP it calls is a
+  # service, so only the PDP is here.
+  #
+  # Its own tenant (tenant-mcp-integration), for the reason pdp-narrow,
+  # pdp-resource, pdp-extauthz, pdp-proxy, pdp-epoch, pdp-cache, and pdp-pap
+  # each state for themselves: these proofs seed policies and create
+  # delegations, and one of them REVOKES a delegation, which bumps
+  # tenant_epoch for every test unlucky enough to share the tenant. The same
+  # role-wide audit_chain revoke pdp-epoch's comment describes applies here
+  # too -- mcp_e2e_integration_test.go's filename sorts before
+  # store_integration_test.go's for exactly that reason.
+  #
+  # THIS IS THE NINTH DEDICATED PDP SERVICE IN THIS FILE, and that is
+  # accumulating debt worth naming rather than paying down here: the
+  # integration stack now carries roughly one PDP per phase that touches
+  # control-plane state, each ~1 container and ~1 tenant. Sharing a tenant
+  # would trade a known, fixed cost (a container) for an intermittent one
+  # (cross-test interference that reproduces only under a particular
+  # ordering), which is the worse trade -- see pdp-epoch's own comment for
+  # the live evidence that this class of failure is real and not theoretical.
+  # A future consolidation would need a different mechanism (per-test tenants
+  # against one PDP process, which the PDP's single startup-fixed
+  # STRATIUM_TENANT_ID currently forbids by design, N1), not a smaller
+  # version of this file.
+  #
+  # Shares the same postgres instance as the PDPs above (RLS keyed on
+  # STRATIUM_TENANT_ID keeps tenants apart). Full default policy-language
+  # registry (STRATIUM_POLICY_LANGUAGES left unset): these proofs only ever
+  # need cedar.
+  pdp-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-mcp-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      # See the "pdp" service's own comment on this variable above -- same
+      # build-time-generated key, same path, same reason.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      # See the "pdp" service's own comment on this variable above -- K9
+      # makes it required, so every PDP service sets one.
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
+    ports:
+      - "50051"
+
   # A REAL IdP, and the first component in this stack that authenticates a
   # human. Phase 14 Task 8's proofs need one because N2 (spec §8) leaves
   # exactly one way for an operator to reach the admin plane -- OIDC against
