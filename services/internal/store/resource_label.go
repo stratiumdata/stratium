@@ -54,12 +54,17 @@ const eventTypeResourceLabelRuleCreated = "resource_label_rule_created"
 //     order the planner chose. Naming all three columns costs nothing and does
 //     not depend on any constraint holding.
 //
-// It does NOT stabilise which of two same-prefix rules Resolve reports. Two
-// such rules disagree (a prefix carrying two answers), and Resolve refuses
-// ambiguity rather than picking by position — so there is no value here for an
-// order to stabilise. Where casing alone differs, this clause does now settle
-// it, but that is a side effect of ordering on the columns, not the reason for
-// it.
+// What it does for two same-prefix rules splits in two, and the halves are
+// easy to state as one sentence that is wrong:
+//
+//   - If they DISAGREE — a prefix carrying two answers — Resolve refuses the
+//     ambiguity rather than picking by position, so there is no value here for
+//     an order to stabilise.
+//   - If they agree once casing is folded, Resolve keeps whichever arrived
+//     first, and this clause does settle which that is. That is a side effect
+//     of ordering on the columns, not the reason for it, and it is worth no
+//     more weight than that: the two rows differ only in casing of strings the
+//     decision compares case-insensitively.
 const loadResourceLabelRulesQuery = `SELECT prefix, hierarchy, level ` +
 	`FROM resource_label_rules ORDER BY prefix, hierarchy, level`
 
