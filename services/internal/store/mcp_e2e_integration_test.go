@@ -1193,6 +1193,20 @@ func assertNoResultFrame(t *testing.T, p *mcpProxy, d time.Duration) {
 // Run 2's own initialize is the positive control: its record proves run 2's
 // upstream was up and writing, so the missing tools/call record is a
 // statement about that call rather than about the process.
+//
+// RUN 3 EXISTS BECAUSE MUTATION TESTING FOUND WHAT RUNS 1-2 DO NOT PIN. A
+// mutant that sent an EMPTY token (Token: "" in decideAndRelay's
+// DecideRequest) survived both of them: the initial Decide denies, and
+// reissueAndRetryDecide then rescues the call using the DELEGATION ID -- which
+// also comes from the session file -- so run 1 still allowed and run 2 still
+// denied "revoked", for a reason one field over from the one asserted. That is
+// not a defect (reissue.go exists precisely to rescue a stale token, and hook
+// behaves identically), but it means "the token specifically" is not what runs
+// 1-2 establish. What they establish, and what run 3 makes unambiguous, is
+// that the SESSION FILE is the credential path: remove it, send the
+// byte-identical frame that was allowed a moment ago, and the call is refused
+// naming the missing file. No frame content substitutes for it, because no
+// frame ever carried a credential in the first place.
 func TestIntegration_MCP_E2E_RevokedDelegationInSessionFileDenies(t *testing.T) {
 	f := newMCPFixture(t, "sessionfile")
 
@@ -1266,4 +1280,34 @@ func TestIntegration_MCP_E2E_RevokedDelegationInSessionFileDenies(t *testing.T) 
 	}
 	// And across the whole file: still exactly the one tools/call run 1 made.
 	assertRecordedTools(t, recs, mcpApprovedTool)
+
+	// Run 3: the session file itself is gone. Same agent id, same subject,
+	// same environment, same frame bytes -- the only thing removed is the one
+	// artifact the frames never carried.
+	if err := os.Remove(f.sessionFile); err != nil {
+		t.Fatalf("remove session file: %v", err)
+	}
+	beforeRun3 := len(recs)
+	run3 := f.start(t)
+	run3.send(initializeFrame("1"))
+	assertCallSucceededInit(t, decodeReply(t, run3.nextFrame(15*time.Second)))
+	run3.send(callFrame)
+	noSessionDenial := decodeReply(t, run3.nextFrame(20*time.Second))
+	if noSessionDenial.Error != nil {
+		t.Logf("live denial for the IDENTICAL frame with no session file at all -> code=%d message=%q",
+			noSessionDenial.Error.Code, noSessionDenial.Error.Message)
+	}
+	assertDenied(t, noSessionDenial, "no session file")
+	run3.closeStdin()
+	if code := run3.waitForExit(30 * time.Second); code != 0 {
+		t.Errorf("run 3 exit = %d, want 0; stderr: %s", code, run3.stderr.String())
+	}
+	run3Records := run3.records()[beforeRun3:]
+	if !recordedMethod(run3Records, "initialize") {
+		t.Fatalf("run 3's upstream recorded %+v, want its own initialize", run3Records)
+	}
+	if calls := toolCallRecords(run3Records); len(calls) != 0 {
+		t.Errorf("run 3 recorded %d tools/call: %+v -- with no session file there is no credential, and the "+
+			"call must not reach the upstream", len(calls), calls)
+	}
 }
