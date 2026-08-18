@@ -492,11 +492,48 @@ delegation, against exactly the cap the delegation exists to enforce — **D1**
 in its original form: a client asserting a security-relevant fact the server
 has no independent way to check and would simply believe.
 
-**The fix:** the PDP discards both keys unconditionally, on every path,
-*before* resolving the resource's label from the tenant's own rules. Not
-validated, not preferred-if-absent — discarded. A caller's assertion about its
-own resource's classification is never evidence, and the only path by which
-those two attributes may acquire a value is **R4**'s prefix rules.
+**The first fix, and why it was not enough.** The PDP discards both keys
+unconditionally, on every path, *before* resolving the resource's label from
+the tenant's own rules. Not validated, not preferred-if-absent — discarded.
+
+**That closed the value channel and left the selector.** Corrected 2026-08-18,
+same day, by the Task 3 review, after this requirement had already been
+written down as closed. `ApplyExtraction` returns the caller's `resource` map
+**unchanged** for any tool with no `tool_catalog` row, so on the uncataloged
+path the label is resolved against the caller's own `id` string — and a caller
+picks its classification by picking which rule it steers into:
+
+```
+rules /data/ → nato SECRET, /public/ → nato UNCLASSIFIED, caps {nato: CONFIDENTIAL}
+
+  id "/data/secret.txt"  →  SECRET        →  DENY
+  id "/public/decoy"     →  UNCLASSIFIED  →  ALLOW
+```
+
+**R4** had already ruled this out — *"the resource id is derived server-side
+(T2) … Naming a different resource changes what you get, not merely what you
+are permitted; lying does not pay"* — but that argument holds only where the
+id **is** derived server-side and **is** what the tool acts on. On the
+uncataloged path neither is true: nothing links `resource["id"]` to
+`raw_input`, so naming a decoy changes what you are permitted and costs
+nothing.
+
+**The complete fix:** label only an identity the PDP produced. The PDP resolves
+a label only when the tool is catalogued, and otherwise leaves the resource
+unlabelled — which **R2** then denies. Fail-closed, and it makes R4's own
+safety argument true by construction rather than by assumption.
+
+So: a caller's assertion about its own resource's classification is never
+evidence, **and neither is its assertion about which resource it is acting
+on.** The only path by which those two attributes may acquire a value is
+**R4**'s prefix rules applied to a server-derived id.
+
+**Recorded because of how it was nearly missed.** The first fix was correct,
+was reviewed, and was written into this spec as closed — and the closure
+sentence was the reason the remaining half was easy to miss. **A requirement
+that records a defect as closed makes the next reader stop looking there.**
+When closing one, state which channel was closed, not that the defect is
+gone.
 
 **The general rule, which is the part worth carrying:** *a safety argument
 attached to an input is a claim about the rest of the system, and it expires
