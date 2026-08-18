@@ -9,7 +9,10 @@
 // caller and passed in, no clock, no I/O, no ambient state.
 package classification
 
-import "strings"
+import (
+	"cmp"
+	"strings"
+)
 
 // Rule is one tenant's mapping from a resource-id prefix to a level in a
 // hierarchy. It is the row shape Task 2's table stores and the PDP reads;
@@ -58,11 +61,47 @@ type Match struct {
 	//
 	// It never aliases the caller's rule slice.
 	LoweredFrom *Rule
+
+	// SwitchedHierarchyFrom is the nearest rule this one overrode from a
+	// DIFFERENT hierarchy, and is nil unless the winner's hierarchy differs
+	// from it. It is the ruling on the case Task 1 surfaced and neither R6
+	// nor Task 2's uniqueness key resolves: a `commercial` PUBLIC carve-out
+	// beneath a `nato` TOP-SECRET rule makes the resource escape a nato cap
+	// entirely, because CheckCap consults one hierarchy per resource and a
+	// nato cap says nothing about commercial.
+	//
+	// Reported, not refused, and reported SEPARATELY from LoweredFrom.
+	//
+	// Not refused, because refusing would make a genuinely two-scheme tenant
+	// inexpressible — a commercial subtree inside a nato tree is a fact an
+	// operator may legitimately be recording, and "this configuration cannot
+	// be written" is the exact argument R6 used to reject highest-wins. The
+	// allow itself is not the defect: per-hierarchy caps are designed so
+	// that silence about a hierarchy is not a denial (R9 says so in as many
+	// words, for the known-hierarchy case it deliberately leaves allowing).
+	// What was missing was any signal at all, and that is what this closes.
+	//
+	// Not folded into LoweredFrom, because it is not a lowering and saying
+	// so would put a false claim in the operator's only signal: no ordering
+	// ranks a commercial level against a nato one, which is precisely why
+	// overriddenBy skips other hierarchies rather than comparing across
+	// them.
+	//
+	// No direction test, unlike LoweredFrom. A lowering is worth reporting
+	// only when it lowers; a hierarchy switch escapes the outer hierarchy's
+	// cap whichever hierarchy it moves to, so both directions are the same
+	// event and gating on one would hide half of them.
+	//
+	// It never aliases the caller's rule slice.
+	SwitchedHierarchyFrom *Rule
 }
 
 // Resolve returns the label for resourceID: the rule with the LONGEST
-// matching prefix (R6), and whether that rule lowered the classification
-// relative to the rule it overrode.
+// matching prefix (R6), plus the two things a caller cannot re-derive about
+// what winning cost — whether that rule lowered the classification within its
+// hierarchy (LoweredFrom, R6) and whether it left one (SwitchedHierarchyFrom).
+// Both are reports about the rule set, not about the decision, which the
+// winner alone settles.
 //
 // The second return is false when no rule matched. That is not a failure and
 // it is not "unclassified" — it is the absence of a label, and R2/R7 make it
@@ -124,7 +163,11 @@ func Resolve(rules []Rule, resourceID string) (Match, bool) {
 	if winner == nil || ambiguous {
 		return Match{}, false
 	}
-	return Match{Rule: *winner, LoweredFrom: overriddenBy(rules, resourceID, *winner)}, true
+	return Match{
+		Rule:                  *winner,
+		LoweredFrom:           overriddenBy(rules, resourceID, *winner),
+		SwitchedHierarchyFrom: switchedFrom(rules, resourceID, *winner),
+	}, true
 }
 
 // longestMatch finds the rule with the longest matching prefix, and reports
@@ -234,4 +277,52 @@ func overriddenBy(rules []Rule, resourceID string, winner Rule) *Rule {
 	// A copy: the caller's slice must not be reachable through a completed
 	// match.
 	return &overridden
+}
+
+// switchedFrom returns the nearest rule winner displaced from a DIFFERENT
+// hierarchy, or nil. See Match.SwitchedHierarchyFrom for the ruling this
+// implements and why it is a separate field rather than part of the lowering
+// report.
+//
+// The mirror image of overriddenBy's eligibility test, deliberately: that
+// one keeps only same-hierarchy rules, this one keeps only different-
+// hierarchy rules, and both fold case exactly as Index does. Every rule is
+// therefore eligible for exactly one of the two reports, so the pair can
+// never describe the same rule twice or drop one between them.
+//
+// No rank is consulted on either side, unlike overriddenBy, and no rule is
+// skipped for being unrankable. There is nothing to rank: the claim is that
+// the winner left a hierarchy, which is true of a `natoo` rule as much as a
+// `nato` one, and a rule this function skipped for a typo would be a
+// carve-out escaping a cap with nothing said about it — the very failure
+// this field exists to prevent.
+//
+// The tie-break is by hierarchy then level, for the reason overriddenBy
+// breaks its own tie: a tie means two rules on one identical prefix — the
+// pair Task 2's key forbids and this package still refuses to assume away —
+// and a report that named a different rule depending on the order rows
+// arrived in would be a warning an operator cannot reproduce. Length first,
+// though: the nearest rule left behind is the one worth naming.
+func switchedFrom(rules []Rule, resourceID string, winner Rule) *Rule {
+	var outer Rule
+	found := false
+	for _, r := range rules {
+		if len(r.Prefix) >= len(winner.Prefix) || !strings.HasPrefix(resourceID, r.Prefix) {
+			continue
+		}
+		if strings.EqualFold(r.Hierarchy, winner.Hierarchy) {
+			continue
+		}
+		if !found || len(r.Prefix) > len(outer.Prefix) ||
+			(len(r.Prefix) == len(outer.Prefix) &&
+				cmp.Or(strings.Compare(r.Hierarchy, outer.Hierarchy),
+					strings.Compare(r.Level, outer.Level)) < 0) {
+			outer, found = r, true
+		}
+	}
+	if !found {
+		return nil
+	}
+	// A copy, for the reason overriddenBy returns one.
+	return &outer
 }

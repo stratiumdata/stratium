@@ -432,6 +432,39 @@ pinned separately (`TestCheckCap_NoCapForThisHierarchyAllows`): a *known*
 hierarchy the caps do not mention allows, because silence is not a denial,
 and that test is what distinguishes this fix from a blanket denial.
 
+**R10 — a carve-out that changes HIERARCHY is reported, not refused.** Ruled
+2026-08-18 (Task 3), on the case Task 1 surfaced and neither **R6** nor Task
+2's uniqueness key resolves.
+
+Rules at *different* prefix lengths in different hierarchies are legal and
+collide: a `commercial` PUBLIC carve-out beneath a `nato` TOP-SECRET rule
+resolves to `commercial`, and a delegation capped on `nato` then has no cap
+that speaks to the resource at all. Task 2's `UNIQUE (tenant_id, prefix)` key
+cannot close it — that key catches one prefix carrying two answers, and this
+needs two *different* prefixes. **R9** does not close it either: it narrows
+the escape to *known* hierarchies, which is exactly where it was always
+reachable.
+
+**The allow is not the defect.** Per-hierarchy caps are built so that silence
+about a hierarchy is not a denial — R9 restates that in the same breath as it
+closes the unknown-hierarchy case — so allowing a genuinely `commercial`
+resource under a `nato`-only cap is the design working. What was missing was
+any *signal*: R6's lowering log cannot fire, because no ordering ranks a
+commercial level against a nato one, so this carve-out was the one kind that
+did something and said nothing.
+
+**Refusing was rejected** on R6's own argument against highest-wins: a tenant
+running two schemes side by side would find the configuration inexpressible,
+and the failure mode — total silent denial under that prefix — is worse than
+the one being fixed.
+
+So `Resolve` reports it in its own field (`Match.SwitchedHierarchyFrom`),
+never through `LoweredFrom`, and the PDP logs it as its own line. Folding the
+two together would put a false claim — "this was lowered" — in the one signal
+R6 exists to make trustworthy. The report is direction-free, unlike the
+lowering report: a switch escapes the outer hierarchy's cap whichever
+hierarchy it moves to.
+
 ---
 
 ### R1 — the PEP sends resource identity, never classification

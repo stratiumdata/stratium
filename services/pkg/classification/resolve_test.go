@@ -180,6 +180,155 @@ func TestResolve_CrossHierarchyOverrideIsNotReportedAsLowering(t *testing.T) {
 	}
 }
 
+// ...and it is reported as what it IS. A carve-out that moves a subtree into
+// another hierarchy escapes every cap on the one it left — a delegation
+// capped on nato has no cap on commercial, and CheckCap correctly allows —
+// so this is a carve-out doing something, which is exactly what R6 says an
+// operator must be able to see. Reporting it through LoweredFrom would put a
+// false claim in that signal; a separate field makes the true one available.
+func TestResolve_CrossHierarchyOverrideIsReportedAsAHierarchySwitch(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "TOP-SECRET"},
+		{Prefix: "/data/inner/", Hierarchy: "commercial", Level: "PUBLIC"},
+	}
+	m, ok := Resolve(rules, "/data/inner/x")
+	if !ok {
+		t.Fatal("a resource id covered by a rule must resolve to a label")
+	}
+	if m.SwitchedHierarchyFrom == nil {
+		t.Fatal("a carve-out that changes hierarchy escapes every cap on the outer one and must be reported")
+	}
+	if m.SwitchedHierarchyFrom.Prefix != "/data/" || m.SwitchedHierarchyFrom.Hierarchy != "nato" {
+		t.Errorf("got %+v, want the nato rule at /data/", *m.SwitchedHierarchyFrom)
+	}
+}
+
+// The escape is direction-independent, so the report must be too: a carve-out
+// into a HIGHER-sounding hierarchy escapes the outer hierarchy's cap exactly
+// as completely as one into a lower-sounding one. "Sounding" is the whole
+// point — there is no ordering between the two, which is why this cannot be
+// folded into the lowering report and why it cannot be gated on a direction.
+func TestResolve_HierarchySwitchIsReportedInEitherDirection(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "commercial", Level: "PUBLIC"},
+		{Prefix: "/data/inner/", Hierarchy: "nato", Level: "TOP-SECRET"},
+	}
+	m, ok := Resolve(rules, "/data/inner/x")
+	if !ok {
+		t.Fatal("a resource id covered by a rule must resolve to a label")
+	}
+	if m.SwitchedHierarchyFrom == nil {
+		t.Fatal("a carve-out into another hierarchy escapes the outer hierarchy's cap in both directions")
+	}
+	if m.SwitchedHierarchyFrom.Hierarchy != "commercial" {
+		t.Errorf("got %+v, want the commercial rule it left", *m.SwitchedHierarchyFrom)
+	}
+}
+
+// The mirror, and the one that keeps the two signals from collapsing into
+// each other: an ordinary lowering within ONE hierarchy is not a hierarchy
+// switch. Without this, "always report a switch" passes every test above and
+// tells an operator their nato carve-out left the nato scheme.
+func TestResolve_SameHierarchyLoweringIsNotAHierarchySwitch(t *testing.T) {
+	m, ok := Resolve(natoSecretTree(), "/data/reports/q3.pdf")
+	if !ok {
+		t.Fatal("fixture must resolve")
+	}
+	if m.SwitchedHierarchyFrom != nil {
+		t.Errorf("a carve-out inside one hierarchy has not switched hierarchies, got %+v",
+			*m.SwitchedHierarchyFrom)
+	}
+}
+
+// Hierarchy comparison folds case, the same fold Index and agree apply. A
+// rule set spelling one hierarchy two ways is a casing difference the
+// decision cannot even see, and reporting it as a scheme change would send an
+// operator hunting for a carve-out that does not exist.
+func TestResolve_HierarchySwitchFoldsCaseLikeIndex(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "NATO", Level: "SECRET"},
+		{Prefix: "/data/inner/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	m, ok := Resolve(rules, "/data/inner/x")
+	if !ok {
+		t.Fatal("fixture must resolve")
+	}
+	if m.SwitchedHierarchyFrom != nil {
+		t.Errorf("NATO and nato are one hierarchy, got %+v", *m.SwitchedHierarchyFrom)
+	}
+	if m.LoweredFrom == nil {
+		t.Error("and the lowering within that one hierarchy must still be reported")
+	}
+}
+
+// The NEAREST rule left behind is the one an operator needs named — the same
+// choice overriddenBy makes for a lowering. A farther outer rule is present
+// so a first-match implementation reports the wrong one.
+func TestResolve_HierarchySwitchNamesTheNearestOuterRule(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/data/", Hierarchy: "nato", Level: "CONFIDENTIAL"},
+		{Prefix: "/data/inner/", Hierarchy: "commercial", Level: "PUBLIC"},
+	}
+	m, ok := Resolve(rules, "/data/inner/x")
+	if !ok {
+		t.Fatal("fixture must resolve")
+	}
+	if m.SwitchedHierarchyFrom == nil {
+		t.Fatal("fixture must report a hierarchy switch")
+	}
+	if m.SwitchedHierarchyFrom.Prefix != "/data/" {
+		t.Errorf("got overridden prefix %q, want /data/ (the nearest rule the carve-out left)",
+			m.SwitchedHierarchyFrom.Prefix)
+	}
+}
+
+// Two shorter rules on one prefix, in two hierarchies both different from the
+// winner's — the pair Task 2's UNIQUE (tenant_id, prefix) forbids, reachable
+// only through a stale read, an in-flight migration, or a direct psql write,
+// which is exactly the set of worlds this package refuses to assume away. The
+// decision is settled by an unambiguous winner either way, so only the report
+// is at stake, and it must name the same rule on every run rather than
+// whichever row the planner returned first.
+func TestResolve_HierarchySwitchTieIsBrokenDeterministically(t *testing.T) {
+	forward := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/data/", Hierarchy: "natoo", Level: "SECRET"},
+		{Prefix: "/data/inner/", Hierarchy: "commercial", Level: "PUBLIC"},
+	}
+	reversed := []Rule{forward[1], forward[0], forward[2]}
+
+	a, ok := Resolve(forward, "/data/inner/x")
+	if !ok || a.SwitchedHierarchyFrom == nil {
+		t.Fatal("fixture must resolve and report a hierarchy switch")
+	}
+	b, ok := Resolve(reversed, "/data/inner/x")
+	if !ok || b.SwitchedHierarchyFrom == nil {
+		t.Fatal("fixture must resolve and report a hierarchy switch in either order")
+	}
+	if *a.SwitchedHierarchyFrom != *b.SwitchedHierarchyFrom {
+		t.Errorf("slice order changed the reported rule: %+v vs %+v",
+			*a.SwitchedHierarchyFrom, *b.SwitchedHierarchyFrom)
+	}
+}
+
+// The switch report must not alias the caller's slice either, for the reason
+// TestResolve_ReportDoesNotAliasTheCallersRules gives for the lowering one.
+func TestResolve_HierarchySwitchDoesNotAliasTheCallersRules(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/data/inner/", Hierarchy: "commercial", Level: "PUBLIC"},
+	}
+	m, ok := Resolve(rules, "/data/inner/x")
+	if !ok || m.SwitchedHierarchyFrom == nil {
+		t.Fatal("fixture must report a hierarchy switch")
+	}
+	rules[0].Level = "TOP-SECRET"
+	if m.SwitchedHierarchyFrom.Level != "SECRET" {
+		t.Errorf("the report aliased the caller's slice: got %q, want SECRET", m.SwitchedHierarchyFrom.Level)
+	}
+}
+
 // R7/R2: no rule matched means NO label, never a default one. The caller
 // must be able to tell this apart from a resolved label, because CheckCap
 // denies on an unlabelled resource and that denial is the whole point.
