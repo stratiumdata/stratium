@@ -372,37 +372,60 @@ func TestC16_FailedAuditWriteDeniesAction(t *testing.T) {
 	provenElsewhere(t, 16, in("internal/store", "TestEndToEnd"))
 }
 
-// C17's reason was re-checked in Phase 14 Task 8 rather than assumed, and
-// AGAIN in Phase 15 Task 7. Its SUBSTANCE still holds: nothing in this tree
-// encrypts an audit row's stored plaintext or has a per-tenant key to
-// destroy. migrations/000003_audit_chain.up.sql and pkg/audit/chain.go both
-// still say so in as many words, verbatim and unchanged.
+// C17 was RESTATED on 2026-08-18, not converted and not deleted. Spec §7 now
+// reads "a decision's raw input is never retained; only its digest is
+// recorded." What it read before was "crypto-shredding a tenant's key renders
+// inputs unrecoverable while the chain still verifies."
 //
-// Two key-shaped subsystems now exist and neither is a step toward this one,
-// which is worth naming because both look like one from a distance:
+// The old wording presumed this system retains decision inputs encrypted
+// under a per-tenant key. IT DOES NOT, AND DELIBERATELY. §4.9 records
+// input_digest — a SHA-256 — and never the input, so the inputs the property
+// wanted made unrecoverable are unrecoverable already, with no key to hold
+// and none to destroy. Never recording is STRONGER than encrypt-then-shred:
+// there is no ciphertext to mishandle, no key-destruction procedure to get
+// right, and no window in which a leaked key exposes history. The old row
+// therefore could not be built as written without first ADDING the retention
+// it then protected against — trading the posture for the capability.
 //
-//   - internal/token's signing key (K1) is ONE process-wide ES256 pair used
-//     to sign this system's OWN delegation tokens. Not per tenant, not
-//     destroyable without invalidating every tenant at once, and it protects
-//     no stored plaintext. token.go's own doc says it plainly: "this package
-//     does no key management beyond signing and verifying."
-//   - internal/dpop (Phase 15) is the one most likely to be misread as
-//     progress, since it handles JWKs, thumbprints, and a cnf.jkt
-//     confirmation claim. Every key it touches is the CLIENT's, and only its
-//     public half — a jkt is a fingerprint carried inside a token, not a key
-//     this system holds, stores, or could shred. The one table the phase
-//     added, spent_proofs (migration 000018), stores a tenant id, a jti, and
-//     an expiry: no key material, and nothing encrypted.
+// §8 assumed otherwise ("§4.9 depends on per-tenant keys for
+// crypto-shredding") because it was written before §4.9 was built. That
+// premise was overtaken; §8 now records it as resolved rather than pending.
 //
-// The "Phase 2+" prefix, however, had gone stale twelve phases ago and is
-// dropped: a phase number nobody revisits turns a live reason into an
-// archaeological one. What is missing is named instead.
-func TestC17_CryptoShreddingPreservesChain(t *testing.T) {
+// The restated property is not a triviality, and the difference is DRIFT.
+// "Never retained" becomes "retained and hopefully protected" the moment
+// someone adds an input column for dry-run replay or to debug a support
+// ticket, and nothing about that change looks alarming in isolation. The two
+// pointers below are drift guards: neither can fail today, both fail the
+// moment retention is introduced, and each names the property in its own
+// failure message so the person who trips it learns why it matters.
+//
+// TWO THINGS THIS DOES NOT SOLVE, recorded so the tally cannot be misread as
+// closing them:
+//
+//   - N6, dry-run replay, STAYS BLOCKED. It needs the input to re-derive a
+//     tier and a digest cannot supply one. Retiring the old C17 does not
+//     unblock it; it confirms the block is a deliberate retention choice
+//     rather than a missing subsystem. §8 carries that.
+//   - The chain's OTHER tenant-identifying columns — actor, tool_name,
+//     action, reason — have no erasure story. That is what a real erasure
+//     request targets, and the old C17's wording never covered it either.
+//     Now its own §8 entry rather than something this restatement absorbs.
+//
+// The two key-shaped subsystems in this tree remain unrelated to any of it,
+// which is worth keeping because both look relevant from a distance:
+// internal/token holds ONE process-wide signing pair (K1) that protects no
+// stored plaintext and could not be destroyed per tenant; internal/dpop only
+// ever sees a CLIENT's public key, and a jkt is a fingerprint carried inside
+// a token, not a key this system holds.
+//
+// PROVEN ELSEWHERE, not a pass: one guard needs reflection over a type in
+// pkg/audit and the other needs a live information_schema read. This package
+// has no database handle and does not import pkg/audit.
+func TestC17_RawInputIsNeverRetained(t *testing.T) {
 	markRan(17)
-	notBuilt(t, 17, "no encrypted audit plaintext and no per-tenant key management exists yet "+
-		"(spec §8; migrations/000003_audit_chain.up.sql and pkg/audit/chain.go both defer it). "+
-		"Neither key-shaped subsystem in this tree is a step toward it: internal/token holds one "+
-		"process-wide signing pair, and internal/dpop only ever sees a client's own public key")
+	provenElsewhere(t, 17,
+		in("pkg/audit", "TestEntry_RecordsOnlyADigestOfTheInput"),
+		in("internal/store", "TestIntegration_AuditChain_RetainsADigestNeverTheInput"))
 }
 
 // C18 reads "a cross-tenant read is impossible at the data layer, not
@@ -848,7 +871,7 @@ var conformanceNames = map[int]string{
 	14: "TestC14_PolicyCannotExceedCeiling",
 	15: "TestC15_AuditChainDetectsMutation",
 	16: "TestC16_FailedAuditWriteDeniesAction",
-	17: "TestC17_CryptoShreddingPreservesChain",
+	17: "TestC17_RawInputIsNeverRetained",
 	18: "TestC18_CrossTenantReadImpossible",
 	19: "TestC19_UnreachablePDPDenies",
 	20: "TestC20_StaleEpochCacheEntryNotServed",

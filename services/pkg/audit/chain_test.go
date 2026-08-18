@@ -200,3 +200,54 @@ func TestLink(t *testing.T) {
 		t.Fatalf("a linked chain must verify: %v", err)
 	}
 }
+
+// TestEntry_RecordsOnlyADigestOfTheInput is half of conformance property C17
+// (internal/authz/conformance_test.go), and it is a drift guard rather than a
+// behavioural check: nothing here can fail today, and that is the point.
+//
+// C17 originally read "crypto-shredding a tenant's key renders inputs
+// unrecoverable while the chain still verifies" -- a property that presumed
+// this system retains decision inputs encrypted. It does not. Spec 4.9
+// records the SHA-256 of the raw input and never the input itself, so the
+// inputs are unrecoverable already, by construction, with no key to hold and
+// none to destroy. Never recording is a stronger guarantee than encrypting
+// and shredding: there is no ciphertext to mis-handle and no key-destruction
+// procedure to get wrong.
+//
+// What that guarantee actually needs is protection from DRIFT. Someone adds
+// raw-input retention for dry-run replay, or for debugging a support ticket,
+// and a "never retained" property silently becomes "retained and hopefully
+// protected." This pins Entry's field set by NAME so that addition cannot be
+// made without editing this list, which puts the decision in front of a
+// reviewer. TestHash_CoversEveryField already pins the COUNT -- that catches
+// a field added and left out of the hash; this catches a field added at all.
+func TestEntry_RecordsOnlyADigestOfTheInput(t *testing.T) {
+	want := []string{
+		"PrevHash", "TenantID", "OccurredAt", "EventType", "Actor",
+		"AgentID", "DelegationID", "RootDelegationID", "ChainDepth",
+		"ToolName", "Action", "DeclaredTier", "DerivedTier", "Decision",
+		"DeniedLeg", "DeniedAtDepth", "Reason", "PolicySource", "PolicyID",
+		"UnevaluatedPolicyIDs", "InputDigest",
+	}
+
+	et := reflect.TypeOf(Entry{})
+	var got []string
+	for i := range et.NumField() {
+		got = append(got, et.Field(i).Name)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Entry's fields changed.\n got: %v\nwant: %v\n\n"+
+			"If you added a field that can carry a decision's RAW INPUT rather than a "+
+			"digest of it, C17 is no longer true and the conformance suite must say so "+
+			"instead of this list being widened. If the new field carries something else, "+
+			"add it here and to TestHash_CoversEveryField's mutation table.", got, want)
+	}
+
+	// The digest is a fixed-width hash, not a string that could hold the
+	// input itself. A [32]byte cannot be widened into plaintext without
+	// changing the type, which this assertion would catch.
+	if f, _ := et.FieldByName("InputDigest"); f.Type != reflect.TypeOf([32]byte{}) {
+		t.Fatalf("InputDigest is %v, want [32]byte -- a digest, not a value that could carry the input", f.Type)
+	}
+}

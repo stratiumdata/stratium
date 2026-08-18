@@ -59,6 +59,17 @@ var conformanceOutcome [26]outcome
 // must name what is missing; an empty reason is rejected because "not
 // built, for no stated reason" is not a claim anyone could check, which is
 // the same complaint this file exists to fix about a bare t.Skip.
+//
+// CURRENTLY UNUSED, AND DELIBERATELY KEPT (2026-08-18). C17 was its last
+// caller until that property was restated to one this system actually holds,
+// leaving every property either passing or proven elsewhere. It is not
+// deleted, because deleting it removes the honest option: the next property
+// that genuinely is not built would find provenElsewhere the only helper to
+// hand, and reach for it with a thin pointer. This suite has corrected that
+// exact overclaim more than once. Ten lines of dead code is the cheaper
+// mistake.
+//
+//nolint:unused // deleting this makes the wrong classification the convenient one — see above.
 func notBuilt(t *testing.T, cNum int, reason string) {
 	t.Helper()
 	if strings.TrimSpace(reason) == "" {

@@ -1764,7 +1764,7 @@ acceptance criteria for the redesign and as diligence evidence.
 | C14 | A policy cannot grant beyond the delegation artifact's ceiling. |
 | C15 | The audit chain verifies end to end; a mutated row is detected. |
 | C16 | An action whose audit write fails is denied. |
-| C17 | Crypto-shredding a tenant's key renders inputs unrecoverable while the chain still verifies. |
+| C17 | A decision's raw input is never retained; only its digest is recorded. (Restated 2026-08-18 — see §8.) |
 | C18 | A cross-tenant read is impossible at the data layer, not merely absent from queries. |
 | C19 | With the PDP unreachable and no valid cache entry, every surface denies. |
 | C20 | A cache entry from a superseded revocation epoch is never served. |
@@ -1789,7 +1789,8 @@ Decided during implementation unless raised sooner.
 | Hosted-tier signup identity | Bring-your-own-IdP has no answer for the hosted tier's own account creation. |
 | Demo IdP | With Keycloak gone, demos and local development need an OIDC provider. |
 | Default for unknown tools | Deny, or a configured floor tier (§4.4 step 4). Likely tenant-configurable. |
-| Per-tenant encryption key management | §4.9 depends on per-tenant keys for crypto-shredding, but where they live, how they rotate, and who can destroy them is unspecified. Destroying a key is irreversible data loss, so the authorization model around that operation matters. |
+| ~~Per-tenant encryption key management~~ **Resolved 2026-08-18 — not needed** | This entry read: *"§4.9 depends on per-tenant keys for crypto-shredding."* It does not, and the premise was overtaken by the build. §4.9 records `input_digest`, a SHA-256, and **never the raw input** — so there is no stored plaintext to encrypt, no key to hold, and none to destroy. Never recording is a stronger guarantee than encrypt-then-shred: no ciphertext to mishandle, no key-destruction procedure to get wrong, no window in which a leaked key exposes history. Building the original C17 would have required **first adding the retention it then protected against**. C17 is restated accordingly (§7); the drift guards that hold it are named in `internal/authz/conformance_test.go`. |
+| Erasure of a tenant's audit history | The audit chain retains `actor`, `tool_name`, `action`, and `reason` per decision. That is the tenant-identifying content a real erasure request targets, and **nothing addresses it** — the old C17 did not either, since its wording only ever covered *inputs*. Surfaced by C17's restatement (2026-08-18) rather than absorbed by it. Hash-over-digest makes selective erasure feasible in principle: the chain covers `input_digest`, not those columns. The hard part is not the cryptography but the authorization model — who may erase, and how an append-only chain records that an erasure happened. |
 | Trust-tier table overrides | §4.3 extends raise-only overrides to `actionTier → requiredTrustTier` by analogy with the action-tier table. Confirm or reverse. |
 | Resource classification source | §3.9 R2/R3. No component supplies a resource's classification today; ZTDF was the prior source and was removed (§5.1). `CheckCap` now denies rather than silently passing when one is absent (correct — see R2), but that only makes the gap loud. Closing it needs a tenant-configured labelling mechanism — a resource registry, tags synced from wherever the underlying storage already classifies content, or an equivalent the tenant controls — not built here. |
 
@@ -1797,7 +1798,13 @@ Decided during implementation unless raised sooner.
 
 Three places where two sound decisions rub. None blocks implementation; each needs a call.
 
-1. **Dry-run replay vs. crypto-shredding.** Policy authoring replays recorded decision inputs.
+1. **Dry-run replay has no inputs to replay (2026-08-18).** This item anticipated a conflict
+   between replay and shredding. There is no conflict, because there is nothing shredded and
+   nothing retained: §4.9 stores only `input_digest`. **N6 (dry-run replay) is therefore blocked
+   by a deliberate retention choice, not by a missing subsystem** — a replay can reuse a recorded
+   derived tier but cannot re-derive one. Unblocking it means deciding to retain inputs, which is
+   a posture change and belongs in its own design, not a task. The original text follows.
+   ~~Policy authoring replays recorded decision inputs.
    Erased tenants lose replay for shredded records. Likely resolution: replay operates on redacted
    or digest-only inputs, with full-fidelity replay available only within the retention window.
 
