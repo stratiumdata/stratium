@@ -91,6 +91,41 @@ import (
 // package today, so this is a named limit rather than a pattern.
 var tenantPredicate = regexp.MustCompile(`(?i)(^|[^a-z0-9_])tenant_id\s*(=|<>|!=|<|>|\bIN\s*\()`)
 
+// filterKeyword is the SQL clause that makes a comparison a FILTER rather
+// than prose. tenantFilterFound requires one before the tenant_id.
+var filterKeyword = regexp.MustCompile(`(?i)\b(WHERE|AND|OR|ON|HAVING|USING)\b`)
+
+// tenantFilterFound reports whether text filters by tenant_id: the name
+// followed by a comparison (tenantPredicate) AND preceded, somewhere earlier
+// in the same string, by a SQL clause keyword.
+//
+// The second half is not decoration. tenantPredicate alone matches any string
+// reading "tenant_id =", including an ordinary Go error message —
+// `"store: tenant_id" + " = " + id` folds to `store: tenant_id = ` and was
+// reported as a tenant filter. That is a false positive on an unrelated
+// commit touching an unrelated message, which is how a guard stops being
+// trusted and then stops existing (migrations_test.go's swallowedStatement
+// comment makes the same argument about bare semicolons in prose).
+//
+// Worth being exact about the provenance, because it was misattributed once:
+// this class does NOT come from the literal-projection branch added for a
+// split predicate. Gating that branch left the finding in place, which is
+// what showed the match was coming from the main fold path all along — the
+// chain's inner sub-expression `"store: tenant_id" + " = "` is fully
+// foldable, so it folds and matches like any other string. The class predates
+// the projection branch; the projection branch merely made it easy to notice.
+//
+// Every real filter carries a clause keyword — a redundant predicate is
+// WHERE/AND tenant_id, and a redundant join is USING (tenant_id). The one
+// shape this gives up is a predicate whose clause keyword lives in a
+// different constant from its tenant_id, which needs the split to fall
+// between them; the projection branch covers the split that falls inside the
+// predicate, which is the one this package's const-append shape produces.
+func tenantFilterFound(text string) bool {
+	loc := tenantPredicate.FindStringIndex(text)
+	return loc != nil && filterKeyword.MatchString(text[:loc[0]])
+}
+
 // sqlStatement recognises a string that carries a SQL statement, which is
 // what scanForTenantPredicates counts so its caller can tell "found no
 // violations" apart from "looked at nothing". It is only ever used for that
@@ -183,7 +218,8 @@ func scanForTenantPredicates(dir string) ([]tenantFilterFinding, int, error) {
 				// base + ` WHERE tenant_id` + ` = $1` — is caught here and
 				// nowhere else: the full fold cannot see it and neither
 				// literal matches alone.
-				if parts, isChain := literalParts(expr); isChain && tenantPredicate.MatchString(parts) {
+				//
+				if parts, isChain := literalParts(expr); isChain && tenantFilterFound(parts) {
 					findings = append(findings, tenantFilterFinding{
 						Pos:   fset.Position(expr.Pos()).String(),
 						Query: parts,
@@ -195,7 +231,7 @@ func scanForTenantPredicates(dir string) ([]tenantFilterFinding, int, error) {
 			if sqlStatement.MatchString(text) {
 				examined++
 			}
-			if tenantPredicate.MatchString(text) {
+			if tenantFilterFound(text) {
 				findings = append(findings, tenantFilterFinding{
 					Pos:   fset.Position(expr.Pos()).String(),
 					Query: text,
@@ -389,6 +425,8 @@ const insertThingQuery = ` + "`" + `INSERT INTO things (tenant_id, name, kind) `
 const selectThingQuery = ` + "`" + `SELECT id, tenant_id, name FROM things WHERE id = $1` + "`" + `
 
 const setTenantFixtureQuery = ` + "`" + `SELECT set_config('app.tenant_id', $1, true)` + "`" + `
+
+var errThingNotFound = ` + "`" + `store: tenant_id` + "`" + ` + ` + "`" + ` = ` + "`" + ` + thingID
 `
 	dir := fixturePackage(t, map[string]string{"things.go": src})
 
@@ -403,7 +441,8 @@ const setTenantFixtureQuery = ` + "`" + `SELECT set_config('app.tenant_id', $1, 
 	}
 	if len(findings) != 0 {
 		t.Errorf("scan flagged %v; tenant_id as an INSERT column, a selected column, a RETURNING column, "+
-			"and the app.tenant_id session setting are all correct and must pass", findings)
+			"the app.tenant_id session setting, and an ordinary concatenated error string that happens to "+
+			"read `tenant_id = ` are all correct and must pass", findings)
 	}
 }
 
@@ -585,6 +624,32 @@ func constValues(files []*ast.File) map[string]string {
 				for i, name := range vs.Names {
 					value := ""
 					if i < len(vs.Values) {
+						// ponytail: a DERIVED const -- one whose value names
+						// another const rather than folding to literals --
+						// records "" here, so it is never classified as a query
+						// and never reconciled. That is a real leak inside the
+						// channel unreachedQueryConsts claims to close, and the
+						// asymmetry is the part worth seeing: the REFERENCE side
+						// handles the const-append shape deliberately and says so
+						// (see unreachedQueryConsts), while this, the CONSTANT
+						// side, drops it silently.
+						//
+						// Exactly one exists today: loadApprovalForUpdateQuery
+						// (approval.go), = loadApprovalQuery + ` FOR UPDATE`.
+						// Renaming its call at approval.go:267 to a method
+						// dbQueryMethods does not know takes that call site out
+						// of coverage silently -- verified: examined drops 43 to
+						// 42, unreached stays empty, both scans stay green --
+						// because loadApprovalQuery is still referenced by its
+						// own call at :93. One call site of 43.
+						//
+						// Left as a named limit rather than fixed because the
+						// failure it hides is bounded at one call site and the
+						// bulk case still fires: a migration that renames calls
+						// wholesale takes the literal-valued consts with it, and
+						// those do orphan. The fix, if a second derived const
+						// appears, is to fold const-to-const references here --
+						// a fixpoint over this map, not a one-pass walk.
 						value, _ = stringExprValue(vs.Values[i])
 					}
 					values[name.Name] = value
@@ -629,15 +694,39 @@ func forEachDBCall(files []*ast.File, fn func(method string, arg ast.Expr)) {
 // hand-maintained, and a call whose method name is not in it is not examined
 // and does not exist as far as either scan is concerned — adopting sqlx or
 // pgx incrementally is an ordinary refactor, not an evasion, and it would
-// quietly take call sites out of coverage while both tests stayed green. The
-// floor cannot see that: dropping 12 of 43 calls still clears 30.
+// quietly take call sites out of coverage while both tests stayed green.
+// Verified by renaming catalog.go's and policy.go's calls: 11 of 43 call
+// sites left coverage (examined 43 -> 32) and the floor stayed quiet, since
+// 32 clears 30. An independent run over a slightly different rename set moved
+// 12 (-> 31). Which calls you rename changes the count; that the floor cannot
+// see it is the invariant.
 //
 // The cross-check is independent because it is derived from a different part
 // of the syntax tree. The query constants come from string-literal
 // declarations; the reference set comes from call expressions. Renaming a
 // call leaves its query constant exactly where it was, so the constant goes
-// unreferenced and is named here. Both would have to fail in the same
-// direction, at once, to stay silent together.
+// unreferenced and is named here.
+//
+// Stronger than "they share no code": under the defect the two sides move in
+// OPPOSITE directions. Shrinking dbQueryMethods shrinks the reference set, so
+// orphans appear here, while it also shrinks examined, so the floor goes
+// quieter. No single edit quiets both — zeroing forEachDBCall trips both
+// floors at once, and widening reference extraction to every identifier in
+// the file is killed by TestQueryConstReconciliation_CatchesAnUnscannedCall's
+// fixture. That opposition is why the mechanism works, not the absence of
+// shared code.
+//
+// SCOPE, stated narrowly on purpose. What is demonstrably closed is: an
+// existing, directly-referenced, LITERAL-VALUED query constant silently
+// leaving the scans' coverage. Two things sit inside that boundary and are
+// not covered. A derived const (see constValues' own comment) is never
+// classified as a query, so its call site can be renamed silently — one of 43
+// today. And greenfield code that never had a query constant orphans nothing:
+// db.SelectContext(ctx, out, fmt.Sprintf("... WHERE %s = $1", col)) is
+// invisible here, because reconciliation asks where the queries WENT and a
+// query that was never a const never went anywhere. The composition degrades
+// rather than collapses there — the tenant scan is method-agnostic, so the
+// literal-predicate variant of that same shape is still caught by it.
 //
 // This is the every-run form of the reconciliation migrations_test.go's
 // reconcileTableCount performs, and which the first version of this file did
@@ -646,10 +735,11 @@ func forEachDBCall(files []*ast.File, fn func(method string, arg ast.Expr)) {
 // ponytail: the alternative considered was asserting that no production file
 // imports a SQL library other than database/sql and lib/pq (today's only
 // non-stdlib imports here are lib/pq and google/uuid). That is fewer lines
-// but strictly weaker: it catches a new dependency, not a hand-rolled
+// but weaker on one axis: it catches a new dependency, not a hand-rolled
 // wrapper type in this package with a Fetch method. Reconciliation catches
-// both, because it asks where the queries went rather than what was
-// imported.
+// that too — but only when the query reaching the wrapper is an existing
+// literal-valued const, per the scope paragraph above. Neither mechanism sees
+// a wrapper called with SQL that was never a const.
 func unreachedQueryConsts(dir string) ([]string, int, error) {
 	_, files, err := parseProductionFiles(dir)
 	if err != nil {
@@ -704,10 +794,13 @@ func unreachedQueryConsts(dir string) ([]string, int, error) {
 // and only then does the cross-file const set get consulted. That set is
 // still needed: resolution does not cross files.
 //
-// A package-level var holding SQL resolves to ast.Var and is rejected, which
-// is correct rather than incidental — //go:embed writes SQL into a var, and
-// SQL that arrives from outside the scanned source is exactly what neither
-// scan can read.
+// A package-level var holding SQL resolves to ast.Var and is rejected. That
+// is the outcome we want, though not for the reason a shorter comment would
+// give: //go:embed writes SQL into a var and the scans genuinely cannot read
+// it, but an in-source `var q = ` + "`" + `... WHERE tenant_id = $1` + "`" + ` is rejected here too
+// and the tenant scan CAN read that one. Rejecting both is still right,
+// because the fix in either case is "make it a const" — which is what these
+// scans are built on and what we want regardless.
 func staticSQLArg(expr ast.Expr, consts map[string]bool) bool {
 	switch e := expr.(type) {
 	case *ast.BasicLit:
@@ -724,11 +817,20 @@ func staticSQLArg(expr ast.Expr, consts map[string]bool) bool {
 	}
 }
 
-// literalParts concatenates every string literal in a + chain in source
-// order, skipping the operands that are not literals, and reports whether
-// expr was a + chain at all. It is the fallback for what stringExprValue
-// refuses to fold; a chain of one literal is not a chain, so an ordinary
-// string is left to the main path.
+// literalParts concatenates string literals found anywhere inside a + chain,
+// in source order, and reports whether expr was a + chain at all. It is the
+// fallback for what stringExprValue refuses to fold; a single literal is not
+// a chain, so an ordinary string is left to the main path.
+//
+// "Anywhere inside" is literal: this descends INTO non-literal operands and
+// harvests their literals too, rather than skipping them. Under the
+// query-const gate at its only call site that distinction cannot arise — a
+// const's value must be a constant expression, so an operand there can never
+// be a call — but the behaviour is worth stating rather than implied, because
+// on an ungated chain it changes the answer in both directions. It destroys a
+// match: `"WHERE tenant_id" + fmt.Sprintf("%s", v) + " = $1"` projects to
+// `WHERE tenant_id%s = $1`, which does not match. And it manufactures one out
+// of fragments that were never adjacent. Both verified.
 func literalParts(expr ast.Expr) (string, bool) {
 	bin, ok := expr.(*ast.BinaryExpr)
 	if !ok || bin.Op != token.ADD {
