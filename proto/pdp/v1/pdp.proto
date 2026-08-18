@@ -95,18 +95,29 @@ message DecideRequest {
   // into one asserting the lowest-sensitivity tier there is.
   optional int32 declared_tier = 7;
 
-  // resource carries attributes the classification and delegation-scope
-  // checks read (e.g. classification hierarchy levels). Caller-supplied and
-  // untrusted like every other field here — it narrows what a delegation
-  // permits, it does not widen it. Neither PEP in this repo populates this
-  // anymore: cmd/stratium-pep sends only tool and raw_input (spec §4.4.2 T3)
-  // and leaves this field unset. A cataloged tool's resource identity is
+  // resource carries attributes the delegation-scope checks read: the
+  // resource's IDENTITY, and any other opaque key a delegation's
+  // resource_constraints might name. Caller-supplied and untrusted like every
+  // other field here. Neither PEP in this repo populates this anymore:
+  // cmd/stratium-pep sends only tool and raw_input (spec §4.4.2 T3) and
+  // leaves this field unset. A cataloged tool's resource identity is
   // extracted server-side instead, from raw_input, by
   // internal/authz.ExtractFromCatalog, which replaces whatever this field
   // carries; an uncataloged tool passes it through unchanged, which for
   // every caller in this repo today is simply empty. The field itself stays
   // on the contract for a caller this repo does not control that has a real,
   // externally-verified resource identity to assert.
+  //
+  // Two keys are NOT read from here and are discarded before any leg sees
+  // them: "classification" and "hierarchy". The PDP resolves both from the
+  // tenant's own resource_label_rules (spec §3.9.1 R4,
+  // internal/pdpgrpc/label.go), because a classification is a
+  // security-relevant fact the server cannot check a caller's word on —
+  // spec §3.9 R1, the same ruling that keeps every PEP in this repo from
+  // sending one. An earlier version of this comment said the map could only
+  // narrow what a delegation permits; that stopped being true when R2 made
+  // an unlabelled resource DENY, since a claimed low classification would
+  // then have turned a denial into an allow.
   map<string, string> resource = 8;
 
   // approval_id, when set, names a pending approval this call should

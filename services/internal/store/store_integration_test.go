@@ -145,6 +145,7 @@ import (
 	"stratium/internal/token"
 	"stratium/migrations"
 	"stratium/pkg/audit"
+	"stratium/pkg/classification"
 	"stratium/pkg/models"
 )
 
@@ -2065,11 +2066,24 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	// and internal/authz's TestDelegationLeg_DeniesConfiguredCapWhenResourceHasNoClassification,
 	// at the live-stack layer instead of the unit layer, with the audit row
 	// read back from Postgres rather than only the RPC response.
+	//
+	// The exceeding half is labelled by a real resource_label_rules row
+	// (§3.9.1 R4), not by the request. It used to be asserted on the wire,
+	// which was the only source of a classification that existed at the time
+	// — R3's gap. Resource labelling closed that gap and, with it, the reason
+	// to believe a caller about it at all: the PDP now owns the
+	// classification and hierarchy attributes and discards whatever the wire
+	// carried under those names (R1, internal/pdpgrpc/label.go), so this
+	// proof reaches the exceeds-cap path the only way production can. proof5
+	// below is the other side of that same change.
 	t.Run("proof3_classification_cap_distinguishes_uncheckable_from_exceeded", func(t *testing.T) {
 		d := newDelegation("proof3: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"}, nil)
+		createRule(t, resourceTenant, classification.Rule{
+			Prefix: "/data/top-secret/", Hierarchy: "nato", Level: "TOP-SECRET",
+		})
 		before := fetchAuditChain(t, resourceTenant)
 
-		uncheckable := decide(t, d.ID, map[string]string{"id": "doc-uncheckable"}) // identity, but no classification at all
+		uncheckable := decide(t, d.ID, map[string]string{"id": "doc-uncheckable"}) // identity, but no rule labels it
 		t.Logf("Decide() with a classification cap against an unlabelled resource -> effect=%s reason=%q",
 			uncheckable.GetEffect(), uncheckable.GetReason())
 		if uncheckable.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
@@ -2083,7 +2097,7 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 				uncheckable.GetReason(), "cannot be evaluated")
 		}
 
-		exceeds := decide(t, d.ID, map[string]string{"classification": "TOP-SECRET", "hierarchy": "nato"})
+		exceeds := decide(t, d.ID, map[string]string{"id": "/data/top-secret/doc"})
 		t.Logf("Decide() with a classification cap against a resource that exceeds it -> effect=%s reason=%q",
 			exceeds.GetEffect(), exceeds.GetReason())
 		if exceeds.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
@@ -2135,10 +2149,12 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	// tightening: a version of this phase that denied every request with a
 	// resource attached would still pass proofs 1-3 above, but not this one.
 	// The request deliberately carries a "project" value the delegation
-	// never constrained AND a classification that would exceed a cap if one
-	// were configured, so this proof cannot pass by accident of an empty
-	// resource map — it must be the empty configuration, not an empty
-	// request, that makes this an allow.
+	// never constrained AND a classification claim, so this proof cannot
+	// pass by accident of an empty resource map — it must be the empty
+	// configuration, not an empty request, that makes this an allow. (The
+	// classification claim is discarded before the delegation leg ever sees
+	// it, since resource labelling shipped; it is left in the fixture as
+	// adversarial payload, not because it is believed.)
 	t.Run("proof4_no_caps_no_constraints_unaffected_regression_guard", func(t *testing.T) {
 		d := newDelegation("proof4: no caps, no constraints (regression guard)", nil, nil)
 
@@ -2154,6 +2170,44 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 		}
 		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
 			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW", resp.GetDelegationEffect())
+		}
+	})
+
+	// proof5: R1, enforced rather than merely intended, over real gRPC. A
+	// caller declares its own resource UNCLASSIFIED under a CONFIDENTIAL cap
+	// and is denied anyway, because the PDP discards the classification and
+	// hierarchy attributes the wire carried and consults only the tenant's
+	// own rules (internal/pdpgrpc/label.go).
+	//
+	// Not a duplicate of proof3's uncheckable half. That one carries no
+	// classification at all; this one carries an entirely valid, entirely
+	// satisfying claim, and the denial is attributable to the claim being
+	// ignored rather than to there being nothing to check. Before resource
+	// labelling, this request ALLOWED — the cheapest possible cap bypass,
+	// available to any caller that can reach the PDP, and the reason
+	// "no PEP in this repo sends one" was never the guarantee.
+	//
+	// The id names a resource no rule labels, deliberately: a rule would
+	// deny this on its own and prove nothing about the claim.
+	t.Run("proof5_wire_supplied_classification_is_not_believed", func(t *testing.T) {
+		d := newDelegation("proof5: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"}, nil)
+
+		resp := decide(t, d.ID, map[string]string{
+			"id": "doc-claiming-its-own-label", "classification": "UNCLASSIFIED", "hierarchy": "nato",
+		})
+		t.Logf("Decide() with a caller-declared classification under a cap -> effect=%s reason=%q",
+			resp.GetEffect(), resp.GetReason())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY — a caller-supplied classification must never satisfy a "+
+				"cap (R1: a client asserting a security-relevant fact the server cannot check is D1 relocated)",
+				resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if !strings.Contains(resp.GetReason(), "cannot be evaluated") {
+			t.Errorf("Reason = %q, want the uncheckable-cap wording: the claim is discarded, leaving the "+
+				"resource unlabelled", resp.GetReason())
 		}
 	})
 }
