@@ -428,12 +428,29 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 //
 //   - "every surface" (closed by Phase 11 Task 4): spec §3.2 (A2) commits to
 //     four first-class surfaces — hook, mcp, extauthz, proxy. All four exist
-//     and are each proven against the real thing they enforce: hook and mcp
-//     against a real claude session, extauthz against a real Envoy
-//     (services/internal/store/extauthz_integration_test.go), and proxy
-//     against a real gRPC service (services/internal/store/proxy_
-//     integration_test.go). There is no fifth surface spec §3.2 names that
-//     remains unbuilt.
+//     and are each proven against the real thing they enforce: hook via
+//     services/internal/store/cache_e2e_integration_test.go (the real
+//     compiled binary exec'd as Claude Code's PreToolUse hook runs it,
+//     against a real containerized PDP), extauthz against a real Envoy
+//     (services/internal/store/extauthz_integration_test.go), proxy against
+//     a real gRPC service (services/internal/store/proxy_integration_test.go),
+//     and mcp against a real PDP and a real upstream child process
+//     (services/internal/store/mcp_e2e_integration_test.go). There is no
+//     fifth surface spec §3.2 names that remains unbuilt.
+//
+//     WHAT THIS BULLET SAID UNTIL THE mcp LIVE PROOF LANDED, and why it was
+//     wrong: "hook and mcp against a real claude session." No such proof
+//     existed for mcp, or for hook in that form. The phrase originated in
+//     proto/target/v1/target.proto (Phase 11) and was copied from there into
+//     this file and into extauthz_integration_test.go's own package doc; both
+//     of those still carry it, as do the two generated .pb.go files, and none
+//     of the four was ever backed by an artifact naming a claude session. The
+//     mcp live-proof plan's own pre-flight established the sharper version of
+//     the same fact — no integration test had ever invoked the mcp subcommand
+//     at all — which is precisely why that plan exists. The claim is now true
+//     for mcp, but through a real containerized PDP and a real child process
+//     rather than through a session of any kind.
+//
 //   - "no valid cache entry" (closed by Phase 13 Task 4, this correction):
 //     the PEP decision cache now exists (Phase 13 Tasks 1-3, spec §4.8) and
 //     is wired into exactly two of the four surfaces — hook and mcp — by a
