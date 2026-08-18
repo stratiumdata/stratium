@@ -108,7 +108,19 @@ func TestC4_TierOverrideRaiseOnly(t *testing.T) {
 //  1. No PEP sends declared_tier at all, on any of the four surfaces.
 //     There is no agent-supplied tier for the PDP to honor in the first
 //     place. Asserted on the wire against a real decoded DecideRequest,
-//     once per surface.
+//     once per surface — and, since the mcp live proof, on ONE surface
+//     against a real PDP's own record as well. declared_tier is a proto3
+//     optional, so absence is a real wire distinction, and
+//     internal/pdpgrpc writes it to audit_chain as -1 (auditDeclaredTierAbsent,
+//     server.go) precisely because 0 would be REASONING, a real declarable
+//     tier. TestIntegration_MCP_E2E_PermittedCallReachesUpstreamAndReturns
+//     reads that row back after a live tools/call. That is strictly stronger
+//     than the fake-PDP assertion it sits beside: a mutant adding
+//     DeclaredTier to decideAndRelay's request and declaring it CORRECTLY
+//     (the tier the PDP derives anyway, so no decision changes) is invisible
+//     to every other live assertion on that surface and dies only here.
+//     The other three surfaces still rest on their unit-level wire
+//     assertions alone.
 //  2. If one arrived anyway, it is cross-checked rather than trusted:
 //     DeriveTier ignores it when deriving (TestDeriveTier_IgnoresDeclaredTier)
 //     and CheckDeclaredTier denies an under-declaration
@@ -147,7 +159,8 @@ func TestC5_AgentWritableOverrideNotHonored(t *testing.T) {
 			"TestIntegration_PAPRole_BumpsOnGovernedTableWrites",
 			"TestIntegration_StratiumApp_CanReadButCannotWriteTierOverrides",
 			"TestIntegration_TierOverride_DirectlyInsertedLoweringRowIsDroppedAtReadTime",
-			"TestIntegration_PAPE2E_UnverifiedTokenIsRefusedEverywhere"))
+			"TestIntegration_PAPE2E_UnverifiedTokenIsRefusedEverywhere",
+			"TestIntegration_MCP_E2E_PermittedCallReachesUpstreamAndReturns"))
 }
 
 // TestC6_DelegationClampedToPrincipalAuthority is the property Phase 2d

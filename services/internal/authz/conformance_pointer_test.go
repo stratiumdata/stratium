@@ -179,6 +179,7 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 			"TestIntegration_StratiumApp_CanReadButCannotWriteTierOverrides",
 			"TestIntegration_TierOverride_DirectlyInsertedLoweringRowIsDroppedAtReadTime",
 			"TestIntegration_PAPE2E_UnverifiedTokenIsRefusedEverywhere",
+			"TestIntegration_MCP_E2E_PermittedCallReachesUpstreamAndReturns",
 		}},
 		{"C16", "internal/store", []string{"TestEndToEnd"}},
 		{"C18", "internal/store", []string{
