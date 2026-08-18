@@ -65,6 +65,15 @@ where a label comes from. This builds it.
   mutant and a survivor.
 - **If you change a fixture other tests route through, re-run every mutation
   those tests were credited with killing.**
+- **A mutation kill that depends on other tests' residue is not a kill.**
+  Earned in Task 2. MS6 (drop `FORCE ROW LEVEL SECURITY`) appeared killed on a
+  full-suite run — but the failing assertion was reading twelve *other*
+  tenants' rows left behind by earlier tests. Re-run in isolation with `-run`
+  against a fresh stack, **the mutant survived**. The property was not tested;
+  the suite's accumulated dirt was doing the work, and it would have evaporated
+  under any reordering or any single-test run. **Re-run a mutant with `-run`
+  scoped to the test credited with killing it**, or the evidence is about the
+  suite rather than about the test.
 
 ---
 
