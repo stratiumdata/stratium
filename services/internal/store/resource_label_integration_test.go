@@ -354,8 +354,19 @@ func TestIntegration_ResourceLabelRules_SchemaDoesNotEnforceHierarchyValidity(t 
 // these transactions should persist.
 func TestIntegration_ResourceLabelRules_ServingRoleCanReadAndCannotWrite(t *testing.T) {
 	const tenant = "tenant-resource-label-serving-grant-integration"
+	const otherTenant = "tenant-resource-label-serving-grant-other-integration"
 	seeded := classification.Rule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}
 	createRule(t, tenant, seeded)
+
+	// A row belonging to a SECOND tenant, seeded inside this test rather than
+	// inherited from whatever else the suite happens to have written. It is what
+	// makes the owner-read at the end of this test mean anything: see that
+	// assertion's own comment. Measured, not assumed — dropping FORCE from the
+	// migration left this test PASSING when run alone via -run, and killed it
+	// only when twelve other tenants' rows from earlier tests in this file
+	// happened to be present. A proof that depends on sibling tests having run
+	// first is not a proof.
+	createRule(t, otherTenant, classification.Rule{Prefix: "/other/", Hierarchy: "commercial", Level: "PUBLIC"})
 
 	assertRules(t, tenant, loadRules(t, tenant), []classification.Rule{seeded})
 
@@ -387,16 +398,30 @@ func TestIntegration_ResourceLabelRules_ServingRoleCanReadAndCannotWrite(t *test
 			"T1/T6: removing a label unlabels the subtree, which is a configuration change like any other", err)
 	})
 
-	// Belt-and-suspenders on top of the three permission errors: confirm via
-	// testDB (which owns the table, so its access is unaffected by any GRANT)
-	// that the row genuinely never changed.
+	// Two properties in one assertion, both of which need the OWNER connection.
+	//
+	// Belt-and-suspenders on top of the three permission errors above: testDB
+	// owns the table, so its access is unaffected by any GRANT, and it can
+	// therefore confirm the row genuinely never changed rather than only that
+	// three statements returned errors.
+	//
+	// And FORCE ROW LEVEL SECURITY, which nothing else here can prove. Without
+	// FORCE, RLS applies to every role EXCEPT the table's owner — ENABLE and the
+	// tenant_isolation policy would both still be present and every
+	// tenant-scoped read and write in this file would behave identically, since
+	// stratium_app and stratium_pap are not owners. This is the only read in the
+	// package that goes through the owner, so the exact-slice assertion here is
+	// the only thing that can notice: with FORCE dropped, testDB sees every
+	// tenant's rules, including otherTenant's, and the count check fails.
 	assertRules(t, tenant, storeRulesViaOwner(t, tenant), []classification.Rule{seeded})
 }
 
 // storeRulesViaOwner reads through testDB (stratium_migrate, the table owner)
 // rather than the serving role — used only where the point is to observe the
 // table's true contents independently of whatever grants the role under test
-// holds.
+// holds, and, because the owner is exactly the role FORCE ROW LEVEL SECURITY
+// exists to bind, to observe that FORCE is present at all. Its one caller
+// explains both.
 func storeRulesViaOwner(t *testing.T, tenant string) []classification.Rule {
 	t.Helper()
 	rules, err := store.New(testDB, tenant).LoadResourceLabelRules(t.Context())
