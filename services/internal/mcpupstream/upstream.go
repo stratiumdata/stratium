@@ -124,7 +124,11 @@ type Record struct {
 //   - A line without its terminating newline is skipped, not decoded. That is what makes a torn
 //     read impossible to MISREAD rather than merely unlikely: a write caught mid-flight can only
 //     ever appear as an unterminated tail, and this reader does not treat an unterminated tail as
-//     a record at all. It reappears, complete, on the next call.
+//     a record at all. It reappears, complete, on the next call -- unless the writer DIED
+//     mid-write, in which case that tail never completes and is dropped for good. That is the
+//     right trade even in the one scenario that reaches it (a SIGKILLed upstream), because the
+//     alternative is counting a half-written record as a whole one; and it is close to
+//     unreachable in practice, since a ~60-byte record is one write to a regular file.
 //
 // A missing file is an error, not zero records: the server creates the file before it reads its
 // first frame, so "not there" means the upstream never started -- which is exactly the condition

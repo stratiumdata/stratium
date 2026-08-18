@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -121,6 +123,14 @@ func TestServe_ToolsList_AdvertisesFetchAndPurge(t *testing.T) {
 	// to relay UNFILTERED.
 	if len(result.Tools) != 2 {
 		t.Fatalf("got %d tools, want 2: %+v", len(result.Tools), result.Tools)
+	}
+	// Distinctness is read off the RESPONSE, not off the constants: the check
+	// below compares each name to the constant it came from, which is
+	// tautological the moment the two constants collide. Two identically named
+	// tools are one identity to a policy -- proof 3 would compare two listings
+	// equal for the wrong reason, and proof 2 would have no denied tool to seed.
+	if result.Tools[0].Name == result.Tools[1].Name {
+		t.Fatalf("both advertised tools are named %q; the proof needs one to seed permitted and one to seed denied", result.Tools[0].Name)
 	}
 	if result.Tools[0].Name != ToolFetch || result.Tools[1].Name != ToolPurge {
 		t.Errorf("tool names = %q, %q; want %q, %q", result.Tools[0].Name, result.Tools[1].Name, ToolFetch, ToolPurge)
@@ -350,25 +360,34 @@ func TestReadRecords_ReadableWhileTheServerIsStillRunning(t *testing.T) {
 // newline, and ReadRecords must not decode one. This asserts the property
 // directly rather than trying to schedule a torn write: an interleaving that
 // cannot be forced reliably cannot be asserted on reliably either.
+//
+// THE TAIL HERE IS VALID JSON, AND THAT IS THE WHOLE TEST. A truncated tail
+// (`{"method":"tools/ca`) would make this pass on json.Unmarshal rejecting a
+// broken string literal -- not on the newline rule under test -- and a
+// ReadRecords that decoded unterminated tails would sail through it. It did:
+// that version of this test survived exactly that mutant. The only shape that
+// separates the two implementations is a record complete in every respect
+// except its newline, which is also the shape a real interrupted write leaves
+// behind, since the newline is the last byte of the buffer.
 func TestReadRecords_UnterminatedTailIsSkippedThenAppears(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.jsonl")
 	const complete = `{"method":"initialize","pid":1}` + "\n"
-	const partial = `{"method":"tools/ca`
+	const partial = `{"method":"tools/call","tool":"purge","pid":1}` // valid JSON; only the newline is missing
 	if err := os.WriteFile(path, []byte(complete+partial), 0o600); err != nil {
 		t.Fatalf("write record file: %v", err)
 	}
 
 	records := mustReadRecords(t, path)
 	if len(records) != 1 || records[0].Method != "initialize" {
-		t.Fatalf("records = %+v, want only the complete one", records)
+		t.Fatalf("records = %+v, want only the complete one -- the tail is decodable but unterminated", records)
 	}
 
-	// The same bytes, once the write finishes: the skipped record is not lost,
-	// only deferred to the next read.
-	if err := os.WriteFile(path, []byte(complete+partial+`ll","pid":1}`+"\n"), 0o600); err != nil {
+	// The same bytes plus the one byte that was missing: the skipped record is
+	// not lost, only deferred to the read after the write lands.
+	if err := os.WriteFile(path, []byte(complete+partial+"\n"), 0o600); err != nil {
 		t.Fatalf("rewrite record file: %v", err)
 	}
-	if records := mustReadRecords(t, path); len(records) != 2 || records[1].Method != "tools/call" {
+	if records := mustReadRecords(t, path); len(records) != 2 || records[1].Tool != ToolPurge {
 		t.Errorf("records = %+v, want both once the second line is terminated", records)
 	}
 }
@@ -467,6 +486,30 @@ func TestAppendRecord_WriteFailure_IsReturned(t *testing.T) {
 	}
 }
 
+// maxFrameBytes is untested by everything above: every frame a test sends is a
+// few hundred bytes, so shrinking the limit changes nothing any of them
+// observe. Drift downward is the failure that matters -- Serve would die on
+// bufio.ErrTooLong mid-session, which is loud for the process and SILENT for an
+// absence assertion, since a call that was never read was never recorded
+// either. The 1 MiB frame kills any drift below that; the constant check covers
+// the rest of the range and names the value it has to agree with.
+func TestServe_LargeFrame_IsNotRejectedByTheScannerLimit(t *testing.T) {
+	if maxFrameBytes != 32*1024*1024 {
+		t.Errorf("maxFrameBytes = %d, want cmd/stratium-pep/mcp.go's own 32 MiB -- this server only ever receives what that proxy already accepted", maxFrameBytes)
+	}
+
+	// Well past bufio.Scanner's own 64 KiB default, which is what a dropped
+	// Buffer call would leave behind.
+	big := strings.Repeat("a", 1<<20)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+ToolFetch+`","arguments":{"message":"`+big+`"}}}`)
+	if len(replies) != 1 {
+		t.Fatalf("got %d replies to a 1 MiB frame, want 1", len(replies))
+	}
+	if records := mustReadRecords(t, recordPath); len(records) != 1 || records[0].Tool != ToolFetch {
+		t.Errorf("records = %+v, want the 1 MiB call recorded once", records)
+	}
+}
+
 // --- the binary, as the live proof will actually build and run it --------
 
 // This is the one test that exercises cmd/mcp-upstream itself, and it exercises
@@ -476,14 +519,7 @@ func TestAppendRecord_WriteFailure_IsReturned(t *testing.T) {
 // checked against a REAL child process id, which is what a proof that the proxy
 // launches and reaps its child needs it for.
 func TestMCPUpstreamBinary_BuiltAndRun_RecordsAgainstItsOwnPID(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "mcp-upstream")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/mcp-upstream")
-	build.Dir = servicesModuleRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/mcp-upstream: %v: %s", err, out)
-	}
+	binary := mcpUpstreamBinary(t)
 
 	recordPath := filepath.Join(t.TempDir(), "records.jsonl")
 	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -523,14 +559,7 @@ func TestMCPUpstreamBinary_BuiltAndRun_RecordsAgainstItsOwnPID(t *testing.T) {
 // records somewhere the test does not read, making every absence assertion pass
 // for the wrong reason.
 func TestMCPUpstreamBinary_NoRecordPath_ExitsNonZero(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "mcp-upstream")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/mcp-upstream")
-	build.Dir = servicesModuleRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/mcp-upstream: %v: %s", err, out)
-	}
+	binary := mcpUpstreamBinary(t)
 
 	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer runCancel()
@@ -542,6 +571,46 @@ func TestMCPUpstreamBinary_NoRecordPath_ExitsNonZero(t *testing.T) {
 		t.Fatalf("running the binary with no argument = %v, want a non-zero exit", err)
 	}
 }
+
+// mcpUpstreamBinary builds cmd/mcp-upstream once for this whole test binary run
+// and returns its path -- the same sync.Once shape, and for the same reason, as
+// cache_e2e_integration_test.go's stratiumPEPBinary: more than one top-level
+// Test needs the SAME binary, and a t.TempDir() belongs to whichever test
+// happened to build it first.
+//
+// ponytail: the build directory is never removed, exactly as that precedent
+// documents -- a few megabytes in the OS temp dir is not worth threading a
+// package-scoped cleanup through TestMain for.
+func mcpUpstreamBinary(t *testing.T) string {
+	t.Helper()
+	binaryOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "stratium-mcp-upstream-*")
+		if err != nil {
+			binaryErr = err
+			return
+		}
+		out := filepath.Join(dir, "mcp-upstream")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		build := exec.CommandContext(ctx, "go", "build", "-o", out, "./cmd/mcp-upstream")
+		build.Dir = servicesModuleRoot(t)
+		if combined, err := build.CombinedOutput(); err != nil {
+			binaryErr = fmt.Errorf("go build ./cmd/mcp-upstream: %w: %s", err, combined)
+			return
+		}
+		binaryPath = out
+	})
+	if binaryErr != nil {
+		t.Fatalf("mcp-upstream binary: %v", binaryErr)
+	}
+	return binaryPath
+}
+
+var (
+	binaryOnce sync.Once
+	binaryPath string
+	binaryErr  error
+)
 
 // servicesModuleRoot resolves the module root from this file's own path, the
 // same way cache_e2e_integration_test.go's identically named helper does -- a
