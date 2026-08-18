@@ -465,6 +465,48 @@ R6 exists to make trustworthy. The report is direction-free, unlike the
 lowering report: a switch escapes the outer hierarchy's cap whichever
 hierarchy it moves to.
 
+**R11 — the wire's `resource` map must never carry a classification, and
+until 2026-08-18 it did.** Found and closed during Task 3.
+
+**R1** rules that a PEP supplies resource identity and never classification,
+and the guard built for it is a structural allowlist test over what the
+bundled PEPs can produce. That guard is sound and was never breached. It also
+does not cover the surface that mattered: `Decide`'s `resource` map arrives
+over gRPC from *whatever holds a delegation token*, and a PEP is not the only
+thing that can hold one. The proto accepted `classification` and `hierarchy`
+from any caller, and for an uncataloged tool passed them through unchanged
+into `CheckCap`.
+
+**The defence was written down and had quietly stopped being true.** The proto
+comment justified accepting the field on the grounds that it *"narrows what a
+delegation permits, it does not widen it"* — a caller could only make its own
+request stricter. That held while an absent classification was permissive. It
+stopped holding the moment **R2** made an unlabelled resource **deny**: from
+then on, a caller sending `classification: UNCLASSIFIED` with
+`hierarchy: nato` under a `{nato: CONFIDENTIAL}` cap converts a denial into an
+allow. Declaring a classification became the widest thing a caller could do,
+and the comment asserting the opposite sat directly above the field.
+
+That is a privilege escalation reachable by any agent holding a valid
+delegation, against exactly the cap the delegation exists to enforce — **D1**
+in its original form: a client asserting a security-relevant fact the server
+has no independent way to check and would simply believe.
+
+**The fix:** the PDP discards both keys unconditionally, on every path,
+*before* resolving the resource's label from the tenant's own rules. Not
+validated, not preferred-if-absent — discarded. A caller's assertion about its
+own resource's classification is never evidence, and the only path by which
+those two attributes may acquire a value is **R4**'s prefix rules.
+
+**The general rule, which is the part worth carrying:** *a safety argument
+attached to an input is a claim about the rest of the system, and it expires
+when the rest of the system changes.* "It narrows, it does not widen" was
+never a property of the field — it was a property of how everything
+downstream treated an absent value, and nothing re-checked it when that
+treatment was deliberately inverted. Every comment of that shape is a claim
+with a hidden dependency, and inverting a default is exactly the change that
+invalidates one.
+
 ---
 
 ### R1 — the PEP sends resource identity, never classification
