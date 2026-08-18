@@ -341,11 +341,38 @@ write; accept a level outside its hierarchy.
    own tests.
 5. `stratium_app` still cannot write the table.
 
+**First, fix what Task 3 made wrong.** `docs/pep.md` currently tells operators
+the opposite of the truth, in three places, and this is not a polish item —
+it is a doc regression this feature introduced:
+
+- `docs/pep.md:464` — the section heading **"Classification caps have no
+  labelling source"**. There is one now.
+- `docs/pep.md:515-516` — instructs operators to *"hold off on configuring the
+  cap until one [exists]"*. That advice is now exactly backwards.
+- `docs/pep.md:761` — the denial-reason table calls `resource declares no
+  classification` *"expected, since nothing in this system supplies one yet"*
+  and **"not a bug, and not fixable by retrying."** It is now both actionable
+  and fixable: the operator needs a rule, or a catch-all.
+
+Line numbers are from 2026-08-18 and are a starting point, not a contract —
+re-grep for the claims themselves. A denial-reason table that tells an
+operator a fixable denial is unfixable is worse than no table.
+
 **Then write R7's cliff into the operator documentation.** A tenant enabling a
 cap without a catch-all denies every unmatched resource. That is correct
 behaviour and it will read as an outage. It belongs somewhere an operator
 finds *before* enabling a cap, alongside how to register the empty-prefix
 catch-all.
+
+**Two more operator hazards belong beside it, both earned earlier in this
+plan.** First, **write the trailing separator**: Task 1 ruled that `/data`
+matches `/database/x` under plain prefix semantics, which is almost never what
+an operator means, and `/data/` is the fix. It is the mitigation for a ruling
+this plan deliberately accepted, so it has to reach the person who writes the
+rule. Second, **a mis-catalogued resource field now decides**: with labelling
+live, cataloguing the wrong field as the resource id no longer merely
+mislabels — it produces a confident wrong classification and an authorization
+decision on top of it.
 
 **Then re-check the conformance suite.** Nothing here is expected to convert —
 this builds a capability rather than proving a property. **Read the properties
