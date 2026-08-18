@@ -377,6 +377,53 @@ read as closed:
   this matcher but are a different table. A small follow-on, kept out so this
   phase stays one mechanism.
 
+**R9 — a label naming a hierarchy the system does not know must deny, and
+today it silently allows.** Found by the Task 1 review, 2026-08-18.
+
+`CheckCap` resolves a delegation's cap for the resource's hierarchy and, on
+not finding one, returns **allow** (`pkg/classification/classification.go`,
+the `if !hasCap` branch). That is correct for a *known* hierarchy a cap simply
+does not mention: a delegation capping `nato` says nothing about `commercial`,
+and silence is not a denial. It is wrong for a hierarchy that does not exist.
+Because **R8** keeps hierarchies hardcoded, `Index` already returns `-1` for
+one — the system can tell the two cases apart and currently does not, because
+`Index` is consulted only *after* the `!hasCap` return.
+
+The consequence is a fail-open reachable by one typed character:
+
+```
+rules: /data/    nato    SECRET
+       /data/x/  natoo   UNCLASSIFIED     <- typo
+caps:  {"nato": "CONFIDENTIAL"}
+```
+
+The carve-out wins on length, the resource is labelled `natoo`, no cap matches
+`natoo`, and `CheckCap` allows — turning a capped resource into an
+unconditional allow. **R6**'s lowering log does not fire either, since an
+unrankable hierarchy has no rank to compare, so the operator's one signal is
+silent precisely when it is most needed. `checkResourceConstraints` does not
+catch it: it compares only keys the constraints name.
+
+This is **D10** — an unevaluable policy denies — applied to classification: a
+label the system cannot rank is not a permissive label, it is an unreadable
+one. It is also the exact shape of a defect this codebase already closed once,
+recorded in `internal/authz/delegation.go`: `CheckCap` formerly read a resource
+with *no* classification as an unconditional allow. Same failure, one field
+over.
+
+**The requirement:** an unknown hierarchy, or a level unknown within its
+hierarchy, denies with a reason naming the unknown value — checked before any
+`!hasCap` early return. Write-time validation in the PAP is worth having so an
+operator learns at the point of the typo rather than at a denial, but it is a
+better error message, not the enforcement: the enforcement is that an
+unreadable label never reaches a permissive branch.
+
+**Not reachable before resource labelling ships.** Nothing populates a
+resource `hierarchy` attribute today — **R1**'s extraction guard blocks it from
+`raw_input` — so `CheckCap` denies at the empty-classification check first.
+Resource labelling is what makes an operator-typed hierarchy reach this code,
+which is why the fix belongs to this phase and not to a backlog entry.
+
 ---
 
 ### R1 — the PEP sends resource identity, never classification
