@@ -151,10 +151,9 @@ func ReadRecords(path string) ([]Record, error) {
 	}
 }
 
-// appendRecord writes one record as one line with one Write call. It takes an io.Writer rather
-// than the *os.File it is always given so that the failure path -- the one that must stop the
-// server rather than be swallowed -- is reachable from a test without breaking a real file
-// underneath a running process.
+// appendRecord writes one record as one line with one Write call -- see ReadRecords on why one
+// write per record, and not one per field or one per flush, is what makes the file safe to read
+// while it is being written.
 func appendRecord(w io.Writer, rec Record) error {
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -226,7 +225,15 @@ func Serve(in io.Reader, out io.Writer, recordPath string) error {
 		return fmt.Errorf("mcpupstream: open record file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+	return serveRecording(in, out, f)
+}
 
+// serveRecording is Serve with the record file already open. It exists as its own function purely
+// so the failure that must NOT be swallowed -- a record that cannot be written once the server is
+// already running -- is reachable from a test. There is no portable way to make a real, already-open
+// file start failing underneath a live process, and a "records are never swallowed" claim nothing
+// can falsify is exactly the kind of claim this project keeps finding to be untrue.
+func serveRecording(in io.Reader, out io.Writer, records io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 4096), maxFrameBytes)
 	for scanner.Scan() {
@@ -241,8 +248,11 @@ func Serve(in io.Reader, out io.Writer, recordPath string) error {
 			continue
 		}
 		tool := toolName(req)
-		if err := appendRecord(f, Record{Method: req.Method, Tool: tool, ID: req.ID, PID: os.Getpid()}); err != nil {
-			return err // never swallowed -- see the package doc
+		if err := appendRecord(records, Record{Method: req.Method, Tool: tool, ID: req.ID, PID: os.Getpid()}); err != nil {
+			// Never swallowed, and the frame is not answered either: a server that kept serving
+			// while failing to record would make "the denied call left no record" pass because
+			// NOTHING left a record. See the package doc.
+			return err
 		}
 		if len(req.ID) == 0 {
 			continue // a notification (notifications/initialized, say): recorded, correctly unanswered

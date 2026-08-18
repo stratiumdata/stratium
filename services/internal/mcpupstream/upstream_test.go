@@ -17,10 +17,10 @@ import (
 
 // --- helpers -------------------------------------------------------------
 
-// serve runs Serve over a fixed list of frames and returns the reply lines and
-// the record file's path. Every test that does not need the server to still be
-// running while it looks at something uses this.
-func serve(t *testing.T, frames ...string) (replies []string, recordPath string) {
+// runServe runs Serve over a fixed list of frames and returns the reply lines
+// and the record file's path. Every test that does not need the server to still
+// be running while it looks at something uses this.
+func runServe(t *testing.T, frames ...string) (replies []string, recordPath string) {
 	t.Helper()
 	recordPath = filepath.Join(t.TempDir(), "records.jsonl")
 	var out strings.Builder
@@ -70,7 +70,7 @@ func mustReadRecords(t *testing.T, path string) []Record {
 // --- the protocol subset -------------------------------------------------
 
 func TestServe_Initialize_AnswersWithProtocolVersionAndServerInfo(t *testing.T) {
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}`)
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1: %v", len(replies), replies)
@@ -102,7 +102,7 @@ func TestServe_Initialize_AnswersWithProtocolVersionAndServerInfo(t *testing.T) 
 }
 
 func TestServe_ToolsList_AdvertisesFetchAndPurge(t *testing.T) {
-	replies, _ := serve(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	replies, _ := runServe(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1: %v", len(replies), replies)
@@ -139,8 +139,8 @@ func TestServe_ToolsList_AdvertisesFetchAndPurge(t *testing.T) {
 // nothing to do with the proxy.
 func TestServe_ToolsList_IsByteForByteDeterministic(t *testing.T) {
 	const frame = `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`
-	first, _ := serve(t, frame)
-	second, _ := serve(t, frame)
+	first, _ := runServe(t, frame)
+	second, _ := runServe(t, frame)
 
 	if len(first) != 1 || len(second) != 1 {
 		t.Fatalf("got %d and %d replies, want 1 each", len(first), len(second))
@@ -151,7 +151,7 @@ func TestServe_ToolsList_IsByteForByteDeterministic(t *testing.T) {
 }
 
 func TestServe_ToolsCall_ReturnsResultAndAppendsExactlyOneRecord(t *testing.T) {
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"`+ToolFetch+`","arguments":{"message":"payload-marker-never-recorded"}}}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"`+ToolFetch+`","arguments":{"message":"payload-marker-never-recorded"}}}`)
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1: %v", len(replies), replies)
@@ -187,7 +187,7 @@ func TestServe_ToolsCall_ReturnsResultAndAppendsExactlyOneRecord(t *testing.T) {
 }
 
 func TestServe_ToolsCall_UnadvertisedTool_IsError(t *testing.T) {
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"not-a-tool"}}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"not-a-tool"}}`)
 
 	var result struct {
 		IsError bool `json:"isError"`
@@ -204,7 +204,7 @@ func TestServe_ToolsCall_UnadvertisedTool_IsError(t *testing.T) {
 }
 
 func TestServe_UnknownMethod_AnswersMethodNotFound(t *testing.T) {
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","id":6,"method":"resources/list"}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":6,"method":"resources/list"}`)
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1: %v", len(replies), replies)
@@ -228,7 +228,7 @@ func TestServe_UnknownMethod_AnswersMethodNotFound(t *testing.T) {
 // still recorded -- the two halves are independent, which is why this asserts
 // both.
 func TestServe_Notification_RecordedButNotAnswered(t *testing.T) {
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 
 	if len(replies) != 0 {
 		t.Errorf("got %d replies to a notification, want 0: %v", len(replies), replies)
@@ -249,7 +249,7 @@ func TestServe_Notification_RecordedButNotAnswered(t *testing.T) {
 // which is why both are checked here.
 func TestServe_LargeIntegerID_EchoedVerbatimInReplyAndRecord(t *testing.T) {
 	const id = "12345678901234567890"
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","id":`+id+`,"method":"tools/list"}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":`+id+`,"method":"tools/list"}`)
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1", len(replies))
@@ -270,7 +270,7 @@ func TestServe_LargeIntegerID_EchoedVerbatimInReplyAndRecord(t *testing.T) {
 // reply is proof the server kept reading past them, and the record count is
 // proof it did not record non-calls.
 func TestServe_MalformedFrames_SurvivedAndNotRecorded(t *testing.T) {
-	replies, recordPath := serve(t,
+	replies, recordPath := runServe(t,
 		`{"jsonrpc":"2.0","id":1,`,             // truncated JSON
 		`not json at all`,                      // not JSON
 		``,                                     // empty line
@@ -295,7 +295,7 @@ func TestServe_MalformedFrames_SurvivedAndNotRecorded(t *testing.T) {
 // be RECORDED as having arrived. Silently-not-recorded is the one direction a
 // fixture serving absence assertions may never fail in.
 func TestServe_ToolsCallWithPositionalParams_StillRecorded(t *testing.T) {
-	replies, recordPath := serve(t, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":["fetch"]}`)
+	replies, recordPath := runServe(t, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":["fetch"]}`)
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1: %v", len(replies), replies)
@@ -432,6 +432,26 @@ func TestServe_UnwritableRecordPath_FailsWithoutAnsweringAnything(t *testing.T) 
 	}
 	if out.Len() != 0 {
 		t.Errorf("Serve() answered %q with no record file open, want nothing", out.String())
+	}
+}
+
+// A record that cannot be written once the server is already running must stop
+// it, and must stop it BEFORE the frame is answered: a server that kept
+// answering while recording nothing would make "the denied call left no record"
+// pass because nothing left a record at all. serveRecording is what makes this
+// reachable -- there is no portable way to make a real open file start failing.
+func TestServeRecording_RecordWriteFailure_StopsWithoutAnsweringTheFrame(t *testing.T) {
+	sentinel := errors.New("disk gone")
+	var out strings.Builder
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n")
+
+	err := serveRecording(in, &out, errWriter{err: sentinel})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("serveRecording() = %v, want it to wrap %v", err, sentinel)
+	}
+	if out.Len() != 0 {
+		t.Errorf("serveRecording() answered %q despite failing to record it, want nothing", out.String())
 	}
 }
 
