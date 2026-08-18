@@ -163,8 +163,16 @@ func TestDecide_UncatalogedToolCannotLabelItselfByNamingAnID(t *testing.T) {
 // The mirror, and the one that says the fix is a provenance rule rather than
 // a blanket refusal: once the tenant catalogs the tool, the label follows the
 // id the PDP extracted from raw_input, and the wire's competing id is inert.
-// The wire names the permissive rule and the real path names the strict one,
-// so a version that preferred — or merged — the wire's id would ALLOW here.
+//
+// Defence in depth, and credited as such rather than as a mutation kill: NO
+// single mutation reaches this, because two independent mechanisms already
+// guarantee it on the cataloged path — ApplyExtraction replaces the resource
+// map wholesale, AND labelResource resolves the parameter rather than the map.
+// Mutating either alone leaves this passing; both together (mutant M21) is
+// what it fails on. Kept because that pair is exactly the end-to-end
+// guarantee a reader asks about, and because a future change that moved
+// labelling back onto the map would be reviewed against ApplyExtraction's
+// replacement as its only remaining guard.
 func TestDecide_CatalogedToolLabelsTheExtractedIDNotTheWireID(t *testing.T) {
 	fs, req := labelFixture(t, map[string]string{"nato": "CONFIDENTIAL"}, []classification.Rule{
 		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
