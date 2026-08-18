@@ -306,8 +306,10 @@ var (
 	cacheAddr   string
 
 	// mcpAddr and mcpTenant back the `mcp` enforcement surface's live proofs
-	// (mcp_e2e_integration_test.go): a ninth, independently configured PDP
-	// (deploy/docker/docker-compose.yml's pdp-mcp service) and its own
+	// (mcp_e2e_integration_test.go): the EIGHTH PDP dedicated to a single
+	// test file (pdp-narrow, pdp-resource, pdp-extauthz, pdp-proxy,
+	// pdp-epoch, pdp-cache, pdp-pap, and this one —
+	// deploy/docker/docker-compose.yml's pdp-mcp service) and its own
 	// tenant, for the same reason every dedicated PDP above has one — those
 	// proofs seed policies, create delegations through the real
 	// "session-start" subcommand, and revoke one of them, which bumps
@@ -320,6 +322,13 @@ var (
 	// string to hand it — the same thing cacheAddr is for, minus the
 	// connection (nothing there ever stops or restarts pdp-mcp). runTestMain
 	// still dials it once, to wait for SERVING, and drops the client.
+	//
+	// COUNTED AS DEDICATED SERVICES, which is deliberately not the ordinal
+	// scheme the comments above use: those count the general-purpose `pdp`
+	// as the first, so pdp-pap below calls itself "a ninth" while being the
+	// seventh dedicated one. Both numbers are right about different things,
+	// and enumerating the services by name here is what keeps this from
+	// reading as a second, contradictory "ninth" eighteen lines away.
 	mcpAddr   string
 	mcpTenant string
 

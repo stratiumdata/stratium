@@ -672,6 +672,97 @@ func (f mcpFixture) start(t *testing.T) *mcpProxy {
 }
 
 // ---------------------------------------------------------------------------
+// Reading the PDP's own record of what it received.
+
+// auditDeclaredTierAbsent mirrors internal/pdpgrpc/server.go's own constant:
+// the value audit_chain.declared_tier carries when the request did not declare
+// one. DecideRequest.declared_tier is a proto3 OPTIONAL (*int32 with oneof
+// presence), so "absent" is a real wire distinction and -1 is how the PDP
+// records it -- 0 would be REASONING, a real declarable tier. Hand-mirrored,
+// and safely: this is a PRESENCE assertion, so drift between the two fails
+// loudly rather than passing vacuously.
+const auditDeclaredTierAbsent = -1
+
+// mcpAuditRow is one audit_chain decision row, narrowed to what these proofs
+// read.
+type mcpAuditRow struct {
+	Tool         string
+	DeclaredTier int16
+	DerivedTier  int16
+	Decision     string
+	Reason       string
+}
+
+// decisionAudit returns every Decide the PDP recorded for THIS fixture's own
+// agent, oldest first.
+//
+// THIS IS A SECOND OUT-OF-BAND CHANNEL, AND THIS FILE'S FIRST VERSION WRONGLY
+// REPORTED THAT IT DID NOT EXIST. The claim was that a live proof cannot see a
+// decoded DecideRequest because the real PDP exposes no request-recording side
+// channel a test can read. It does: audit_chain is a per-request record of
+// what the PDP received, written by appendAudit on every decision including a
+// denial, and readable here through the same withTenantTx path proof 7's own
+// revoke already uses. Two things depend on it, and neither is observable from
+// the caller's side of the proxy at all:
+//
+//   - declared_tier presence (proof 1). C5's first mechanism is "no PEP sends
+//     declared_tier", and until this existed it was asserted only against a
+//     decoded FAKE PDP. An edit adding DeclaredTier to decideAndRelay's
+//     request -- D1 by the exact route mcp_authorize.go's package doc warns
+//     about, "if a future edit ever adds one just to be helpful" -- would ship
+//     green past every other assertion in this file.
+//   - which credential actually authenticated (proof 7). A request sending no
+//     token is rescued by reissueAndRetryDecide from the session file's
+//     delegation id, so the CALLER observes an identical ALLOW either way. The
+//     PDP's own record splits them: the rescued path leaves a
+//     "no token provided" denial behind and the real one leaves none.
+//
+// Scoped by agent_id, not delegation_id: an authentication failure has no
+// token to read a delegation from, so those rows carry uuid.Nil -- scoping on
+// the delegation would silently exclude exactly the rows worth finding. Every
+// fixture's agent id is freshly generated, so this never sees another proof's.
+func (f mcpFixture) decisionAudit(t *testing.T) []mcpAuditRow {
+	t.Helper()
+	var out []mcpAuditRow
+	withTenantTx(t, mcpTenant, func(tx *sql.Tx) {
+		rows, err := tx.QueryContext(t.Context(),
+			`SELECT tool_name, declared_tier, derived_tier, decision, reason
+			   FROM audit_chain
+			  WHERE event_type = 'decision' AND agent_id = $1
+			  ORDER BY seq ASC`, f.agentID.String())
+		if err != nil {
+			t.Fatalf("query audit_chain: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var r mcpAuditRow
+			if err := rows.Scan(&r.Tool, &r.DeclaredTier, &r.DerivedTier, &r.Decision, &r.Reason); err != nil {
+				t.Fatalf("scan audit_chain row: %v", err)
+			}
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate audit_chain: %v", err)
+		}
+	})
+	return out
+}
+
+// assertNoUnauthenticatedDecide fails if the PDP ever recorded an
+// authentication failure for this fixture's agent. See decisionAudit's own doc
+// comment for why this is the only place a missing token is visible at all.
+func assertNoUnauthenticatedDecide(t *testing.T, rows []mcpAuditRow) {
+	t.Helper()
+	for _, r := range rows {
+		if strings.Contains(r.Reason, "no token provided") {
+			t.Errorf("the PDP recorded a Decide that presented no token at all (%+v) -- every call on this "+
+				"surface must authenticate with the session file's own token, not be rescued by "+
+				"reissueAndRetryDecide from its delegation id; full audit: %+v", r, rows)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Reading the upstream's own record -- never what the caller observed.
 
 // toolCallRecords returns only the tools/call records, in arrival order. Every
@@ -782,6 +873,31 @@ func TestIntegration_MCP_E2E_PermittedCallReachesUpstreamAndReturns(t *testing.T
 	}
 
 	assertRecordedTools(t, p.records(), mcpApprovedTool)
+
+	// AND WHAT THE PDP ITSELF RECEIVED, off its own audit_chain row (C5's
+	// first mechanism, live for the first time on this surface). Until this
+	// assertion existed, "this proxy never sends declared_tier" was pinned
+	// only against a decoded FAKE PDP
+	// (TestDecideAndRelay_RequestCarriesRawInputAndNoDeclaredTier), and an
+	// edit adding one here would have shipped green past every other
+	// assertion in this file. -1 is the PDP's own absent sentinel; 0 would be
+	// REASONING, a real declarable tier.
+	audit := f.decisionAudit(t)
+	if len(audit) != 1 {
+		t.Fatalf("the PDP recorded %d decisions for this agent, want exactly 1 (the one tools/call): %+v",
+			len(audit), audit)
+	}
+	t.Logf("the PDP's own audit row: tool=%q declared_tier=%d derived_tier=%d decision=%s",
+		audit[0].Tool, audit[0].DeclaredTier, audit[0].DerivedTier, audit[0].Decision)
+	if audit[0].Tool != mcpApprovedTool || audit[0].Decision != "ALLOW" {
+		t.Errorf("audit row = %+v, want tool %q decided ALLOW", audit[0], mcpApprovedTool)
+	}
+	if audit[0].DeclaredTier != auditDeclaredTierAbsent {
+		t.Errorf("audit declared_tier = %d, want %d (absent) -- this proxy must never send a declared tier, "+
+			"and this is the only place a live proof can see whether it did",
+			audit[0].DeclaredTier, auditDeclaredTierAbsent)
+	}
+	assertNoUnauthenticatedDecide(t, audit)
 }
 
 // assertCallSucceededInit asserts an initialize reply is the upstream's own,
@@ -1310,4 +1426,16 @@ func TestIntegration_MCP_E2E_RevokedDelegationInSessionFileDenies(t *testing.T) 
 		t.Errorf("run 3 recorded %d tools/call: %+v -- with no session file there is no credential, and the "+
 			"call must not reach the upstream", len(calls), calls)
 	}
+
+	// WHICH CREDENTIAL ACTUALLY AUTHENTICATED, off the PDP's own record. Runs
+	// 1-3 above pin the SESSION FILE as the credential path, and cannot do
+	// better than that from the caller's side: a request that sends no token
+	// at all is rescued by reissueAndRetryDecide from the session file's
+	// DELEGATION ID, and the caller observes the identical ALLOW either way
+	// (a mutant doing exactly that survived every assertion in this file
+	// before this one existed). The PDP's own audit splits them cleanly -- the
+	// rescued path leaves an authentication failure behind and the real one
+	// leaves none. Run 3 never reaches Decide at all, so this covers runs 1
+	// and 2, which are the two that do.
+	assertNoUnauthenticatedDecide(t, f.decisionAudit(t))
 }

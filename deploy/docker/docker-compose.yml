@@ -611,7 +611,9 @@ services:
   # too -- mcp_e2e_integration_test.go's filename sorts before
   # store_integration_test.go's for exactly that reason.
   #
-  # THIS IS THE NINTH DEDICATED PDP SERVICE IN THIS FILE, and that is
+  # THIS IS THE EIGHTH PDP DEDICATED TO ONE TEST FILE (pdp-narrow,
+  # pdp-resource, pdp-extauthz, pdp-proxy, pdp-epoch, pdp-cache, pdp-pap, and
+  # this one; the general-purpose "pdp" is shared, not dedicated), and that is
   # accumulating debt worth naming rather than paying down here: the
   # integration stack now carries roughly one PDP per phase that touches
   # control-plane state, each ~1 container and ~1 tenant. Sharing a tenant

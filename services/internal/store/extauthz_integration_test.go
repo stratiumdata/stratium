@@ -8,7 +8,12 @@
 // not the INTEGRATION -- a real Envoy in front of a real stratium-pep
 // extauthz, in front of a real stratium-pdp. Every other enforcement surface
 // in this binary was proven against the real thing it was built for (hook
-// and mcp against a real claude session); this file is that proof for
+// via cache_e2e_integration_test.go, mcp via mcp_e2e_integration_test.go --
+// this line said "hook and mcp against a real claude session" until the mcp
+// live proof landed, and no such proof ever existed for either; see
+// internal/authz/conformance_test.go's C19 for the full correction and for
+// the two places, both generated from proto/target/v1/target.proto, that
+// still carry the original phrasing); this file is that proof for
 // extauthz, against deploy/docker/docker-compose.yml's own envoy,
 // pep-extauthz, pdp-extauthz, and echo-upstream services.
 //
