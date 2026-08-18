@@ -2445,6 +2445,16 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 // row proof1 seeded there (READ_ONLY, resource_field "path") rather than
 // seeding a second one earlier and breaking that assertion. There is no
 // DeleteToolCatalogEntry to undo one with, by design (store/catalog.go).
+//
+// So proofs 1-3 DEPEND ON RESIDUE from another test, which this project
+// otherwise removes on sight. Left deliberately, and it is the mild form:
+// run in isolation the row is simply absent, read_file falls to BuiltinTier's
+// unrecognized-means-it-modifies default, derives INTERNAL_MODIFY and exceeds
+// these delegations' READ_ONLY ceiling -- so every assertion fails loudly on
+// the tier, never passes falsely on a label that was not applied. Seeding the
+// row here instead is what proof4's zero-rows assertion forbids, and fighting
+// that fixture would trade a loud failure for a broken counterfactual.
+// proof5 depends on no residue at all: it needs a tool with NO row.
 func TestIntegration_Live_ResourceLabelling(t *testing.T) {
 	const subject = "resource-labelling-proof@example.com"
 	const secretPath = "/label-proof/secret/q3.pdf"
@@ -2565,18 +2575,23 @@ func TestIntegration_Live_ResourceLabelling(t *testing.T) {
 		}
 	})
 
-	// proof3: the review's C1, live -- the caller does not get to pick which
-	// rule labels it. raw_input names the TOP-SECRET path; the wire's own
-	// Resource names the UNCLASSIFIED carve-out. The label follows the id the
-	// PDP extracted through read_file's catalog row, so this DENIES.
+	// proof3: the label follows the id the PDP extracted through read_file's
+	// catalog row, and the wire's competing id is inert.
 	//
-	// Before the fix, resource["id"] was what got resolved, and on an
-	// uncataloged tool that is a string the caller simply typed -- naming a
-	// decoy under a permissive rule bought an UNCLASSIFIED label and turned a
-	// capped resource into an allow. R4 permits labelling an agent-influenced
-	// id only because "the id is what the tool actually acts on ... lying does
-	// not pay"; nothing tied a caller's map key to raw_input, so that premise
-	// did not hold for it.
+	// Defence in depth, and credited as such rather than as C1's live proof,
+	// which it cannot be: read_file IS catalogued, so ApplyExtraction has
+	// already replaced the map with {"id": secretPath} before labelResource
+	// runs. Under a full revert of the C1 fix, labelled["id"] IS the extracted
+	// id, this still denies naming TOP-SECRET, and this subtest stays green.
+	// Two independent mechanisms hold the property here and no single
+	// mutation reaches it -- the same honest credit
+	// TestDecide_CatalogedToolLabelsTheExtractedIDNotTheWireID carries at the
+	// unit layer. C1's own case is proof5, below.
+	//
+	// The distinction matters because it is the defect that produced C1: R11
+	// recorded a closure that was half true, and the closure sentence is what
+	// stopped anyone looking further. A comment claiming a proof it cannot
+	// carry does the same job.
 	t.Run("proof3_the_caller_cannot_choose_which_rule_labels_it", func(t *testing.T) {
 		d := newDelegation("label proof3: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"})
 
@@ -2593,6 +2608,48 @@ func TestIntegration_Live_ResourceLabelling(t *testing.T) {
 		}
 		if !strings.Contains(resp.GetReason(), "TOP-SECRET") {
 			t.Errorf("Reason = %q, want the extracted path's own TOP-SECRET label to have decided", resp.GetReason())
+		}
+	})
+
+	// proof5: C1's own case, live -- an UNCATALOGUED tool, where the caller's
+	// resource["id"] is a string it simply typed and nothing links it to
+	// raw_input. "Read" has no tool_catalog row for this tenant (only
+	// read_file and write_file do), so ExtractFromCatalog returns its zero
+	// value and nothing may be labelled.
+	//
+	// The id names the PERMISSIVE rule seeded above, which is what makes this
+	// a real proof rather than a restatement of proof1's unmatched case:
+	// before the fix this resolved to UNCLASSIFIED and ALLOWED. Now the
+	// resource is unlabelled and R2 denies it. Verified by mutation, live:
+	// the full revert of the C1 fix turns this subtest green-to-red.
+	t.Run("proof5_an_uncatalogued_tools_wire_id_labels_nothing", func(t *testing.T) {
+		d := newDelegation("label proof5: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"})
+
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			Token:   mintToken(t, resourcePdpClient, d.ID),
+			AgentId: agentID.String(),
+			Subject: subject,
+			Tool:    "Read", // deliberately NOT read_file: no catalog row for this tenant
+			// The caller names the permissive carve-out, and would have been
+			// labelled UNCLASSIFIED by it before the fix.
+			Resource: map[string]string{"id": publicPath},
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		t.Logf("Decide() for an uncatalogued tool whose caller named the public carve-out -> effect=%s reason=%q",
+			resp.GetEffect(), resp.GetReason())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY: a caller-typed id is not an identity this PDP derived, "+
+				"so no rule may label it -- naming the UNCLASSIFIED carve-out must not buy its label",
+				resp.GetEffect())
+		}
+		if resp.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", resp.GetDeniedLeg(), "delegation")
+		}
+		if !strings.Contains(resp.GetReason(), "cannot be evaluated") {
+			t.Errorf("Reason = %q, want the uncheckable-cap wording: the resource is unlabelled, not labelled "+
+				"from the caller's claim", resp.GetReason())
 		}
 	})
 

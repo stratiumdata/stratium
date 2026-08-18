@@ -123,8 +123,14 @@ type Match struct {
 	// fails precisely here, where it never wins because a carve-out covers
 	// every id it would have decided.
 	//
-	// Nil when the WINNER is unrankable, because R9 then denies the decision
-	// itself and names the level — there is no silence to break.
+	// Nil when the WINNER is unrankable. R9 then denies the decision itself
+	// and names the level, so there is no silence to break — with one honest
+	// gap: R9 is reached only when a cap is CONFIGURED, since CheckCap
+	// returns allow on len(caps) == 0 before looking at the label at all. An
+	// uncapped delegation against an unrankable winner therefore produces
+	// neither a denial nor a line. No consequence follows — an uncapped
+	// delegation is unrestricted on this axis whatever the label says — but
+	// the claim is narrowed to what holds rather than left as "R9 covers it".
 	//
 	// It never aliases the caller's rule slice.
 	OverrodeUnrankable *Rule

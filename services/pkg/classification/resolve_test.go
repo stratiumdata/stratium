@@ -699,6 +699,39 @@ func TestResolve_UnrankableRuleInAnotherHierarchyIsTheSwitchReport(t *testing.T)
 	}
 }
 
+// N2: two shorter rules on ONE prefix, in the winner's hierarchy, both
+// unrankable — the pair Task 2's UNIQUE (tenant_id, prefix) forbids and this
+// package still refuses to assume away. Nothing ranks them against each
+// other, so the report must break the tie on something stable or it names a
+// different rule depending on the order rows came back in.
+//
+// Its two siblings are pinned the same way
+// (TestResolve_OverriddenTieIsBrokenDeterministically,
+// TestResolve_HierarchySwitchTieIsBrokenDeterministically). This one was not,
+// and the determinism claim sat in a doc comment for a round unchecked —
+// which is the third time this project has found exactly that.
+func TestResolve_UnrankableTieIsBrokenDeterministically(t *testing.T) {
+	forward := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
+		{Prefix: "/data/", Hierarchy: "nato", Level: "ALSO-WRONG"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	reversed := []Rule{forward[1], forward[0], forward[2]}
+
+	a, ok := Resolve(forward, "/data/x/file")
+	if !ok || a.OverrodeUnrankable == nil {
+		t.Fatal("fixture must resolve and report an inert rule")
+	}
+	b, ok := Resolve(reversed, "/data/x/file")
+	if !ok || b.OverrodeUnrankable == nil {
+		t.Fatal("fixture must report an inert rule in either slice order")
+	}
+	if *a.OverrodeUnrankable != *b.OverrodeUnrankable {
+		t.Errorf("slice order changed the reported rule: %+v vs %+v",
+			*a.OverrodeUnrankable, *b.OverrodeUnrankable)
+	}
+}
+
 func TestResolve_UnrankableReportDoesNotAliasTheCallersRules(t *testing.T) {
 	rules := []Rule{
 		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
