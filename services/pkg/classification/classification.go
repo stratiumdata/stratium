@@ -106,6 +106,15 @@ func Index(hierarchy, level string) int {
 //   - unknown cap level                        → DENY (never compare as equal)
 //   - otherwise                                → resource rank ≤ cap rank
 //
+// One case the list above does not show, because both outcomes are DENY and
+// only the reason differs: caps keyed "NATO" and "nato" with different levels
+// are ambiguous, and against a resource whose own level is unrankable the R9
+// check now fires first, so the reason names the unknown level rather than
+// the conflicting caps. That ordering is deliberate — an unreadable label is
+// the more basic fact, and reporting the caps as the problem would send an
+// operator to fix the delegation when the rule is what is wrong — but it does
+// mean the ambiguity reason is reachable only for a label that ranks.
+//
 // The first two rules look alike — both see "nothing was declared" — but
 // answer different questions and must stay independent. No caps means this
 // delegation restricts nothing on any hierarchy, so there is no rule to

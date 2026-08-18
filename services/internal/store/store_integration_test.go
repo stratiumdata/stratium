@@ -2060,30 +2060,28 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	})
 
 	// proof3: a classification cap denies a resource that declares none at
-	// all (R2, Task 3) — distinctly from an ordinary cap violation, in both
-	// the wire response AND the persisted audit row. Mirrors
-	// pkg/classification's own TestCheckCap_UncheckableReasonDiffersFromExceedsCapReason
-	// and internal/authz's TestDelegationLeg_DeniesConfiguredCapWhenResourceHasNoClassification,
-	// at the live-stack layer instead of the unit layer, with the audit row
-	// read back from Postgres rather than only the RPC response.
+	// all (R2, Task 3), in both the wire response AND the persisted audit
+	// row. Mirrors internal/authz's
+	// TestDelegationLeg_DeniesConfiguredCapWhenResourceHasNoClassification at
+	// the live-stack layer, with the audit row read back from Postgres rather
+	// than only the RPC response.
 	//
-	// The exceeding half is labelled by a real resource_label_rules row
-	// (§3.9.1 R4), not by the request. It used to be asserted on the wire,
-	// which was the only source of a classification that existed at the time
-	// — R3's gap. Resource labelling closed that gap and, with it, the reason
-	// to believe a caller about it at all: the PDP now owns the
-	// classification and hierarchy attributes and discards whatever the wire
-	// carried under those names (R1, internal/pdpgrpc/label.go), so this
-	// proof reaches the exceeds-cap path the only way production can. proof5
-	// below is the other side of that same change.
-	t.Run("proof3_classification_cap_distinguishes_uncheckable_from_exceeded", func(t *testing.T) {
+	// The EXCEEDS half of this proof, and the "these two reasons must differ"
+	// comparison, moved to TestIntegration_Live_ResourceLabelling (below).
+	// They used to live here and to assert a classification the CALLER sent,
+	// which was the only source that existed -- R3's gap. Resource labelling
+	// closed that gap, and closed the wire as a source with it: a label is
+	// resolved only against an id the PDP extracted through the tenant's own
+	// catalog row (R1/R4, internal/pdpgrpc/label.go). Tool "Read" here has no
+	// catalog row, deliberately -- proofs 1, 2 and 4 need the wire's Resource
+	// to reach the delegation leg unchanged -- so no resource in THIS test can
+	// carry a label at all, and asserting the exceeds path here would have
+	// meant asserting it through a path production cannot take.
+	t.Run("proof3_classification_cap_denies_an_unlabelled_resource", func(t *testing.T) {
 		d := newDelegation("proof3: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"}, nil)
-		createRule(t, resourceTenant, classification.Rule{
-			Prefix: "/data/top-secret/", Hierarchy: "nato", Level: "TOP-SECRET",
-		})
 		before := fetchAuditChain(t, resourceTenant)
 
-		uncheckable := decide(t, d.ID, map[string]string{"id": "doc-uncheckable"}) // identity, but no rule labels it
+		uncheckable := decide(t, d.ID, map[string]string{"id": "doc-uncheckable"}) // identity, but nothing labels it
 		t.Logf("Decide() with a classification cap against an unlabelled resource -> effect=%s reason=%q",
 			uncheckable.GetEffect(), uncheckable.GetReason())
 		if uncheckable.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
@@ -2097,49 +2095,18 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 				uncheckable.GetReason(), "cannot be evaluated")
 		}
 
-		exceeds := decide(t, d.ID, map[string]string{"id": "/data/top-secret/doc"})
-		t.Logf("Decide() with a classification cap against a resource that exceeds it -> effect=%s reason=%q",
-			exceeds.GetEffect(), exceeds.GetReason())
-		if exceeds.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
-			t.Fatalf("Effect = %v, want EFFECT_DENY (TOP-SECRET exceeds a CONFIDENTIAL cap)", exceeds.GetEffect())
-		}
-		if !strings.Contains(exceeds.GetReason(), "exceeds delegation cap") {
-			t.Errorf("Reason = %q, want it to contain %q (the exceeds-cap wording)", exceeds.GetReason(), "exceeds delegation cap")
-		}
-
-		if uncheckable.GetReason() == exceeds.GetReason() {
-			t.Fatalf("the uncheckable-cap and exceeds-cap reasons must differ over the wire, both were %q", uncheckable.GetReason())
-		}
-
-		// The property this proof exists for, one layer deeper than the wire
-		// response: the persisted audit row's own Reason column must carry
-		// the same distinction, not just DecideResponse's in-memory copy of
-		// it.
 		after := fetchAuditChain(t, resourceTenant)
 		newRows := after[len(before):]
-		if len(newRows) != 2 {
-			t.Fatalf("this subtest made 2 Decide() calls, want 2 new audit rows, got %d", len(newRows))
+		if len(newRows) != 1 {
+			t.Fatalf("this subtest made 1 Decide() call, want 1 new audit row, got %d", len(newRows))
 		}
-		uncheckableRow, exceedsRow := newRows[0], newRows[1]
-		t.Logf("audit rows: uncheckable reason=%q exceeds reason=%q", uncheckableRow.Reason, exceedsRow.Reason)
-
-		if uncheckableRow.Decision != "DENY" || exceedsRow.Decision != "DENY" {
-			t.Fatalf("audit rows Decision = %q/%q, want DENY/DENY", uncheckableRow.Decision, exceedsRow.Decision)
+		row := newRows[0]
+		t.Logf("audit row: decision=%q reason=%q", row.Decision, row.Reason)
+		if row.Decision != "DENY" {
+			t.Fatalf("audit row Decision = %q, want DENY", row.Decision)
 		}
-		if uncheckableRow.Reason != uncheckable.GetReason() {
-			t.Errorf("audit row reason = %q, want %q (the response's own reason)", uncheckableRow.Reason, uncheckable.GetReason())
-		}
-		if exceedsRow.Reason != exceeds.GetReason() {
-			t.Errorf("audit row reason = %q, want %q (the response's own reason)", exceedsRow.Reason, exceeds.GetReason())
-		}
-		if !strings.Contains(uncheckableRow.Reason, "cannot be evaluated") {
-			t.Errorf("audit row reason = %q, want it to contain %q", uncheckableRow.Reason, "cannot be evaluated")
-		}
-		if !strings.Contains(exceedsRow.Reason, "exceeds delegation cap") {
-			t.Errorf("audit row reason = %q, want it to contain %q", exceedsRow.Reason, "exceeds delegation cap")
-		}
-		if uncheckableRow.Reason == exceedsRow.Reason {
-			t.Fatalf("the audit row's reason must distinguish the two denials, both were %q", uncheckableRow.Reason)
+		if row.Reason != uncheckable.GetReason() {
+			t.Errorf("audit row reason = %q, want %q (the response's own reason)", row.Reason, uncheckable.GetReason())
 		}
 	})
 
@@ -2187,8 +2154,12 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	// available to any caller that can reach the PDP, and the reason
 	// "no PEP in this repo sends one" was never the guarantee.
 	//
-	// The id names a resource no rule labels, deliberately: a rule would
-	// deny this on its own and prove nothing about the claim.
+	// Tool "Read" has no catalog row here, which is the path on which this
+	// property is load-bearing: ApplyExtraction replaces the resource map
+	// wholesale for a CATALOGED tool, so the claim would be gone before
+	// labelResource ever ran. On the uncataloged path the caller's map
+	// survives intact, and stripping the two label keys is the only thing
+	// standing between this claim and a satisfied cap.
 	t.Run("proof5_wire_supplied_classification_is_not_believed", func(t *testing.T) {
 		d := newDelegation("proof5: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"}, nil)
 
@@ -2455,6 +2426,188 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 		}
 		if !strings.Contains(mismatched.GetReason(), `does not match request value "`+other+`"`) {
 			t.Errorf("Reason = %q, want it to name the mismatched value extracted from raw_input", mismatched.GetReason())
+		}
+	})
+}
+
+// TestIntegration_Live_ResourceLabelling is Phase 7 Task 3's live proof of
+// resource labelling (spec §3.9.1): a tenant's own resource_label_rules rows
+// decide a resource's classification, and the delegation's cap is enforced
+// against that label over real gRPC, against a real PDP, with the audit rows
+// read back from Postgres.
+//
+// Placed AFTER TestIntegration_Live_ToolCatalogEnforcement, and that is
+// structural rather than cosmetic. Every proof here needs a tool with a
+// tool_catalog row naming a resource_field, because a label may only ever be
+// resolved against an id the PDP extracted for itself (R1/R4) -- and that
+// test's proof4 asserts resourceTenant has ZERO catalog rows before it seeds
+// any, which is its own counterfactual. So this test reuses the "read_file"
+// row proof1 seeded there (READ_ONLY, resource_field "path") rather than
+// seeding a second one earlier and breaking that assertion. There is no
+// DeleteToolCatalogEntry to undo one with, by design (store/catalog.go).
+func TestIntegration_Live_ResourceLabelling(t *testing.T) {
+	const subject = "resource-labelling-proof@example.com"
+	const secretPath = "/label-proof/secret/q3.pdf"
+	const publicPath = "/label-proof/public/brochure.pdf"
+	const unlabelledPath = "/label-proof-elsewhere/notes.txt"
+
+	agentID := uuid.New()
+	seedAgent(t, resourceTenant, agentID, "integration-agent-resource-labelling", models.TrustTierPlatformTrusted)
+
+	// The rule set: a strict tree with a public carve-out inside it (R6's own
+	// example), and nothing at all covering unlabelledPath.
+	createRule(t, resourceTenant, classification.Rule{
+		Prefix: "/label-proof/", Hierarchy: "nato", Level: "TOP-SECRET",
+	})
+	createRule(t, resourceTenant, classification.Rule{
+		Prefix: "/label-proof/public/", Hierarchy: "nato", Level: "UNCLASSIFIED",
+	})
+
+	newDelegation := func(purpose string, caps map[string]string) *models.Delegation {
+		id := uuid.New()
+		return seedDelegation(t, &models.Delegation{
+			ID: id, TenantID: resourceTenant, UserID: "integration-test-user", AgentID: agentID,
+			ApprovedTools: []string{}, MaxActionTier: models.ActionTierReadOnly,
+			ClassificationCaps: caps, Purpose: purpose, ExpiresAt: time.Now().Add(time.Hour),
+			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+		})
+	}
+
+	// resource is a parameter here, unlike TestIntegration_Live_ToolCatalog
+	// Enforcement's own decide(), precisely so proof3 below can send a
+	// competing caller-supplied id and prove it inert.
+	decide := func(t *testing.T, delegationID uuid.UUID, rawInput string, resource map[string]string) *pdpgrpc.DecideResponse {
+		t.Helper()
+		resp, err := resourcePdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
+			Token:    mintToken(t, resourcePdpClient, delegationID),
+			AgentId:  agentID.String(),
+			Subject:  subject,
+			Tool:     "read_file",
+			RawInput: rawInput,
+			Resource: resource,
+		})
+		if err != nil {
+			t.Fatalf("Decide() error = %v, want a decision", err)
+		}
+		return resp
+	}
+
+	// proof1: the headline. A tenant rule labels the resource TOP-SECRET, the
+	// delegation caps nato at CONFIDENTIAL, and the decision denies naming
+	// the level -- distinctly from the uncheckable denial an unmatched
+	// resource gets, in the wire response AND the persisted audit row. This
+	// carries the property that used to live in
+	// TestIntegration_Live_ResourceIdentityEnforcement's proof3, moved here
+	// because reaching the exceeds path now requires a server-extracted id.
+	t.Run("proof1_label_enforces_the_cap_and_reads_differently_from_an_unlabelled_resource", func(t *testing.T) {
+		d := newDelegation("label proof1: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"})
+		before := fetchAuditChain(t, resourceTenant)
+
+		exceeds := decide(t, d.ID, `{"path":"`+secretPath+`"}`, nil)
+		t.Logf("Decide() for a TOP-SECRET-labelled resource under a CONFIDENTIAL cap -> effect=%s reason=%q",
+			exceeds.GetEffect(), exceeds.GetReason())
+		if exceeds.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY (TOP-SECRET exceeds a CONFIDENTIAL cap)", exceeds.GetEffect())
+		}
+		if exceeds.GetDeniedLeg() != "delegation" {
+			t.Errorf("DeniedLeg = %q, want %q", exceeds.GetDeniedLeg(), "delegation")
+		}
+		if !strings.Contains(exceeds.GetReason(), "exceeds delegation cap") {
+			t.Errorf("Reason = %q, want it to contain %q", exceeds.GetReason(), "exceeds delegation cap")
+		}
+
+		uncheckable := decide(t, d.ID, `{"path":"`+unlabelledPath+`"}`, nil)
+		t.Logf("Decide() for a resource no rule labels -> effect=%s reason=%q",
+			uncheckable.GetEffect(), uncheckable.GetReason())
+		if uncheckable.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY: an unmatched resource is unlabelled and R2/R7 deny it "+
+				"-- no default level, no fallback", uncheckable.GetEffect())
+		}
+		if !strings.Contains(uncheckable.GetReason(), "cannot be evaluated") {
+			t.Errorf("Reason = %q, want the uncheckable-cap wording", uncheckable.GetReason())
+		}
+		if exceeds.GetReason() == uncheckable.GetReason() {
+			t.Fatalf("the exceeds-cap and uncheckable-cap reasons must differ over the wire, both were %q",
+				exceeds.GetReason())
+		}
+
+		after := fetchAuditChain(t, resourceTenant)
+		newRows := after[len(before):]
+		if len(newRows) != 2 {
+			t.Fatalf("this subtest made 2 Decide() calls, want 2 new audit rows, got %d", len(newRows))
+		}
+		exceedsRow, uncheckableRow := newRows[0], newRows[1]
+		t.Logf("audit rows: exceeds reason=%q uncheckable reason=%q", exceedsRow.Reason, uncheckableRow.Reason)
+		if exceedsRow.Reason != exceeds.GetReason() || uncheckableRow.Reason != uncheckable.GetReason() {
+			t.Errorf("audit row reasons = %q/%q, want the responses' own reasons %q/%q",
+				exceedsRow.Reason, uncheckableRow.Reason, exceeds.GetReason(), uncheckable.GetReason())
+		}
+		if exceedsRow.Reason == uncheckableRow.Reason {
+			t.Fatalf("the audit rows must distinguish the two denials, both were %q", exceedsRow.Reason)
+		}
+	})
+
+	// proof2: R6's carve-out, live. The public subtree inside the secret one
+	// is genuinely public, longest prefix wins, and the decision ALLOWS under
+	// the same cap that denied proof1 -- the whole reason R6 departs from the
+	// raise-only pattern.
+	t.Run("proof2_lowering_carve_out_is_honoured", func(t *testing.T) {
+		d := newDelegation("label proof2: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"})
+
+		resp := decide(t, d.ID, `{"path":"`+publicPath+`"}`, nil)
+		t.Logf("Decide() for a resource under the public carve-out -> effect=%s", resp.GetEffect())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v (%q), want EFFECT_ALLOW: the longest matching prefix carves this subtree "+
+				"down to UNCLASSIFIED, which is under the cap (R6)", resp.GetEffect(), resp.GetReason())
+		}
+		if resp.GetDelegationEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Errorf("DelegationEffect = %v, want EFFECT_ALLOW", resp.GetDelegationEffect())
+		}
+	})
+
+	// proof3: the review's C1, live -- the caller does not get to pick which
+	// rule labels it. raw_input names the TOP-SECRET path; the wire's own
+	// Resource names the UNCLASSIFIED carve-out. The label follows the id the
+	// PDP extracted through read_file's catalog row, so this DENIES.
+	//
+	// Before the fix, resource["id"] was what got resolved, and on an
+	// uncataloged tool that is a string the caller simply typed -- naming a
+	// decoy under a permissive rule bought an UNCLASSIFIED label and turned a
+	// capped resource into an allow. R4 permits labelling an agent-influenced
+	// id only because "the id is what the tool actually acts on ... lying does
+	// not pay"; nothing tied a caller's map key to raw_input, so that premise
+	// did not hold for it.
+	t.Run("proof3_the_caller_cannot_choose_which_rule_labels_it", func(t *testing.T) {
+		d := newDelegation("label proof3: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"})
+
+		resp := decide(t, d.ID, `{"path":"`+secretPath+`"}`, map[string]string{
+			"id":             publicPath,     // the caller names the permissive rule
+			"classification": "UNCLASSIFIED", // and, for good measure, the label itself
+			"hierarchy":      "nato",
+		})
+		t.Logf("Decide() with raw_input naming the secret path and the wire naming the public one -> effect=%s reason=%q",
+			resp.GetEffect(), resp.GetReason())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Effect = %v, want EFFECT_DENY: the label must follow the id the PDP extracted from "+
+				"raw_input, never the one the caller sent", resp.GetEffect())
+		}
+		if !strings.Contains(resp.GetReason(), "TOP-SECRET") {
+			t.Errorf("Reason = %q, want the extracted path's own TOP-SECRET label to have decided", resp.GetReason())
+		}
+	})
+
+	// proof4: the regression guard, restated for this feature. A delegation
+	// with no classification cap is unaffected by the rules entirely, even on
+	// a resource labelled TOP-SECRET -- the boundary between shipping
+	// labelling and shipping a change that denies more (R2's own narrowness).
+	t.Run("proof4_uncapped_delegation_is_unaffected_by_the_rules", func(t *testing.T) {
+		d := newDelegation("label proof4: no classification caps (regression guard)", nil)
+
+		resp := decide(t, d.ID, `{"path":"`+secretPath+`"}`, nil)
+		t.Logf("Decide() against an uncapped delegation on a TOP-SECRET resource -> effect=%s", resp.GetEffect())
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v (%q), want EFFECT_ALLOW: a delegation with no caps places no restriction "+
+				"on this axis and never did", resp.GetEffect(), resp.GetReason())
 		}
 	})
 }

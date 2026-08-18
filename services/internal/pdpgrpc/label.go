@@ -32,12 +32,34 @@ import (
 // replace it with. That is also the ONLY direction this can fail safely in —
 // leaving the claim would let the cheapest possible bypass through.
 //
+// resourceID is the id internal/authz.ExtractFromCatalog read out of this
+// call's raw_input through the tenant's own catalog row — NOT resource["id"],
+// which is where an earlier version of this function looked, and not any
+// other map key. The difference is the whole of R4's safety argument.
+//
+// R4 permits labelling an agent-influenced identifier for one specific
+// reason: "the id is what the tool actually acts on. Naming a different
+// resource changes what you get, not merely what you are permitted; lying
+// does not pay." That holds only where the id was derived server-side from
+// the field the tool operates on. ApplyExtraction returns the caller's map
+// untouched for a tool with no catalog row, so reading resource["id"] there
+// resolved the tenant's rules against a string the caller simply typed —
+// nothing tied it to raw_input, and naming a decoy under a permissive rule
+// cost one field and bought a label. That is the same escalation stripping
+// the classification attribute closed, one indirection further out: the
+// claim was gone and the lever that selects it was not.
+//
+// Taking the id as a parameter makes R4's premise true by construction
+// rather than by assumption. An uncataloged tool yields ExtractedInput's zero
+// value, so resourceID is "" and nothing is labelled — the resource stays
+// unlabelled and R2 denies it under any configured cap. Fail-closed, and it
+// costs nothing today: no PEP in this repo populates the resource map at all.
+//
 // No id, no label, even under R7's empty-prefix catch-all. Resolve would
 // match "" against the catch-all quite happily, and doing so would invent a
 // fact about a resource nobody identified — which under a PUBLIC catch-all
-// ALLOWS. Skipping is strictly fail-closed: the resource stays unlabelled and
-// R2 denies it under any configured cap, which is the same answer this path
-// gave before the rule ever existed.
+// ALLOWS. Skipping is strictly fail-closed, for both the uncataloged case
+// above and a cataloged call that simply carried no such field.
 //
 // And no fallback when nothing matched. There is no default level here, not
 // even the lowest one: a default would be this file answering a question the
@@ -51,7 +73,7 @@ import (
 // Returned fresh rather than mutated: for an uncataloged tool this map IS
 // req.Resource, and rewriting a caller's request in place would leave the
 // audit trail describing something other than what arrived.
-func labelResource(rules []classification.Rule, resource map[string]string) map[string]string {
+func labelResource(rules []classification.Rule, resource map[string]string, resourceID string) map[string]string {
 	labelled := make(map[string]string, len(resource)+2)
 	for k, v := range resource {
 		if k == classification.AttrClassification || k == classification.AttrHierarchy {
@@ -60,11 +82,10 @@ func labelResource(rules []classification.Rule, resource map[string]string) map[
 		labelled[k] = v
 	}
 
-	id := labelled["id"]
-	if id == "" {
+	if resourceID == "" {
 		return labelled
 	}
-	match, ok := classification.Resolve(rules, id)
+	match, ok := classification.Resolve(rules, resourceID)
 	if !ok {
 		return labelled
 	}
@@ -74,10 +95,20 @@ func labelResource(rules []classification.Rule, resource map[string]string) map[
 	return labelled
 }
 
-// logCarveOut emits R6's lowering signal, and R10's hierarchy-switch signal
-// beside it. Two lines, never one: a switch is not a lowering, and no
-// ordering ranks a commercial level against a nato one, so reporting one as
-// the other would put a false claim in the only signal an operator has.
+// logCarveOut emits R6's lowering signal, R10's hierarchy-switch signal, and
+// the inert-rule signal beside them. Three lines, never one merged one: a
+// switch is not a lowering and an unrankable rule is neither, so folding any
+// pair together would put a claim the code cannot support into the only
+// signal an operator has. All three can fire for one match, and each is
+// independently true when it does.
+//
+// The three carry the same six fields for the same reason — an operator
+// greps one shape, not three — including overrides_hierarchy on every line.
+// It looks redundant on the lowering line, where the two hierarchies are the
+// same hierarchy, and is not: overriddenBy matches with EqualFold, so the
+// overridden ROW can read "NATO" where the winner reads "nato", and a line
+// that printed only the winner's spelling would send an operator grepping
+// for a string their table does not contain.
 //
 // WHAT IT CARRIES: the two rules, each as prefix + hierarchy + level. That is
 // what an operator needs to find the row and decide whether they meant it,
@@ -122,10 +153,20 @@ func logCarveOut(match classification.Match) {
 			"rule_hierarchy", match.Rule.Hierarchy,
 			"rule_level", match.Rule.Level,
 			"overrides_prefix", r.Prefix,
+			"overrides_hierarchy", r.Hierarchy,
 			"overrides_level", r.Level)
 	}
 	if r := match.SwitchedHierarchyFrom; r != nil {
-		slog.Info("resource label carve-out changes hierarchy: caps on the hierarchy it left no longer apply",
+		slog.Info("resource label carve-out changes hierarchy: a cap naming only the hierarchy it left does not apply to the one it entered",
+			"rule_prefix", match.Rule.Prefix,
+			"rule_hierarchy", match.Rule.Hierarchy,
+			"rule_level", match.Rule.Level,
+			"overrides_prefix", r.Prefix,
+			"overrides_hierarchy", r.Hierarchy,
+			"overrides_level", r.Level)
+	}
+	if r := match.OverrodeUnrankable; r != nil {
+		slog.Info("resource label carve-out covers a rule whose level this system cannot rank: that rule is inert",
 			"rule_prefix", match.Rule.Prefix,
 			"rule_hierarchy", match.Rule.Hierarchy,
 			"rule_level", match.Rule.Level,

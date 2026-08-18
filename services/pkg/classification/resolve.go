@@ -94,6 +94,40 @@ type Match struct {
 	//
 	// It never aliases the caller's rule slice.
 	SwitchedHierarchyFrom *Rule
+
+	// OverrodeUnrankable is the nearest rule this one overrode in its OWN
+	// hierarchy whose level the system cannot rank, and is nil otherwise. It
+	// closes, one column over, the hole R9 closed for the winner:
+	//
+	//	/data/    nato  SEKRET        <- one typed character, in the LEVEL
+	//	/data/x/  nato  UNCLASSIFIED
+	//	caps: {"nato": "CONFIDENTIAL"}
+	//
+	// overriddenBy skips the outer rule because there is no rank to compare,
+	// so LoweredFrom is nil, SwitchedHierarchyFrom is nil (same hierarchy),
+	// and a capped subtree allows with nothing said. The allow is R6 working
+	// as designed; the loss is that the operator never learns their /data/
+	// SECRET rule is inert.
+	//
+	// A third field rather than a third meaning for LoweredFrom, for R10's
+	// reason exactly: reporting this as a lowering would assert an ordering
+	// between UNCLASSIFIED and SEKRET that does not exist, which is the false
+	// claim in the operator's only signal that R10 exists to prevent.
+	//
+	// The same standard switchedFrom is held to, applied consistently:
+	// validateResourceLabelRule refuses SEKRET at write time, and that is a
+	// better error message, not the enforcement — a stale read, an in-flight
+	// migration and a direct psql write each hand this function rows it never
+	// saw. The tempting reason to skip this is that an unrankable rule denies
+	// loudly (R9) wherever it WINS, so it announces itself; that argument
+	// fails precisely here, where it never wins because a carve-out covers
+	// every id it would have decided.
+	//
+	// Nil when the WINNER is unrankable, because R9 then denies the decision
+	// itself and names the level — there is no silence to break.
+	//
+	// It never aliases the caller's rule slice.
+	OverrodeUnrankable *Rule
 }
 
 // Resolve returns the label for resourceID: the rule with the LONGEST
@@ -163,10 +197,12 @@ func Resolve(rules []Rule, resourceID string) (Match, bool) {
 	if winner == nil || ambiguous {
 		return Match{}, false
 	}
+	lowered, unrankable := overriddenBy(rules, resourceID, *winner)
 	return Match{
 		Rule:                  *winner,
-		LoweredFrom:           overriddenBy(rules, resourceID, *winner),
+		LoweredFrom:           lowered,
 		SwitchedHierarchyFrom: switchedFrom(rules, resourceID, *winner),
+		OverrodeUnrankable:    unrankable,
 	}, true
 }
 
@@ -215,7 +251,10 @@ func agree(a, b Rule) bool {
 
 // overriddenBy returns the rule winner displaced, but only when winner
 // resolves strictly LOWER than it — the one case R6 wants logged. Nil
-// otherwise.
+// otherwise. Its second return is the nearest rule it skipped for being
+// unrankable, which is Match.OverrodeUnrankable — computed here rather than
+// in a pass of its own because this loop already has the eligibility test and
+// already computes the rank that decides it.
 //
 // "The rule it overrides" is the next-longest match IN THE WINNER'S
 // HIERARCHY, not the next-longest overall. A level is higher or lower only
@@ -240,15 +279,15 @@ func agree(a, b Rule) bool {
 // This is a second pass rather than a second tracker in longestMatch because
 // the hierarchy that decides which rules are even eligible is not known
 // until the winner is.
-func overriddenBy(rules []Rule, resourceID string, winner Rule) *Rule {
+func overriddenBy(rules []Rule, resourceID string, winner Rule) (lowered, unrankable *Rule) {
 	winnerRank := Index(winner.Hierarchy, winner.Level)
 	if winnerRank < 0 {
-		return nil
+		return nil, nil
 	}
 
-	var overridden Rule
+	var overridden, unrankableRule Rule
 	overriddenRank := -1
-	found := false
+	found, foundUnrankable := false, false
 	for _, r := range rules {
 		if len(r.Prefix) >= len(winner.Prefix) || !strings.HasPrefix(resourceID, r.Prefix) {
 			continue
@@ -258,6 +297,15 @@ func overriddenBy(rules []Rule, resourceID string, winner Rule) *Rule {
 		}
 		rank := Index(r.Hierarchy, r.Level)
 		if rank < 0 {
+			// Still skipped for the lowering comparison — there is no rank to
+			// compare — but no longer dropped on the floor. Nearest first, and
+			// the level breaks a tie so the report does not depend on the
+			// order rows arrived in, the same discipline the two winners below
+			// and in switchedFrom follow.
+			if !foundUnrankable || len(r.Prefix) > len(unrankableRule.Prefix) ||
+				(len(r.Prefix) == len(unrankableRule.Prefix) && r.Level < unrankableRule.Level) {
+				unrankableRule, foundUnrankable = r, true
+			}
 			continue
 		}
 		// Longest first; on a tie the higher level wins, so that a rule set
@@ -271,12 +319,16 @@ func overriddenBy(rules []Rule, resourceID string, winner Rule) *Rule {
 		}
 	}
 
-	if !found || winnerRank >= overriddenRank {
-		return nil
+	// Copies: the caller's slice must not be reachable through a completed
+	// match. Both reports are independent — a carve-out can lower a rankable
+	// rule AND cover an inert one, and each is worth its own line.
+	if foundUnrankable {
+		unrankable = &unrankableRule
 	}
-	// A copy: the caller's slice must not be reachable through a completed
-	// match.
-	return &overridden
+	if !found || winnerRank >= overriddenRank {
+		return nil, unrankable
+	}
+	return &overridden, unrankable
 }
 
 // switchedFrom returns the nearest rule winner displaced from a DIFFERENT

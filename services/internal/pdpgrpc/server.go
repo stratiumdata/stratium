@@ -478,7 +478,12 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
 			fmt.Errorf("load resource label rules: %w", err), &epoch)
 	}
-	resource = labelResource(labelRules, resource)
+	// extracted.ResourceID, never resource["id"]: the label may only ever be
+	// resolved against an identity this PDP derived itself, from raw_input,
+	// through the tenant's own catalog row. See labelResource's own doc
+	// comment for why reading it back out of the map instead let a caller
+	// choose which rule labelled it.
+	resource = labelResource(labelRules, resource, extracted.ResourceID)
 
 	// The catalog step of §4.4's resolution order (override, catalog,
 	// built-in): the tenant's own rows override DefaultCatalog() per tool,

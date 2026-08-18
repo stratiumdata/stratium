@@ -608,6 +608,112 @@ func TestResolve_UnrankableOverriddenRuleIsSkippedNotFatal(t *testing.T) {
 	}
 }
 
+// I1: the outer rule's LEVEL is one character wrong, so overriddenBy cannot
+// rank it and reports no lowering — and before this, nothing reported
+// anything at all. The carve-out allows under a CONFIDENTIAL cap and the
+// operator never learns their /data/ rule is inert. Same shape as R9's
+// fail-open, one column over.
+func TestResolve_UnrankableOverriddenRuleIsReportedNotOnlySkipped(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	m, ok := Resolve(rules, "/data/x/file")
+	if !ok {
+		t.Fatal("fixture must resolve")
+	}
+	if m.OverrodeUnrankable == nil {
+		t.Fatal("a carve-out covering a rule whose level cannot be ranked must say so: nothing else will")
+	}
+	if m.OverrodeUnrankable.Prefix != "/data/" || m.OverrodeUnrankable.Level != "SEKRET" {
+		t.Errorf("got %+v, want the inert /data/ rule", *m.OverrodeUnrankable)
+	}
+	if m.LoweredFrom != nil {
+		t.Errorf("it must NOT be reported as a lowering: no ordering places UNCLASSIFIED against SEKRET, got %+v",
+			*m.LoweredFrom)
+	}
+	if m.SwitchedHierarchyFrom != nil {
+		t.Errorf("and not as a hierarchy switch either — both rules are nato, got %+v", *m.SwitchedHierarchyFrom)
+	}
+}
+
+// The two same-hierarchy reports are independent: one carve-out can lower a
+// rankable rule AND cover an inert one, and each is separately true. A
+// version that returned early on either would drop the other.
+func TestResolve_LoweringAndUnrankableAreReportedTogether(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	m, ok := Resolve(rules, "/data/x/file")
+	if !ok {
+		t.Fatal("fixture must resolve")
+	}
+	if m.LoweredFrom == nil || m.LoweredFrom.Prefix != "/" {
+		t.Errorf("LoweredFrom = %v, want the rankable / rule: an unrankable rule between them must not blind it",
+			m.LoweredFrom)
+	}
+	if m.OverrodeUnrankable == nil || m.OverrodeUnrankable.Prefix != "/data/" {
+		t.Errorf("OverrodeUnrankable = %v, want the inert /data/ rule", m.OverrodeUnrankable)
+	}
+}
+
+// An unrankable WINNER reports nothing. R9 denies that decision outright and
+// names the level, so there is no silence to break — and a report here would
+// be about a label that never decides anything.
+func TestResolve_UnrankableWinnerReportsNoInertRule(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "ALSO-WRONG"},
+	}
+	m, ok := Resolve(rules, "/data/x/file")
+	if !ok {
+		t.Fatal("an unrankable level still resolves — CheckCap is what denies it (R9)")
+	}
+	if m.OverrodeUnrankable != nil {
+		t.Errorf("got %+v, want nil: R9 denies this decision and names the level itself",
+			*m.OverrodeUnrankable)
+	}
+}
+
+// An unrankable rule in ANOTHER hierarchy belongs to switchedFrom, not here.
+// The two eligibility tests are exact negations, and this is the case that
+// proves an unrankable rule does not fall through both.
+func TestResolve_UnrankableRuleInAnotherHierarchyIsTheSwitchReport(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "commercial-ish", Level: "SEKRET"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	m, ok := Resolve(rules, "/data/x/file")
+	if !ok {
+		t.Fatal("fixture must resolve")
+	}
+	if m.OverrodeUnrankable != nil {
+		t.Errorf("OverrodeUnrankable = %+v, want nil: it is not in the winner's hierarchy",
+			*m.OverrodeUnrankable)
+	}
+	if m.SwitchedHierarchyFrom == nil || m.SwitchedHierarchyFrom.Prefix != "/data/" {
+		t.Errorf("SwitchedHierarchyFrom = %v, want the /data/ rule: switchedFrom skips no rule for being "+
+			"unrankable, so exactly one report covers it", m.SwitchedHierarchyFrom)
+	}
+}
+
+func TestResolve_UnrankableReportDoesNotAliasTheCallersRules(t *testing.T) {
+	rules := []Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
+		{Prefix: "/data/x/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	m, ok := Resolve(rules, "/data/x/file")
+	if !ok || m.OverrodeUnrankable == nil {
+		t.Fatal("fixture must report an inert rule")
+	}
+	rules[0].Level = "SECRET"
+	if m.OverrodeUnrankable.Level != "SEKRET" {
+		t.Errorf("the report aliased the caller's slice: got %q, want SEKRET", m.OverrodeUnrankable.Level)
+	}
+}
+
 // The report must not alias the caller's slice. A caller that reuses or
 // mutates the rules it loaded must not be able to change what a completed
 // match says it decided.

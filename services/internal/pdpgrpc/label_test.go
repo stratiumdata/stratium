@@ -123,6 +123,90 @@ func TestDecide_NoResourceIDMeansNoLabelEvenUnderACatchAll(t *testing.T) {
 	}
 }
 
+// C1, the lever behind the claim: a tool with no catalog row must not be
+// labelled at all, because on that path resource["id"] is a string the caller
+// simply typed. Nothing ties it to raw_input, so R4's "the id is what the tool
+// actually acts on — lying does not pay" does not hold for it, and resolving
+// the tenant's rules against it let a caller pick its own classification by
+// naming a decoy.
+//
+// Two rules, and the decoy is the PERMISSIVE one: before the fix this
+// allowed, with the resource labelled UNCLASSIFIED purely because the caller
+// asked for that string. Unlabelled denies (R2), which is the same answer
+// this path gave before rules existed.
+func TestDecide_UncatalogedToolCannotLabelItselfByNamingAnID(t *testing.T) {
+	fs, req := wellFormedFixture() // deliberately no catalog row for "Bash"
+	fs.chain[0].ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
+	fs.labelRules = []classification.Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/public/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}
+	req.RawInput = `{"path":"/data/secret.txt"}`            // what the tool would act on
+	req.Resource = map[string]string{"id": "/public/decoy"} // what the caller claims it is
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDelegationEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("DelegationEffect = %v (%q), want DENY: a caller-typed id is not an identity this PDP "+
+			"derived, so no rule may label it — naming /public/decoy must not buy an UNCLASSIFIED label",
+			resp.GetDelegationEffect(), resp.GetDelegationReason())
+	}
+	if !strings.Contains(resp.GetDelegationReason(), "cannot be evaluated") {
+		t.Errorf("DelegationReason = %q, want the uncheckable-cap wording: the resource is unlabelled, not "+
+			"labelled from the caller's claim", resp.GetDelegationReason())
+	}
+}
+
+// The mirror, and the one that says the fix is a provenance rule rather than
+// a blanket refusal: once the tenant catalogs the tool, the label follows the
+// id the PDP extracted from raw_input, and the wire's competing id is inert.
+// The wire names the permissive rule and the real path names the strict one,
+// so a version that preferred — or merged — the wire's id would ALLOW here.
+func TestDecide_CatalogedToolLabelsTheExtractedIDNotTheWireID(t *testing.T) {
+	fs, req := labelFixture(t, map[string]string{"nato": "CONFIDENTIAL"}, []classification.Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
+		{Prefix: "/public/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	})
+	req.RawInput = `{"path":"/data/reports/q3.pdf"}`
+	req.Resource = map[string]string{"id": "/public/decoy"}
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDelegationEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("DelegationEffect = %v (%q), want DENY on the SECRET label of the extracted path",
+			resp.GetDelegationEffect(), resp.GetDelegationReason())
+	}
+	if !strings.Contains(resp.GetDelegationReason(), "SECRET") {
+		t.Errorf("DelegationReason = %q, want the extracted path's own label to have decided",
+			resp.GetDelegationReason())
+	}
+}
+
+// wantLogFields asserts each key=value pair appears in the captured log.
+//
+// key=VALUE pairs, not bare values, and that is the fix for a real hole: the
+// lowering line's overridden prefix is BY CONSTRUCTION a prefix of the
+// winner's — a shorter rule that matched the same id — so no choice of
+// fixture can make Contains(line, "/data/") fail when the line prints
+// rule_prefix=/data/public/ and nothing else. Asserting the field NAME
+// alongside the value is what pins the second rule; asserting the value
+// alone pins nothing, and a mutation deleting overrides_prefix outright
+// survived the earlier version of these tests.
+func wantLogFields(t *testing.T, line string, fields ...string) {
+	t.Helper()
+	for _, f := range fields {
+		if !strings.Contains(line, f) {
+			t.Errorf("log is missing %s — an operator must be able to find both rules by field.\ngot: %s", f, line)
+		}
+	}
+}
+
 // R6 end to end: the carve-out is HONOURED — longest prefix wins, and a
 // public file inside a secret directory is genuinely public — and it is
 // LOGGED, because a mistyped narrow rule that silently lowers a subtree is
@@ -154,11 +238,9 @@ func TestDecide_LoweringCarveOutIsHonouredAndLoggedWithoutTheResourceID(t *testi
 	}
 
 	line := logs.String()
-	for _, want := range []string{"/data/public/", "/data/", "UNCLASSIFIED", "SECRET", "nato"} {
-		if !strings.Contains(line, want) {
-			t.Errorf("log = %q, want it to name %q: an operator must be able to find both rules", line, want)
-		}
-	}
+	wantLogFields(t, line,
+		"rule_prefix=/data/public/", "rule_hierarchy=nato", "rule_level=UNCLASSIFIED",
+		"overrides_prefix=/data/", "overrides_hierarchy=nato", "overrides_level=SECRET")
 	if strings.Contains(line, adversarialID) || strings.Contains(line, "AKIAIOSFODNN7EXAMPLE") {
 		t.Errorf("log leaked the resource id: %q", line)
 	}
@@ -204,14 +286,45 @@ func TestDecide_HierarchySwitchIsAllowedAndLoggedAsItsOwnLine(t *testing.T) {
 	}
 
 	line := logs.String()
-	if !strings.Contains(line, "hierarchy") || !strings.Contains(line, "commercial") ||
-		!strings.Contains(line, "nato") {
-		t.Errorf("log = %q, want a line naming both hierarchies: this carve-out escapes every nato cap "+
-			"and R6's lowering log cannot fire for it", line)
-	}
+	wantLogFields(t, line,
+		"rule_prefix=/data/reports/", "rule_hierarchy=commercial", "rule_level=PUBLIC",
+		"overrides_prefix=/data/", "overrides_hierarchy=nato", "overrides_level=TOP-SECRET")
 	if strings.Contains(line, "lower") {
 		t.Errorf("log = %q, must not claim a lowering: no ordering ranks a commercial level against a "+
 			"nato one", line)
+	}
+}
+
+// I1 end to end: the outer rule's level is one character wrong, so it can
+// never be ranked and never lowers anything — the carve-out allows under a
+// cap and, before this line existed, said nothing. The rule is inert and only
+// the PDP is in a position to notice.
+func TestDecide_InertRuleBeneathACarveOutIsLogged(t *testing.T) {
+	fs, req := labelFixture(t, map[string]string{"nato": "CONFIDENTIAL"}, []classification.Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SEKRET"},
+		{Prefix: "/data/reports/", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	})
+	logs := captureLogs(t)
+	srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+	if resp.GetDelegationEffect() != Effect_EFFECT_ALLOW {
+		t.Fatalf("DelegationEffect = %v (%q), want ALLOW: the carve-out is UNCLASSIFIED, under the cap",
+			resp.GetDelegationEffect(), resp.GetDelegationReason())
+	}
+
+	line := logs.String()
+	wantLogFields(t, line,
+		"rule_prefix=/data/reports/", "rule_level=UNCLASSIFIED",
+		"overrides_prefix=/data/", "overrides_hierarchy=nato", "overrides_level=SEKRET")
+	if !strings.Contains(line, "cannot rank") {
+		t.Errorf("log = %q, want it to say the covered rule cannot be ranked", line)
+	}
+	if strings.Contains(line, "lower") {
+		t.Errorf("log = %q, must not claim a lowering: SEKRET has no rank to have been lowered from", line)
 	}
 }
 
@@ -285,11 +398,15 @@ func TestDecide_WireSuppliedClassificationIsNeverBelieved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide() error = %v", err)
 	}
-	if resp.GetDelegationEffect() != Effect_EFFECT_ALLOW {
-		return // denied, which is the required outcome
+	if resp.GetDelegationEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("DelegationEffect = %v (%q), want DENY: a caller-supplied classification must never "+
+			"satisfy a cap", resp.GetDelegationEffect(), resp.GetDelegationReason())
 	}
-	t.Fatalf("DelegationEffect = ALLOW (%q): a caller-supplied classification must never satisfy a cap",
-		resp.GetDelegationReason())
+	if !strings.Contains(resp.GetDelegationReason(), "cannot be evaluated") {
+		t.Errorf("DelegationReason = %q, want the uncheckable-cap wording — accepting any non-ALLOW would "+
+			"pass on an ESCALATE or on a denial from some other leg's rule entirely",
+			resp.GetDelegationReason())
+	}
 }
 
 // The same claim, losing to a real rule rather than to its absence: the
