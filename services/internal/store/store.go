@@ -19,9 +19,13 @@
 // tenant_epoch.epoch (migrations/000001_baseline) is bumped by a database
 // trigger (migrations/000015_tenant_epoch_trigger), not by any code in this
 // package or anywhere else in Go: every INSERT/UPDATE/DELETE on policies,
-// agents, tool_catalog, or tier_overrides, and every UPDATE/DELETE (not
-// INSERT) on delegations, bumps the affected tenant's epoch in the same
-// transaction as the write. LoadTenantEpoch (tenant_epoch.go) reads it, the
+// agents, tool_catalog, tier_overrides, or resource_label_rules, and every
+// UPDATE/DELETE (not INSERT) on delegations, bumps the affected tenant's epoch
+// in the same transaction as the write. resource_label_rules is the one table
+// in that list whose trigger is NOT created by 000015 — it did not exist yet;
+// migrations/000019_resource_label_rules attaches 000015's own shared
+// bump_tenant_epoch() function to it, and that migration's own comment records
+// why a labelling change has to invalidate a cached decision. LoadTenantEpoch (tenant_epoch.go) reads it, the
 // same way every other method here reads its own table. Nothing here writes
 // tenant_epoch directly, and nothing here should ever be changed to: a PDP
 // that bumped its own cache-invalidation counter would be a PDP writing

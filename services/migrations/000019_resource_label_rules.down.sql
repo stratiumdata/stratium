@@ -1,0 +1,18 @@
+-- Rolling this back discards every resource labelling rule the tenant has
+-- registered, and an operator should know what that costs before running it.
+-- It is NOT a fail-open: R2/R7 make an unlabelled resource deny under any
+-- configured cap, so the effect of losing these rows is that every capped
+-- decision starts denying again -- back to exactly the inert state R3
+-- recorded, which is what this table exists to close. Loud, not silent, and in
+-- the safe direction; but a tenant relying on classification caps is down
+-- until the rows are restored.
+--
+-- A bare DROP TABLE, matching 000013_tool_catalog.down.sql and
+-- 000018_spent_proofs.down.sql, with no REVOKE and no DROP TRIGGER before it.
+-- Both are dependencies of the table: object-level privileges and row-level
+-- triggers are dropped with the object, so naming either here would be
+-- redundant, or -- if the drop were ever made conditional -- misleading about
+-- which statement actually removed them. bump_tenant_epoch() itself is NOT
+-- dropped: it is 000015_tenant_epoch_trigger's object, still attached to five
+-- other tables, and dropping it here would break them.
+DROP TABLE IF EXISTS resource_label_rules;
