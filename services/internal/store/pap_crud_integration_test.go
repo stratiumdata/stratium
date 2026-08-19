@@ -567,3 +567,180 @@ func assertAuditTrailMatches(t *testing.T, tenant, actor string, wantEventTypes 
 		t.Errorf("audit.Verify() error = %v, want the chain to verify end to end", err)
 	}
 }
+
+// TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip is Task 5's own "each
+// resource round-trips through create, read, update, delete," proven against
+// real Postgres as stratium_pap_login — the same shape the three round trips
+// above take, plus two things specific to this table.
+//
+// The first is the EPOCH, asserted after every write and specifically after
+// the UPDATE and the DELETE. migrations/000019 attaches bump_tenant_epoch()
+// FOR EACH ROW on all three verbs, and Task 2 already proved the trigger fires
+// for raw SQL; what only this test can prove is that the Go write paths added
+// here actually WRITE — an UPDATE matching no row, or a DELETE the RLS policy
+// silently scoped away, would return no error from a method that ignored
+// RETURNING and would leave the epoch flat. A labelling change that did not
+// invalidate a cached decision is a stale authorization decision.
+//
+// The second is the DELETE's own audit reason, which carries the blast radius
+// computed inside the delete's transaction. Asserted here rather than only at
+// the unit level because the surviving-rules read happens after the DELETE in
+// the same transaction, and "the delete is visible to its own transaction's
+// subsequent SELECT" is a property of Postgres, not of sqlmock's replay.
+func TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip(t *testing.T) {
+	const tenant = "tenant-pap-crud-resource-label-integration"
+	const actor = "integration-operator"
+	repo := store.New(papDB, tenant)
+	before, _ := readTenantEpoch(t, tenant)
+
+	created, err := repo.CreateResourceLabelRule(t.Context(),
+		models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}, actor, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateResourceLabelRule() error = %v", err)
+	}
+	if created.ID == uuid.Nil {
+		t.Fatal("CreateResourceLabelRule() returned the zero UUID — the id is what update-by-id and " +
+			"delete-by-id name, and the schema's own uuid_generate_v4() DEFAULT supplies it via RETURNING")
+	}
+	if created.TenantID != tenant {
+		t.Errorf("CreateResourceLabelRule().TenantID = %q, want %q", created.TenantID, tenant)
+	}
+	before = assertEpochBumped(t, tenant, before)
+
+	// R7's catch-all, as a second rule. It is fixture with a purpose: it is
+	// what the /data/ subtree falls back to when the rule above is deleted,
+	// which is the "still covered" branch of the delete's own report.
+	catchAll, err := repo.CreateResourceLabelRule(t.Context(),
+		models.ResourceLabelRule{Prefix: "", Hierarchy: "commercial", Level: "PUBLIC"}, actor, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateResourceLabelRule(catch-all) error = %v — the empty prefix is a legal, meaningful "+
+			"value and nothing on the write path may treat it as a missing field", err)
+	}
+	before = assertEpochBumped(t, tenant, before)
+
+	got, err := repo.GetResourceLabelRule(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("GetResourceLabelRule() error = %v", err)
+	}
+	if got != created {
+		t.Errorf("GetResourceLabelRule() = %+v, want %+v", got, created)
+	}
+
+	listed, err := repo.ListResourceLabelRules(t.Context())
+	if err != nil {
+		t.Fatalf("ListResourceLabelRules() error = %v", err)
+	}
+	// ORDER BY prefix puts the catch-all first ('' sorts before everything),
+	// asserted against a real planner rather than replayed rows.
+	want := []models.ResourceLabelRule{catchAll, created}
+	if len(listed) != len(want) {
+		t.Fatalf("ListResourceLabelRules() returned %d rules, want %d: %+v", len(listed), len(want), listed)
+	}
+	for i := range want {
+		if listed[i] != want[i] {
+			t.Errorf("ListResourceLabelRules()[%d] = %+v, want %+v", i, listed[i], want[i])
+		}
+	}
+
+	// The one validator, on the UPDATE path, against a live database: PUBLIC is
+	// a real level of a real hierarchy, just not nato's. The row must be
+	// untouched afterwards — a refusal that had nonetheless written is a
+	// quieter defect than no refusal at all.
+	badLevel := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "PUBLIC"}
+	if _, err := repo.UpdateResourceLabelRule(t.Context(), created.ID, badLevel, actor, time.Now().UTC()); !errors.Is(err, store.ErrInvalidRequest) {
+		t.Fatalf("UpdateResourceLabelRule(%+v) error = %v, want ErrInvalidRequest — the update path must reach "+
+			"the SAME validateResourceLabelRule the create path does", badLevel, err)
+	}
+	if unchanged, err := repo.GetResourceLabelRule(t.Context(), created.ID); err != nil || unchanged != created {
+		t.Fatalf("after a refused update, GetResourceLabelRule() = %+v (err = %v), want the row unchanged: %+v",
+			unchanged, err, created)
+	}
+
+	updated, err := repo.UpdateResourceLabelRule(t.Context(), created.ID,
+		models.ResourceLabelRule{Prefix: "/data/reports/", Hierarchy: "nato", Level: "TOP-SECRET"}, actor, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("UpdateResourceLabelRule() error = %v", err)
+	}
+	if updated.Prefix != "/data/reports/" || updated.Level != "TOP-SECRET" {
+		t.Fatalf("UpdateResourceLabelRule() = %+v, want all three operator-owned columns replaced", updated)
+	}
+	// The epoch after an UPDATE specifically (V1): a relabelling that did not
+	// invalidate a cached decision would leave a PEP serving an ALLOW this
+	// write just made wrong.
+	before = assertEpochBumped(t, tenant, before)
+
+	if err := repo.DeleteResourceLabelRule(t.Context(), created.ID, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("DeleteResourceLabelRule() error = %v", err)
+	}
+	// And after a DELETE specifically. Removing a label is the write most in
+	// need of this: under R2/R7 it turns allows into denials.
+	assertEpochBumped(t, tenant, before)
+
+	if _, err := repo.GetResourceLabelRule(t.Context(), created.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetResourceLabelRule() after delete: error = %v, want ErrNotFound", err)
+	}
+
+	assertAuditTrailMatches(t, tenant, actor,
+		"resource_label_rule_created", "resource_label_rule_created",
+		"resource_label_rule_updated", "resource_label_rule_deleted")
+
+	// The delete's blast-radius report, live. The catch-all survives, so the
+	// deleted prefix is still labelled, and the entry must say so and say by
+	// what — an operator reading this line should not have to re-derive the
+	// next-longest match by hand.
+	entries := fetchAuditChain(t, tenant)
+	deleteReason := entries[len(entries)-1].Reason
+	for _, want := range []string{`"/data/reports/"`, "TOP-SECRET", "now resolves to", "commercial/PUBLIC"} {
+		if !strings.Contains(deleteReason, want) {
+			t.Errorf("delete audit reason = %q, want it to name %q", deleteReason, want)
+		}
+	}
+}
+
+// TestIntegration_PAPCRUD_ResourceLabelRuleDeleteRecordsAnUnlabelling is the
+// other branch of the same report, and the case the whole blast-radius
+// argument is about: removing the LAST rule covering a prefix leaves
+// everything under it unlabelled, and R2/R7 make an unlabelled resource deny
+// under any configured cap. Here that rule is the empty-prefix catch-all, so
+// the delete un-labels the tenant.
+//
+// The delete is not blocked — see DeleteResourceLabelRule's own doc comment for
+// why a confirmation gate was rejected — so what has to be true instead is that
+// the consequence is recorded, durably, in the same transaction, in a chain
+// that verifies. That is what this asserts.
+func TestIntegration_PAPCRUD_ResourceLabelRuleDeleteRecordsAnUnlabelling(t *testing.T) {
+	const tenant = "tenant-pap-crud-resource-label-unlabel-integration"
+	const actor = "integration-operator"
+	repo := store.New(papDB, tenant)
+
+	catchAll, err := repo.CreateResourceLabelRule(t.Context(),
+		models.ResourceLabelRule{Prefix: "", Hierarchy: "nato", Level: "SECRET"}, actor, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateResourceLabelRule(catch-all) error = %v", err)
+	}
+
+	if err := repo.DeleteResourceLabelRule(t.Context(), catchAll.ID, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("DeleteResourceLabelRule() error = %v", err)
+	}
+
+	if rules, err := repo.ListResourceLabelRules(t.Context()); err != nil || len(rules) != 0 {
+		t.Fatalf("ListResourceLabelRules() = %+v (err = %v), want empty after deleting the only rule", rules, err)
+	}
+
+	entries := fetchAuditChain(t, tenant)
+	if len(entries) != 2 {
+		t.Fatalf("audit_chain has %d entries, want 2 (the create and the delete)", len(entries))
+	}
+	reason := entries[1].Reason
+	// `""` specifically: the catch-all's prefix is the empty string, and an
+	// entry that could not name the one rule matching everything would be the
+	// entry an operator most needs. %q is what keeps it visible.
+	for _, want := range []string{`""`, "nato/SECRET", "no remaining rule labels", "deny under any configured cap"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("delete audit reason = %q, want it to name %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "now resolves to") {
+		t.Errorf("delete audit reason = %q, must not claim the prefix still resolves — nothing labels it", reason)
+	}
+}
