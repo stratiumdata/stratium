@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -610,5 +611,111 @@ func TestCreateDelegation_PolicySetPrepareFailure_Internal(t *testing.T) {
 	wantCode(t, err, codes.Internal)
 	if len(fs.created) != 0 {
 		t.Errorf("delegation rows created = %d, want 0", len(fs.created))
+	}
+}
+
+// TestCreateDelegationRPC_CarriesNoClassificationCapField and
+// TestCreateDelegation_RootIsCreatedWithNoClassificationCap are the other two
+// guards for docs/pep.md's section "Nothing in the admin plane can change a
+// cap" (the third is TestRouteTable_ExposesNoWriteSurfaceForAClassificationCap,
+// cmd/stratium-pap/server_test.go — it cannot live here, because routeTable is
+// unexported in a main package).
+//
+// Between them they pin the three NEGATIVE facts that section asserts and
+// that nothing checked: no route writes a cap, the RPC carries no field for
+// one, and a root comes back with none. Only the fourth — a child inherits
+// its parent's map unchanged — already had a test
+// (TestCreateDelegation_ChildInheritsParentClassificationAndChainAgentIDs,
+// above).
+//
+// The claim that makes these load-bearing rather than tidy is the warning
+// built on top of them: revoking a capped delegation returns a session with
+// NO cap, so revocation removes classification enforcement instead of
+// adjusting it. That is true only while every one of these holds.
+
+// TestCreateDelegationRPC_CarriesNoClassificationCapField pins that the
+// issuance RPC gives a caller no way to name a cap.
+//
+// An exact field-set comparison, not a search for cap-shaped names. A field
+// that set a cap could be called anything — SecurityLevel, Clearance,
+// Labels — and a keyword guard would pass while the documented claim became
+// false. Any new field on either message fails this and sends the author to
+// re-read the claim, which is the intended cost: these two messages are
+// small, stable, and the whole of what a caller may ask for.
+func TestCreateDelegationRPC_CarriesNoClassificationCapField(t *testing.T) {
+	for _, tc := range []struct {
+		typ  reflect.Type
+		want []string
+	}{
+		{reflect.TypeOf(CreateDelegationRequest{}),
+			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds"}},
+		{reflect.TypeOf(RequestedScope{}),
+			[]string{"MaxActionTier", "Tools"}},
+	} {
+		t.Run(tc.typ.Name(), func(t *testing.T) {
+			var got []string
+			for i := range tc.typ.NumField() {
+				// Exported only: protoc's own state/sizeCache/unknownFields
+				// are not part of the caller's surface and would make this
+				// guard fail on a protoc upgrade for no reason.
+				if f := tc.typ.Field(i); f.IsExported() {
+					got = append(got, f.Name)
+				}
+			}
+
+			// A floor, the same one TestResourceLabelRule_RuleCopiesEvery
+			// MatcherField needed added after the fact: reflection returning
+			// nothing must not read as "nothing cap-shaped found".
+			if len(got) < 2 {
+				t.Fatalf("%s has %d exported fields, want at least 2 — either the message was gutted or "+
+					"this guard is about to verify nothing", tc.typ.Name(), len(got))
+			}
+
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("%s exported fields = %v, want %v.\n"+
+					"docs/pep.md's section \"Nothing in the admin plane can change a cap\" tells operators "+
+					"this RPC carries no field for a classification cap, and warns that revoking a "+
+					"delegation therefore returns a session with NO cap rather than a different one. If a "+
+					"field here can now carry one, that warning is false and it is the sentence that will "+
+					"talk an operator out of the correct remedy. Update docs/pep.md in this commit, then "+
+					"update this list.", tc.typ.Name(), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCreateDelegation_RootIsCreatedWithNoClassificationCap is the fact the
+// re-issue warning rests on most directly: session-start issues a ROOT, and a
+// root is written with an empty cap map — which CheckCap treats as "no cap
+// configured" and allows unconditionally, not as a cap of zero.
+//
+// The parent-id assertion is not decoration. It makes "this is a root" true
+// by check rather than by assumption about a shared fixture; if the fixture
+// ever gains a parent, this test would otherwise silently start proving the
+// inheritance path that already has its own test, and the root claim would go
+// unguarded while still reporting success.
+func TestCreateDelegation_RootIsCreatedWithNoClassificationCap(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	if req.GetParentDelegationId() != "" {
+		t.Fatalf("fixture parent_delegation_id = %q, want empty — this guard is about the ROOT path, and "+
+			"a fixture with a parent would prove the inheritance path instead",
+			req.GetParentDelegationId())
+	}
+	srv := newDelegationServer(fs, permissiveGrantSet())
+
+	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+
+	if caps := fs.created[0].ClassificationCaps; len(caps) != 0 {
+		t.Errorf("root delegation ClassificationCaps = %v, want empty.\n"+
+			"docs/pep.md's section \"Nothing in the admin plane can change a cap\" tells operators that "+
+			"revoking and re-issuing returns a session with classification enforcement OFF on every "+
+			"hierarchy, because session-start issues a root and a root is created with no cap. If a root "+
+			"now carries one, that warning is wrong in the dangerous direction — it talks an operator out "+
+			"of a remedy that would in fact work. Update docs/pep.md in this commit.", caps)
 	}
 }

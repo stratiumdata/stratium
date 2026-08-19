@@ -505,6 +505,71 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	}
 }
 
+// TestRouteTable_ExposesNoWriteSurfaceForAClassificationCap guards a NEGATIVE
+// claim docs/pep.md makes about this table, in its section "Nothing in the
+// admin plane can change a cap": that no route, at any role, sets, raises,
+// lowers or repairs a delegation's classification_caps. Three operator
+// remedies in that document are ruled out by it, and one warning depends on
+// it — "revoking removes classification enforcement entirely", which is
+// correct today and becomes advice that talks an operator out of the right
+// fix on the day a cap-editing route lands.
+//
+// A negative claim about what a system can observe is a claim to check, not
+// to reason to. Nothing checked this one: the sibling test above pins the
+// route COUNT, which a new delegation route would fail — but it would fail
+// naming a count, sending the author to update a number rather than to the
+// documentation whose warning just became false.
+//
+// Asserted as "the delegation routes are exactly these two", not as "no
+// route contains the word caps". A cap-writing route would almost certainly
+// be spelled PUT /v1/delegations/{id} or POST /v1/delegations/{id}/caps, and
+// a keyword guard would miss both. The claim is about the delegation
+// resource's whole write surface, so that is what is pinned.
+//
+// This is the same dependency structure as R11, where a proto comment said
+// "it narrows, it does not widen" and stayed true until R2 inverted the
+// default beneath it. That comment had no guard either.
+func TestRouteTable_ExposesNoWriteSurfaceForAClassificationCap(t *testing.T) {
+	// The whole delegation surface, both routes read-or-revoke. Neither
+	// carries a request body that could name a cap: the GET has none, and
+	// revoke names only the delegation it ends.
+	want := map[string]bool{
+		"GET /v1/delegations":              true,
+		"POST /v1/delegations/{id}/revoke": true,
+	}
+
+	var got []string
+	for _, rt := range routeTable {
+		if strings.Contains(rt.Pattern, "/v1/delegations") {
+			got = append(got, rt.Pattern)
+		}
+	}
+
+	// A floor, for the reason TestResourceLabelRule_RuleCopiesEveryMatcherField
+	// carries one: the loop below is the whole test, and a loop over zero
+	// matches passes silently. A guard that can check nothing and report
+	// success is the failure mode this exists to prevent.
+	if len(got) < len(want) {
+		t.Fatalf("found %d /v1/delegations routes, want at least %d — either the delegation surface was "+
+			"removed or this guard is about to verify nothing", len(got), len(want))
+	}
+
+	for _, pattern := range got {
+		if !want[pattern] {
+			t.Errorf("routeTable exposes %q, which docs/pep.md does not know about.\n"+
+				"That document's section \"Nothing in the admin plane can change a cap\" tells operators "+
+				"no route sets, raises, lowers or repairs a classification cap, and warns that revoking a "+
+				"delegation returns a session with NO cap rather than a different one. If this route can "+
+				"write classification_caps, BOTH claims are now false and the warning actively misleads. "+
+				"Update docs/pep.md in this commit, then add the route here.", pattern)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("routeTable has %d /v1/delegations routes, want exactly %d (%v) — a delegation write "+
+			"surface beyond revoke is what docs/pep.md's cap claims deny exists", len(got), len(want), got)
+	}
+}
+
 // TestOperator_HasNoTenantField is the structural check over the identity
 // type every handler receives -- see server.go's package doc, point 2.
 // Operator gained a Subject field in Task 3 (N4 attribution); this test's
