@@ -47,6 +47,16 @@ func TestResourceLabelRule_RuleCopiesEveryMatcherField(t *testing.T) {
 
 	got := reflect.ValueOf(src.Rule())
 	matcher := reflect.TypeOf(classification.Rule{})
+
+	// A floor, for the same reason ShareOneValidator carries one: the loop
+	// below is the whole test, and a loop over zero fields passes silently.
+	// This guard exists to catch a field going unchecked, so it must not be
+	// able to check nothing and report success.
+	if matcher.NumField() < 3 {
+		t.Fatalf("classification.Rule has %d fields, want at least 3 — either the matcher "+
+			"lost a field or this guard is about to verify nothing", matcher.NumField())
+	}
+
 	for i := range matcher.NumField() {
 		name := matcher.Field(i).Name
 		if matcher.Field(i).Type.Kind() != reflect.String {
