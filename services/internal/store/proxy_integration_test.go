@@ -861,6 +861,9 @@ func TestIntegration_Proxy_ProofExcludedFromAuditDigest(t *testing.T) {
 		if _, err := proxyTargetClient.Fetch(ctx, &grpctarget.EchoRequest{Message: payload}); err != nil {
 			t.Fatalf("Fetch(%q) error = %v, want success", payload, err)
 		}
+		// nolint:contextcheck // ctx here is the gRPC OUTGOING context carrying
+		// the DPoP-bound token for Fetch. fetchAuditChain reads Postgres, and
+		// handing it a bound-token metadata context would be wrong, not tidier.
 		rows := fetchAuditChain(t, proxyTenant)
 		if len(rows) == 0 {
 			t.Fatalf("no audit rows for proxyTenant after %q", payload)

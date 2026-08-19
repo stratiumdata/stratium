@@ -1,6 +1,12 @@
 version: "2"
 
 run:
+  # Without this, golangci-lint parses no file behind a build tag -- and every
+  # live-Postgres proof in this repo sits behind `//go:build integration`.
+  # 19 files, analysed by zero linters, while `make lint` reported 0 issues.
+  # Tags are additive, so untagged files stay covered by the same invocation.
+  build-tags:
+    - integration
   timeout: 5m
   tests: true
 
