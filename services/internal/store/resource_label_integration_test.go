@@ -126,7 +126,8 @@ func assertRules(t *testing.T, tenant string, got, want []classification.Rule) {
 // write or the read path shows up as a wrong value rather than as nothing; and
 // the empty-prefix catch-all is present, which is both R7's construct and the
 // row a reflexive "required field" guard would have refused. The expected
-// slice is spelled out in ORDER BY prefix order — '' sorts first — so the
+// slice is spelled out in ORDER BY prefix order — the empty prefix sorts
+// first — so the
 // query's own ordering is asserted here too, against a real planner rather
 // than against sqlmock's replayed rows.
 func TestIntegration_ResourceLabelRules_RoundTrip(t *testing.T) {
@@ -300,7 +301,8 @@ func TestIntegration_ResourceLabelRules_LevelNotInItsHierarchyIsRefused(t *testi
 //
 // The STRUCTURAL floor the schema does carry is asserted in the same breath: an
 // empty hierarchy or an empty level is refused by the CHECK constraint, because
-// NOT NULL alone is satisfied by ''. That is the half of validity expressible in
+// NOT NULL alone is satisfied by the empty string. That is the half of
+// validity expressible in
 // SQL without duplicating pkg/classification.Levels.
 func TestIntegration_ResourceLabelRules_SchemaDoesNotEnforceHierarchyValidity(t *testing.T) {
 	const tenant = "tenant-resource-label-schema-floor-integration"
