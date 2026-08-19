@@ -188,6 +188,24 @@ type routeSpec struct {
 // strictly less than a viewer holding that text could already work out by
 // hand. Editor is the floor because of the workflow argument, not the
 // disclosure one.
+//
+// The resource-labelling task's own five routes are the plainest CRUD in this
+// table -- the full five-verb shape, at the same viewer/editor/admin floors
+// Task 3's three resources use -- and the reasoning behind that plainness is
+// worth one line each, because two of the three exceptions above could
+// plausibly have been argued here:
+//
+//   - DELETE is admin, not editor, and this is the table where that floor
+//     earns the most. Every other DELETE here removes something PERMISSIVE;
+//     removing a resource label is the opposite, because R2/R7 make an
+//     unlabelled resource DENY under any configured cap. Deleting the
+//     empty-prefix catch-all does that tenant-wide. The blanket DELETE ->
+//     admin rule already puts it where it belongs, so there is no exception to
+//     make -- only a reason not to weaken one.
+//   - Nothing here is an actionRoutes-style RoleAdmin POST. A label write is
+//     ordinary configuration authoring, the same kind of write a policy or a
+//     tier override is; N7's "a role is necessary but never sufficient" is
+//     about an approval's root principal and has no analogue on this table.
 var routeTable = []routeSpec{
 	{Pattern: "GET /v1/policies", MinRole: RoleViewer, Handler: listPolicies},
 	{Pattern: "POST /v1/policies", MinRole: RoleEditor, Handler: createPolicy},
@@ -220,6 +238,12 @@ var routeTable = []routeSpec{
 
 	{Pattern: "GET /v1/delegations", MinRole: RoleViewer, Handler: listDelegations},
 	{Pattern: "POST /v1/delegations/{id}/revoke", MinRole: RoleAdmin, Handler: revokeDelegation},
+
+	{Pattern: "GET /v1/resource-label-rules", MinRole: RoleViewer, Handler: listResourceLabelRules},
+	{Pattern: "POST /v1/resource-label-rules", MinRole: RoleEditor, Handler: createResourceLabelRule},
+	{Pattern: "GET /v1/resource-label-rules/{id}", MinRole: RoleViewer, Handler: getResourceLabelRule},
+	{Pattern: "PUT /v1/resource-label-rules/{id}", MinRole: RoleEditor, Handler: updateResourceLabelRule},
+	{Pattern: "DELETE /v1/resource-label-rules/{id}", MinRole: RoleAdmin, Handler: deleteResourceLabelRule},
 }
 
 // Server is the PAP's HTTP server: identity verification and role gating

@@ -2,20 +2,30 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"stratium/pkg/audit"
 	"stratium/pkg/classification"
+	"stratium/pkg/models"
 )
 
-// eventTypeResourceLabelRuleCreated is audit_chain.event_type for a write to
-// resource_label_rules (N4) — the same constant shape policy.go, agent.go,
-// tier_override.go and catalog.go each declare for their own tables.
-const eventTypeResourceLabelRuleCreated = "resource_label_rule_created"
+// eventTypeResourceLabelRuleCreated, eventTypeResourceLabelRuleUpdated and
+// eventTypeResourceLabelRuleDeleted are audit_chain.event_type values for this
+// table's three write operations (N4) — the same three-constant shape
+// policy.go, agent.go and tier_override.go each declare for their own tables.
+const (
+	eventTypeResourceLabelRuleCreated = "resource_label_rule_created"
+	eventTypeResourceLabelRuleUpdated = "resource_label_rule_updated"
+	eventTypeResourceLabelRuleDeleted = "resource_label_rule_deleted"
+)
 
 // loadResourceLabelRulesQuery loads every resource_label_rules row RLS scopes
 // the transaction to (migrations/000019_resource_label_rules).
@@ -68,12 +78,60 @@ const eventTypeResourceLabelRuleCreated = "resource_label_rule_created"
 const loadResourceLabelRulesQuery = `SELECT prefix, hierarchy, level ` +
 	`FROM resource_label_rules ORDER BY prefix, hierarchy, level`
 
-// insertResourceLabelRuleQuery omits id, letting the schema's own
-// uuid_generate_v4() DEFAULT generate it: nothing here needs the value back,
-// so there is no RETURNING clause either — see insertPolicyQuery's own doc
-// comment (policy.go) for the general form of that choice.
+// insertResourceLabelRuleQuery omits id from its column list, letting the
+// schema's own uuid_generate_v4() DEFAULT generate it, and reads it back via
+// RETURNING — see insertPolicyQuery's own doc comment (policy.go) for the
+// general form of that choice.
+//
+// The RETURNING clause is Task 5's own addition. Until the PAP had an
+// update-by-id and a delete-by-id route there was no reader for the value, and
+// this constant said so; now a create's own 201 response is where the operator
+// gets the handle those two routes name, exactly as every sibling resource's
+// create already does.
 const insertResourceLabelRuleQuery = `INSERT INTO resource_label_rules (tenant_id, prefix, hierarchy, level) ` +
-	`VALUES ($1,$2,$3,$4)`
+	`VALUES ($1,$2,$3,$4) RETURNING id`
+
+// --- PAP CRUD (Task 5) ---
+//
+// The four queries below are the admin plane's surface over this table, named
+// distinctly from loadResourceLabelRulesQuery above for the reason
+// catalog.go's own PAP-CRUD block gives: the two families read different
+// shapes for different purposes. This one selects id and tenant_id, which the
+// decision path has never had a reader for; that one selects the three columns
+// a match is made of and nothing else.
+//
+// None of them filters by tenant_id — RLS via beginTenantTx is the only tenant
+// boundary in this package, and TestNoProductionQueryFiltersByTenantID checks
+// that automatically for every query here, including these.
+
+const getResourceLabelRuleQuery = `SELECT id, tenant_id, prefix, hierarchy, level ` +
+	`FROM resource_label_rules WHERE id = $1`
+
+// listResourceLabelRulesQuery orders by prefix, hierarchy, level for the same
+// reason loadResourceLabelRulesQuery does: ordering on prefix alone would be
+// total only if prefix were unique, and that is a schema constraint, not a
+// runtime one. Unlike that query it could order on id instead — a genuine
+// primary key — but an operator's list is read by a human, and prefix order is
+// the order the rules are reasoned about in.
+const listResourceLabelRulesQuery = `SELECT id, tenant_id, prefix, hierarchy, level ` +
+	`FROM resource_label_rules ORDER BY prefix, hierarchy, level`
+
+// updateResourceLabelRuleQuery is a full replace of all three operator-owned
+// columns, matching every other Update* in this package. RETURNING id exists
+// only to tell "no such row for this tenant" from "updated" — the id is
+// already known to the caller — the identical trick updateToolCatalogEntryQuery
+// uses, and the reason neither needs a separate rows-affected check.
+const updateResourceLabelRuleQuery = `UPDATE resource_label_rules SET prefix = $1, hierarchy = $2, level = $3 ` +
+	`WHERE id = $4 RETURNING id`
+
+// deleteResourceLabelRuleQuery returns the whole rule, not just the prefix its
+// siblings return (deletePolicyQuery returns a name, deleteTierOverrideQuery a
+// tool_or_verb). Two readers need it: the audit entry names the rule that was
+// removed in the same "%q -> %s/%s" form the create entry names the rule that
+// was added, and DeleteResourceLabelRule's own blast-radius report resolves the
+// deleted prefix against what survives.
+const deleteResourceLabelRuleQuery = `DELETE FROM resource_label_rules WHERE id = $1 ` +
+	`RETURNING prefix, hierarchy, level`
 
 // LoadResourceLabelRules loads the tenant's whole set of resource labelling
 // rules (spec §3.9.1 R4), the input pkg/classification.Resolve resolves a
@@ -93,6 +151,25 @@ func (s *Store) LoadResourceLabelRules(ctx context.Context) ([]classification.Ru
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	rules, err := queryResourceLabelRulesTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return rules, nil
+}
+
+// queryResourceLabelRulesTx runs loadResourceLabelRulesQuery inside an
+// already-open, already-tenant-scoped transaction — the same split
+// queryToolCatalogTx (catalog.go) and queryTierOverridesTx (tier_override.go)
+// each make, and for the same kind of second caller: DeleteResourceLabelRule
+// needs the rules that SURVIVE its own delete, read after it, in the
+// transaction the delete lands in, so the blast radius it records is the one
+// that was actually committed.
+func queryResourceLabelRulesTx(ctx context.Context, tx *sql.Tx) ([]classification.Rule, error) {
 	rows, err := tx.QueryContext(ctx, loadResourceLabelRulesQuery)
 	if err != nil {
 		return nil, fmt.Errorf("store: load resource label rules: %w", err)
@@ -109,10 +186,6 @@ func (s *Store) LoadResourceLabelRules(ctx context.Context) ([]classification.Ru
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate resource label rules: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: commit: %w", err)
 	}
 	return rules, nil
 }
@@ -180,32 +253,34 @@ func knownHierarchies() []string {
 // prefix. Note what the key does NOT distinguish — a second rule on the same
 // prefix in a DIFFERENT hierarchy collides exactly like an identical one,
 // which is the whole point of narrowing the key from the triple.
-func (s *Store) CreateResourceLabelRule(ctx context.Context, rule classification.Rule, actor string, now time.Time) error {
-	if err := validateResourceLabelRule(rule); err != nil {
-		return err
+func (s *Store) CreateResourceLabelRule(
+	ctx context.Context, rule models.ResourceLabelRule, actor string, now time.Time,
+) (models.ResourceLabelRule, error) {
+	if err := validateResourceLabelRule(rule.Rule()); err != nil {
+		return models.ResourceLabelRule{}, err
 	}
 
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
-		return err
+		return models.ResourceLabelRule{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, insertResourceLabelRuleQuery,
-		s.tenantID, rule.Prefix, rule.Hierarchy, rule.Level); err != nil {
+	rule.TenantID = s.tenantID
+	row := tx.QueryRowContext(ctx, insertResourceLabelRuleQuery,
+		s.tenantID, rule.Prefix, rule.Hierarchy, rule.Level)
+	if err := row.Scan(&rule.ID); err != nil {
 		if isUniqueViolation(err) {
-			return fmt.Errorf("%w: resource label rule for prefix %q", ErrAlreadyExists, rule.Prefix)
+			return models.ResourceLabelRule{}, fmt.Errorf("%w: resource label rule for prefix %q", ErrAlreadyExists, rule.Prefix)
 		}
-		return fmt.Errorf("store: insert resource label rule %q: %w", rule.Prefix, err)
+		return models.ResourceLabelRule{}, fmt.Errorf("store: insert resource label rule %q: %w", rule.Prefix, err)
 	}
 
-	// Reason carries the whole row, quoted, because it is the only field on
-	// audit.Entry that fits: this write has no tool, no action, and no tier to
-	// repurpose the decision-shaped columns for, unlike CreateTierOverride and
-	// CreateToolCatalogEntry which each document their own repurposing. Quoted
-	// (%q) rather than bare specifically so the catch-all is legible — an empty
-	// prefix would otherwise vanish from the record, leaving the one rule that
-	// matches everything as the one rule the audit row cannot name.
+	// Reason carries the whole row (ruleAuditReason, below, shared with the
+	// update and delete paths) because it is the only field on audit.Entry that
+	// fits: this write has no tool, no action, and no tier to repurpose the
+	// decision-shaped columns for, unlike CreateTierOverride and
+	// CreateToolCatalogEntry which each document their own repurposing.
 	//
 	// Recording the prefix here is not the thing "never log a resource id"
 	// rules out. That constraint is about decision-time resource ids in process
@@ -220,7 +295,267 @@ func (s *Store) CreateResourceLabelRule(ctx context.Context, rule classification
 		Actor:         actor,
 		Decision:      "ALLOW",
 		DeniedAtDepth: noDenial,
-		Reason:        fmt.Sprintf("%q -> %s/%s", rule.Prefix, rule.Hierarchy, rule.Level),
+		Reason:        ruleAuditReason(rule),
+	}
+	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return models.ResourceLabelRule{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return models.ResourceLabelRule{}, fmt.Errorf("store: commit: %w", err)
+	}
+	return rule, nil
+}
+
+// ruleAuditReason renders a rule for audit_chain.reason. Quoted (%q) rather
+// than bare specifically so the catch-all is legible — an empty prefix would
+// otherwise vanish from the record, leaving the one rule that matches
+// everything as the one rule the audit row cannot name. Shared by all three
+// write paths so a create, an update and a delete describe the same rule the
+// same way, which is what makes the three entries readable as a sequence.
+func ruleAuditReason(rule models.ResourceLabelRule) string {
+	return fmt.Sprintf("%q -> %s/%s", rule.Prefix, rule.Hierarchy, rule.Level)
+}
+
+// GetResourceLabelRule loads one resource_label_rules row by id. RLS scopes it
+// to the tenant fixed at New; a row for another tenant, or no row at all, is
+// ErrNotFound either way — the same indistinguishable-by-design guarantee every
+// other Get method in this package gives (store.go's package doc).
+func (s *Store) GetResourceLabelRule(ctx context.Context, id uuid.UUID) (models.ResourceLabelRule, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return models.ResourceLabelRule{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rule, err := scanResourceLabelRule(tx.QueryRowContext(ctx, getResourceLabelRuleQuery, id.String()))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.ResourceLabelRule{}, fmt.Errorf("%w: resource label rule %s", ErrNotFound, id)
+		}
+		return models.ResourceLabelRule{}, fmt.Errorf("store: get resource label rule %s: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return models.ResourceLabelRule{}, fmt.Errorf("store: commit: %w", err)
+	}
+	return rule, nil
+}
+
+// scanResourceLabelRule scans one row (Get) or the current row of a *sql.Rows
+// (List) into a models.ResourceLabelRule, sharing decode logic via rowScanner
+// (store.go) exactly as scanFullTierOverride does for its own table.
+//
+// No validation here, deliberately, and the omission is the same one
+// LoadResourceLabelRules makes: a stale read, an in-flight migration and a
+// direct psql write each put rows in this table that
+// validateResourceLabelRule never saw, and an operator whose list silently
+// omitted them could not correct what they cannot see. Reading a rule back is
+// how you FIND a bad one; refusing to read it would hide it.
+func scanResourceLabelRule(row rowScanner) (models.ResourceLabelRule, error) {
+	var r models.ResourceLabelRule
+	if err := row.Scan(&r.ID, &r.TenantID, &r.Prefix, &r.Hierarchy, &r.Level); err != nil {
+		return models.ResourceLabelRule{}, err
+	}
+	return r, nil
+}
+
+// ListResourceLabelRules loads every rule the tenant has, ids included — the
+// operator's own view of the set, and the only place the handles
+// UpdateResourceLabelRule and DeleteResourceLabelRule name come from. A tenant
+// with none is an ordinary, empty result.
+//
+// It is also, unglamorously, the whole of an operator's pre-flight view before
+// a delete: see DeleteResourceLabelRule's own doc comment for why that is where
+// the blast-radius question is answered rather than in a confirmation gate.
+func (s *Store) ListResourceLabelRules(ctx context.Context) ([]models.ResourceLabelRule, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, listResourceLabelRulesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("store: list resource label rules: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	rules := make([]models.ResourceLabelRule, 0)
+	for rows.Next() {
+		r, err := scanResourceLabelRule(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan resource label rule row: %w", err)
+		}
+		rules = append(rules, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate resource label rule rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return rules, nil
+}
+
+// UpdateResourceLabelRule validates rule through validateResourceLabelRule —
+// THE SAME FUNCTION CreateResourceLabelRule calls, not a second copy of its
+// rule — and, only if that succeeds, replaces the id row's three
+// operator-owned columns and audits the change inside one transaction (N4).
+//
+// That shared call is the whole point of this method's existence being flagged
+// in Task 2's report as a ranked concern. The semantic half of validity lives
+// in Go rather than in a schema CHECK precisely because a CHECK enumerating
+// the ten (hierarchy, level) pairs would be a second copy of
+// pkg/classification.Levels with two silent drift directions
+// (migrations/000019's own comment). A second copy of the same rule inside
+// this package, reached only by the update path, would be that identical
+// defect one layer up — and it would be worse, because the two copies would
+// share a test suite that could not tell which one it had exercised.
+//
+// A PUT-shaped full replace: prefix, hierarchy and level may all change
+// together, matching UpdatePolicy/UpdateAgent/UpdateTierOverride/
+// UpdateToolCatalogEntry. Editing the prefix is not a corner case here, it is
+// the ordinary correction — migrations/000019 names it as the reason this
+// table carries a surrogate id at all.
+//
+// A prefix that collides with another rule's is ErrAlreadyExists, not a
+// generic failure, for the reason CreateResourceLabelRule's own doc comment
+// gives: UNIQUE (tenant_id, prefix) refuses one prefix carrying two answers,
+// and an HTTP caller should see 409 rather than 500.
+//
+// now is an explicit parameter for the reason UpdateTierOverride's is: this
+// table has no updated_at column whose RETURNING value the audit entry could
+// reuse (migrations/000019 declines created_at/created_by too, and says why),
+// so the clock read is unavoidable and is injected rather than called inline.
+func (s *Store) UpdateResourceLabelRule(
+	ctx context.Context, id uuid.UUID, rule models.ResourceLabelRule, actor string, now time.Time,
+) (models.ResourceLabelRule, error) {
+	if err := validateResourceLabelRule(rule.Rule()); err != nil {
+		return models.ResourceLabelRule{}, err
+	}
+
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return models.ResourceLabelRule{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx, updateResourceLabelRuleQuery, rule.Prefix, rule.Hierarchy, rule.Level, id.String())
+	if err := row.Scan(&rule.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.ResourceLabelRule{}, fmt.Errorf("%w: resource label rule %s", ErrNotFound, id)
+		}
+		if isUniqueViolation(err) {
+			return models.ResourceLabelRule{}, fmt.Errorf("%w: resource label rule for prefix %q", ErrAlreadyExists, rule.Prefix)
+		}
+		return models.ResourceLabelRule{}, fmt.Errorf("store: update resource label rule %s: %w", id, err)
+	}
+	rule.TenantID = s.tenantID
+
+	entry := audit.Entry{
+		TenantID:      s.tenantID,
+		OccurredAt:    now,
+		EventType:     eventTypeResourceLabelRuleUpdated,
+		Actor:         actor,
+		Decision:      "ALLOW",
+		DeniedAtDepth: noDenial,
+		Reason:        ruleAuditReason(rule),
+	}
+	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return models.ResourceLabelRule{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return models.ResourceLabelRule{}, fmt.Errorf("store: commit: %w", err)
+	}
+	return rule, nil
+}
+
+// DeleteResourceLabelRule deletes the id row and audits the deletion inside one
+// transaction, recording WHAT THE DELETE DID TO THE PREFIX in the audit entry's
+// own reason.
+//
+// # Deleting a rule is not neutral, and this is what is done about it
+//
+// Every other Delete* in this package removes something PERMISSIVE: a policy,
+// an agent, a raise-only tier override. Removing a resource label is the
+// opposite. R2/R7 make an unlabelled resource DENY under any configured cap, so
+// deleting a rule can turn allows into denials for everything beneath its
+// prefix, and deleting the empty-prefix catch-all does it tenant-wide.
+//
+// The delete is NOT gated on a confirmation flag, and that is a decision
+// rather than an omission:
+//
+//   - There is no "off" value for a rule. Every row that exists MATCHES
+//     something, so removal is the only way to un-label a subtree
+//     (migrations/000019 says exactly this, as the reason stratium_pap holds
+//     DELETE on this table at all where it does not on tool_catalog). A gate
+//     would sit in front of the one sanctioned operation, not in front of a
+//     mistake.
+//   - No sibling DELETE route in this system takes one, and inventing a
+//     query-parameter handshake for this table alone would put the surface an
+//     operator learns out of step with itself.
+//   - The window is bounded by the epoch, not by hope: migrations/000019
+//     attaches bump_tenant_epoch() FOR EACH ROW on DELETE, so a PEP holding a
+//     cached ALLOW under this prefix is made to re-ask rather than serving a
+//     decision this delete invalidated.
+//
+// What replaces the gate is a RECORD, computed rather than assumed. After the
+// DELETE, inside the same transaction, the surviving rules are read back and
+// the deleted prefix is resolved against them with the same
+// pkg/classification.Resolve the decision path uses — never a second matcher
+// written for this report, which would be free to disagree about
+// case-sensitivity, ties and the catch-all. The audit entry then names either
+// the rule that now covers the prefix or the fact that none does.
+//
+// The claim that report makes is deliberately narrow, because the honest one
+// is: it answers "what does THIS PREFIX resolve to now," not "what does
+// everything beneath it resolve to now." A rule at a LONGER prefix
+// (`/data/public/` beneath a deleted `/data/`) still covers its own subtree, so
+// "no remaining rule matches this prefix" does not mean the whole subtree went
+// dark. Saying more than that would put a false claim in the operator's record,
+// which is the mistake pkg/classification.Match's own three separate fields
+// exist to avoid.
+//
+// The operator's PRE-flight view is ListResourceLabelRules: the rule set is
+// small, operator-authored, and returned whole by one GET, so "what else covers
+// this prefix" is answerable before the delete by looking. This method's job is
+// to make the answer durable afterwards, in the tamper-evident chain, where a
+// one-time console warning would not be.
+//
+// now is a parameter for the reason DeleteTierOverride's is: a DELETE leaves no
+// row behind whose own timestamp the audit entry could reuse via RETURNING.
+func (s *Store) DeleteResourceLabelRule(ctx context.Context, id uuid.UUID, actor string, now time.Time) error {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var deleted models.ResourceLabelRule
+	if err := tx.QueryRowContext(ctx, deleteResourceLabelRuleQuery, id.String()).
+		Scan(&deleted.Prefix, &deleted.Hierarchy, &deleted.Level); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: resource label rule %s", ErrNotFound, id)
+		}
+		return fmt.Errorf("store: delete resource label rule %s: %w", id, err)
+	}
+
+	remaining, err := queryResourceLabelRulesTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+
+	entry := audit.Entry{
+		TenantID:      s.tenantID,
+		OccurredAt:    now,
+		EventType:     eventTypeResourceLabelRuleDeleted,
+		Actor:         actor,
+		Decision:      "ALLOW",
+		DeniedAtDepth: noDenial,
+		Reason:        ruleAuditReason(deleted) + "; " + prefixAftermath(remaining, deleted.Prefix),
 	}
 	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
 		return err
@@ -230,4 +565,26 @@ func (s *Store) CreateResourceLabelRule(ctx context.Context, rule classification
 		return fmt.Errorf("store: commit: %w", err)
 	}
 	return nil
+}
+
+// prefixAftermath says what prefix resolves to against remaining — the blast
+// radius of the delete that produced that set, in the words an operator reading
+// the audit chain needs.
+//
+// Resolve, not a hand-rolled scan, so this report and the decision agree by
+// construction: the "nothing matches" answer here is the same absence that
+// makes CheckCap deny, and an ambiguous or lowered match is folded exactly as
+// the decision path folds it.
+//
+// Both branches are about the prefix ITSELF, and the wording says so rather
+// than generalising to the subtree — see DeleteResourceLabelRule's own doc
+// comment for why that narrowness is the point.
+func prefixAftermath(remaining []classification.Rule, prefix string) string {
+	match, ok := classification.Resolve(remaining, prefix)
+	if !ok {
+		return fmt.Sprintf("no remaining rule labels %q; ids under it that no longer-prefixed rule covers "+
+			"are now unlabelled and deny under any configured cap", prefix)
+	}
+	return fmt.Sprintf("%q now resolves to %s/%s via %q",
+		prefix, match.Rule.Hierarchy, match.Rule.Level, match.Rule.Prefix)
 }

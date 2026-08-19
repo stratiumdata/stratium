@@ -419,18 +419,27 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // delete -- migrations/000016_stratium_pap_role withholds that grant) and
 // actionRoutes' three (approve, deny, revoke) -- plus Task 5's own two
 // (validate, test), plus Task 6's own two list routes (GET /v1/approvals,
-// GET /v1/delegations) -- twenty-six total.
+// GET /v1/delegations), plus resource-label-rules' own five -- thirty-one
+// total.
 //
 // The two Task 6 routes are pinned here, in the same test that pins every
 // other route's existence, for the reason this test exists at all: without
 // it, deleting either one would leave TestRouteTable_RoleGatingMatchesSpec
 // perfectly green while making both write actions on that resource
 // undiscoverable again.
+//
+// resource-label-rules' five are pinned for a sharper version of the same
+// reason. Its DELETE is the one route in this table whose REMOVAL would be
+// invisible in exactly the wrong direction: deleting a label rule is how a
+// tenant un-labels a subtree, and with no delete route an operator faced with
+// a wrong rule can only edit it -- and every rule that exists matches
+// something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
-			"2 Task-5 authoring routes + 2 Task-6 list routes)", len(routeTable), wantTotal)
+			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes)",
+			len(routeTable), wantTotal)
 	}
 
 	// The number gated above RoleViewer, pinned alongside the total because
@@ -451,7 +460,7 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			writes++
 		}
 	}
-	const wantWrites = 16
+	const wantWrites = 19
 	if writes != wantWrites {
 		t.Fatalf("routeTable has %d routes gated above RoleViewer, want %d -- if that is a deliberate new "+
 			"route, papRouteTable in internal/store/pap_e2e_integration_test.go must gain it too, or proofs "+
@@ -459,7 +468,7 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	}
 
 	want := map[string]bool{}
-	for _, resource := range []string{"policies", "agents", "tier-overrides"} {
+	for _, resource := range []string{"policies", "agents", "tier-overrides", "resource-label-rules"} {
 		want["GET /v1/"+resource] = false
 		want["POST /v1/"+resource] = false
 		want["GET /v1/"+resource+"/{id}"] = false

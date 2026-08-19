@@ -22,10 +22,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	"stratium/internal/store"
 	"stratium/pkg/classification"
+	"stratium/pkg/models"
 )
 
 // beginServingTenantTx begins a transaction on servingDB with app.tenant_id
@@ -62,13 +64,30 @@ const insertResourceLabelRuleRawQuery = `INSERT INTO resource_label_rules (tenan
 // once: that stratium_pap's GRANT covers this table, that RLS's WITH CHECK
 // accepts a correctly tenant-scoped writer, and that the audit append N4
 // requires (which shares the transaction) succeeds for this role too.
-func createRule(t *testing.T, tenant string, rule classification.Rule) {
+func createRule(t *testing.T, tenant string, rule classification.Rule) models.ResourceLabelRule {
 	t.Helper()
-	if err := store.New(papDB, tenant).CreateResourceLabelRule(
-		t.Context(), rule, "operator-integration", time.Now().UTC(),
-	); err != nil {
+	created, err := store.New(papDB, tenant).CreateResourceLabelRule(
+		t.Context(), labelRule(rule), "operator-integration", time.Now().UTC(),
+	)
+	if err != nil {
 		t.Fatalf("CreateResourceLabelRule(%+v) for %s error = %v, want nil", rule, tenant, err)
 	}
+	if created.ID == uuid.Nil {
+		t.Fatalf("CreateResourceLabelRule(%+v) for %s returned the zero UUID — the id is the handle the "+
+			"update-by-id and delete-by-id routes name", rule, tenant)
+	}
+	return created
+}
+
+// labelRule lifts a classification.Rule fixture into the
+// models.ResourceLabelRule shape the PAP-facing write methods take. The
+// fixtures in this file stay classification.Rule because that is what the
+// decision path reads back through LoadResourceLabelRules, and asserting a
+// round trip against the type the DECISION sees is the point of most of them;
+// see models.ResourceLabelRule's own doc comment for why the two shapes are
+// separate at all.
+func labelRule(rule classification.Rule) models.ResourceLabelRule {
+	return models.ResourceLabelRule{Prefix: rule.Prefix, Hierarchy: rule.Hierarchy, Level: rule.Level}
 }
 
 // loadRules reads a tenant's rules through the real SERVING identity
@@ -157,7 +176,7 @@ func TestIntegration_ResourceLabelRules_DuplicatePrefixCollides(t *testing.T) {
 		createRule(t, tenant, first)
 
 		second := classification.Rule{Prefix: "/data/", Hierarchy: "commercial", Level: "PUBLIC"}
-		err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), second, "operator-integration", time.Now().UTC())
+		_, err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), labelRule(second), "operator-integration", time.Now().UTC())
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			t.Fatalf("CreateResourceLabelRule(%+v) error = %v, want ErrAlreadyExists — UNIQUE (tenant_id, prefix) "+
 				"must refuse a second rule on the same prefix even in another hierarchy, because a resource "+
@@ -172,7 +191,7 @@ func TestIntegration_ResourceLabelRules_DuplicatePrefixCollides(t *testing.T) {
 		first := classification.Rule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}
 		createRule(t, tenant, first)
 
-		err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), first, "operator-integration", time.Now().UTC())
+		_, err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), labelRule(first), "operator-integration", time.Now().UTC())
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			t.Fatalf("CreateResourceLabelRule(%+v) error = %v, want ErrAlreadyExists", first, err)
 		}
@@ -189,7 +208,7 @@ func TestIntegration_ResourceLabelRules_DuplicatePrefixCollides(t *testing.T) {
 		createRule(t, tenant, first)
 
 		second := classification.Rule{Prefix: "", Hierarchy: "nato", Level: "UNCLASSIFIED"}
-		err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), second, "operator-integration", time.Now().UTC())
+		_, err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), labelRule(second), "operator-integration", time.Now().UTC())
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			t.Fatalf("CreateResourceLabelRule(%+v) error = %v, want ErrAlreadyExists for a second catch-all", second, err)
 		}
@@ -253,7 +272,7 @@ func TestIntegration_ResourceLabelRules_LevelNotInItsHierarchyIsRefused(t *testi
 		{Prefix: "/data/", Hierarchy: "nato", Level: "PUBLIC"},
 		{Prefix: "/data/x/", Hierarchy: "natoo", Level: "UNCLASSIFIED"},
 	} {
-		err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), bad, "operator-integration", time.Now().UTC())
+		_, err := store.New(papDB, tenant).CreateResourceLabelRule(t.Context(), labelRule(bad), "operator-integration", time.Now().UTC())
 		if !errors.Is(err, store.ErrInvalidRequest) {
 			t.Fatalf("CreateResourceLabelRule(%+v) error = %v, want ErrInvalidRequest", bad, err)
 		}
@@ -287,8 +306,8 @@ func TestIntegration_ResourceLabelRules_SchemaDoesNotEnforceHierarchyValidity(t 
 	const tenant = "tenant-resource-label-schema-floor-integration"
 
 	unrankable := classification.Rule{Prefix: "/data/x/", Hierarchy: "natoo", Level: "UNCLASSIFIED"}
-	if err := store.New(papDB, tenant).CreateResourceLabelRule(
-		t.Context(), unrankable, "operator-integration", time.Now().UTC(),
+	if _, err := store.New(papDB, tenant).CreateResourceLabelRule(
+		t.Context(), labelRule(unrankable), "operator-integration", time.Now().UTC(),
 	); !errors.Is(err, store.ErrInvalidRequest) {
 		t.Fatalf("fixture is not actually refusable through the Go write path: error = %v", err)
 	}
