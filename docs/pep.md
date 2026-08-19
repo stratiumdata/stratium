@@ -521,6 +521,32 @@ how a cap stops applying by accident.
 any of this.** Labelling changes what a *configured* cap means; it does not
 start capping delegations that never had one.
 
+### Nothing in the admin plane can change a cap
+
+Read this before planning a remedy, because it rules several out. A
+delegation's classification caps are fixed at creation and inherited unchanged
+by every child. **No route, at any role, sets, raises, lowers, or repairs
+one.** Issuance writes an empty cap map on every root delegation and copies
+the parent's map verbatim on every child; the issuance RPC carries no field
+for a cap at all. Every cap that exists in production got there by a route
+outside this API.
+
+Two consequences to have in advance:
+
+- **The lever for "this cap is wrong for this resource" is the label, not the
+  cap.** Correcting the resource label rule changes what the cap is compared
+  against. It is the only adjustment this API offers — recreating the
+  delegation is not a second one, because a new delegation is created with no
+  cap at all.
+- **Revoking and re-issuing does not get you a different cap — it gets you no
+  cap.** `stratium-pep session-start` issues a *root* delegation, and a root
+  is created with an empty cap map. An empty map is not a low cap: a cap check
+  allows immediately when no cap is configured, so the replacement session has
+  classification enforcement switched **off entirely, on every hierarchy**.
+  Nothing warns you, and the audit log records allows rather than denials. So
+  revoking is a way to stop a capped delegation, never a way to adjust one — if
+  you need a different cap, you need whatever process created the original.
+
 ### Enabling a cap without a catch-all denies every unmatched resource
 
 **Read this before you configure your first cap, not after the tickets
@@ -962,8 +988,9 @@ could not ask" matters, because the fix is different:
 | `approval ... was denied` | The action required human approval, and a human explicitly denied it. | Not a bug — this is the intended outcome of a reviewed escalation. |
 | `approval ... is unknown to the PDP` | The PDP no longer recognizes the approval this session was waiting on. | Unusual; retry the tool call (a fresh escalation will be created) and check the PDP's own logs if it recurs. |
 | `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured, and **no resource label rule matched this resource** — so the cap could not be checked, and an unlabelled resource under a cap denies (spec §3.9, R2). Either the tenant has no rule covering it, or the tool's `tool_catalog` row names no `resource_field`, so the PDP had no id to resolve rules against. | Fixable, but not by retrying — retrying reproduces it exactly. Register a rule covering this resource, or an empty-prefix catch-all covering everything; check the tool has a `resource_field`. See "Labelling resources for classification caps" above. |
-| `resource classification X exceeds delegation cap Y in hierarchy "H"` | The resource **was** labelled, and its level is above this delegation's cap. The cap did its job. | Not a bug. Two levers exist: correct the rule if the resource is mislabelled (`GET /v1/resource-label-rules` shows which rules exist), or revoke the delegation and re-issue one whose cap fits the work. There is no route that edits a live delegation's cap — don't go looking for one. |
-| `unknown classification hierarchy ...`, `unknown classification level ...`, `delegation cap "..." is not a known level ...`, `conflicting caps for hierarchy ...` | A label or a cap names something outside the fixed hierarchies — a rule written around the API's validation (a direct SQL write, or a read that raced a migration), or a delegation whose cap keys differ only by case. Before labelling, none of these could be reached. | A configuration fix, not a policy grant. Compare the offending value against the hierarchy table in "Labelling resources for classification caps" above; fix the rule through `stratium-pap` so the validator sees it. |
+| `resource classification X exceeds delegation cap Y in hierarchy "H"` | The resource **was** labelled, and its level is above this delegation's cap. The cap did its job. | Not a bug. The one adjustment available is the **label**: correct the rule if the resource is mislabelled (`GET /v1/resource-label-rules` shows which rules exist). The cap itself cannot be edited by any route — and revoking to re-issue returns a session with *no* cap at all, not a higher one. See "Nothing in the admin plane can change a cap" above before doing that. |
+| `unknown classification hierarchy ...`, `unknown classification level ...` | The **resource label rule** that matched names a hierarchy or level outside the fixed set — a rule written around the API's validation (a direct SQL write, or a read that raced a migration). Unreachable before labelling. | A rule fix, not a policy grant. Compare the value against the hierarchy table in "Labelling resources for classification caps" above, and rewrite the rule through `stratium-pap` so the validator sees it. |
+| `delegation cap "..." is not a known level ...`, `conflicting caps for hierarchy ...` | The **delegation's own cap map** is malformed — a cap naming a non-level, or two keys differing only by case carrying different levels. Nothing is wrong with your label rules, and looking there will find nothing. Unreachable before labelling. | Not fixable from the admin plane at all: no route reads or writes that column. Fix it at whatever process created the delegation, then revoke this one — accepting that its replacement carries no cap (see "Nothing in the admin plane can change a cap" above). |
 | Anything else | An actual policy decision: a policy was evaluated and does not permit this tool for this principal. | Whoever manages policy for this tenant needs to grant it. |
 
 `proxy` and `extauthz` are later enforcement surfaces over the same PDP call.
