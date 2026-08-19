@@ -8,8 +8,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -413,58 +416,143 @@ func TestStore_ResourceLabelRuleWrites_InvalidLabelRefusedBeforePersisting(t *te
 }
 
 // TestResourceLabelRuleWrites_ShareOneValidator states, structurally, what the
-// table above proves behaviourally: CreateResourceLabelRule and
-// UpdateResourceLabelRule call the SAME validateResourceLabelRule, and neither
-// carries a private copy of the rule.
+// table above proves behaviourally: every write path in resource_label.go that
+// can put a rule INTO this table calls the SAME validateResourceLabelRule, and
+// none carries a private copy of the rule.
 //
 // A behavioural test alone cannot say this. Two identical, independently
 // written validators pass every fixture above on the day they are written and
 // drift apart on the day one of them is corrected — which is the entire
 // argument migrations/000019 makes against a CHECK constraint enumerating the
-// ten (hierarchy, level) pairs, transposed one layer up into Go. The only
-// place a second copy is visible is the source, so this reads the source, the
-// same shape TestNoProductionQueryFiltersByTenantID (tenant_predicate_test.go)
-// already uses for the tenancy constraint.
+// ten (hierarchy, level) pairs, transposed one layer up into Go. The only place
+// a second copy is visible is the source, so this reads the source, the same
+// shape TestNoProductionQueryFiltersByTenantID (tenant_predicate_test.go) uses
+// for the tenancy constraint.
 //
-// Deliberately narrow: it counts calls to the one validator, per method, in
-// this package's own resource_label.go. It does not attempt to prove no
-// validation logic exists anywhere else by any other name — a negative claim
-// about a whole package that a source scan cannot honestly make.
+// It DISCOVERS the write paths rather than naming them, which is the property
+// that guard has and an earlier version of this one did not. That version
+// checked a hardcoded pair of method names, so an UpsertResourceLabelRule added
+// tomorrow with no validation at all would have left it green — a guard that
+// only covers what its author remembered is the thing this project keeps
+// replacing. The walk is two steps:
+//
+//  1. Find every query constant in the file whose SQL writes a rule into the
+//     table (INSERT INTO / UPDATE resource_label_rules). A future write path
+//     needs a query, and its query has to say one of those two things.
+//  2. Require exactly one validator call from every function that mentions one
+//     of those constants.
+//
+// DELETE is deliberately not among them: a delete supplies no rule, so there is
+// nothing for the validator to have an opinion about. That is why step 1 keys
+// on the two writing verbs rather than on "any query naming this table."
+//
+// Still deliberately narrow in one respect: it proves no SECOND copy is reached
+// by a write path in this file. It does not attempt to prove no validation
+// logic exists anywhere else in the package by any other name — a negative
+// claim about a whole package that a source scan cannot honestly make.
 func TestResourceLabelRuleWrites_ShareOneValidator(t *testing.T) {
-	src, err := os.ReadFile("resource_label.go")
+	const filename = "resource_label.go"
+	src, err := os.ReadFile(filename)
 	if err != nil {
-		t.Fatalf("reading resource_label.go: %v", err)
+		t.Fatalf("reading %s: %v", filename, err)
 	}
-	file, err := parser.ParseFile(token.NewFileSet(), "resource_label.go", src, 0)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
-		t.Fatalf("parsing resource_label.go: %v", err)
+		t.Fatalf("parsing %s: %v", filename, err)
 	}
 
-	calls := map[string]int{}
+	// Step 1: the query constants that write a rule into the table.
+	writeQueries := map[string]bool{}
 	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
 			continue
 		}
-		ast.Inspect(fn, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
 			if !ok {
-				return true
+				continue
 			}
-			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "validateResourceLabelRule" {
-				calls[fn.Name.Name]++
+			sql := strings.ToUpper(constText(vs))
+			if strings.Contains(sql, "INSERT INTO RESOURCE_LABEL_RULES") ||
+				strings.Contains(sql, "UPDATE RESOURCE_LABEL_RULES") {
+				for _, name := range vs.Names {
+					writeQueries[name.Name] = true
+				}
+			}
+		}
+	}
+	// A floor, for the reason tenant_predicate_test.go's own queryFloor exists:
+	// a scan that passed because it found nothing to look at is the defect this
+	// guard is supposed to prevent, one level up. Two today (insert, update).
+	if len(writeQueries) < 2 {
+		t.Fatalf("found %d rule-writing query constants in %s (%v), want at least 2 — the scan cannot have "+
+			"looked at the write paths it is meant to check", len(writeQueries), filename, writeQueries)
+	}
+
+	// Step 2: every function mentioning one must call the validator exactly once.
+	checked := 0
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		writes, validates := false, 0
+		ast.Inspect(fn, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.Ident:
+				if writeQueries[node.Name] {
+					writes = true
+				}
+			case *ast.CallExpr:
+				if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == "validateResourceLabelRule" {
+					validates++
+				}
+			}
+			return true
+		})
+		if !writes {
+			continue
+		}
+		checked++
+		if validates != 1 {
+			t.Errorf("%s writes a rule (it names %v) but calls validateResourceLabelRule %d times, want exactly 1 "+
+				"— every write path must reach the one validator, and a path that validates twice, or not at "+
+				"all, or through a copy of its own, is the drift migrations/000019 rejected a duplicate CHECK "+
+				"constraint to avoid", fn.Name.Name, writeQueryNames(writeQueries), validates)
+		}
+	}
+	if checked < 2 {
+		t.Fatalf("the scan checked %d write paths, want at least 2 (create and update) — a guard that found no "+
+			"violations because it found no write paths is worse than none", checked)
+	}
+}
+
+// constText concatenates the string literals a const spec is built from, so a
+// query assembled by `+`-appending several backtick literals (this package's
+// house style, so the source stays inside its line limit) is matched on the
+// whole SQL rather than on whichever fragment happens to carry the verb.
+func constText(vs *ast.ValueSpec) string {
+	var b strings.Builder
+	for _, value := range vs.Values {
+		ast.Inspect(value, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if unquoted, err := strconv.Unquote(lit.Value); err == nil {
+					b.WriteString(unquoted)
+				}
 			}
 			return true
 		})
 	}
+	return b.String()
+}
 
-	for _, method := range []string{"CreateResourceLabelRule", "UpdateResourceLabelRule"} {
-		if calls[method] != 1 {
-			t.Errorf("%s calls validateResourceLabelRule %d times, want exactly 1 — every write path must "+
-				"reach the one validator, and a path that validates twice or not at all is the drift "+
-				"migrations/000019 rejected a duplicate CHECK constraint to avoid", method, calls[method])
-		}
-	}
+// writeQueryNames sorts the discovered constant names so a failure names the
+// same set every time rather than in Go's randomised map order — the same
+// reason knownHierarchies (resource_label.go) exists.
+func writeQueryNames(set map[string]bool) []string {
+	return slices.Sorted(maps.Keys(set))
 }
 
 // The refusal above must not be read as a downstream guarantee. This pins the
@@ -761,7 +849,7 @@ func TestStore_UpdateResourceLabelRule_ReplacesAllThreeColumnsAndAudits(t *testi
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
-		WithArgs(auditArgsWithReason(`"/data/reports/"`, "NATO", "top-secret")...).
+		WithArgs(auditArgsWithReason(`"/data/reports/"`, "NATO", "top-secret", id.String())...).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -878,7 +966,13 @@ func TestStore_DeleteResourceLabelRule_AuditsWhatTheDeleteDidToThePrefix(t *test
 		expectAdvisoryLock(mock)
 		mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 		mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
-			WithArgs(auditArgsWithReason(`"/data/reports/"`, "TOP-SECRET", "now resolves to", "CONFIDENTIAL", `"/data/"`)...).
+			WithArgs(auditArgsWithReason(`"/data/reports/"`, "TOP-SECRET", "now resolves to", "CONFIDENTIAL", `"/data/"`,
+				// The id the caller named. deleteResourceLabelRuleQuery returns
+				// only the three operator-owned columns, so a reason carrying
+				// the zero UUID here would mean the id was never filled in --
+				// and "what happened to THIS rule" is exactly what a prefix
+				// edit makes unanswerable without it.
+				id.String())...).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 
@@ -907,7 +1001,8 @@ func TestStore_DeleteResourceLabelRule_AuditsWhatTheDeleteDidToThePrefix(t *test
 		// could not name the one rule matching everything would be the one
 		// line an operator most needs.
 		mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
-			WithArgs(auditArgsWithReason(`""`, "commercial/PUBLIC", "no remaining rule labels", "deny under any configured cap")...).
+			WithArgs(auditArgsWithReason(`""`, "commercial/PUBLIC", "no remaining rule labels",
+				"deny under any configured cap", id.String())...).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 
@@ -967,11 +1062,16 @@ func TestStore_DeleteResourceLabelRule_AuditFailureRollsBackDelete(t *testing.T)
 // itself unlabelled has NOT necessarily darkened everything beneath it. The
 // report says "no remaining rule labels <prefix>" and stops there; a claim
 // about the whole subtree would be false exactly here.
+//
+// deletedHierarchy varies per case because the last two cases are about it: a
+// survivor in another hierarchy is a different event from a relabelling within
+// one, and saying so is the only thing that distinguishes them in the record.
 func TestPrefixAftermath(t *testing.T) {
 	tests := []struct {
 		name      string
 		remaining []classification.Rule
 		prefix    string
+		hierarchy string // the DELETED rule's
 		want      []string
 		notWant   []string
 	}{
@@ -979,29 +1079,60 @@ func TestPrefixAftermath(t *testing.T) {
 			name:      "a shorter rule takes over",
 			remaining: []classification.Rule{{Prefix: "/data/", Hierarchy: "nato", Level: "CONFIDENTIAL"}},
 			prefix:    "/data/reports/",
+			hierarchy: "nato",
 			want:      []string{`"/data/reports/"`, "now resolves to", "nato/CONFIDENTIAL", `"/data/"`},
+			// Same hierarchy: an ordinary relabelling, and the switch clause
+			// must stay silent or it would fire on every delete.
+			notWant: []string{"different hierarchy"},
 		},
 		{
 			name:      "nothing is left",
 			remaining: []classification.Rule{},
 			prefix:    "/data/",
+			hierarchy: "nato",
 			want:      []string{"no remaining rule labels", `"/data/"`, "deny under any configured cap"},
 			notWant:   []string{"now resolves to"},
 		},
 		{
-			name:      "the catch-all takes over",
-			remaining: []classification.Rule{{Prefix: "", Hierarchy: "commercial", Level: "PUBLIC"}},
+			name:      "the catch-all takes over, in the SAME hierarchy",
+			remaining: []classification.Rule{{Prefix: "", Hierarchy: "COMMERCIAL", Level: "PUBLIC"}},
 			prefix:    "/data/",
-			want:      []string{"now resolves to", "commercial/PUBLIC"},
+			hierarchy: "commercial",
+			want:      []string{"now resolves to", "COMMERCIAL/PUBLIC"},
+			// Case folded, the same fold Index applies: an operator who typed
+			// one casing on the survivor and another on the deleted rule has
+			// not switched hierarchy, and reporting that they had would be a
+			// false claim in the only record they get.
+			notWant: []string{"different hierarchy"},
 		},
 		{
 			name:      "only a LONGER rule survives -- the prefix itself is unlabelled",
 			remaining: []classification.Rule{{Prefix: "/data/public/", Hierarchy: "commercial", Level: "PUBLIC"}},
 			prefix:    "/data/",
+			hierarchy: "commercial",
 			want:      []string{"no remaining rule labels", `"/data/"`},
 			// The narrow claim, stated as an absence: the report must not say
 			// the subtree went dark, because /data/public/ is still labelled.
-			notWant: []string{"now resolves to", "everything beneath"},
+			// "now resolves to" is the string a strings.HasPrefix-based matcher
+			// would produce here, so this element kills a real mutant.
+			notWant: []string{"now resolves to"},
+		},
+		{
+			// The hazard classification.Match.SwitchedHierarchyFrom exists to
+			// surface, reached here by a delete instead of by a carve-out: ids
+			// under /data/ were nato TOP-SECRET and are now commercial PUBLIC,
+			// so a nato cap does not constrain them at all -- they did not drop
+			// within an ordering, they left it. Both hierarchies appear in the
+			// base string either way; what this pins is that the CONSEQUENCE is
+			// spelled out rather than left for the reader to notice.
+			name:      "the survivor is in a different hierarchy -- the cap is escaped, not lowered",
+			remaining: []classification.Rule{{Prefix: "", Hierarchy: "commercial", Level: "PUBLIC"}},
+			prefix:    "/data/",
+			hierarchy: "nato",
+			want:      []string{"now resolves to", "commercial/PUBLIC", "different hierarchy", "nato"},
+			// Not a lowering: no ordering ranks a commercial level against a
+			// nato one, and saying "lower" would assert one that does not exist.
+			notWant: []string{"lower"},
 		},
 		{
 			name: "a prefix carrying two answers resolves to none -- ambiguity is not a label",
@@ -1009,14 +1140,15 @@ func TestPrefixAftermath(t *testing.T) {
 				{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
 				{Prefix: "/data/", Hierarchy: "commercial", Level: "PUBLIC"},
 			},
-			prefix:  "/data/x/",
-			want:    []string{"no remaining rule labels"},
-			notWant: []string{"now resolves to"},
+			prefix:    "/data/x/",
+			hierarchy: "nato",
+			want:      []string{"no remaining rule labels"},
+			notWant:   []string{"now resolves to"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := prefixAftermath(tt.remaining, tt.prefix)
+			got := prefixAftermath(tt.remaining, tt.prefix, tt.hierarchy)
 			for _, w := range tt.want {
 				if !strings.Contains(got, w) {
 					t.Errorf("prefixAftermath(%+v, %q) = %q, want it to name %q", tt.remaining, tt.prefix, got, w)

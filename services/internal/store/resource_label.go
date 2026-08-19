@@ -313,8 +313,18 @@ func (s *Store) CreateResourceLabelRule(
 // everything as the one rule the audit row cannot name. Shared by all three
 // write paths so a create, an update and a delete describe the same rule the
 // same way, which is what makes the three entries readable as a sequence.
+//
+// The id is included, and this table needs it where its siblings do not.
+// Elsewhere in this package the audit reason is a NAME that survives editing (a
+// policy name, a tool_or_verb), so the chain reads as a history of one row. Here
+// the reason is the rule itself, and migrations/000019 calls editing the prefix
+// "exactly the field an operator corrects when a rule is wrong" — which is the
+// reason this table carries a surrogate key at all. Without the id, an update
+// that moved a prefix is indistinguishable in the chain from two unrelated
+// rules, and "what happened to THIS rule" becomes unanswerable from the one
+// record designed to answer it.
 func ruleAuditReason(rule models.ResourceLabelRule) string {
-	return fmt.Sprintf("%q -> %s/%s", rule.Prefix, rule.Hierarchy, rule.Level)
+	return fmt.Sprintf("%q -> %s/%s (%s)", rule.Prefix, rule.Hierarchy, rule.Level, rule.ID)
 }
 
 // GetResourceLabelRule loads one resource_label_rules row by id. RLS scopes it
@@ -543,6 +553,14 @@ func (s *Store) DeleteResourceLabelRule(ctx context.Context, id uuid.UUID, actor
 		return fmt.Errorf("store: delete resource label rule %s: %w", id, err)
 	}
 
+	// The id the caller named, not one read back: deleteResourceLabelRuleQuery
+	// returns the three operator-owned columns and deliberately not the key it
+	// was just given, so without this the reason would carry the zero UUID —
+	// which reads as an id rather than as an absence, and is worse than omitting
+	// it. RETURNING id would work equally well and cost a column; this costs a
+	// line and cannot disagree with the WHERE clause.
+	deleted.ID = id
+
 	remaining, err := queryResourceLabelRulesTx(ctx, tx)
 	if err != nil {
 		return err
@@ -555,7 +573,7 @@ func (s *Store) DeleteResourceLabelRule(ctx context.Context, id uuid.UUID, actor
 		Actor:         actor,
 		Decision:      "ALLOW",
 		DeniedAtDepth: noDenial,
-		Reason:        ruleAuditReason(deleted) + "; " + prefixAftermath(remaining, deleted.Prefix),
+		Reason:        ruleAuditReason(deleted) + "; " + prefixAftermath(remaining, deleted.Prefix, deleted.Hierarchy),
 	}
 	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
 		return err
@@ -579,12 +597,31 @@ func (s *Store) DeleteResourceLabelRule(ctx context.Context, id uuid.UUID, actor
 // Both branches are about the prefix ITSELF, and the wording says so rather
 // than generalising to the subtree — see DeleteResourceLabelRule's own doc
 // comment for why that narrowness is the point.
-func prefixAftermath(remaining []classification.Rule, prefix string) string {
+//
+// deletedHierarchy is the removed rule's, and is only ever compared against the
+// survivor's: it is what turns "a different hierarchy is in this string
+// somewhere" into a sentence naming the consequence.
+func prefixAftermath(remaining []classification.Rule, prefix, deletedHierarchy string) string {
 	match, ok := classification.Resolve(remaining, prefix)
 	if !ok {
 		return fmt.Sprintf("no remaining rule labels %q; ids under it that no longer-prefixed rule covers "+
 			"are now unlabelled and deny under any configured cap", prefix)
 	}
-	return fmt.Sprintf("%q now resolves to %s/%s via %q",
+	aftermath := fmt.Sprintf("%q now resolves to %s/%s via %q",
 		prefix, match.Rule.Hierarchy, match.Rule.Level, match.Rule.Prefix)
+	// A survivor in a DIFFERENT hierarchy is legible from the string above —
+	// both hierarchies are in it — but it is not the same event as a relabelling
+	// within one, and it is the more dangerous of the two. CheckCap consults one
+	// hierarchy per resource, so a cap in the DELETED rule's hierarchy now says
+	// nothing at all about ids under this prefix: they do not resolve lower, they
+	// leave the ordering that cap was written against. That is the hazard
+	// classification.Match.SwitchedHierarchyFrom exists to surface on the
+	// decision path, named here for the same reason and reported separately for
+	// the same reason — calling it a lowering would assert an ordering between
+	// two hierarchies that does not exist.
+	if !strings.EqualFold(deletedHierarchy, match.Rule.Hierarchy) {
+		aftermath += fmt.Sprintf("; that is a different hierarchy from the deleted rule's %s, so a %s cap no "+
+			"longer constrains anything under this prefix", deletedHierarchy, deletedHierarchy)
+	}
+	return aftermath
 }

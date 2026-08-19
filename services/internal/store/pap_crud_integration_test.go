@@ -674,10 +674,33 @@ func TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip(t *testing.T) {
 	}
 	// And after a DELETE specifically. Removing a label is the write most in
 	// need of this: under R2/R7 it turns allows into denials.
-	assertEpochBumped(t, tenant, before)
+	before = assertEpochBumped(t, tenant, before)
 
 	if _, err := repo.GetResourceLabelRule(t.Context(), created.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetResourceLabelRule() after delete: error = %v, want ErrNotFound", err)
+	}
+
+	// The NO-ROW half, and it needs its own trajectory rather than riding on the
+	// asserts above. Every write so far targeted a row this tenant owns, so a
+	// method that ignored RETURNING and used ExecContext would still match, still
+	// fire the trigger, still bump — and still pass. What distinguishes it is a
+	// write that matches NOTHING: RETURNING is the only reason these two report
+	// ErrNotFound rather than succeeding silently, and the flat epoch is what
+	// says no row was touched on the way to that answer.
+	//
+	// Both verbs, against the id just deleted, which is also the RLS case in
+	// disguise: a row belonging to another tenant is, through this connection,
+	// exactly a row that is not there.
+	if _, err := repo.UpdateResourceLabelRule(t.Context(), created.ID,
+		models.ResourceLabelRule{Prefix: "/gone/", Hierarchy: "nato", Level: "SECRET"}, actor, time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("UpdateResourceLabelRule() on a deleted id: error = %v, want ErrNotFound", err)
+	}
+	if err := repo.DeleteResourceLabelRule(t.Context(), created.ID, actor, time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("DeleteResourceLabelRule() on a deleted id: error = %v, want ErrNotFound", err)
+	}
+	if after, _ := readTenantEpoch(t, tenant); after != before {
+		t.Errorf("epoch = %d after two no-row writes, want %d unchanged — nothing matched, so nothing may have "+
+			"been written, and a bump here means one of them touched a row it should not have", after, before)
 	}
 
 	assertAuditTrailMatches(t, tenant, actor,
@@ -690,7 +713,8 @@ func TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip(t *testing.T) {
 	// next-longest match by hand.
 	entries := fetchAuditChain(t, tenant)
 	deleteReason := entries[len(entries)-1].Reason
-	for _, want := range []string{`"/data/reports/"`, "TOP-SECRET", "now resolves to", "commercial/PUBLIC"} {
+	for _, want := range []string{`"/data/reports/"`, "TOP-SECRET", "now resolves to", "commercial/PUBLIC",
+		created.ID.String(), "different hierarchy"} {
 		if !strings.Contains(deleteReason, want) {
 			t.Errorf("delete audit reason = %q, want it to name %q", deleteReason, want)
 		}
@@ -735,7 +759,8 @@ func TestIntegration_PAPCRUD_ResourceLabelRuleDeleteRecordsAnUnlabelling(t *test
 	// `""` specifically: the catch-all's prefix is the empty string, and an
 	// entry that could not name the one rule matching everything would be the
 	// entry an operator most needs. %q is what keeps it visible.
-	for _, want := range []string{`""`, "nato/SECRET", "no remaining rule labels", "deny under any configured cap"} {
+	for _, want := range []string{`""`, "nato/SECRET", "no remaining rule labels", "deny under any configured cap",
+		catchAll.ID.String()} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("delete audit reason = %q, want it to name %q", reason, want)
 		}

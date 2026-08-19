@@ -36,10 +36,23 @@ import (
 //     classification.Match is logged and audited.
 //
 // What that costs is one conversion, Rule below, and the field set staying in
-// step — which the compiler checks at that conversion. What it does NOT cost
-// is a second validator: internal/store.validateResourceLabelRule is the only
-// thing anywhere that decides whether a (hierarchy, level) pair is legal, and
-// every write path calls it.
+// step — which NOTHING IN THE COMPILER CHECKS. That was claimed here once and
+// it was false: Rule uses a keyed composite literal, so a field added to
+// classification.Rule is silently zero-valued through the conversion and a
+// field added here is silently ignored by it, and neither direction is even a
+// warning. Measured, not reasoned about — adding a Category field to
+// classification.Rule left `go build ./...` AND the whole test suite green.
+//
+// TestResourceLabelRule_RuleCopiesEveryMatcherField (resource_label_test.go)
+// is what actually holds the invariant: for every field of classification.Rule
+// it requires a same-named field here and requires Rule to carry its value
+// through. An unkeyed literal is not the alternative — go vet's composites
+// check would refuse it — so a test is where this guarantee can live at all.
+//
+// What the two structs do NOT cost is a second validator:
+// internal/store.validateResourceLabelRule is the only thing anywhere that
+// decides whether a (hierarchy, level) pair is legal, and every write path
+// calls it.
 //
 // ID and TenantID are set authoritatively by internal/store on the way out and
 // ignored on the way in, the same treatment models.Policy/Agent/TierOverride/
@@ -64,9 +77,11 @@ type ResourceLabelRule struct {
 	Level     string `json:"level"     db:"level"`
 }
 
-// Rule is r as the matcher and the validator see it. The single place the two
-// shapes meet, so a field added to either without the other stops compiling
-// here rather than going quietly missing from a decision.
+// Rule is r as the matcher and the validator see it — the single place the two
+// shapes meet. Keyed deliberately (go vet's composites check forbids the
+// unkeyed form that would have made this compiler-enforced), which is exactly
+// why the drift it permits is pinned by a test rather than by the compiler:
+// see TestResourceLabelRule_RuleCopiesEveryMatcherField.
 func (r ResourceLabelRule) Rule() classification.Rule {
 	return classification.Rule{Prefix: r.Prefix, Hierarchy: r.Hierarchy, Level: r.Level}
 }
