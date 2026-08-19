@@ -66,6 +66,15 @@ where a label comes from. This builds it.
 - **If you change a fixture other tests route through, re-run every mutation
   those tests were credited with killing.**
 - **A mutation kill that depends on other tests' residue is not a kill.**
+- **A stale claim that points somewhere leaves the staleness at the far end.**
+  Earned in Task 6. `docs/pep.md` carried a pointer reading "track the
+  tenant-configured labelling source this needs (spec §8)". The pointer was
+  deleted correctly, and the doc sweep then checked for references **to** the
+  deleted section — not for what the deleted text pointed **at**. Spec §8 was
+  left still saying the mechanism was "not built here", which is the claim the
+  task existed to correct. **A search for a stale claim's own title never finds
+  it, because the staleness is at the other end of the link.** When you delete
+  or correct a claim that cites something, open the thing it cites.
 - **Identical output from two different mutants is a signal that one of them
   did not apply.** Earned in Task 4. A compound shell command that `cd`'d
   mid-script left the working directory moved; a later `git checkout` silently
