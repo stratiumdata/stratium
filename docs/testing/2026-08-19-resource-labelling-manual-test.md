@@ -3,8 +3,13 @@
 How to exercise per-tenant resource classification labelling by hand, against a
 real stack, in the state the feature is in today.
 
-Every command below was checked against the repository at `dc8fbed`. Ports are
-resolved at runtime because the compose file binds ephemeral host ports.
+**Every step below was executed end to end against a live stack on 2026-08-19**,
+not written from reading the code. Where the two disagreed the observed
+behaviour won — five commands in an earlier draft were wrong, and each is
+flagged inline where the surprise is worth knowing.
+
+Ports are resolved at runtime because the compose file binds ephemeral host
+ports.
 
 ---
 
@@ -42,14 +47,18 @@ Resolve the ports you'll need — they are ephemeral, so read them rather than
 assuming:
 
 ```bash
-C='docker compose -f deploy/docker/docker-compose.yml'
-export PAP="localhost:$($C port stratium-pap 8080 | sed -E 's/.*://')"
-export PDP="localhost:$($C port pdp-pap 50051 | sed -E 's/.*://')"
-export KC="localhost:$($C port keycloak 8080 | sed -E 's/.*://')"
-export PG="$($C port postgres 5432 | sed -E 's/.*://')"
+dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }   # a function, not a variable
+export PAP="localhost:$(dc port stratium-pap 8080 | sed -E 's/.*://')"
+export PDP="localhost:$(dc port pdp-pap 50051 | sed -E 's/.*://')"
+export KC="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"
 export TENANT=tenant-pap-e2e-integration
-echo "PAP=$PAP  PDP=$PDP  KC=$KC  PG=$PG"
+echo "PAP=$PAP  PDP=$PDP  KC=$KC"
 ```
+
+> `dc` is a function deliberately. Putting the command in a variable and
+> calling `$dc port …` fails — the shell looks for a single command whose name
+> is the whole string.
+
 
 `stratium-pap` and `pdp-pap` are both pinned to `tenant-pap-e2e-integration`.
 The tenant is startup configuration and no request can carry one, so a PAP
@@ -61,13 +70,11 @@ socket rules:
 
 ```bash
 psqlm() {   # the owner role — used for setup and for reading state
-  docker compose -f deploy/docker/docker-compose.yml exec -T \
-    -e PGPASSWORD=stratium_migrate_local_dev_only postgres \
+  dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres \
     psql -h 127.0.0.1 -U stratium_migrate -d stratium "$@"
 }
 psqlapp() { # the PDP's serving role — used to prove what it CANNOT do
-  docker compose -f deploy/docker/docker-compose.yml exec -T \
-    -e PGPASSWORD=stratium_local_dev_only postgres \
+  dc exec -T -e PGPASSWORD=stratium_local_dev_only postgres \
     psql -h 127.0.0.1 -U stratium -d stratium "$@"
 }
 ```
@@ -140,7 +147,7 @@ mkrule "/exports/"        nato SECRET
 mkrule "/exports/public/" nato UNCLASSIFIED   # a lowering carve-out
 ```
 
-**Expect:** each returns the created rule with an `id` and `tenant_id`.
+**Expect: 201**, and each returns the created rule with an `id` and `tenant_id`.
 
 ```bash
 curl -sS -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/resource-label-rules"
@@ -238,48 +245,70 @@ call's `raw_input` is the resource identity. A tool whose catalog row names no
 `resource_field` produces no resource id — and therefore gets no label at all.
 See D2.
 
-### B2 — Create a delegation
+### B2 — Seed a delegation, with its cap, in one step
 
-`CreateDelegation` returns the delegation id **and** a token, so no separate
-`IssueToken` call is needed. Run these from the repository root — the `-proto`
-path is relative to it.
-
-```bash
-read -r DELEG TOKEN < <(grpcurl -plaintext -import-path proto -proto pdp/v1/pdp.proto \
-  -d "{\"subject\":\"tester@example.com\",\"agent_id\":\"$AGENT\",
-       \"requested_scope\":{\"max_action_tier\":2,\"tools\":[\"read_file\",\"Read\"]},
-       \"purpose\":\"manual test\"}" \
-  "$PDP" stratium.pdp.v1.PDPService/CreateDelegation \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["delegationId"], d["token"])')
-export DELEG TOKEN
-echo "DELEG=$DELEG"
-```
-
-The token is a *reference* to the delegation, not a snapshot of it — the PDP
-loads the delegation fresh on every decision. So the cap you add in B3 takes
-effect on the next call without re-issuing anything.
-
-### B3 — Put a cap on it (the SQL step)
+**`CreateDelegation` over gRPC will not work here**, and the reason is worth
+knowing: a root delegation is clamped by what the *principal* holds, so with no
+principal policy configured for this tenant it fails with `none of the requested
+tools are held by this principal`. The project's own integration fixtures do not
+use that RPC either — they insert the row. Do the same, and put the cap in the
+same statement, since §0 already established that no route can add one later.
 
 ```bash
-psqlm -c "BEGIN;
-   SELECT set_config('app.tenant_id','$TENANT',true);
-   UPDATE delegations SET classification_caps='{\"nato\":\"CONFIDENTIAL\"}'
-   WHERE id='$DELEG';
-   COMMIT;"
+export DELEG=$(python3 -c 'import uuid;print(uuid.uuid4())')
+psqlm -q -c "BEGIN;
+ SELECT set_config('app.tenant_id','$TENANT',true);
+ INSERT INTO delegations (id,tenant_id,user_id,agent_id,approved_tools,max_action_tier,
+   classification_caps,resource_constraints,purpose,expires_at,revoked,
+   parent_delegation_id,root_delegation_id,depth,chain_agent_ids,escalate_at)
+ VALUES ('$DELEG','$TENANT','tester@example.com','$AGENT',
+   '[\"read_file\",\"Read\",\"list_dir\"]',3,'{\"nato\":\"CONFIDENTIAL\"}','{}',
+   'manual test',now()+interval '1 hour',false,NULL,'$DELEG',0,'[\"$AGENT\"]',NULL);
+ COMMIT;"
 ```
 
-`set_config` is required in the same transaction: row-level security is the
-only tenant boundary and the table is `FORCE ROW LEVEL SECURITY`, so even the
-owner is subject to the policy. Without it the `UPDATE` matches zero rows and
-reports success.
+`set_config` is required in the same transaction: RLS is the only tenant
+boundary and the table is `FORCE ROW LEVEL SECURITY`, so even the owner is
+subject to the policy. Without it the `INSERT` is rejected by `WITH CHECK`.
 
-This `UPDATE` also bumps the epoch, so the next decision sees the new cap.
+Then issue a token. **`ttl_seconds` is required** — omitting it fails with
+`ttl_seconds must be positive`:
 
-### B4 — Run a decision
+```bash
+export TOKEN=$(grpcurl -plaintext -import-path proto -proto pdp/v1/pdp.proto \
+  -d "{\"delegation_id\":\"$DELEG\",\"ttl_seconds\":3600}" \
+  "$PDP" stratium.pdp.v1.PDPService/IssueToken \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+echo "token is ${#TOKEN} chars"
+```
 
-`raw_input` is a JSON *string* containing JSON, so build it with a tool rather
-than by hand-escaping quotes in the shell:
+The token is a *reference* to the delegation, not a snapshot — the PDP loads it
+fresh on every decision, so a later change to the cap or the rules takes effect
+on the next call without re-issuing.
+
+### B3 — Read the right field
+
+**This is the step most likely to make a working system look broken.**
+
+`Effect`'s zero value is `EFFECT_DENY` and grpcurl omits default-valued fields,
+so a denied decision has **no `effect` key at all**. Worse, the top-level
+`effect` is DENY on every call below regardless of labelling, because the
+compound decision is `principal ∧ agent ∧ delegation` and this tenant has no
+principal policies:
+
+```
+"principalReason": "principal: no policies configured for this tenant"
+```
+
+**Read `delegationEffect` and `delegationReason`.** That is the leg
+classification caps are evaluated on, and treating an absent `delegationEffect`
+as DENY is correct.
+
+### B4 — Run decisions
+
+Run from the repository root — the `-proto` path is relative to it. `raw_input`
+is a JSON *string* containing JSON, so build it with a tool rather than by
+hand-escaping quotes:
 
 ```bash
 decide() {  # decide <path> [tool] [extra-resource-json]
@@ -295,15 +324,15 @@ print(json.dumps({
 }))
 PY
 }
+show() { decide "$@" | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print(d.get("delegationEffect","EFFECT_DENY"), "|", d.get("delegationReason",""))'; }
 ```
 
-Run each and read `effect` and `delegationReason`:
-
-| Command | Expect | Why |
+| Command | Observed | Why |
 |---|---|---|
-| `decide /exports/report.csv` | **DENY** — `resource classification SECRET exceeds delegation cap CONFIDENTIAL in hierarchy "nato"` | `/exports/` matches, SECRET > CONFIDENTIAL |
-| `decide /exports/public/notice.txt` | **ALLOW** | Longer prefix wins *even though it lowers* — a public file inside a classified directory is genuinely public |
-| `decide /elsewhere/thing.txt` | **ALLOW** | Falls to the catch-all at UNCLASSIFIED |
+| `show /exports/report.csv` | `EFFECT_DENY` — `resource classification SECRET exceeds delegation cap CONFIDENTIAL in hierarchy "nato" (depth 0)` | `/exports/` matches; SECRET > CONFIDENTIAL |
+| `show /exports/public/notice.txt` | `EFFECT_ALLOW` | Longest prefix wins *even though it lowers* — a public file inside a classified directory is genuinely public |
+| `show /elsewhere/thing.txt` | `EFFECT_ALLOW` | Falls to the catch-all at UNCLASSIFIED |
 
 ### B5 — An unlabelled resource denies
 
@@ -313,12 +342,13 @@ Delete the catch-all, then repeat the third call:
 CATCHALL=$(curl -sS -H "Authorization: Bearer $VIEWER" \
   "http://$PAP/v1/resource-label-rules" \
   | python3 -c 'import json,sys; print([r["id"] for r in json.load(sys.stdin) if r["prefix"]==""][0])')
-curl -sS -X DELETE "http://$PAP/v1/resource-label-rules/$CATCHALL" \
-  -H "Authorization: Bearer $ADMIN"
-decide /elsewhere/thing.txt
+curl -sS -o /dev/null -w 'admin DELETE -> %{http_code}\n' \
+  -X DELETE "http://$PAP/v1/resource-label-rules/$CATCHALL" \
+  -H "Authorization: Bearer $ADMIN"     # 204
+show /nowhere/thing.txt
 ```
 
-**Expect: DENY** — `resource declares no classification; the delegation's
+**Expect `delegationEffect` = `EFFECT_DENY`** — `resource declares no classification; the delegation's
 classification cap cannot be evaluated and therefore denies`.
 
 This is the cliff. A cap with no catch-all denies every unmatched resource.
@@ -330,7 +360,7 @@ Re-create the catch-all before continuing.
 docker compose -f deploy/docker/docker-compose.yml logs pdp-pap | grep carve-out
 ```
 
-After running `decide /exports/public/notice.txt`, expect:
+After running `show /exports/public/notice.txt`, expect:
 
 ```
 resource label carve-out lowers the classification it overrides
@@ -350,11 +380,11 @@ operator-authored configuration.
 ### C1 — A caller cannot declare its own classification
 
 ```bash
-decide /exports/report.csv read_file \
+show /exports/report.csv read_file \
   '{"classification":"UNCLASSIFIED","hierarchy":"nato"}'
 ```
 
-**Expect: DENY, still `SECRET exceeds … CONFIDENTIAL`.** The PDP discards both
+**Expect `delegationEffect` = `EFFECT_DENY`, still `SECRET exceeds … CONFIDENTIAL`.** The PDP discards both
 keys unconditionally before resolving. If this ever returns ALLOW, a caller can
 declare itself unclassified and walk past every cap.
 
@@ -363,7 +393,7 @@ declare itself unclassified and walk past every cap.
 The subtler half. Call an **uncatalogued** tool while naming a permissive id:
 
 ```bash
-decide /exports/report.csv Read '{"id":"/exports/public/decoy"}'
+show /exports/report.csv Read '{"id":"/exports/public/decoy"}'
 ```
 
 `raw_input` names the classified path; the wire `resource.id` names a
@@ -372,7 +402,7 @@ permissive decoy. `Read` is in the delegation's approved tools (B2) but has no
 rather than `effect` alone, so a denial on the wrong leg is not mistaken for a
 pass.
 
-**Expect: DENY** — `resource declares no classification…`, **not** an allow.
+**Expect `delegationEffect` = `EFFECT_DENY`** — `resource declares no classification…`, **not** an allow.
 `Read` has no catalog row, so the PDP derives no identity and refuses to label
 rather than trusting the caller's `id`. An ALLOW here would mean a caller can
 pick its own label by naming a decoy.
@@ -383,14 +413,14 @@ pick its own label by naming a decoy.
 psqlm -c "BEGIN; SELECT set_config('app.tenant_id','$TENANT',true);
    INSERT INTO resource_label_rules (tenant_id,prefix,hierarchy,level)
    VALUES ('$TENANT','/exports/typo/','natoo','UNCLASSIFIED'); COMMIT;"
-decide /exports/typo/x
+show /exports/typo/x
 ```
 
 Raw SQL is used deliberately here: the API refuses this rule (A3), and the
 point is that the *decision path* must also refuse it rather than trusting a
 row that bypassed validation.
 
-**Expect: DENY** — `unknown classification hierarchy "natoo"…`. If this allows,
+**Expect `delegationEffect` = `EFFECT_DENY`** — `unknown classification hierarchy "natoo"…`. If this allows,
 one mistyped character turns a capped resource into an unconditional allow.
 Delete the rule afterwards.
 
@@ -449,10 +479,10 @@ curl -sS -X POST "http://$PAP/v1/tool-catalog" \
   -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
   -d '{"tool_name":"list_dir","action_tier":1,"verb":"read"}'   # no resource_field
 
-decide /exports/public/notice.txt list_dir
+show /exports/public/notice.txt list_dir
 ```
 
-**Expect: DENY** — `resource declares no classification…` — even though the
+**Expect `delegationEffect` = `EFFECT_DENY`** — `resource declares no classification…` — even though the
 catch-all is registered and the path would otherwise resolve to UNCLASSIFIED.
 The path in `raw_input` is irrelevant here: with no `resource_field`, nothing
 extracts an id from it.
@@ -487,10 +517,10 @@ separator and call a path the operator never meant to cover:
 
 ```bash
 mkrule "/exp" nato TOP-SECRET      # meant "/exports/", forgot the slash
-decide /expenses/q3.csv            # a different directory entirely
+show /expenses/q3.csv             # a different directory entirely
 ```
 
-**Expect: DENY** — `TOP-SECRET exceeds … CONFIDENTIAL`. `/exp` is a prefix of
+**Expect `delegationEffect` = `EFFECT_DENY`** — `TOP-SECRET exceeds … CONFIDENTIAL`. `/exp` is a prefix of
 `/expenses/q3.csv` and is longer than the catch-all, so an unrelated directory
 inherits a classification nobody assigned it. Nothing warns about this; the
 rule is valid and behaves exactly as specified.
