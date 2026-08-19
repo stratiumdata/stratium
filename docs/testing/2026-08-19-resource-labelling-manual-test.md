@@ -122,6 +122,15 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/resource-label-rules"
 ```
 
+> **These tokens expire after 5 minutes.** The realm sets no
+> `accessTokenLifespan`, so Keycloak's 300-second default applies — shorter
+> than a hand-paced walk through this plan. A bare `unauthorized` body, or a
+> `401`, means the token aged out rather than anything being wrong with the
+> request. Re-run the three `export` lines above and continue; nothing else
+> needs redoing, and the rules you have already created are unaffected.
+>
+> If you would rather not think about it, re-mint at the top of each Part.
+
 ---
 
 ## Part A — the admin plane
