@@ -113,6 +113,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -2667,6 +2668,123 @@ func TestIntegration_Live_ResourceLabelling(t *testing.T) {
 				"on this axis and never did", resp.GetEffect(), resp.GetReason())
 		}
 	})
+
+	// proof6: R6's log line, in the DEPLOYED PDP's own stdout.
+	//
+	// Phase 7 Task 6. proof2 above already proves the carve-out is HONOURED
+	// live, and internal/pdpgrpc/label_test.go already pins what the line
+	// SAYS -- both rules' three fields, and no resource id -- over the real
+	// Decide path. Neither can reach the one channel this does: whether the
+	// shipped binary's own logger actually emits an Info record where an
+	// operator can read it. cmd/stratium-pdp/main.go builds a TextHandler on
+	// os.Stdout with nil options, so the level is Info by inheritance from a
+	// nil field, and Docker has to be capturing that stream. Both are facts
+	// about the deployment, not about labelling, and a unit test cannot
+	// observe either.
+	//
+	// It is proven here because Task 6's operator documentation tells an
+	// operator to grep their PDP log for this line. A negative claim about
+	// what a system can observe is a claim to check, not to reason to -- and
+	// a positive one directing an operator to look somewhere is the same
+	// claim with the burden reversed.
+	//
+	// The absence half is scoped to THIS test's three ids, deliberately, and
+	// not to "no path anywhere in the log". Only the scoped claim is this
+	// test's to make: another proof against this same container may log an
+	// id of its own for its own reasons, and a blanket assertion would fail
+	// for a reason that has nothing to do with labelling. Scoped, it is still
+	// the broader claim than label_test.go's -- that one proves logCarveOut
+	// does not leak the id, this one proves nothing ELSE in the whole
+	// deployed process did either, for the ids this test actually sent.
+	t.Run("proof6_the_carve_out_line_reaches_the_deployed_pdps_own_log", func(t *testing.T) {
+		d := newDelegation("label proof6: classification cap nato=CONFIDENTIAL", map[string]string{"nato": "CONFIDENTIAL"})
+
+		resp := decide(t, d.ID, `{"path":"`+publicPath+`"}`, nil)
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Effect = %v (%q), want EFFECT_ALLOW -- the line under test is emitted only when the "+
+				"carve-out actually won, so this has to be the same allow proof2 gets", resp.GetEffect(), resp.GetReason())
+		}
+
+		// Both rules by prefix: the line's whole purpose is naming the pair,
+		// and a line carrying only the winner would send an operator looking
+		// for a row they cannot find.
+		want := []string{
+			"resource label carve-out lowers the classification it overrides",
+			`rule_prefix=/label-proof/public/`,
+			`overrides_prefix=/label-proof/`,
+		}
+		logs := awaitContainerLog(t, "pdp-resource", want)
+
+		// R6's line is deliberately id-free (labelResource's own doc comment):
+		// a resource id is derived from client-supplied raw_input and a process
+		// log may be shipped somewhere the subject matter should not go.
+		for _, id := range []string{secretPath, publicPath, unlabelledPath} {
+			if strings.Contains(logs, id) {
+				t.Errorf("the deployed PDP's log contains the resource id %q -- ids are attacker-influenced "+
+					"content (§4.4.2 T2) and this log is shipped off-box", id)
+			}
+		}
+	})
+}
+
+// awaitContainerLog returns the named compose service's captured stdout+stderr
+// once every string in want appears in it, failing the test if they have not
+// all arrived within the settle window.
+//
+// Polled rather than read once. slog's TextHandler writes each record in one
+// Write and does not buffer, but nothing makes Docker's log driver expose that
+// write to `docker logs` synchronously with the gRPC response this test
+// already has in hand -- so a single read races the daemon, and a test that
+// fails one run in fifty for that reason would be read as flakiness in
+// labelling.
+//
+// The container is found by the label compose puts on everything it creates
+// (com.docker.compose.service), not by a container name, a project name, or a
+// published port. Those are all conventions this test would be guessing at;
+// the label is Docker's own and is set by the same `docker compose up` the
+// Makefile's integration target runs. Exactly one match is required, so a
+// second stack on the host running a service of the same name fails loudly
+// here rather than being silently read instead of ours.
+func awaitContainerLog(t *testing.T, service string, want []string) string {
+	t.Helper()
+
+	out, err := exec.CommandContext(t.Context(), "docker", "ps", "--quiet",
+		"--filter", "label=com.docker.compose.service="+service).Output()
+	if err != nil {
+		t.Fatalf("docker ps for compose service %q: %v -- this proof reads the deployed process's own "+
+			"stdout, so it needs the same docker `make integration` already required", service, err)
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) != 1 {
+		t.Fatalf("docker ps matched %d containers for compose service %q, want exactly 1 (%v)",
+			len(ids), service, ids)
+	}
+
+	var logs string
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		raw, err := exec.CommandContext(t.Context(), "docker", "logs", ids[0]).CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker logs %s: %v", ids[0], err)
+		}
+		logs = string(raw)
+
+		missing := make([]string, 0, len(want))
+		for _, w := range want {
+			if !strings.Contains(logs, w) {
+				missing = append(missing, w)
+			}
+		}
+		if len(missing) == 0 {
+			return logs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the deployed %s never logged %q -- R6's carve-out line is the operator's ONLY signal "+
+				"that a carve-out is doing something, and the operator documentation sends them here to grep "+
+				"for it", service, missing)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // Phase 9 Task 5 (docs/superpowers/sdd/2026-08-13-phase-9-tokens/

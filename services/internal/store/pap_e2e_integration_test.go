@@ -1003,6 +1003,193 @@ func TestIntegration_PAPE2E_TierOverrideRaisesAndLoweringIsRefusedOnBothBaseline
 	})
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7 Task 6 -- resource labelling, through the real admin plane
+// ---------------------------------------------------------------------------
+
+// TestIntegration_PAPE2E_ResourceLabelRuleWriteBumpsEpochAndReachesTheNextDecision
+// is proof 1 of the resource-labelling task, and it is proof 1 of THIS file
+// re-run over a different resource: an operator authenticated by a real IdP
+// writes a label rule through the real admin plane, the epoch bumps, and a
+// different process -- the PDP, connected as a role with no write grant --
+// classifies a resource by it on its very next call.
+//
+// # What was already proven, and why this is not that
+//
+// Task 3's TestIntegration_Live_ResourceLabelling (store_integration_test.go)
+// already proves labelling live: an unmatched resource denies, the carve-out
+// is honoured, the caller cannot choose its own label. Task 5's
+// TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip already proves the CRUD
+// and the epoch bump. Neither goes through the HTTP routes an operator
+// actually uses -- both call internal/store's methods directly on papDB. So
+// the five routes cmd/stratium-pap registers have been swept for ROLE
+// refusals by proofs 2 and 3 above and never once exercised for what they DO.
+// A route that 403s the right operators and writes the wrong row passes
+// everything in this file today.
+//
+// # The four steps are the operator documentation's own narrative
+//
+// docs/pep.md's "Labelling resources for classification caps" tells an
+// operator, in order: a configured cap denies everything unmatched, the
+// empty-prefix catch-all is the fix, a longer prefix overrides it, and
+// deleting the catch-all puts them back at the start. Each step below is one
+// of those sentences, executed. If the documentation is wrong, this test is
+// what goes red.
+//
+// Step 3 is also the raising direction of longest-prefix-wins, which nothing
+// live covered: Task 3's proof2 has the longer prefix carrying the LOWER
+// level (R6's carve-out), so an implementation that ranked by severity rather
+// than by prefix length would fail there and an implementation that ranked by
+// insertion order would pass it. Here the longer prefix is the MORE
+// classified one and it still wins, over a rule written earlier.
+//
+// The sibling id is the control throughout. It is covered by the catch-all
+// and by nothing else, so it holds still while the capped id moves -- which
+// is what makes each transition attributable to the rule just written rather
+// than to anything else reaching the tenant.
+func TestIntegration_PAPE2E_ResourceLabelRuleWriteBumpsEpochAndReachesTheNextDecision(t *testing.T) {
+	const tool = "papLabelProofReadTool"
+	const principal = "pap-label-proof@example.com"
+	// Both ids are fictional and local to this proof. The capped one sits
+	// under the prefix step 3 writes; the sibling deliberately does not, so
+	// only the catch-all ever covers it.
+	const cappedID = "/pap-label-proof/reports/q3.pdf"
+	const siblingID = "/pap-label-proof-elsewhere/notes.txt"
+
+	papBlanketPermit(t, "pap-label-proof-blanket-permit")
+
+	// Seeded inline rather than through papChainFixture, which hardcodes an
+	// EMPTY cap map -- correct for every other proof here, and the one thing
+	// this proof cannot have: CheckCap returns allow on len(caps) == 0 before
+	// it ever looks at a label, so a capless delegation would allow all four
+	// steps identically and prove nothing. DESTRUCTIVE max tier follows this
+	// file's own convention, leaving the cap as the only axis that can deny.
+	agentID := uuid.New()
+	seedAgent(t, papTenant, agentID, "pap-label-proof-agent", models.TrustTierPlatformTrusted)
+	rootID := uuid.New()
+	root := seedDelegation(t, &models.Delegation{
+		ID: rootID, TenantID: papTenant, UserID: principal, AgentID: agentID,
+		ApprovedTools: []string{}, MaxActionTier: models.ActionTierDestructive,
+		ClassificationCaps: map[string]string{"nato": "CONFIDENTIAL"}, ResourceConstraints: map[string]string{},
+		Purpose: "pap-label-proof", ExpiresAt: time.Now().Add(time.Hour),
+		RootDelegationID: rootID, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
+	})
+	tok := mintToken(t, papPdpClient, root.ID)
+
+	admin := papAccessToken(t, papAdminUser, papAdminPass)
+
+	// The catalog row is a precondition, not the subject: a label may only be
+	// resolved against an id the PDP extracted for itself (R1/R4), so without
+	// a resource_field naming "path" nothing here could ever be labelled and
+	// all four steps would deny identically. Written through the admin plane
+	// too, because that is where an operator writes it.
+	papJSON(t, papAddr, http.MethodPost, "/v1/tool-catalog", admin, map[string]any{
+		"tool_name": tool, "action_tier": int(models.ActionTierReadOnly),
+		"verb": "read", "resource_field": "path",
+	}, nil)
+
+	decide := func(id string) *pdpgrpc.DecideResponse {
+		return papDecide(t, &pdpgrpc.DecideRequest{
+			Token: tok, AgentId: agentID.String(), Subject: principal, Tool: tool,
+			RawInput: `{"path":"` + id + `"}`,
+		})
+	}
+	createRuleViaPAP := func(t *testing.T, prefix, hierarchy, level string) models.ResourceLabelRule {
+		t.Helper()
+		epochBefore, _ := readTenantEpoch(t, papTenant)
+		var created models.ResourceLabelRule
+		papJSON(t, papAddr, http.MethodPost, "/v1/resource-label-rules", admin, map[string]any{
+			"prefix": prefix, "hierarchy": hierarchy, "level": level,
+		}, &created)
+		if created.ID == uuid.Nil {
+			t.Fatalf("POST /v1/resource-label-rules (prefix %q) returned the zero UUID -- nothing was created", prefix)
+		}
+		if created.Prefix != prefix {
+			t.Errorf("created rule prefix = %q, want %q", created.Prefix, prefix)
+		}
+		assertEpochBumped(t, papTenant, epochBefore)
+		return created
+	}
+
+	// Step 1 -- R7's cliff, live and through the operator's own front door.
+	// A configured cap with no rule covering the id denies, and this is the
+	// state a tenant is in the moment they configure their first cap. The
+	// documentation calls it a cliff because it reads as an outage; it is one
+	// assertion here.
+	for _, id := range []string{cappedID, siblingID} {
+		before := decide(id)
+		if before.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("with no label rule written, Decide() = %v (reason: %s), want DENY -- a configured cap "+
+				"over an unmatched resource cannot be evaluated (R2/R7), and every step below reads the "+
+				"CHANGE from this state", before.GetEffect(), before.GetReason())
+		}
+		if !strings.Contains(before.GetReason(), "cannot be evaluated") {
+			t.Errorf("Reason = %q, want the uncheckable-cap wording rather than an ordinary cap violation "+
+				"-- an operator acts differently on the two", before.GetReason())
+		}
+	}
+
+	// Step 2 -- the catch-all is the documented remedy, and it works. One
+	// POST with an empty prefix, and every id in the tenant is labelled.
+	catchAll := createRuleViaPAP(t, "", "nato", "UNCLASSIFIED")
+	for _, id := range []string{cappedID, siblingID} {
+		after := decide(id)
+		if after.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("after the catch-all was written, Decide() = %v (reason: %s), want ALLOW -- the empty "+
+				"prefix matches every id, which is the whole of R7's answer to the cliff",
+				after.GetEffect(), after.GetReason())
+		}
+	}
+
+	// Step 3 -- longest prefix wins, raising. The rule written SECOND and
+	// carrying the HIGHER level takes the subtree it names, and takes nothing
+	// else: the sibling still allows under the catch-all.
+	createRuleViaPAP(t, "/pap-label-proof/", "nato", "TOP-SECRET")
+
+	raised := decide(cappedID)
+	if raised.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+		t.Fatalf("Decide() on the capped id = %v (reason: %s), want DENY -- the longer prefix labels it "+
+			"TOP-SECRET, which exceeds the delegation's CONFIDENTIAL cap",
+			raised.GetEffect(), raised.GetReason())
+	}
+	if !strings.Contains(raised.GetReason(), "TOP-SECRET") {
+		t.Errorf("Reason = %q, want it to name TOP-SECRET -- the longer prefix has to be what decided, and "+
+			"the uncheckable-cap wording here would mean nothing labelled it at all", raised.GetReason())
+	}
+	if control := decide(siblingID); control.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+		t.Fatalf("Decide() on the sibling id = %v (reason: %s), want ALLOW -- the new rule names one prefix, "+
+			"so a sibling going dark means something broader than this write reached the decision",
+			control.GetEffect(), control.GetReason())
+	}
+
+	// Step 4 -- deleting the catch-all un-labels everything only it covered.
+	// This is the hazard Task 5's delete records after the fact and the
+	// documentation warns about before it: the DELETE takes no confirmation
+	// flag, and the sibling's allow becomes a denial with no further warning.
+	//
+	// The capped id is the other half, and it is why the delete's own audit
+	// claim is narrow: a longer rule still covers its own subtree, so
+	// "unlabelled" is not "the tenant went dark".
+	epochBefore, _ := readTenantEpoch(t, papTenant)
+	papJSON(t, papAddr, http.MethodDelete, "/v1/resource-label-rules/"+catchAll.ID.String(), admin, nil, nil)
+	assertEpochBumped(t, papTenant, epochBefore)
+
+	unlabelled := decide(siblingID)
+	if unlabelled.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+		t.Fatalf("after the catch-all was deleted, Decide() on the sibling id = %v (reason: %s), want DENY "+
+			"-- nothing else covered it, so deleting the empty-prefix rule un-labelled it",
+			unlabelled.GetEffect(), unlabelled.GetReason())
+	}
+	if !strings.Contains(unlabelled.GetReason(), "cannot be evaluated") {
+		t.Errorf("Reason = %q, want the uncheckable-cap wording", unlabelled.GetReason())
+	}
+	if survived := decide(cappedID); !strings.Contains(survived.GetReason(), "TOP-SECRET") {
+		t.Errorf("Decide() on the capped id after the delete: reason = %q, want it still labelled TOP-SECRET "+
+			"by the longer rule -- deleting a catch-all does not un-label what another rule covers",
+			survived.GetReason())
+	}
+}
+
 // papE2EEnvError formats TestMain's failure (store_integration_test.go's
 // runTestMain) when one of Phase 14 Task 8's PAP environment variables is
 // missing.
