@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"stratium/internal/policy"
+
 	"stratium/pkg/classification"
 	"stratium/pkg/models"
 )
@@ -462,5 +464,73 @@ func TestDecide_ResourceLabelRuleLoadFailureDeniesAndAudits(t *testing.T) {
 	if len(fs.appended) != 1 {
 		t.Errorf("audit entries appended = %d, want 1: a pre-decision denial is audited like any other",
 			len(fs.appended))
+	}
+}
+
+// TestDecide_PolicySeesTheResolvedClassification closes the gap every other
+// test in this file leaves open: they all read the label through CheckCap's
+// verdict — the response effect, the denial reason, the audit row — and
+// server.go's own comment on the labelling step claims something wider than
+// that. It says the label is placed where it is "so the label is on the
+// resource map every downstream consumer sees: the policy provider's
+// EvaluationInput, and the delegation leg's own ResourceConstraints and
+// CheckCap."
+//
+// Only the CheckCap half was checked. Moving `resource = labelResource(...)`
+// to just above authz.Decide — after s.policy.Evaluate — leaves every
+// assertion in this package passing, the whole module's tests passing, and
+// go vet clean, while every tenant policy conditioning on
+// input.resource.classification silently stops seeing it. For a Rego or Cedar
+// DENY rule keyed on classification that is a fail-open, and it is exactly the
+// class internal/policy/engine.go's "absence is undefined, not false" note
+// warns about: the attribute does not arrive as a wrong value, it arrives as
+// no value, and a rule that never fires looks like a rule that was satisfied.
+//
+// capturingVerdictSet (server_test.go) was built for this precise shape and
+// was pointed one field over. Its own doc comment describes the defect class —
+// "a bug that corrupts ONLY the early value would leave the response looking
+// correct while still handing every policy engine the wrong tier" — and the
+// label is the second value with that property. The sibling ordering claim,
+// epoch-first, has TestDecide_EpochIsTheFirstStoreRead; this one had nothing.
+//
+// Both keys are asserted. A label that arrived without its hierarchy would
+// satisfy a policy testing only for presence while telling CheckCap nothing
+// it can rank, and the two keys are written by the same two lines, so a test
+// reading one of them credits the other for free.
+func TestDecide_PolicySeesTheResolvedClassification(t *testing.T) {
+	// The cap is deliberately ABOVE the label, so this decision is not a
+	// denial: a test whose request died at the delegation leg could pass with
+	// the policy input never populated at all.
+	fs, req := labelFixture(t, map[string]string{"nato": "TOP-SECRET"}, []classification.Rule{
+		{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"},
+	})
+
+	capture := &capturingVerdictSet{}
+	srv := NewServer(fs, policy.NewMulti(
+		fakeAllPolicySource{policies: []policy.StoredPolicy{{ID: "p1", Language: fakeLanguage}}},
+		policy.Registry{fakeLanguage: fakePolicyEngine{set: capture}},
+	), testConfig(), &fakeSigner{})
+
+	if _, err := srv.Decide(context.Background(), req); err != nil {
+		t.Fatalf("Decide() error = %v", err)
+	}
+
+	// A floor: every assertion below reads through lastInput, so a policy
+	// engine that was never consulted would pass all of them vacuously.
+	if capture.lastInput == nil {
+		t.Fatal("the policy engine was never handed an EvaluationInput — this guard cannot check what the " +
+			"policy sees if no policy was consulted")
+	}
+
+	for _, tc := range []struct{ key, want string }{
+		{classification.AttrClassification, "SECRET"},
+		{classification.AttrHierarchy, "nato"},
+	} {
+		if got := capture.lastInput.Resource[tc.key]; got != tc.want {
+			t.Errorf("EvaluationInput.Resource[%q] = %q, want %q — the label must be on the resource map "+
+				"BEFORE s.policy.Evaluate runs, not only before authz.Decide. A tenant policy conditioning "+
+				"on this attribute is handed nothing, and a deny rule keyed on it silently never fires "+
+				"while the response, the reason, and the audit row all stay correct.", tc.key, got, tc.want)
+		}
 	}
 }

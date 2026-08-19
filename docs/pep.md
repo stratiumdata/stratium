@@ -694,9 +694,10 @@ The PDP logs the switch on every such decision:
     resource label carve-out changes hierarchy: a cap naming only the
     hierarchy it left does not apply to the one it entered
 
-There are three such lines in total, and grepping `carve-out` finds all of
-them. The other two are the lowering signal, which fires when a carve-out
-lowers a level *within* one hierarchy:
+Three kinds of line are emitted, and grepping `carve-out` finds all three —
+all three *that are emitted*, which is not the same as all overrides; see the
+end of this section. The other two are the lowering signal, which fires when a
+carve-out lowers a level *within* one hierarchy:
 
     resource label carve-out lowers the classification it overrides
 
@@ -711,8 +712,26 @@ it would have decided:
 All three name the winning rule and the rule it overrode, each by prefix,
 hierarchy, and level, so you can find both rows. None names the resource id —
 a rule is your configuration, an id is derived from client-supplied input.
-Grep your PDP's log for `carve-out` after writing an overriding rule and
-confirm the pair it reports is the pair you meant.
+
+**Only some overrides are logged, and the workflow above writes one that is
+not.** A line appears when the winning rule *lowers* a level within one
+hierarchy, *switches* hierarchy, or *covers an unrankable* rule. An override
+that RAISES within one hierarchy — the `/exports/quarterly/` example above,
+`SECRET` over the catch-all's `UNCLASSIFIED` — is deliberately silent: it
+tightens, and logging every tightening would bury the three cases above in
+noise.
+
+So grepping after a raise finds nothing, and finding nothing is not evidence
+your rule is inert. Two further reasons a grep can come back empty even for a
+logged override: the line is emitted **per decision, not per write**, so
+nothing appears until real traffic hits an id under that prefix; and it names
+only the two rules, so there is nothing request-specific to search for.
+
+When you have written a *lowering*, a *hierarchy switch*, or a rule covering
+one whose level cannot be ranked, grep your PDP's log for `carve-out` once
+traffic has reached the prefix, and confirm the pair it reports is the pair
+you meant. To check a raise, or to check any rule before traffic arrives, read
+the rule set back with `GET /v1/resource-label-rules` instead.
 
 ### Deleting the empty-prefix rule un-labels the tenant
 
@@ -987,7 +1006,7 @@ could not ask" matters, because the fix is different:
 | `approval ... did not resolve within the escalation timeout` | The action required human approval, and nobody resolved it inside `STRATIUM_PEP_APPROVAL_TIMEOUT`. | Approve escalations faster, or raise the timeout — see "Grant discovery tools" above for the same "the grant is real but unusable" shape applied to timing instead of scope. |
 | `approval ... was denied` | The action required human approval, and a human explicitly denied it. | Not a bug — this is the intended outcome of a reviewed escalation. |
 | `approval ... is unknown to the PDP` | The PDP no longer recognizes the approval this session was waiting on. | Unusual; retry the tool call (a fresh escalation will be created) and check the PDP's own logs if it recurs. |
-| `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured, and **no resource label rule matched this resource** — so the cap could not be checked, and an unlabelled resource under a cap denies (spec §3.9, R2). Either the tenant has no rule covering it, or the tool's `tool_catalog` row names no `resource_field`, so the PDP had no id to resolve rules against. | Fixable, but not by retrying — retrying reproduces it exactly. Register a rule covering this resource, or an empty-prefix catch-all covering everything; check the tool has a `resource_field`. See "Labelling resources for classification caps" above. |
+| `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured and **the resource ended up unlabelled**, so the cap could not be checked and it denies (spec §3.9, R2). Three different causes produce this one text: (a) no rule covers the resource; (b) the tool's `tool_catalog` row names no `resource_field`, so the PDP had no id to resolve rules against; (c) the row *does* name one, but this call's `raw_input` omitted that field, spelled it differently, or carried it as a non-string or an empty string — all of which read as no id. | Fixable, but not by retrying — retrying reproduces it exactly. The three causes have three different fixes: (a) register a rule, or an empty-prefix catch-all; (b) give the tool a `resource_field`, or accept it is unusable under a cap; (c) fix the **call** or the catalogued field *name* — the rule set is not the problem, and editing it will not help. Distinguish them by checking the tool's catalog row first, then a sample `raw_input` against it. See "Labelling resources for classification caps" above. |
 | `resource classification X exceeds delegation cap Y in hierarchy "H"` | The resource **was** labelled, and its level is above this delegation's cap. The cap did its job. | Not a bug. The one adjustment available is the **label**: correct the rule if the resource is mislabelled (`GET /v1/resource-label-rules` shows which rules exist). The cap itself cannot be edited by any route — and revoking to re-issue returns a session with *no* cap at all, not a higher one. See "Nothing in the admin plane can change a cap" above before doing that. |
 | `unknown classification hierarchy ...`, `unknown classification level ...` | The **resource label rule** that matched names a hierarchy or level outside the fixed set — a rule written around the API's validation (a direct SQL write, or a read that raced a migration). Unreachable before labelling. | A rule fix, not a policy grant. Compare the value against the hierarchy table in "Labelling resources for classification caps" above, and rewrite the rule through `stratium-pap` so the validator sees it. |
 | `delegation cap "..." is not a known level ...`, `conflicting caps for hierarchy ...` | The **delegation's own cap map** is malformed — a cap naming a non-level, or two keys differing only by case carrying different levels. Nothing is wrong with your label rules, and looking there will find nothing. Unreachable before labelling. | Not fixable from the admin plane at all: no route reads or writes that column. Fix it at whatever process created the delegation, then revoke this one — accepting that its replacement carries no cap (see "Nothing in the admin plane can change a cap" above). |

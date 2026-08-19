@@ -6,10 +6,8 @@ import (
 	"database/sql/driver"
 	"errors"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"maps"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -446,25 +444,33 @@ func TestStore_ResourceLabelRuleWrites_InvalidLabelRefusedBeforePersisting(t *te
 // nothing for the validator to have an opinion about. That is why step 1 keys
 // on the two writing verbs rather than on "any query naming this table."
 //
+// Scoped to the PACKAGE, not to one file. It read resource_label.go by name
+// until the Task 6 review pointed out the hole that leaves: a future
+// UpsertResourceLabelRule in a new internal/store/*.go, with its own INSERT and
+// no validator call, was invisible to a scan bounded by a filename — and the
+// filename bound bought nothing, because parseProductionFiles (tenant_predicate
+// _test.go) already walks the whole package for exactly this kind of scan.
+//
 // Still deliberately narrow in one respect: it proves no SECOND copy is reached
-// by a write path in this file. It does not attempt to prove no validation
-// logic exists anywhere else in the package by any other name — a negative
-// claim about a whole package that a source scan cannot honestly make.
+// by a write path. It does not attempt to prove no validation logic exists
+// anywhere in the package by any other name — a negative claim about a whole
+// package that a source scan cannot honestly make.
 func TestResourceLabelRuleWrites_ShareOneValidator(t *testing.T) {
-	const filename = "resource_label.go"
-	src, err := os.ReadFile(filename)
+	_, files, err := parseProductionFiles(".")
 	if err != nil {
-		t.Fatalf("reading %s: %v", filename, err)
+		t.Fatalf("parsing internal/store: %v", err)
 	}
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filename, src, 0)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", filename, err)
+	// A floor on the scan's own input, ahead of the two below: a package walk
+	// that returned nothing would satisfy every later assertion by finding no
+	// writers to object to.
+	if len(files) < 2 {
+		t.Fatalf("parsed %d production files in internal/store, want at least 2 — the scan cannot have "+
+			"looked at the package it is meant to check", len(files))
 	}
 
 	// Step 1: the query constants that write a rule into the table.
 	writeQueries := map[string]bool{}
-	for _, decl := range file.Decls {
+	for _, decl := range allDecls(files) {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
 			continue
@@ -487,13 +493,13 @@ func TestResourceLabelRuleWrites_ShareOneValidator(t *testing.T) {
 	// a scan that passed because it found nothing to look at is the defect this
 	// guard is supposed to prevent, one level up. Two today (insert, update).
 	if len(writeQueries) < 2 {
-		t.Fatalf("found %d rule-writing query constants in %s (%v), want at least 2 — the scan cannot have "+
-			"looked at the write paths it is meant to check", len(writeQueries), filename, writeQueries)
+		t.Fatalf("found %d rule-writing query constants in internal/store (%v), want at least 2 — the scan "+
+			"cannot have looked at the write paths it is meant to check", len(writeQueries), writeQueries)
 	}
 
 	// Step 2: every function mentioning one must call the validator exactly once.
 	checked := 0
-	for _, decl := range file.Decls {
+	for _, decl := range allDecls(files) {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
@@ -1161,4 +1167,15 @@ func TestPrefixAftermath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// allDecls flattens the package's files into one declaration stream, so the
+// scan above reads "every writer in internal/store" rather than "every writer
+// in the file someone remembered to name".
+func allDecls(files []*ast.File) []ast.Decl {
+	var decls []ast.Decl
+	for _, f := range files {
+		decls = append(decls, f.Decls...)
+	}
+	return decls
 }
