@@ -414,6 +414,20 @@ call outright (the constrained key is never present). Most tools have no
 resource field (an array argument, a pattern, no arguments at all); leave
 it out rather than guessing.
 
+**Guessing this field wrong now decides more than it used to.** Cataloging
+the wrong field as a tool's resource id was previously a scoping mistake: the
+PDP compared `ResourceConstraints` against the wrong string, and a constraint
+either denied calls it should have allowed or allowed ones it should have
+denied. Since resource labelling shipped (below), the same wrong field also
+picks which of your prefix rules classifies the call — so a tool whose
+`resource_field` names, say, a destination argument instead of the file being
+read gets a *confident* classification of the wrong resource, and an
+authorization decision on top of it. Nothing reports this: the rule matched,
+a level was resolved, and the decision looks exactly like a correct one. If a
+tool's arguments do not contain one unambiguous field holding the thing the
+call acts on, leave `resource_field` out — an unlabelled resource under a cap
+denies loudly, which is the failure you want.
+
 ### Seed material for the two servers this project has run against
 
 `deploy/seed/tool-catalog-claude-code.sql` and
@@ -461,60 +475,186 @@ current_tenant()` (`NULL`), so the statement "succeeds" having touched
 nothing. A prior task lost time this way on exactly this table; set the
 tenant first, every time, for every write.
 
-## Classification caps have no labelling source
+## Labelling resources for classification caps
 
 A delegation can carry a classification cap — for example `nato:
-CONFIDENTIAL` — meant to refuse access to anything above that level. As of
-this release, a configured cap **denies** when the resource being accessed
-carries no classification, rather than treating an unlabelled resource as
-compliant (spec §3.9, R2). If your tenant has any classification cap
-configured, on any hierarchy, **you will start seeing denials you have not
-seen before.**
+CONFIDENTIAL` — meaning "resources above this level are refused." A cap needs
+two things to mean anything: a level to compare against, and something that
+says what the resource's level *is*. This release supplies the second. Your
+tenant's own **resource label rules** (spec §3.9.1) map a resource-id prefix
+to a hierarchy and a level, and the PDP resolves them on every decision.
 
-**This is correct, not a regression.** A cap's semantics were always
-"resources above this level are refused." Nothing in this system today — not
-`stratium-pep`, not the PDP, not any policy engine — has a source for a
-resource's actual classification. `stratium-pep` sends resource *identity*
-only (a path or an id extracted from the tool call's own arguments — see
-`cmd/stratium-pep/resource.go`'s package doc), deliberately never a
-classification: a PEP that decided a resource's sensitivity would be making
-exactly the security decision this whole system exists to keep out of the
-untrusted client (spec §3.9, R1). So before this change, every resource a
-configured cap was ever compared against looked unlabelled, and the cap
-silently allowed everything through. It was never enforcing anything; it
-just never told you.
+Two rules govern the result, and the second is the one that surprises people:
 
-The reason text this produces reads:
+- **The longest matching prefix wins.** The PDP resolves your rules against
+  the resource id *it* extracted from the tool call itself — never one the
+  client sent, and never a classification the client claims. A PEP that
+  decided a resource's sensitivity would be making exactly the security
+  decision this system exists to keep out of the untrusted client (spec §3.9,
+  R1), so `stratium-pep` sends resource *identity* only, and even that is
+  re-derived server-side from the tenant's own `tool_catalog` row. **No
+  `resource_field` on the tool's row means no id, which means no label** —
+  see "Seeding the tool catalog" above.
+- **A cap that cannot be checked denies** (spec §3.9, R2). A resource matching
+  no rule is *unlabelled*, and a configured cap over an unlabelled resource
+  denies. There is no default level and no fallback, deliberately:
+  `UNCLASSIFIED` is a real level that a cap can be *satisfied by*, so
+  defaulting to it would be this system answering a question your rules did
+  not — and quietly allowing, which is the direction that costs you.
+
+The hierarchies and their levels are fixed, ordered low to high
+(`services/pkg/classification/classification.go`):
+
+    nato        UNCLASSIFIED  RESTRICTED  CONFIDENTIAL  SECRET  TOP-SECRET
+    commercial  PUBLIC  INTERNAL  CONFIDENTIAL-COMMERCIAL  RESTRICTED-COMMERCIAL  HIGHLY-CONFIDENTIAL
+
+A cap says nothing about a hierarchy it does not name: a `nato` cap never
+constrains a resource labelled `commercial`, and that is by design (spec §3.9,
+R9) — but see "A carve-out that changes hierarchy" below, because it is also
+how a cap stops applying by accident.
+
+**A delegation with no classification cap configured at all is unaffected by
+any of this.** Labelling changes what a *configured* cap means; it does not
+start capping delegations that never had one.
+
+### Enabling a cap without a catch-all denies every unmatched resource
+
+**Read this before you configure your first cap, not after the tickets
+arrive.** The moment a delegation carries a cap, every resource your rules do
+not cover starts denying — not the ones above the cap, *all* of them. If you
+have no rules at all, that is every resource the delegation can reach.
+
+This is correct behaviour and it will read as an outage. The reason text is
+what tells the two apart:
 
     resource declares no classification; the delegation's classification
     cap cannot be evaluated and therefore denies
 
-— distinct, deliberately, from an ordinary cap violation (`resource
-classification X exceeds delegation cap Y in hierarchy "H"`), so your audit
-log can tell "we could not check" apart from "we checked, and it was over
-the line." Both are denials, for different reasons an operator acts on
-differently.
+is deliberately distinct from an ordinary cap violation:
 
-**A delegation with no classification cap configured at all is unaffected.**
-This tightens what a *configured* cap means; it does not start capping
-delegations that never had one.
+    resource classification X exceeds delegation cap Y in hierarchy "H"
 
-**What to do about it.** There is currently no source of resource
-classification for this system to check against, so the honest options are
-narrow:
+so your audit log can tell "we could not check" from "we checked, and it was
+over the line." The first means your rules have a gap. The second means the
+cap worked.
 
-- **If this hierarchy's cap was not actually protecting anything** — the
-  common case, since it could never have fired before now — remove it from
-  the delegation. This makes today's real behavior (unrestricted on this
-  axis) a visible, deliberate choice instead of an accidental one.
-- **If classification enforcement is a real requirement, this system cannot
-  deliver it yet.** Do not work around the gap by standing up something
-  outside this system that reports "everything is UNCLASSIFIED" (or any
-  other fixed value) just to quiet the denials — that satisfies the cap
-  exactly as badly as the old silent allow did, only more deliberately.
-  Track the tenant-configured labelling source this needs (spec §8, "Resource
-  classification source") and hold off on configuring the cap until one
-  exists.
+**The fix is a catch-all, and it costs no new mechanism.** The empty prefix is
+a prefix of every string, so one rule with `"prefix": ""` labels every
+resource in the tenant. Register it *before* you enable the cap:
+
+    curl -sS -X POST http://<stratium-pap>/v1/resource-label-rules \
+        -H "Authorization: Bearer $OPERATOR_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d '{"prefix": "", "hierarchy": "nato", "level": "UNCLASSIFIED"}'
+
+The catch-all's level is your answer to "what should a resource no rule
+describes be treated as?" `UNCLASSIFIED` restores the pre-cap behaviour for
+everything you have not classified yet and lets you tighten subtree by
+subtree; a higher level fails closed and keeps denying until you carve out
+what is genuinely safe. Either is defensible — a catch-all you did not choose
+is not.
+
+Then narrow, one prefix at a time, with the same `POST` and a longer prefix. A
+longer prefix overrides a shorter one in both directions: it can raise a
+subtree above the catch-all, or lower one below an enclosing rule (a genuinely
+public directory inside a secret tree).
+
+        -d '{"prefix": "/exports/quarterly/", "hierarchy": "nato", "level": "SECRET"}'
+
+An unknown `hierarchy`, or a `level` that is not one of that hierarchy's
+levels, is refused at write time with a 400 naming the known values — so a
+typo in either costs you a failed request rather than a stored rule that
+silently never decides anything.
+
+The full set of routes under `/v1/resource-label-rules` is the same CRUD shape
+as every other admin resource, gated by operator role:
+
+| Route | Role |
+|---|---|
+| `GET /v1/resource-label-rules` | viewer |
+| `GET /v1/resource-label-rules/{id}` | viewer |
+| `POST /v1/resource-label-rules` | editor |
+| `PUT /v1/resource-label-rules/{id}` | editor |
+| `DELETE /v1/resource-label-rules/{id}` | admin |
+
+Write them through `stratium-pap`, not with `psql`: the PAP writes an audit
+entry in the same transaction as the row, so a direct SQL write produces a
+rule change nothing recorded.
+
+**A rule takes effect on the next decision.** The PDP reads the tenant's whole
+rule set on every `Decide` rather than caching it, and every write to the
+table also bumps the tenant's revocation epoch, which invalidates cached
+decisions made under the old rules. There is no TTL to wait out and no PDP
+restart to schedule.
+
+### Write the trailing separator
+
+**`/data` matches `/database/x`.** Matching is plain string prefix, exactly as
+written, and `/data` is literally a prefix of `/database/x`. An operator who
+means the directory writes the separator:
+
+    "prefix": "/data/"
+
+This is not a bug to be fixed later; it is a ruling with a reason. A
+boundary-aware matcher would need a separator vocabulary the resource id does
+not carry — an id is whatever field you catalogued as `resource_field`, which
+is as often a bucket key, a URL, or a dotted table name as it is a POSIX path
+— so the matcher would be guessing at syntax. It would also put a second,
+invisible rule between what you wrote and what it does, and it would break the
+empty-prefix catch-all above, which works only because `""` is a prefix of
+every string.
+
+The direction that costs you is a boundary-less rule that **lowers**: `/data`
+at `UNCLASSIFIED`, meant for one directory, also declassifies `/database/`,
+`/datastore/`, and anything else sharing those five characters. Write the
+separator on every rule where you mean a subtree.
+
+### A carve-out that changes hierarchy leaves the cap behind
+
+If the longer, winning rule names a *different* hierarchy from the rule it
+overrides, resources under it escape the outer hierarchy's cap entirely —
+they did not drop within an ordering, they left it. A `commercial: PUBLIC`
+carve-out beneath a `nato: TOP-SECRET` rule allows under a `nato` cap, because
+a `nato` cap says nothing about `commercial`.
+
+That is the designed behaviour of per-hierarchy caps, and it is also what one
+mistyped `hierarchy` value looks like. The PDP logs it on every such decision:
+
+    resource label carve-out changes hierarchy: a cap naming only the
+    hierarchy it left does not apply to the one it entered
+
+alongside the lowering signal, which fires when a carve-out lowers a level
+*within* one hierarchy:
+
+    resource label carve-out lowers the classification it overrides
+
+Both lines name the winning rule and the rule it overrode, each by prefix,
+hierarchy, and level, so you can find both rows. Neither names the resource
+id — a rule is your configuration, an id is derived from client-supplied
+input. Grep your PDP's log for `carve-out` after writing an overriding rule
+and confirm the pair it reports is the pair you meant.
+
+### Deleting the empty-prefix rule un-labels the tenant
+
+`DELETE /v1/resource-label-rules/{id}` takes no confirmation flag, by design —
+a flag would obstruct the one legitimate use of a delete. Deleting the
+catch-all is the largest blast radius available in this table: every resource
+that only it covered becomes unlabelled, and under any configured cap, denies.
+
+**Your pre-flight view is the list.** `GET /v1/resource-label-rules` returns
+the whole rule set — it is small and operator-authored — so "what else covers
+this prefix?" is answerable by reading it before you press the button:
+
+    curl -sS http://<stratium-pap>/v1/resource-label-rules \
+        -H "Authorization: Bearer $OPERATOR_TOKEN"
+
+The delete does record what it cost, in the audit entry it writes in the same
+transaction: either what the deleted prefix now resolves to, or that nothing
+labels it any more. That is a durable record rather than a warning that
+scrolls past — but it is written *after* the fact, which is why the list is
+the thing to read first. Note the record's claim is narrow on purpose: a rule
+at a longer prefix still covers its own subtree, so "nothing labels this
+prefix" does not mean everything beneath it went dark.
 
 ## The `proxy` surface's limits
 
@@ -758,7 +898,8 @@ could not ask" matters, because the fix is different:
 | `approval ... did not resolve within the escalation timeout` | The action required human approval, and nobody resolved it inside `STRATIUM_PEP_APPROVAL_TIMEOUT`. | Approve escalations faster, or raise the timeout — see "Grant discovery tools" above for the same "the grant is real but unusable" shape applied to timing instead of scope. |
 | `approval ... was denied` | The action required human approval, and a human explicitly denied it. | Not a bug — this is the intended outcome of a reviewed escalation. |
 | `approval ... is unknown to the PDP` | The PDP no longer recognizes the approval this session was waiting on. | Unusual; retry the tool call (a fresh escalation will be created) and check the PDP's own logs if it recurs. |
-| `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured, and nothing told the PDP what the resource's classification is — expected, since nothing in this system supplies one yet. | Not a bug, and not fixable by retrying. See "Classification caps have no labelling source" above. |
+| `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured, and **no resource label rule matched this resource** — so the cap could not be checked, and an unlabelled resource under a cap denies (spec §3.9, R2). Either the tenant has no rule covering it, or the tool's `tool_catalog` row names no `resource_field`, so the PDP had no id to resolve rules against. | Fixable, but not by retrying — retrying reproduces it exactly. Register a rule covering this resource, or an empty-prefix catch-all covering everything; check the tool has a `resource_field`. See "Labelling resources for classification caps" above. |
+| `resource classification X exceeds delegation cap Y in hierarchy "H"` | The resource **was** labelled, and its level is above this delegation's cap. The cap did its job. | Not a bug. Raise the delegation's cap if the access is legitimate, or correct the rule if the resource is mislabelled — `GET /v1/resource-label-rules` shows which rules exist. |
 | Anything else | An actual policy decision: a policy was evaluated and does not permit this tool for this principal. | Whoever manages policy for this tenant needs to grant it. |
 
 `proxy` and `extauthz` are later enforcement surfaces over the same PDP call.
