@@ -283,19 +283,28 @@ epoch() {
   psqlm -tAc "SELECT set_config('app.tenant_id','$TENANT',false);
               SELECT epoch FROM tenant_epoch WHERE tenant_id='$TENANT';" | tail -1
 }
-echo "before: $(epoch)"; mkrule "/tmp-probe/" nato RESTRICTED >/dev/null; echo "after:  $(epoch)"
+P="/probe-$(python3 -c 'import uuid;print(uuid.uuid4().hex[:8])')/"   # unique per run
+echo "before: $(epoch)"; mkrule "$P" nato RESTRICTED | tail -1; echo "after:  $(epoch)"
 ```
 
-**Expected** — the second value strictly higher (yours will differ; only the
-increase matters):
+**Expected** — a `201` between two values, the second strictly higher (yours
+will differ; only the increase matters):
 
 ```
 before: 4
+201
 after:  5
 ```
 
-**PASS if** it increased. Repeat with a `PUT` and a `DELETE` if you want all
-three verbs — the trigger fires on each.
+**PASS if** the create returned `201` **and** the epoch increased. Repeat with a
+`PUT` and a `DELETE` if you want all three verbs — the trigger fires on each.
+
+> **The prefix must be unique per run, and the status must be visible.** An
+> earlier draft used a fixed `/tmp-probe/` and piped the create to `/dev/null`.
+> On a second run that write returns `409`, the epoch correctly does not move,
+> and the discarded output leaves you looking at a flat epoch with no
+> explanation — reading a working trigger as a broken one. Measured on a
+> re-run: `before: 7 / after: 7`.
 
 ---
 
@@ -326,6 +335,23 @@ AGENT=4eced803-d8bd-4a51-8e2c-4d846b47a189
 
 **PASS if** `$AGENT` is a UUID and the catalog create returns `201` **with
 `resource_field` echoed back**. An empty `AGENT` here breaks every later step.
+
+> **On a second run the catalog create returns `409`**, since `read_file` is
+> already catalogued and there is no delete route for catalog entries. That is
+> harmless — confirm the existing row is right and carry on:
+>
+> ```bash
+> curl -sS -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/tool-catalog" \
+>   | python3 -c 'import json,sys
+> for e in json.load(sys.stdin): print(e["tool_name"], "| resource_field:", e.get("resource_field","(none)"))'
+> ```
+>
+> ```
+> read_file | resource_field: path
+> ```
+>
+> The agent, by contrast, needs a fresh `name` on each run — `UNIQUE
+> (tenant_id, name)` applies there too.
 
 **`resource_field` is the load-bearing part.** It names which field of the
 call's `raw_input` is the resource identity. A tool whose row names none
@@ -683,13 +709,32 @@ psqlm -tAc "SELECT set_config('app.tenant_id','$TENANT',false);
    SELECT id, classification_caps FROM delegations ORDER BY created_at DESC LIMIT 3;"
 ```
 
-**Expected:** your seeded delegation shows `{"nato": "CONFIDENTIAL"}`; anything
-created through `CreateDelegation` shows `{}`.
+**Expected** — every row you seeded in B2 shows the cap you wrote:
 
-**PASS if** you can see the difference. An **empty map is not a low cap** — the
-check allows immediately when no cap is configured, so a re-issued session has
-classification enforcement switched off entirely on every hierarchy, silently.
-Revoke-and-re-issue is a way to *stop* a capped delegation, never to adjust one.
+```
+7dc1b7b7-…|{"nato": "CONFIDENTIAL"}
+48605d6d-…|{"nato": "CONFIDENTIAL"}
+```
+
+**PASS if** the caps are there. **You will not see a `{}` row to compare
+against, and that absence is the finding** — on this tenant no delegation can
+be created through the API at all (B2), so the only rows that exist are ones
+written by hand with a cap already in them.
+
+The claim this step exists to convey therefore cannot be demonstrated by
+observation here; it is established by reading the code and pinned by three
+guard tests:
+
+| Guard | Holds |
+|---|---|
+| `TestRouteTable_ExposesNoWriteSurfaceForAClassificationCap` | No route writes a cap |
+| `TestCreateDelegationRPC_CarriesNoClassificationCapField` | The RPC has no field for one |
+| `TestCreateDelegation_RootIsCreatedWithNoClassificationCap` | A root is created with `{}` |
+
+An **empty map is not a low cap** — the check allows immediately when no cap is
+configured, so a session re-issued through the API has classification
+enforcement switched off entirely on every hierarchy, silently. Revoke-and-
+re-issue is a way to *stop* a capped delegation, never to adjust one.
 
 ### D4 — `/data` matches `/database/x`
 
