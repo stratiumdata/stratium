@@ -23,3 +23,11 @@
 # Node (clients/ui, later phases)
 node_modules/
 dist/
+
+# deploy/stratium quickstart — machine-local identity and build output.
+# Nothing here is shareable: the agent id belongs to one local tenant and the
+# binary is built per-machine. Ports and tokens are never written to disk at all.
+/.stratium-quickstart.json
+/.stratium-session.json
+/.stratium-session.json.cache.json
+/bin/

@@ -1,0 +1,1348 @@
+#!/usr/bin/env python3
+"""Stratium quickstart -- zero to an enforcing agent, and a way back out.
+
+    deploy/stratium up --harness claude    bring it all up, end on a real denial
+    deploy/stratium run claude [args...]   launch an agent with the env set
+    deploy/stratium verify                 observe a denial and assert on it
+    deploy/stratium doctor                 diagnose a break, name the fix
+    deploy/stratium down                   tear down, in the safe order
+    deploy/stratium install|uninstall|status    hook wiring only
+
+Standalone from the product: it drives `stratium-pep`, it is not part of it.
+
+One discipline runs through all of it -- PERSIST IDENTITY, NEVER ADDRESSES.
+Agent ids and file paths go in .stratium-quickstart.json; ports and tokens never
+do. Docker republishes ports on every `compose up` and Keycloak tokens die after
+five minutes, so both are resolved fresh per invocation. That is also why `run`
+is a launcher rather than a file you source -- a stale value cannot outlive the
+process that resolved it.
+
+Hook wiring, inherited from the original stratium-hooks:
+
+--claude (the default) writes the pair documented in docs/pep.md
+("`.claude/settings.json`"): SessionStart runs `stratium-pep session-start`
+once per session, PreToolUse runs `stratium-pep hook` before every tool call.
+
+--codex writes ~/.codex/hooks.json, and only that file — a project-local Codex
+hook is disabled until the project is trusted, which for an enforcement point
+is fail-open rather than inert. It wires PreToolUse alone, through the
+stratium-codex-hook shim. See Part 2 of
+docs/testing/2026-08-20-agent-integration-test.md.
+
+This script only edits the file. The environment variables the hooks read must
+be exported in the shell that launches the agent, and `session-start` must have
+run — until then every tool call is denied for want of a session.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+
+# What identifies our entries on the way back out. Both names appear: Claude Code
+# runs the binary directly, Codex runs the stratium-codex-hook shim (see HARNESS).
+MARKERS = ("stratium-pep", "stratium-codex-hook")
+
+
+def ours(hook):
+    return any(m in str(hook.get("command", "")) for m in MARKERS)
+
+# Timeouts are Claude Code's own hook-execution budget, in seconds, and are
+# deliberately larger than STRATIUM_PEP_CONNECT_TIMEOUT so a slow-but-answering
+# PDP finishes before Claude Code gives up on the process. See docs/pep.md.
+SESSION_START_TIMEOUT = 15
+PRE_TOOL_USE_TIMEOUT = 10
+
+
+# What each hook needs in its environment, per the binary's own loaders. Both
+# lists come to eight, but they are NOT the same eight: `hook` wants the two
+# approval durations and the cache staleness window, `session-start` wants what
+# the delegation is for. Exporting 1a's block satisfies session-start and leaves
+# `hook` denying every call. selftest cross-checks these against the Go source.
+REQUIRED_ENV = {
+    # services/cmd/stratium-pep/session_start.go (STRATIUM_PEP_PURPOSE is optional)
+    "SessionStart": (
+        "STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
+        "STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT",
+        "STRATIUM_PEP_REQUESTED_TIER", "STRATIUM_PEP_REQUESTED_TOOLS",
+        "STRATIUM_PEP_TTL_SECONDS",
+    ),
+    # services/cmd/stratium-pep/hook.go, plus cache.go's cacheStalenessWindowEnv
+    "PreToolUse": (
+        "STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
+        "STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT",
+        "STRATIUM_PEP_APPROVAL_POLL_INTERVAL", "STRATIUM_PEP_APPROVAL_TIMEOUT",
+        "STRATIUM_PEP_CACHE_STALENESS_WINDOW",
+    ),
+}
+
+
+# A worked value for each variable, from the agent-integration test plan. The
+# first two are per-run: the PDP port is a docker ephemeral port that changes on
+# every `compose up`, so it is resolved rather than quoted, and the agent id
+# comes from whatever row 0d created.
+EXAMPLES = {
+    "STRATIUM_PEP_PDP_ADDR": ('"localhost:$(dc port pdp-pap 50051 | sed -E \'s/.*://\')"',
+                              "ephemeral — re-resolve after every `compose up`"),
+    "STRATIUM_PEP_AGENT_ID": ('"$AGENT"', "the agent row from 0d"),
+    "STRATIUM_PEP_SUBJECT": '"agent-tester@example.com"',
+    "STRATIUM_PEP_SESSION_FILE": '"/tmp/stratium-session.json"',
+    "STRATIUM_PEP_CONNECT_TIMEOUT": "5s",
+    "STRATIUM_PEP_REQUESTED_TIER": "3",
+    "STRATIUM_PEP_REQUESTED_TOOLS": '"Read,Grep,Glob,Write,Bash"',
+    "STRATIUM_PEP_TTL_SECONDS": "3600",
+    "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s",
+    "STRATIUM_PEP_APPROVAL_TIMEOUT": "120s",
+    "STRATIUM_PEP_CACHE_STALENESS_WINDOW": "30s",
+}
+
+DC = 'dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }'
+
+
+def next_steps(events, agent="claude", binary="stratium-pep"):
+    """Print the exports the installed hooks need, and what to run after them.
+
+    Only the ones missing from *this* shell are printed, which is a hint and not
+    the truth: the hooks read the environment of whatever shell launches the
+    agent. Printing the whole block every time would bury that.
+    """
+    need = []
+    for e in events:
+        for v in REQUIRED_ENV.get(e, ()):
+            if v not in need:
+                need.append(v)
+    gone = [v for v in need if not os.environ.get(v)]
+
+    print(f"\nNEXT — the hooks read their configuration from the environment of the "
+          f"shell that launches `{agent}`, not from this one.")
+    if not gone:
+        print(f"All {len(need)} are set here. If you launch `{agent}` from a different "
+              "shell, export them there too.")
+    else:
+        print(f"{len(gone)} of {len(need)} are missing here. In the launching shell:\n")
+        if "STRATIUM_PEP_PDP_ADDR" in gone:
+            print(f"  {DC}")
+        for v in gone:
+            spec = EXAMPLES.get(v, '""')
+            value, note = spec if isinstance(spec, tuple) else (spec, None)
+            line = f"  export {v}={value}"
+            if note and len(line) + len(note) + 3 <= 100:
+                print(f"{line}{'':<{max(1, 58 - len(line))}}# {note}")
+            else:
+                if note:
+                    print(f"  # {note}")
+                print(line)
+    if "SessionStart" not in events:
+        print(f"\nNo SessionStart hook is installed, so nothing issues a delegation for "
+              f"you — run `{binary.split()[0]} session-start` by hand first, or every tool "
+              "call denies for want of a session.")
+    print(f"\nThen: deploy/stratium --{'codex' if agent == 'codex' else 'claude'} "
+          "status   # 0 when the command resolves and the environment is whole")
+
+
+def missing_env(event):
+    return [v for v in REQUIRED_ENV.get(event, ()) if not os.environ.get(v)]
+
+
+def entries(binary, matcher, only=None, hook_arg="hook"):
+    """The two groups to install, in docs/pep.md's shape.
+
+    SessionStart carries no matcher on purpose: it must fire for every session
+    source (startup, resume, clear, compact, fork), so a resumed session gets a
+    fresh delegation rather than whatever `hook` finds left over.
+    """
+    all_events = {
+        "SessionStart": {
+            "hooks": [{
+                "type": "command",
+                "command": f"{binary} session-start",
+                "timeout": SESSION_START_TIMEOUT,
+            }],
+        },
+        "PreToolUse": {
+            "matcher": matcher,
+            "hooks": [{
+                "type": "command",
+                "command": f"{binary} {hook_arg}".strip(),
+                "timeout": PRE_TOOL_USE_TIMEOUT,
+            }],
+        },
+    }
+    return {e: g for e, g in all_events.items() if not only or e in only}
+
+
+def load(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        text = f.read().strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        sys.exit(f"stratium: {path} is not valid JSON ({e}); refusing to overwrite it")
+
+
+def save(path, settings, dry_run):
+    body = json.dumps(settings, indent=2) + "\n"
+    if dry_run:
+        print(f"--- would write {path} ---\n{body}", end="")
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    # Write-then-rename: a crash mid-write must not leave a truncated settings
+    # file, which Claude Code would reject on next launch.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def strip(settings, events=None):
+    """Remove Stratium entries, pruning containers left empty. Returns count.
+
+    `events` limits the sweep to those event names; None means all of them.
+    """
+    removed = 0
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return 0
+    for event in list(hooks):
+        if events is not None and event not in events:
+            continue
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        for group in groups:
+            inner = group.get("hooks", []) if isinstance(group, dict) else []
+            kept = [h for h in inner if not ours(h)]
+            removed += len(inner) - len(kept)
+            if not kept:
+                continue  # the whole group was ours
+            group["hooks"] = kept
+            kept_groups.append(group)
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            del hooks[event]
+    if not hooks:
+        del settings["hooks"]
+    return removed
+
+
+def resolves(binary):
+    """Is `binary` actually runnable? A path is checked as one, a bare name on PATH."""
+    word = binary.split()[0] if binary.split() else binary
+    if os.sep in word:
+        return os.path.isfile(word) and os.access(word, os.X_OK)
+    return shutil.which(word) is not None
+
+
+def install(args):
+    if not args.force and not resolves(args.bin):
+        # Refusing rather than warning, because the failure is fail-open, not
+        # broken: a PreToolUse hook whose command is missing exits 127, and
+        # Claude Code lets the tool call through on any non-zero that is not 2.
+        # You would see a hook error in the transcript and no enforcement at all.
+        sys.exit(f"stratium: {args.bin!r} is not runnable "
+                 f"({'no such executable' if os.sep in args.bin else 'not on PATH'}). "
+                 "A PreToolUse hook that cannot run exits 127, which Claude Code treats "
+                 "as a non-blocking error — the tool call proceeds unchecked. Pass "
+                 "--bin with a real path (the test plan builds /tmp/stratium-pep), or "
+                 "--force if you are writing settings for another machine.")
+    if not ours({"command": args.bin}):
+        print(f"warning: {args.bin!r} matches none of {MARKERS} — `uninstall` and "
+              "`status` find entries by name, so they will not see this one. "
+              "Remove it by hand if you install it.", file=sys.stderr)
+    settings = load(args.settings)
+    wanted = entries(args.bin, args.matcher, args.only, HARNESS[args.harness]["hook_arg"])
+    # Strip only the events we are about to write, so `install --only PreToolUse`
+    # does not silently remove a SessionStart hook installed by an earlier run.
+    replaced = strip(settings, events=set(wanted))
+    hooks = settings.setdefault("hooks", {})
+    for event, group in wanted.items():
+        hooks.setdefault(event, []).append(group)
+    save(args.settings, settings, args.dry_run)
+    verb = "reinstalled" if replaced else "installed"
+    print(f"{verb} {' + '.join(wanted)} (matcher {args.matcher!r}, command {args.bin!r}) in {args.settings}")
+    if getattr(args, "show_next", True):
+        next_steps(list(wanted), "codex" if args.harness == "codex" else "claude", args.bin)
+
+
+def uninstall(args):
+    settings = load(args.settings)
+    removed = strip(settings)
+    if not removed:
+        print(f"no Stratium hooks in {args.settings}")
+        return
+    save(args.settings, settings, args.dry_run)
+    print(f"removed {removed} Stratium hook(s) from {args.settings}")
+
+
+def status(args):
+    settings = load(args.settings)
+    found = [
+        (event, h.get("command"), h.get("timeout"), group.get("matcher"))
+        for event, groups in (settings.get("hooks") or {}).items()
+        if isinstance(groups, list)
+        for group in groups
+        if isinstance(group, dict)
+        for h in group.get("hooks", [])
+        if ours(h)
+    ]
+    if not found:
+        print(f"no Stratium hooks in {args.settings}")
+        return 1
+    incomplete = False
+    for event, command, timeout, matcher in found:
+        m = "" if matcher is None else f" matcher={matcher!r}"
+        print(f"{event}{m} command={command!r} timeout={timeout}")
+        runnable = resolves(command)
+        gone = missing_env(event)
+        if not runnable:
+            print(f"  command: NOT RUNNABLE — {command.split()[0]!r} is not there")
+        if gone:
+            print(f"  env: missing {', '.join(gone)}")
+        elif REQUIRED_ENV.get(event):
+            print(f"  env: all {len(REQUIRED_ENV[event])} set")
+        incomplete = incomplete or gone or not runnable
+    if incomplete:
+        next_steps([e for e, _, _, _ in found],
+                   "codex" if args.harness == "codex" else "claude",
+                   found[0][1] or args.bin)
+        return 1
+    return 0
+
+
+def selftest(_args):
+    """Round-trip the install/uninstall pair over a settings file with a neighbour."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, ".claude", "settings.json")
+        os.makedirs(os.path.dirname(path))
+        theirs = {
+            "model": "opus",
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "my-linter"}]}]},
+        }
+        with open(path, "w") as f:
+            json.dump(theirs, f)
+
+        a = argparse.Namespace(settings=path, bin="/tmp/stratium-pep", matcher="*",
+                               dry_run=False, only=None, harness="claude", force=True)
+        install(a)
+        got = load(path)
+        cmds = [h["command"] for g in got["hooks"]["PreToolUse"] for h in g["hooks"]]
+        assert "/tmp/stratium-pep hook" in cmds, cmds
+        assert "my-linter" in cmds, "clobbered a hook that was not ours"
+        assert len(got["hooks"]["SessionStart"]) == 1
+        assert "matcher" not in got["hooks"]["SessionStart"][0], "SessionStart must stay matcher-less"
+        assert got["model"] == "opus", "dropped an unrelated setting"
+
+        install(a)  # idempotent
+        got = load(path)
+        assert len(got["hooks"]["PreToolUse"]) == 2, got["hooks"]["PreToolUse"]
+        assert len(got["hooks"]["SessionStart"]) == 1
+
+        a.bin = "/usr/local/bin/stratium-pep"
+        install(a)  # a changed --bin replaces, does not stack
+        cmds = [h["command"] for g in load(path)["hooks"]["PreToolUse"] for h in g["hooks"]]
+        assert "/tmp/stratium-pep hook" not in cmds, cmds
+
+        uninstall(a)
+        got = load(path)
+        assert got["model"] == "opus"
+        assert got["hooks"] == {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "my-linter"}]}]}, got["hooks"]
+        assert status(a) == 1
+
+        # --only installs one half and leaves the other alone. 1d in the agent
+        # test plan needs this: a SessionStart hook there would issue a fresh
+        # delegation over the one 1a made by hand and 1c edited by SQL.
+        install(a)
+        a.only = ["PreToolUse"]
+        a.bin = "/tmp/stratium-pep"
+        install(a)
+        got = load(path)
+        ss = [h["command"] for g in got["hooks"]["SessionStart"] for h in g["hooks"]]
+        ptu = [h["command"] for g in got["hooks"]["PreToolUse"] for h in g["hooks"]]
+        assert ss == ["/usr/local/bin/stratium-pep session-start"], ss
+        assert "/tmp/stratium-pep hook" in ptu, ptu
+        assert "/usr/local/bin/stratium-pep hook" not in ptu, ptu
+        a.only = None
+        uninstall(a)
+
+        # a file that was ours alone loses the "hooks" key entirely
+        with open(path, "w") as f:
+            json.dump({}, f)
+        install(a)
+        uninstall(a)
+        assert load(path) == {}, load(path)
+        # --codex: its own file, its own default command, PreToolUse only.
+        pr = argparse.ArgumentParser()
+        def resolved(**kw):
+            ns = argparse.Namespace(harness="codex", settings=None, user=False, bin=None,
+                                    matcher="*", only=None, dry_run=False)
+            vars(ns).update(kw)
+            return resolve(ns, pr)
+
+        c = resolved()
+        assert c.settings == os.path.expanduser("~/.codex/hooks.json"), c.settings
+        assert c.bin == "stratium-codex-hook", c.bin
+        assert c.only == ["PreToolUse"], c.only
+
+        # a project-local Codex hook is fail-open, not inert — refuse it
+        for bad in (os.path.join(REPO, ".codex", "hooks.json"),
+                    os.path.join(d, ".codex", "hooks.json")):
+            try:
+                resolved(settings=bad)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(f"accepted a project-local Codex path: {bad}")
+
+        # ...and Codex has no SessionStart to wire here
+        try:
+            resolved(only=["SessionStart"])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("accepted --codex --only SessionStart")
+
+        # Claude Code keeps the project file by default, the user file under --user
+        cc = argparse.Namespace(harness="claude", settings=None, user=False, bin=None,
+                                matcher="*", only=None, dry_run=False)
+        # anchored to the script's own repo, not the caller's cwd
+        assert resolve(cc, pr).settings == os.path.join(REPO, ".claude", "settings.json")
+        cc = argparse.Namespace(harness="claude", settings=None, user=True, bin=None,
+                                matcher="*", only=None, dry_run=False)
+        assert resolve(cc, pr).settings == os.path.expanduser("~/.claude/settings.json")
+
+        # the Codex block itself: same shape, one event, the shim as the command
+        cx = entries("stratium-codex-hook", "*", ["PreToolUse"], HARNESS["codex"]["hook_arg"])
+        assert list(cx) == ["PreToolUse"], list(cx)
+        # bare, no subcommand: 2b's block is `"command": "…/stratium-codex-hook"`
+        assert cx["PreToolUse"]["hooks"][0]["command"] == "stratium-codex-hook", cx
+        assert entries("stratium-pep", "*", ["PreToolUse"])["PreToolUse"]["hooks"][0][
+            "command"] == "stratium-pep hook"
+
+        # a full round trip against a Codex file, including that uninstall finds
+        # the shim — MARKERS has to cover a name that does not contain "stratium-pep"
+        cxpath = os.path.join(d, "codex-hooks.json")
+        b = argparse.Namespace(harness="codex", settings=cxpath, bin="stratium-codex-hook",
+                               matcher="*", only=["PreToolUse"], dry_run=False, user=False, force=True)
+        install(b)
+        assert load(cxpath)["hooks"]["PreToolUse"][0]["hooks"][0][
+            "command"] == "stratium-codex-hook"
+        uninstall(b)
+        assert load(cxpath) == {}, load(cxpath)
+
+        # status is green only when the command runs AND the environment is whole.
+        # The stub has to be *named* like ours, or ours() cannot see the entry —
+        # which is the same reason install() warns about an off-name --bin.
+        stub = os.path.join(d, "stratium-codex-hook")
+        with open(stub, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(stub, 0o755)
+        b.bin = stub
+        install(b)
+        saved = {k: os.environ.get(k) for k in REQUIRED_ENV["PreToolUse"]}
+        try:
+            assert status(b) == 1, "green with an empty environment"
+            for k in REQUIRED_ENV["PreToolUse"]:
+                os.environ[k] = "set"
+            assert not missing_env("PreToolUse")
+            assert status(b) == 0, "red with a complete environment and a real command"
+            del os.environ["STRATIUM_PEP_CACHE_STALENESS_WINDOW"]
+            assert missing_env("PreToolUse") == ["STRATIUM_PEP_CACHE_STALENESS_WINDOW"]
+            assert status(b) == 1, "green with one variable missing"
+            os.environ["STRATIUM_PEP_CACHE_STALENESS_WINDOW"] = "set"
+            os.unlink(stub)  # the command is gone; env is whole
+            assert status(b) == 1, "green with a command that is not there"
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+        uninstall(b)
+
+        # a --bin that does not resolve is refused, because that install is
+        # fail-open rather than broken (127 is not 2, so the tool call proceeds)
+        assert resolves("/bin/sh") and resolves("sh")
+        assert not resolves("/nonexistent/stratium-pep")
+        assert not resolves("stratium-pep-that-is-not-installed")
+        assert resolves("/bin/sh hook"), "the subcommand must not be part of the lookup"
+        bad = argparse.Namespace(settings=os.path.join(d, "refuse.json"), bin="/nonexistent/pep",
+                                 matcher="*", only=None, dry_run=False, harness="claude",
+                                 force=False)
+        try:
+            install(bad)
+        except SystemExit:
+            assert not os.path.exists(bad.settings), "wrote settings despite refusing"
+        else:
+            raise AssertionError("installed a binary that does not resolve")
+        bad.force = True
+        install(bad)  # --force is the escape hatch
+        assert os.path.exists(bad.settings)
+
+    # REQUIRED_ENV must track the Go loaders. Skipped when the script is running
+    # outside the repo, where there is no source to check against.
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "services", "cmd", "stratium-pep")
+    if os.path.isdir(src):
+        import re
+
+        def literals(name):
+            text = open(os.path.join(src, name)).read()
+            return set(re.findall(r'"(STRATIUM_PEP_[A-Z_]+)"', text))
+
+        want_ss = literals("session_start.go") - {"STRATIUM_PEP_PURPOSE"}  # optional
+        assert set(REQUIRED_ENV["SessionStart"]) == want_ss, (
+            f"SessionStart drifted from session_start.go: "
+            f"{want_ss ^ set(REQUIRED_ENV['SessionStart'])}")
+        want_h = literals("hook.go") | literals("cache.go")
+        assert set(REQUIRED_ENV["PreToolUse"]) == want_h, (
+            f"PreToolUse drifted from hook.go/cache.go: "
+            f"{want_h ^ set(REQUIRED_ENV['PreToolUse'])}")
+
+    # the guidance has to cover every required variable, or it is worse than none
+    import io, contextlib
+    for events in (["SessionStart", "PreToolUse"], ["PreToolUse"]):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            next_steps(events)
+        out = buf.getvalue()
+        for e in events:
+            for v in REQUIRED_ENV[e]:
+                assert v in out, f"{v} missing from the guidance for {events}"
+        assert ("session-start` by hand" in out) == (events == ["PreToolUse"]), out
+    assert set(EXAMPLES) == set(REQUIRED_ENV["SessionStart"]) | set(REQUIRED_ENV["PreToolUse"]), (
+        "EXAMPLES and REQUIRED_ENV disagree: "
+        f"{set(EXAMPLES) ^ (set(REQUIRED_ENV['SessionStart']) | set(REQUIRED_ENV['PreToolUse']))}")
+
+    # options must work on both sides of the subcommand, and a value given
+    # before it must survive the subparser's own (suppressed) default
+    pp = argparse.ArgumentParser()
+    add_options(pp)
+    ss = pp.add_subparsers(dest="cmd", required=True)
+    for n in ("install", "status"):
+        add_options(ss.add_parser(n), suppress=True)
+    for argv in (["--claude", "--bin", "/x", "--matcher", "R", "install"],
+                 ["--claude", "install", "--bin", "/x", "--matcher", "R"],
+                 ["install", "--claude", "--bin", "/x", "--matcher", "R"],
+                 ["--claude", "--bin", "/x", "install", "--matcher", "R"]):
+        got = pp.parse_args(argv)
+        assert (got.harness, got.bin, got.matcher) == ("claude", "/x", "R"), (argv, got)
+    # an unspecified option still lands on its real default, not SUPPRESS
+    got = pp.parse_args(["--codex", "install"])
+    assert (got.bin, got.matcher, got.only, got.force) == (None, "*", None, False), got
+
+    print("selftest OK")
+    return 0
+
+
+# Per-harness defaults. Codex differs in three ways that all matter, see Part 2
+# of docs/testing/2026-08-20-agent-integration-test.md:
+#   - the file is ~/.codex/hooks.json, and *only* that one (see resolve());
+#   - the command is the stratium-codex-hook shim, not the bare binary, because
+#     Codex reads a blocking reason off stderr and `stratium-pep hook` writes it
+#     to stdout — without the shim the call is still denied but the reason is
+#     lost (§2e);
+#   - only PreToolUse is wired; session-start is run by hand (§2e, last para).
+HARNESS = {
+    "claude": {"path": ".claude/settings.json", "user_path": "~/.claude/settings.json",
+               "bin": "stratium-pep", "events": ("SessionStart", "PreToolUse"),
+               "hook_arg": "hook"},
+    # hook_arg is empty for Codex: 2e's shim IS the hook, and calls
+    # `stratium-pep hook` itself. Passing "hook" to the shim would be a stray arg.
+    "codex":  {"path": "~/.codex/hooks.json", "user_path": "~/.codex/hooks.json",
+               "bin": "stratium-codex-hook", "events": ("PreToolUse",),
+               "hook_arg": ""},
+}
+
+
+def resolve(args, parser):
+    """Fill in the harness-dependent defaults and refuse the fail-open setups."""
+    h = HARNESS[args.harness]
+    if args.bin is None:
+        args.bin = h["bin"]
+    if args.settings is None:
+        args.settings = harness_path(args.harness, user=args.user)
+    args.settings = os.path.expanduser(args.settings)
+
+    if args.harness == "codex":
+        # A project-local .codex/hooks.json is disabled until the project is
+        # trusted, and a disabled enforcement hook is not a no-op — it is
+        # fail-open: every tool call proceeds unchecked (§2b).
+        home = os.path.expanduser("~/.codex")
+        if os.path.dirname(os.path.abspath(args.settings)) != home:
+            parser.error(
+                f"--codex writes {home}/hooks.json only. {args.settings} looks "
+                "project-local, and Codex disables project hooks until the project "
+                "is trusted — an enforcement hook that does not run is fail-open, "
+                "not inert (see 2b)")
+        if args.only and "SessionStart" not in h["events"] and "SessionStart" in args.only:
+            parser.error("--codex wires PreToolUse only; run session-start by hand (see 2e)")
+        if os.path.basename(args.bin) == "stratium-pep":
+            print(f"warning: --codex with {args.bin!r} loses the deny reason — Codex reads "
+                  "it off stderr, the hook writes it to stdout. Use the "
+                  "stratium-codex-hook shim from 2e.", file=sys.stderr)
+    args.only = args.only or list(h["events"])
+    return args
+
+
+# ---------------------------------------------------------------- quickstart
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+COMPOSE = os.path.join(REPO, "deploy", "docker", "docker-compose.yml")
+STATE_PATH = os.path.join(REPO, ".stratium-quickstart.json")
+BIN_DIR = os.path.join(REPO, "bin")
+PEP_BIN = os.path.join(BIN_DIR, "stratium-pep")
+SHIM_BIN = os.path.join(BIN_DIR, "stratium-codex-hook")
+
+# stratium-pap and pdp-pap are both pinned to this tenant at startup; no request
+# can carry one, so a PAP process serves exactly one tenant for its whole life.
+TENANT = "tenant-pap-e2e-integration"
+SUBJECT = "agent-tester@example.com"
+
+# Deliberately narrower than the tools an agent would want. verify() asserts that
+# Write is DENIED, and a grant including Write would have nothing to prove.
+DEMO_TOOLS = "Read,Grep,Glob"
+DEMO_TIER = 3
+DEMO_TTL = 3600
+
+OPERATORS = {  # realm users from the docker stack, local dev credentials
+    "editor": ("pap-editor", "pap_editor_local_dev_only"),
+    "admin": ("pap-admin", "pap_admin_local_dev_only"),
+    "viewer": ("pap-viewer", "pap_viewer_local_dev_only"),
+}
+
+# 2e's shim. Codex reads a blocking reason off stderr; `stratium-pep hook` writes
+# it to stdout. Without this the call is still denied and the reason is lost.
+# Every non-zero becomes 2, so a crashed or missing binary denies rather than
+# falling through: the allow case is the only one that exits 0.
+SHIM = """#!/bin/sh
+# stratium-codex-hook -- `stratium-pep hook` with the deny reason also on stderr,
+# which is where Codex reads it when a PreToolUse hook exits non-zero.
+out=$(%s hook); rc=$?
+[ "$rc" -eq 0 ] && exit 0
+printf '%%s\\n' "${out:-stratium-pep: denied with no output (exit $rc)}" >&2
+printf '%%s' "$out"
+exit 2
+"""
+
+
+class Fail(Exception):
+    """A step failed with something the operator can act on."""
+
+
+def sh(cmd, check=True, **kw):
+    r = subprocess.run(cmd, text=True, capture_output=True, **kw)
+    if check and r.returncode != 0:
+        raise Fail((r.stderr or r.stdout or f"{cmd[0]} exited {r.returncode}").strip())
+    return (r.stdout or "").strip()
+
+
+def compose(*args, **kw):
+    return sh(["docker", "compose", "-f", COMPOSE, *args], **kw)
+
+
+def compose_project():
+    """The compose project these commands act on.
+
+    Docker derives it from the compose file's parent directory unless
+    COMPOSE_PROJECT_NAME says otherwise -- and that directory is `docker` here,
+    which is not distinctive. Two checkouts, or a stray COMPOSE_PROJECT_NAME in
+    the environment, resolve to the same or a surprising project, and `down -v`
+    destroys volumes. So `up` records what it created and `down` refuses to tear
+    down anything else.
+    """
+    try:
+        return json.loads(compose("config", "--format", "json"))["name"]
+    except (Fail, ValueError, KeyError):
+        return os.environ.get("COMPOSE_PROJECT_NAME") or "?"
+
+
+def port(service, internal):
+    """Resolve a published port. Never cached — it changes on every compose up."""
+    out = compose("port", service, str(internal))
+    if ":" not in out:
+        raise Fail(f"{service} has no published port for {internal} (is the stack up?)")
+    return "localhost:" + out.rsplit(":", 1)[1]
+
+
+def token(role):
+    """Mint a fresh operator token. Called per request, because they die in 5m."""
+    user, password = OPERATORS[role]
+    body = urllib.parse.urlencode({
+        "grant_type": "password", "client_id": "stratium-pap",
+        "username": user, "password": password, "scope": "openid email",
+    }).encode()
+    url = "http://%s/realms/stratium/protocol/openid-connect/token" % port("keycloak", 8080)
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=10) as r:
+            return json.load(r)["access_token"]
+    except urllib.error.URLError as e:
+        raise Fail(f"could not mint a {role} token from keycloak: {e}")
+
+
+def api(method, path, role="editor", body=None):
+    """Call the PAP. Returns (status, parsed-or-text) — errors are text, not JSON."""
+    url = "http://%s%s" % (port("stratium-pap", 8080), path)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + token(role),
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read().decode().strip()
+            return r.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode().strip()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, raw          # 401 is the bare word `unauthorized`
+    except urllib.error.URLError as e:
+        raise Fail(f"could not reach the PAP: {e}")
+
+
+def psql(sql, owner=True):
+    pw = "stratium_migrate_local_dev_only" if owner else "stratium_local_dev_only"
+    user = "stratium_migrate" if owner else "stratium"
+    return compose("exec", "-T", "-e", "PGPASSWORD=" + pw, "postgres",
+                   "psql", "-h", "127.0.0.1", "-U", user, "-d", "stratium", "-tAc",
+                   "SELECT set_config('app.tenant_id','%s',false); %s" % (TENANT, sql))
+
+
+def load_state():
+    if not os.path.exists(STATE_PATH):
+        return {}
+    try:
+        return json.loads(open(STATE_PATH).read() or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_state(**kw):
+    state = load_state()
+    state.update(kw)
+    # Addresses and tokens are deliberately never persisted; see the docstring.
+    for banned in ("pdp_addr", "pap_addr", "kc_addr", "token"):
+        state.pop(banned, None)
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+    return state
+
+
+def pep_env(state):
+    """The eleven variables, built fresh. Ports resolved now, not remembered."""
+    env = dict(os.environ)
+    env.update({
+        "STRATIUM_PEP_PDP_ADDR": port("pdp-pap", 50051),
+        "STRATIUM_PEP_AGENT_ID": state["agent_id"],
+        "STRATIUM_PEP_SUBJECT": SUBJECT,
+        "STRATIUM_PEP_SESSION_FILE": state["session_file"],
+        "STRATIUM_PEP_CONNECT_TIMEOUT": "5s",
+        "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s",
+        "STRATIUM_PEP_APPROVAL_TIMEOUT": "120s",
+        "STRATIUM_PEP_CACHE_STALENESS_WINDOW": "30s",
+        "STRATIUM_PEP_REQUESTED_TOOLS": state.get("tools", DEMO_TOOLS),
+        "STRATIUM_PEP_REQUESTED_TIER": str(DEMO_TIER),
+        "STRATIUM_PEP_TTL_SECONDS": str(DEMO_TTL),
+        "STRATIUM_PEP_PURPOSE": "stratium quickstart",
+    })
+    return env
+
+
+def hook_scopes():
+    """Every file Claude Code and Codex merge hooks from.
+
+    `status` reports on ONE file, which reads as a global all-clear and is not.
+    doctor walks all of them: a hook hiding in a scope you did not check denies
+    every tool call in every project, and the clean report from the file you did
+    check is exactly what stops you finding it.
+    """
+    return [
+        ("claude project", os.path.join(REPO, ".claude", "settings.json")),
+        ("claude project-local", os.path.join(REPO, ".claude", "settings.local.json")),
+        ("claude user", os.path.expanduser("~/.claude/settings.json")),
+        ("codex user", os.path.expanduser("~/.codex/hooks.json")),
+    ]
+
+
+def scan_hooks():
+    """Every Stratium hook entry across every scope: (scope, path, event, command)."""
+    found = []
+    for label, path in hook_scopes():
+        if not os.path.exists(path):
+            continue
+        try:
+            settings = json.loads(open(path).read() or "{}")
+        except json.JSONDecodeError:
+            found.append((label, path, "UNREADABLE", None))
+            continue
+        for event, groups in (settings.get("hooks") or {}).items():
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                for h in (group.get("hooks", []) if isinstance(group, dict) else []):
+                    if ours(h):
+                        found.append((label, path, event, h.get("command")))
+    return found
+
+
+def hook_probe(state, tool, resource):
+    """Run one PreToolUse decision through the real binary. Returns (rc, reason)."""
+    payload = json.dumps({"tool_name": tool, "tool_input": {
+        "file_path": resource, "path": resource,
+        "command": "echo hi", "url": "https://example.com"}})
+    r = subprocess.run([PEP_BIN, "hook"], input=payload, text=True,
+                       capture_output=True, env=pep_env(state))
+    out = (r.stdout or "").strip()
+    reason = ""
+    if out:
+        try:
+            reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        except Exception:
+            reason = out
+    return r.returncode, reason or (r.stderr or "").strip()
+
+
+# ------------------------------------------------------------------- the verbs
+
+STEP = [0]
+
+
+def step(title):
+    STEP[0] += 1
+    print(f"\n[{STEP[0]}] {title}")
+
+
+def ok(msg):
+    print(f"    ok   {msg}")
+
+
+def note(msg):
+    print(f"         {msg}")
+
+
+def harness_path(harness, user=False):
+    """Absolute settings path for a harness, anchored to THIS repo.
+
+    HARNESS's project path is relative, which resolves against the caller's cwd.
+    Anchoring to REPO keeps `up` and `down` acting on the same file no matter
+    where either was invoked from.
+    """
+    raw = HARNESS[harness]["user_path" if user else "path"]
+    return os.path.expanduser(raw) if raw.startswith("~") else os.path.join(REPO, raw)
+
+
+def hook_args(harness, binary, only=None, dry_run=False):
+    """A Namespace shaped the way install()/uninstall()/status() expect."""
+    h = HARNESS[harness]
+    return argparse.Namespace(
+        harness=harness, bin=binary, matcher="*", only=only or list(h["events"]),
+        settings=harness_path(harness, user=(harness == "codex")),
+        dry_run=dry_run, force=False, user=False,
+        # `up` ends on the launcher, which supersedes the by-hand export block
+        show_next=False)
+
+
+def in_agent_session():
+    """Are we running inside an agent session that our own hooks would gag?
+
+    Claude Code exports CLAUDECODE=1 to everything it spawns, so a quickstart run
+    from its Bash tool sees it. Codex sets CODEX_SANDBOX / CODEX_HOME.
+    """
+    if os.environ.get("CLAUDECODE"):
+        return "claude"
+    if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_HOME"):
+        return "codex"
+    return None
+
+
+def preflight():
+    missing = [t for t in ("docker", "go") if not shutil.which(t)]
+    if missing:
+        raise Fail("missing on PATH: " + ", ".join(missing) +
+                   " -- docker runs the stack, go builds stratium-pep")
+    if not os.path.exists(COMPOSE):
+        raise Fail(f"no compose file at {COMPOSE}; run this from the repo")
+    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode:
+        raise Fail("`docker compose` is not available (v1 `docker-compose` will not do)")
+
+
+def ensure_stack():
+    compose("up", "-d", "--build", "--wait", "--wait-timeout", "300")
+
+
+def ensure_binary():
+    os.makedirs(BIN_DIR, exist_ok=True)
+    sh(["go", "build", "-o", PEP_BIN, "./cmd/stratium-pep"],
+       cwd=os.path.join(REPO, "services"))
+    if not resolves(PEP_BIN):
+        raise Fail(f"built {PEP_BIN} but it is not executable")
+
+
+def ensure_shim():
+    os.makedirs(BIN_DIR, exist_ok=True)
+    with open(SHIM_BIN, "w") as f:
+        f.write(SHIM % PEP_BIN)
+    os.chmod(SHIM_BIN, 0o755)
+
+
+def ensure_policy():
+    """0b: without a policy naming the principal, CreateDelegation refuses.
+
+    The effect column must be "deny" even for a policy that allows: a Rego policy
+    can produce either outcome per request, so the column holds a fixed
+    placeholder rather than a claim about behaviour. Sending "allow" is a 400.
+    """
+    rego = ('package stratium.policy\n\nallow if {\n\tinput.principal.subject == "%s"\n}'
+            % SUBJECT)
+    code, body = api("POST", "/v1/policies", body={
+        "name": "stratium-quickstart-grant",
+        "description": "quickstart: let the demo principal hold tools",
+        "language": "rego", "effect": "deny", "enabled": True,
+        "policy_content": rego})
+    if code == 201:
+        return "created"
+    if code == 409:
+        return "already present"
+    raise Fail(f"policy POST returned {code}: {body}")
+
+
+def ensure_catalog():
+    before = int(psql("SELECT count(*) FROM tool_catalog;").splitlines()[-1] or 0)
+    for seed in ("tool-catalog-claude-code.sql", "tool-catalog-mcp-filesystem.sql"):
+        path = os.path.join(REPO, "deploy", "seed", seed)
+        if not os.path.exists(path):
+            raise Fail(f"missing seed {path}")
+        with open(path) as f:
+            subprocess.run(
+                ["docker", "compose", "-f", COMPOSE, "exec", "-T",
+                 "-e", "PGPASSWORD=stratium_migrate_local_dev_only", "postgres",
+                 "psql", "-h", "127.0.0.1", "-U", "stratium_migrate", "-d", "stratium",
+                 "-v", f"tenant_id={TENANT}", "-q", "-f", "/dev/stdin"],
+                stdin=f, capture_output=True, text=True)
+    after = int(psql("SELECT count(*) FROM tool_catalog;").splitlines()[-1] or 0)
+    return before, after
+
+
+def ensure_agent(state):
+    """Reuse the agent from a previous run if it still exists, else make one.
+
+    Names carry a uuid suffix: UNIQUE (tenant_id, name) turns a fixed name into a
+    409 on the second run, and nothing downstream reads the name anyway.
+    """
+    if state.get("agent_id"):
+        code, _ = api("GET", "/v1/agents/" + state["agent_id"], role="viewer")
+        if code == 200:
+            return state["agent_id"], state.get("agent_name", "?"), "reused"
+    name = "quickstart-" + uuid.uuid4().hex[:6]
+    code, body = api("POST", "/v1/agents", body={
+        "name": name, "provider": "anthropic", "model_id": "claude",
+        "trust_tier": DEMO_TIER, "enabled": True, "suspended": False,
+        "allowed_tools": []})
+    if code != 201:
+        raise Fail(f"agent POST returned {code}: {body}")
+    return body["id"], name, "created"
+
+
+def start_session(state):
+    r = subprocess.run([PEP_BIN, "session-start"], capture_output=True, text=True,
+                       env=pep_env(state))
+    if r.returncode != 0:
+        raise Fail("session-start failed: " + (r.stderr or r.stdout).strip())
+    with open(state["session_file"]) as f:
+        return json.load(f)
+
+
+def cmd_up(args):
+    started = time.time()
+    harnesses = {"claude": ["claude"], "codex": ["codex"],
+                 "both": ["claude", "codex"]}[args.harness]
+
+    step("Preflight")
+    preflight()
+    ok("docker, docker compose and go are present")
+
+    step("Stack up (this is the slow one -- it builds images)")
+    ensure_stack()
+    project = compose_project()
+    ok(f"compose project: {project}")
+    ok(f"pap={port('stratium-pap', 8080)}  pdp={port('pdp-pap', 50051)}  "
+       f"kc={port('keycloak', 8080)}")
+    note("resolved now, never stored -- they change on every compose up")
+
+    step("Build the PEP")
+    ensure_binary()
+    ok(PEP_BIN)
+
+    step("Policy so the principal may delegate")
+    ok(ensure_policy() + f" (subject {SUBJECT})")
+
+    step("Seed the tool catalog")
+    before, after = ensure_catalog()
+    ok(f"tool_catalog rows: {before} -> {after}")
+
+    step("Agent row")
+    state = load_state()
+    state.setdefault("session_file", os.path.join(REPO, ".stratium-session.json"))
+    state["tools"] = DEMO_TOOLS
+    agent_id, agent_name, how = ensure_agent(state)
+    state = save_state(agent_id=agent_id, agent_name=agent_name,
+                       session_file=state["session_file"], tools=DEMO_TOOLS,
+                       project=project)
+    ok(f"{how}: {agent_name} ({agent_id})")
+
+    step("Delegation")
+    session = start_session(state)
+    ok(f"{session['delegation_id']}  grants {','.join(session['granted_scope']['tools'])}"
+       f"  tier {session['granted_scope']['max_action_tier']}")
+
+    step("Wire the hooks")
+    inside = in_agent_session()
+    if inside and not args.wire_anyway:
+        # Refusing rather than warning. A matcher:"*" hook takes effect in the
+        # running session immediately, and that session was not launched with the
+        # eleven variables -- so every tool call denies, including the ones you
+        # would use to undo it. Everything above this line is already done.
+        note(f"SKIPPED -- this is running inside a {inside} session.")
+        note("Installing now would deny every tool call in it, including the ones")
+        note("you would need to recover: the session picks the hook up live, but it")
+        note("was not launched with the environment the hook reads.")
+        note("")
+        note("Finish from a plain terminal:")
+        note(f"    deploy/stratium install --{inside} --bin " +
+             (SHIM_BIN if inside == "codex" else PEP_BIN))
+        note(f"    deploy/stratium run {inside}")
+        note("")
+        note("Or re-run with --wire-anyway if you meant to disable this session.")
+        save_state(harnesses=harnesses)
+        step("Verify -- onboarding is not done until a denial is observed")
+        rc = cmd_verify(argparse.Namespace(harness=None))
+        print(f"\nStack, agent and delegation are ready in {int(time.time() - started)}s;"
+              f"\nhooks are not wired. The two commands above finish it.")
+        return rc
+    for harness in harnesses:
+        binary = PEP_BIN
+        if harness == "codex":
+            ensure_shim()
+            binary = SHIM_BIN
+            note("wrote the Codex shim: " + SHIM_BIN)
+        install(hook_args(harness, binary))
+    save_state(harnesses=harnesses)
+
+    step("Verify -- onboarding is not done until a denial is observed")
+    rc = cmd_verify(argparse.Namespace(harness=None))
+    if rc:
+        raise Fail("verification failed; the stack is up but enforcement is not proven")
+
+    print(f"\nReady in {int(time.time() - started)}s. Launch an agent with:\n")
+    for harness in harnesses:
+        print(f"    deploy/stratium run {harness}")
+    print("\nThat launcher sets the environment the hooks read. Starting the agent\n"
+          "any other way leaves it denying every tool call for want of config.")
+    return 0
+
+
+def cmd_verify(args):
+    """Observe real decisions and assert on them. No model in the loop."""
+    state = load_state()
+    if not state.get("agent_id"):
+        raise Fail("no state -- run `deploy/stratium up` first")
+    if not resolves(PEP_BIN):
+        raise Fail(f"{PEP_BIN} is not there -- run `deploy/stratium up` first")
+
+    tag = uuid.uuid4().hex[:8]   # fresh resource each run, so the 30s cache cannot answer
+    cases = [
+        ("Read", 0, "granted -- must be allowed"),
+        ("Write", 2, "not in the grant -- must be denied"),
+        ("Frobnicate" + tag, 2, "not even catalogued -- must be denied"),
+    ]
+    print(f"delegation grants {state.get('tools', DEMO_TOOLS)}\n")
+    failures = []
+    for tool, want, why in cases:
+        rc, reason = hook_probe(state, tool, f"/quickstart-{tag}/probe.txt")
+        good = rc == want
+        failures.append(None if good else (tool, want, rc))
+        print(f"  {'PASS' if good else 'FAIL'}  {tool:<18} exit={rc} (want {want})  {why}")
+        if reason:
+            print(f"        {reason[:150]}")
+
+    if "codex" in state.get("harnesses", []) and resolves(SHIM_BIN):
+        print("\nthrough the Codex shim (2e):")
+        for tool, want, _ in cases:
+            payload = json.dumps({"tool_name": tool, "tool_input": {
+                "file_path": f"/quickstart-{tag}/probe.txt"}})
+            r = subprocess.run([SHIM_BIN], input=payload, text=True,
+                               capture_output=True, env=pep_env(state))
+            good = r.returncode == want
+            failures.append(None if good else ("shim:" + tool, want, r.returncode))
+            print(f"  {'PASS' if good else 'FAIL'}  {tool:<18} exit={r.returncode} "
+                  f"(want {want})  reason on stderr: {bool(r.stderr.strip())}")
+        note("the live-session leg is unverified -- see 2f of the agent test plan")
+
+    bad = [f for f in failures if f]
+    print("\nNOT DEMONSTRATED: classification enforcement. `classification_caps` is\n"
+          "unreachable through the API -- issuance writes {} on every root delegation\n"
+          "and an empty map denies nothing. Exercising it needs a direct SQL write;\n"
+          "see Part B of the resource-labelling plan. This tool will not do that for\n"
+          "you, so what you see above is the whole of what is proven.")
+    if bad:
+        print("\n%d assertion(s) failed: %s" % (len(bad), bad))
+        return 1
+    print("\nEnforcement proven: a held tool allowed, an unheld tool denied.")
+    return 0
+
+
+def cmd_run(args):
+    """Resolve everything fresh, then become the agent."""
+    state = load_state()
+    if not state.get("agent_id"):
+        raise Fail("no state -- run `deploy/stratium up` first")
+    binary = shutil.which(args.agent)
+    if not binary:
+        raise Fail(f"{args.agent} is not on PATH")
+    env = pep_env(state)
+    print(f"launching {args.agent} with {len(REQUIRED_ENV['SessionStart']) } + "
+          f"{len(REQUIRED_ENV['PreToolUse'])} variables resolved at "
+          f"{env['STRATIUM_PEP_PDP_ADDR']}", file=sys.stderr)
+    os.execve(binary, [args.agent] + list(args.rest), env)
+
+
+def cmd_doctor(args):
+    """Walk the layers in dependency order; stop being green at the first break."""
+    problems = 0
+
+    def line(state, label, msg, fix=None):
+        nonlocal problems
+        print(f"  {state}  {label:<12} {msg}")
+        if fix:
+            print(f"     -> {fix}")
+            problems += 1
+
+    try:
+        preflight()
+        line("OK", "toolchain", "docker, docker compose, go")
+    except Fail as e:
+        line("XX", "toolchain", str(e), "install what is missing")
+        return 1
+
+    try:
+        running = compose("ps", "--services", "--filter", "status=running").splitlines()
+        if running:
+            line("OK", "stack", f"{len(running)} services running")
+        else:
+            line("XX", "stack", "nothing running", "deploy/stratium up --harness claude")
+            return 1
+        line("OK", "ports", f"pap={port('stratium-pap', 8080)} pdp={port('pdp-pap', 50051)}")
+    except Fail as e:
+        line("XX", "stack", str(e), "deploy/stratium up --harness claude")
+        return 1
+
+    state = load_state()
+    if state.get("agent_id"):
+        line("OK", "state", f"{state.get('agent_name')} ({state['agent_id']})")
+    else:
+        line("XX", "state", "no .stratium-quickstart.json",
+             "deploy/stratium up --harness claude")
+
+    line("OK" if resolves(PEP_BIN) else "XX", "binary",
+         PEP_BIN if resolves(PEP_BIN) else PEP_BIN + " missing or not executable",
+         None if resolves(PEP_BIN) else "deploy/stratium up --harness claude")
+
+    found = scan_hooks()
+    if not found:
+        line("--", "hooks", "none in any scope")
+        print("     note: install and uninstall both take effect in a running session,\n"
+              "           observed. If a session still denies with clean scopes here,\n"
+              "           the hook is defined somewhere this list does not cover --\n"
+              "           check `/hooks` inside that session, then restart it.")
+    for scope, path, event, command in found:
+        runnable = command and resolves(command)
+        line("OK" if runnable else "XX", "hooks",
+             f"{scope:<20} {event:<12} {command}",
+             None if runnable else f"that command does not resolve; re-run install "
+                                   f"with --bin {PEP_BIN}")
+
+    if state.get("agent_id"):
+        gone = [v for v in sorted(set(REQUIRED_ENV["SessionStart"]) |
+                                  set(REQUIRED_ENV["PreToolUse"]))
+                if not os.environ.get(v)]
+        if gone:
+            line("XX", "environment", f"{len(gone)} of 11 missing in this shell",
+                 "you are outside the launcher -- use: deploy/stratium run claude")
+        else:
+            line("OK", "environment", "all 11 set here")
+
+    if state.get("session_file") and os.path.exists(state["session_file"]):
+        with open(state["session_file"]) as f:
+            s = json.load(f)
+        line("OK", "delegation", f"{s['delegation_id']} grants "
+                                 f"{','.join(s['granted_scope']['tools'])}")
+        caps = psql("SELECT classification_caps FROM delegations WHERE id='%s';"
+                    % s["delegation_id"]).splitlines()[-1]
+        line("!!" if caps in ("{}", "") else "OK", "caps",
+             f"{caps or '(none)'} -- classification enforcement is "
+             f"{'OFF (expected, see verify)' if caps in ('{}', '') else 'on'}")
+    else:
+        line("XX", "delegation", "no session file",
+             "deploy/stratium up --harness claude")
+
+    print()
+    return 1 if problems else 0
+
+
+def cmd_down(args):
+    """Order matters: hooks first, stack second.
+
+    Reverse it and every tool call in an open agent session denies against a PDP
+    that is no longer listening, and the session cannot recover without a restart.
+    """
+    step("Unwire the hooks (before the stack, deliberately)")
+    for scope, path, event, command in scan_hooks():
+        note(f"{scope}: {event} {command}")
+    for harness in ("claude", "codex"):
+        for scope_path in {harness_path(harness), harness_path(harness, user=True)}:
+            a = hook_args(harness, PEP_BIN)
+            a.settings = scope_path
+            if os.path.exists(scope_path):
+                uninstall(a)
+    note("an agent session already open keeps the hooks it read at startup -- "
+         "restart it, or it will deny every call once the stack is down")
+
+    step("Stack down")
+    project, recorded = compose_project(), load_state().get("project")
+    if recorded and project != recorded and not getattr(args, "force", False):
+        raise Fail(
+            f"this would tear down compose project {project!r} with -v (volumes and "
+            f"all), but `up` created {recorded!r}. Refusing. You are probably in the "
+            f"wrong directory, or COMPOSE_PROJECT_NAME is set. Pass --force if you "
+            f"really mean {project!r}.")
+    if not recorded:
+        note(f"no recorded project; acting on {project!r} as docker resolves it")
+    compose("down", "-v", "--remove-orphans")
+    ok(f"project {project}: containers and volumes gone")
+
+    step("Local artefacts")
+    for path in (STATE_PATH, PEP_BIN, SHIM_BIN, os.path.join(REPO, ".stratium-session.json")):
+        if os.path.exists(path):
+            os.unlink(path)
+            ok("removed " + path)
+    return 0
+
+
+def add_options(p, suppress=False):
+    """Add the shared options to `p`.
+
+    They go on the top-level parser *and* on every subparser, so both
+    `--claude install` and `install --claude` work — argparse subparsers do not
+    inherit their parent's options, and having them accepted in only one
+    position is a trap. On the subparsers the defaults are SUPPRESS: without
+    that, a subparser's unspecified default would overwrite the value the
+    top-level parser already parsed, and `--bin X install` would silently lose X.
+    """
+    def d(value):
+        return argparse.SUPPRESS if suppress else value
+
+    # No default harness, deliberately. The two write different files with
+    # different failure modes — picking one for you is how you end up enforcing
+    # on the harness you were not running.
+    harness = p.add_mutually_exclusive_group()
+    harness.add_argument("--claude", dest="harness", action="store_const", const="claude",
+                         default=d(None),
+                         help="target Claude Code: .claude/settings.json, SessionStart + PreToolUse")
+    harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
+                         default=d(None),
+                         help="target Codex: ~/.codex/hooks.json, PreToolUse only, via the shim")
+    p.add_argument("--settings", default=d(None),
+                   help="the file to edit (default: the harness's own, see --claude/--codex)")
+    p.add_argument("--user", action="store_true", default=d(False),
+                   help="use the user-scope file rather than the project one (Claude Code; "
+                        "Codex is user-scope either way)")
+    p.add_argument("--bin", default=d(None),
+                   help="the hook command (default: stratium-pep, or stratium-codex-hook "
+                        "under --codex; the test plan builds /tmp/stratium-pep)")
+    p.add_argument("--matcher", default=d("*"),
+                   help="PreToolUse matcher (default: *; 'Read' to start narrow)")
+    p.add_argument("--only", action="append", choices=["SessionStart", "PreToolUse"],
+                   default=d(None),
+                   help="install just this event, repeatable (default: every event the "
+                        "harness wires). Use --only PreToolUse when a delegation already "
+                        "exists and a SessionStart hook would replace it")
+    p.add_argument("-n", "--dry-run", action="store_true", default=d(False),
+                   help="print the result, write nothing")
+    p.add_argument("--force", action="store_true", default=d(False),
+                   help="install even if --bin does not resolve here (for settings you are "
+                        "writing on one machine and running on another)")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_options(p)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    for name, fn in (("install", install), ("uninstall", uninstall),
+                     ("status", status), ("selftest", selftest)):
+        sp = sub.add_parser(name, help=(fn.__doc__ or "").strip().splitlines()[0]
+                            if fn.__doc__ else name)
+        add_options(sp, suppress=True)
+        sp.set_defaults(fn=fn, needs_harness=fn is not selftest)
+
+    up = sub.add_parser("up", help="zero to an enforcing agent")
+    up.add_argument("--harness", required=True, choices=["claude", "codex", "both"],
+                    help="which agent to wire -- required, there is no default: a hook "
+                         "installed on the harness you are not running is no enforcement")
+    up.add_argument("--wire-anyway", action="store_true",
+                    help="install hooks even when running inside an agent session -- "
+                         "that session will deny every tool call from then on")
+    up.set_defaults(fn=cmd_up, needs_harness=False)
+
+    run = sub.add_parser("run", help="launch an agent with the environment set")
+    run.add_argument("agent", choices=["claude", "codex"])
+    run.add_argument("rest", nargs=argparse.REMAINDER)
+    run.set_defaults(fn=cmd_run, needs_harness=False)
+
+    for name, fn, help_ in (("verify", cmd_verify, "observe a denial, assert on it"),
+                            ("doctor", cmd_doctor, "diagnose a break, name the fix"),
+                            ("down", cmd_down, "tear down, hooks first")):
+        sp = sub.add_parser(name, help=help_)
+        if name == "down":
+            sp.add_argument("--force", action="store_true",
+                            help="tear down even if the compose project is not the one "
+                                 "`up` created")
+        sp.set_defaults(fn=fn, needs_harness=False)
+
+    args = p.parse_args()
+    if getattr(args, "needs_harness", False):
+        if args.harness is None:
+            p.error("pick a harness: --claude or --codex")
+        resolve(args, p)
+    try:
+        sys.exit(args.fn(args) or 0)
+    except Fail as e:
+        sys.exit(f"stratium: {e}")
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
