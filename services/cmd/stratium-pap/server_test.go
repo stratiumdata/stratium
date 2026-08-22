@@ -361,6 +361,11 @@ var actionRoutes = map[string]bool{
 	"POST /v1/approvals/{id}/approve":  true,
 	"POST /v1/approvals/{id}/deny":     true,
 	"POST /v1/delegations/{id}/revoke": true,
+	// Task 7's classification-caps write, gated RoleAdmin rather than the
+	// blanket PUT -> editor rule: see this route's own comment in
+	// routeTable (above) for why a classification ceiling is not ordinary
+	// agent configuration.
+	"PUT /v1/agents/{id}/classification-caps": true,
 }
 
 // TestRouteTable_RoleGatingMatchesSpec checks the stated role mapping
@@ -435,10 +440,11 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // a wrong rule can only edit it -- and every rule that exists matches
 // something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
-			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes)",
+			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes + "+
+			"3 Task-7 classification-caps routes)",
 			len(routeTable), wantTotal)
 	}
 
@@ -460,7 +466,7 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			writes++
 		}
 	}
-	const wantWrites = 19
+	const wantWrites = 19 + 2 // Task 7 adds PUT and DELETE .../classification-caps; its GET is not a write
 	if writes != wantWrites {
 		t.Fatalf("routeTable has %d routes gated above RoleViewer, want %d -- if that is a deliberate new "+
 			"route, papRouteTable in internal/store/pap_e2e_integration_test.go must gain it too, or proofs "+
@@ -490,6 +496,12 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	// Task 6's two list routes -- the read half of the two resources whose
 	// write actions actionRoutes above already covers.
 	for _, verb := range []string{"GET /v1/approvals", "GET /v1/delegations"} {
+		want[verb] = false
+	}
+	// Task 7's classification-caps sub-resource: GET and DELETE named here;
+	// PUT is already covered by the actionRoutes range below (RoleAdmin, not
+	// the blanket PUT -> editor rule).
+	for _, verb := range []string{"GET /v1/agents/{id}/classification-caps", "DELETE /v1/agents/{id}/classification-caps"} {
 		want[verb] = false
 	}
 

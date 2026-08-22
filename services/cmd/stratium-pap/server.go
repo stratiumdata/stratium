@@ -221,6 +221,15 @@ var routeTable = []routeSpec{
 	{Pattern: "PUT /v1/agents/{id}", MinRole: RoleEditor, Handler: updateAgent},
 	{Pattern: "DELETE /v1/agents/{id}", MinRole: RoleAdmin, Handler: deleteAgent},
 
+	// classification-caps is gated RoleAdmin on both writes, not the blanket
+	// "POST/PUT -> editor" rule the rest of this resource follows: a
+	// classification ceiling is a security boundary, not ordinary agent
+	// configuration, so an editor who may rename or retag an agent must not
+	// be able to set or clear what it can be trusted to see.
+	{Pattern: "GET /v1/agents/{id}/classification-caps", MinRole: RoleViewer, Handler: getAgentCaps},
+	{Pattern: "PUT /v1/agents/{id}/classification-caps", MinRole: RoleAdmin, Handler: putAgentCaps},
+	{Pattern: "DELETE /v1/agents/{id}/classification-caps", MinRole: RoleAdmin, Handler: deleteAgentCaps},
+
 	{Pattern: "GET /v1/tier-overrides", MinRole: RoleViewer, Handler: listTierOverrides},
 	{Pattern: "POST /v1/tier-overrides", MinRole: RoleEditor, Handler: createTierOverride},
 	{Pattern: "GET /v1/tier-overrides/{id}", MinRole: RoleViewer, Handler: getTierOverride},
