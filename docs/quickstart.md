@@ -144,6 +144,16 @@ deploy/stratium install --claude --bin "$PWD/bin/stratium-pep"
 installed SessionStart + PreToolUse (matcher '*', command '/Users/you/stratium-data/bin/stratium-pep') in .claude/settings.json
 ```
 
+> **This gags every agent session already open in this project — including one
+> you may be reading this guide with.** Installation takes effect live, and a
+> session started any other way lacks the environment the hook reads, so its next
+> tool call denies with `missing required configuration`. That is the hook working
+> correctly, not a fault.
+>
+> Restart those sessions through `deploy/stratium run claude` (§3), or back the
+> hooks out with `deploy/stratium --claude uninstall` — removal takes effect live
+> too, and the session recovers on its next call.
+
 ---
 
 ## 3. Launch an agent
