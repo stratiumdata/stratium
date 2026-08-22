@@ -16,31 +16,43 @@ mapping is visible to the model, the same friendly-name/wire-identity split
 
 ## Running it
 
+**One-time setup**, before the first run: seed the one agent row `pep-proxy`'s
+own fixed identity names. Nothing in `main.go` writes it — see **The one row
+that lives in `deploy/seed/`**, below, for exactly why not.
+
 ```bash
 cd example
 dc() { docker compose -f ../deploy/docker/docker-compose.yml "$@"; }
-dc up -d pap-proxy --wait   # one-time: brings up this tenant's control plane, disturbs nothing else
+dc up -d pap-proxy --wait   # brings up this tenant's control plane, disturbs nothing else
+dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres \
+  psql -h 127.0.0.1 -U stratium_migrate -d stratium -q \
+  -f /dev/stdin < ../deploy/seed/proxy-example-agent.sql
+```
+
+Then, every run:
+
+```bash
 export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-proxy 50051 | sed -E 's/.*://')"
 export EXAMPLE_PEP_PROXY_ADDR="localhost:$(dc port pep-proxy 9292 | sed -E 's/.*://')"
 export EXAMPLE_GRPC_TARGET_ADDR="localhost:$(dc port grpc-target 50051 | sed -E 's/.*://')"
 export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-proxy 8080 | sed -E 's/.*://')"
 export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"
-export EXAMPLE_POSTGRES_ADDR="localhost:$(dc port postgres 5432 | sed -E 's/.*://')"
 export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"
 go run ./proxy
 ```
 
-`main.go` then, in order: prechecks Ollama/LiteLLM/the PDP/pap-proxy/postgres;
-seeds the tool catalog and a blanket-permit policy through **pap-proxy's own
-HTTP API** (see **A control plane for this tenant**, below); ensures the one
-agent row that API cannot create (see **The one row SQL still owns**, below);
-runs `stratium-pep session-start` requesting **only** Fetch's full method
-path; mints a second, DPoP-bound token (see **Sender-constrained tokens**,
-below); and hands the whole thing to `agent.Run` with a task that calls
-`fetch` then `purge`, expecting Fetch **ALLOWED** and Purge **DENIED** for
-`not in delegation approved_tools` — both methods are cataloged at the
-identical action tier, so a tier ceiling can never be the reason; only the
-requested-tools list can.
+`main.go` then, in order: prechecks Ollama/LiteLLM/the PDP/pap-proxy, **and
+that the seed above was applied** (see **The one row that lives in
+`deploy/seed/`**, below) — a missing fixture reads as setup, exactly like a
+missing Ollama model, never as a policy denial; seeds the tool catalog and a
+blanket-permit policy through **pap-proxy's own HTTP API** (see **A control
+plane for this tenant**, below); runs `stratium-pep session-start` requesting
+**only** Fetch's full method path; mints a second, DPoP-bound token (see
+**Sender-constrained tokens**, below); and hands the whole thing to
+`agent.Run` with a task that calls `fetch` then `purge`, expecting Fetch
+**ALLOWED** and Purge **DENIED** for `not in delegation approved_tools` —
+both methods are cataloged at the identical action tier, so a tier ceiling
+can never be the reason; only the requested-tools list can.
 
 ## Sender-constrained tokens (K5)
 
@@ -71,7 +83,7 @@ that gap: a second PAP, modelled directly on `pap-extauthz`, bound to
 convention (`example/mcp/main.go`'s own `setUpPolicy`) where a `201` or a
 `409` (already exists) both count as success.
 
-## The one row SQL still owns
+## The one row that lives in `deploy/seed/`
 
 `pep-proxy` (docker-compose.yml) is configured with a literal
 `STRATIUM_PEP_AGENT_ID`, read from its own startup config and never from
@@ -79,15 +91,32 @@ anything a caller's session names — so the only agent row its principal leg
 will ever resolve is the one whose `id` matches that exact literal.
 `POST /v1/agents` cannot produce that row: `store.CreateAgent`'s own doc
 comment states plainly that `id` is ignored on input, and the row's id always
-comes from the table's own `uuid_generate_v4()` default. `ensureAgentRow` is
-one idempotent `INSERT ... ON CONFLICT DO NOTHING` with that one pre-known id
-— the identical literal `services/internal/store/proxy_integration_test.go`'s
-own `proxyAgentID` hardcodes, since both this example and that test suite
-must agree with docker-compose.yml's `pep-proxy` and neither may invent a
-different value. This is the one write in this program that cannot move to
-`pap-proxy`, and it is a property of the PAP's own admin-API design (a
-caller-chosen primary key is exactly the kind of write it should refuse), not
-a shortcut.
+comes from the table's own `uuid_generate_v4()` default — deliberate
+control-plane hygiene, not a gap: an HTTP caller choosing its own primary key
+is exactly the kind of write a real admin API should refuse.
+
+That is a property of the **stack** — `pep-proxy`'s own fixed configuration —
+not of this example, so the fixture that satisfies it lives at the stack
+level too: `deploy/seed/proxy-example-agent.sql`, one idempotent
+`INSERT ... ON CONFLICT DO NOTHING`, applied once with `psql` exactly like
+`deploy/seed/tool-catalog-claude-code.sql` and
+`deploy/seed/tool-catalog-mcp-filesystem.sql` already are (see
+`docs/testing/2026-08-20-agent-integration-test.md` §0c for that same
+`psql -f` pattern). It seeds the identical literal id
+`services/internal/store/proxy_integration_test.go`'s own `proxyAgentID`
+hardcodes, since this example, that test suite, and docker-compose.yml's
+`pep-proxy` must all agree and none of the three may invent a different
+value.
+
+`main.go` itself holds no database credential and imports no SQL driver
+(`database/sql`/`lib/pq` are gone from it entirely). It only ever *checks*
+that the row exists — `agentSeededProbe`, one more entry in the same
+`Precheck` list as Ollama and LiteLLM — and tells the operator the exact
+`psql` command to run if it does not. An earlier version of this file seeded
+the row itself, directly, with the PAP's own database credential; that put
+the wrong lesson in a reader's hands (a showcase reaching past the control
+plane into Postgres) for a constraint that was never this program's to own.
+See `task-6-report.md` for the full history.
 
 ## THE PUNCHLINE: why CallCount is dialled directly
 

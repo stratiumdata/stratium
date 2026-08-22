@@ -41,17 +41,22 @@
 // idempotent-POST convention example/mcp/main.go's own setUpPolicy already uses, not a direct
 // table write.
 //
-// ONE ROW STILL CANNOT GO THROUGH THAT API, AND IT IS NOT A CHOICE THIS FILE MAKES. proxy.go
+// ONE ROW STILL CANNOT GO THROUGH THAT API, AND THIS PROGRAM DOES NOT WRITE IT EITHER. proxy.go
 // reads its own identity from a literal STRATIUM_PEP_AGENT_ID baked into docker-compose.yml at
 // startup, never from anything a caller's session names (proxy.go's package doc, NO SESSION
 // FILE) -- so the only agent row its principal leg will ever resolve is the one whose id matches
 // that exact literal. POST /v1/agents cannot produce that row: store.CreateAgent's own doc
 // comment states outright that id (with tenant_id/created_at/updated_at) is ignored on input, and
 // the row's id always comes from the table's own uuid_generate_v4() default, never from a caller.
-// ensureAgentRow (below) is a single idempotent INSERT with that one pre-known id -- the identical
-// literal services/internal/store/proxy_integration_test.go's own proxyAgentID hardcodes, since
-// both must agree with docker-compose.yml's pep-proxy and neither may invent a different value.
-// See ensureAgentRow's own doc comment and task-6-report.md for the fuller case.
+// That is a property of the STACK -- pep-proxy's own fixed configuration -- not of this example,
+// so the fixture that satisfies it lives at the stack level too: deploy/seed/proxy-example-
+// agent.sql, applied once with psql, the same "data, not code" precedent
+// deploy/seed/tool-catalog-*.sql already establish and the same literal id services/internal/
+// store/proxy_integration_test.go's own proxyAgentID hardcodes. This program only ever CHECKS
+// that row exists (agentSeededProbe, part of Precheck) and tells the operator the exact command
+// to run if it does not -- it holds no database credential and imports no SQL driver. See
+// task-6-report.md for the fuller case, including the version of this file that did seed it
+// directly and why that was wrong.
 package main
 
 import (
@@ -60,7 +65,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,7 +77,6 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -96,8 +99,8 @@ const (
 	exampleAgentID = "04ef809a-849f-404a-9a5c-015b7f73a014"
 	exampleSubject = "proxy-integration@example.com"
 
-	// exampleTenant is pdp-proxy's own STRATIUM_TENANT_ID (docker-compose.yml). This example is
-	// the only thing in this repo that ever writes to it outside `go test -tags integration`.
+	// exampleTenant is pdp-proxy's own STRATIUM_TENANT_ID (docker-compose.yml) -- also
+	// pap-proxy's own tenant, and the one deploy/seed/proxy-example-agent.sql seeds into.
 	exampleTenant = "tenant-proxy-integration"
 
 	// publicURI must equal docker-compose.yml's pep-proxy STRATIUM_PEP_PROXY_PUBLIC_URI exactly:
@@ -133,7 +136,6 @@ func run() int {
 	litellmAddr := os.Getenv("EXAMPLE_LITELLM_ADDR")
 	papAddr := os.Getenv("EXAMPLE_PAP_ADDR")
 	kcAddr := os.Getenv("EXAMPLE_KC_ADDR")
-	pgAddr := os.Getenv("EXAMPLE_POSTGRES_ADDR")
 	ollamaAddr := os.Getenv("EXAMPLE_OLLAMA_ADDR")
 	if ollamaAddr == "" {
 		ollamaAddr = "127.0.0.1:11434" // fixed, per this suite's own prerequisites -- not ephemeral like the compose ports
@@ -143,9 +145,9 @@ func run() int {
 		pepBin = "../bin/stratium-pep"
 	}
 
-	if pdpAddr == "" || proxyAddr == "" || targetAddr == "" || papAddr == "" || kcAddr == "" || pgAddr == "" {
+	if pdpAddr == "" || proxyAddr == "" || targetAddr == "" || papAddr == "" || kcAddr == "" {
 		fmt.Fprintln(os.Stderr, "stratium-example: EXAMPLE_PDP_ADDR, EXAMPLE_PEP_PROXY_ADDR, EXAMPLE_GRPC_TARGET_ADDR, "+
-			"EXAMPLE_PAP_ADDR, EXAMPLE_KC_ADDR and EXAMPLE_POSTGRES_ADDR must be set -- this is setup, not a policy denial:")
+			"EXAMPLE_PAP_ADDR and EXAMPLE_KC_ADDR must be set -- this is setup, not a policy denial:")
 		fmt.Fprintln(os.Stderr, `      fix: dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }`)
 		fmt.Fprintln(os.Stderr, `           dc up -d pap-proxy --wait`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-proxy 50051 | sed -E 's/.*://')"`)
@@ -153,11 +155,10 @@ func run() int {
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_GRPC_TARGET_ADDR="localhost:$(dc port grpc-target 50051 | sed -E 's/.*://')"`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-proxy 8080 | sed -E 's/.*://')"`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"`)
-		fmt.Fprintln(os.Stderr, `           export EXAMPLE_POSTGRES_ADDR="localhost:$(dc port postgres 5432 | sed -E 's/.*://')"`)
 		return 1
 	}
 
-	fmt.Println("stratium-example: prechecking ollama, litellm, the PDP, and postgres...")
+	fmt.Println("stratium-example: prechecking ollama, litellm, the PDP, pap-proxy, and the seeded agent fixture...")
 	if err := agent.Precheck(
 		agent.Check{Name: "ollama", Probe: agent.DialCheck(ollamaAddr),
 			Fix: "start Ollama and `ollama pull llama3.2` (expected at " + ollamaAddr + ")"},
@@ -167,26 +168,19 @@ func run() int {
 			Fix: `EXAMPLE_PDP_ADDR not set or not reachable`},
 		agent.Check{Name: "pap-proxy", Probe: addrProbe(papAddr),
 			Fix: `EXAMPLE_PAP_ADDR not set or not reachable -- bring it up: docker compose -f deploy/docker/docker-compose.yml up -d pap-proxy --wait`},
-		agent.Check{Name: "postgres", Probe: addrProbe(pgAddr),
-			Fix: `EXAMPLE_POSTGRES_ADDR not set or not reachable`},
+		agent.Check{Name: "proxy-example-agent", Probe: agentSeededProbe(papAddr, kcAddr),
+			Fix: `dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }; dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres psql -h 127.0.0.1 -U stratium_migrate -d stratium -q -f /dev/stdin < deploy/seed/proxy-example-agent.sql`},
 	); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 
 	// The tool catalog and the permit policy go through pap-proxy's own HTTP API -- the control
-	// plane, not a direct table write. See setUpCatalogAndPolicy's own doc comment.
+	// plane, not a direct table write. See setUpCatalogAndPolicy's own doc comment. The one agent
+	// row that API cannot create was already confirmed present by Precheck, above -- this program
+	// never writes it.
 	fmt.Println("stratium-example: seeding the tool catalog and permit policy via pap-proxy...")
 	if err := setUpCatalogAndPolicy(papAddr, kcAddr); err != nil {
-		fmt.Fprintln(os.Stderr, "stratium-example:", err)
-		return 1
-	}
-
-	// The one row that cannot go through that same API -- see ensureAgentRow's own doc comment
-	// for exactly why, and why that is a property of the PAP's own POST /v1/agents, not a
-	// shortcut this example is taking.
-	fmt.Println("stratium-example: ensuring the one agent row pep-proxy's own fixed identity names...")
-	if err := ensureAgentRow(pgAddr); err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example:", err)
 		return 1
 	}
@@ -293,53 +287,45 @@ func addrProbe(addr string) func() error {
 	}
 }
 
-// ensureAgentRow is the ONE row in this example's setup that cannot go through pap-proxy's own
-// HTTP API, and it is a property of that API's own design, not a shortcut: POST /v1/agents
-// decodes the request body straight into models.Agent and passes it to store.CreateAgent, whose
-// own doc comment states plainly that ID (along with TenantID/CreatedAt/UpdatedAt) is "ignored on
-// input" -- the row's id always comes back from the table's own uuid_generate_v4() default
-// (insertAgentQuery, internal/store/agent.go), never from anything a caller sends. That is
-// deliberate control-plane hygiene, not a gap: an HTTP caller choosing its own primary key is
-// exactly the kind of write a real admin API should refuse.
-//
-// This example needs one specific, PRE-KNOWN id, though: docker-compose.yml's pep-proxy is
-// configured with a literal STRATIUM_PEP_AGENT_ID, and cmd/stratium-pep/proxy.go reads that value
-// from ITS OWN startup config on every call, never from anything a session names (see the package
-// doc's ONE ROW STILL CANNOT GO THROUGH THAT API section) -- so the only agent row proxy's
-// principal leg will ever resolve is the one whose id matches that exact literal. The same literal is also
-// hardcoded in services/internal/store/proxy_integration_test.go's own proxyAgentID, so it is a
-// shared contract this example must not invent a different value for or ask docker-compose.yml to
-// change. Given both constraints together, a single idempotent INSERT with that exact id, ON
-// CONFLICT DO NOTHING, is the only correct way to seed this one row -- see task-6-report.md for
-// the fuller reasoning and the alternative that was rejected.
-func ensureAgentRow(pgAddr string) error {
-	db, err := sql.Open("postgres", "postgres://stratium_pap_login:stratium_pap_login_local_dev_only@"+pgAddr+"/stratium?sslmode=disable")
-	if err != nil {
-		return fmt.Errorf("opening postgres: %w", err)
+// agentSeededProbe is a Precheck probe, not a seeder: it confirms -- via pap-proxy's own
+// GET /v1/agents/{id} -- that the one agent row this surface needs already exists, and returns an
+// error naming exactly what is missing if it does not. This program holds no database credential
+// and imports no SQL driver; the row itself is a STACK fixture (deploy/seed/proxy-example-
+// agent.sql), applied once with psql, because POST /v1/agents cannot create it at all --
+// store.CreateAgent's own doc comment states plainly that a caller-supplied id is ignored on
+// input, and this example needs one specific, pre-known id: the literal
+// STRATIUM_PEP_AGENT_ID docker-compose.yml's pep-proxy is configured with, which
+// services/internal/store/proxy_integration_test.go's own proxyAgentID independently hardcodes
+// too (see the package doc's ONE ROW STILL CANNOT GO THROUGH THAT API section). A missing fixture
+// is setup, exactly like a missing Ollama model or an unreachable PDP -- never a policy denial --
+// which is why this is a Precheck entry, in the same style as every other one in this file,
+// rather than a special-cased error deeper in the run.
+func agentSeededProbe(papAddr, kcAddr string) func() error {
+	return func() error {
+		tok, err := mintToken(kcAddr, editorUser, editorPass)
+		if err != nil {
+			return fmt.Errorf("minting a token to check: %w", err)
+		}
+		req, err := http.NewRequest(http.MethodGet, "http://"+papAddr+"/v1/agents/"+exampleAgentID, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("querying pap-proxy: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			return nil
+		case http.StatusNotFound:
+			return fmt.Errorf("agent %s does not exist in %s yet", exampleAgentID, exampleTenant)
+		default:
+			b, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("pap-proxy: %s: %s", resp.Status, b)
+		}
 	}
-	defer func() { _ = db.Close() }()
-
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin agent seed tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Postgres row-level security's own per-transaction tenant switch (every table here forces
-	// RLS keyed to current_tenant()) -- true (LOCAL) so it applies to this transaction only, the
-	// identical mechanism services/internal/store/store_integration_test.go's own withTenantTx
-	// uses for the same table.
-	if _, err := tx.Exec(`SELECT set_config('app.tenant_id', $1, true)`, exampleTenant); err != nil {
-		return fmt.Errorf("set tenant context: %w", err)
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
-		exampleAgentID, exampleTenant, "proxy-example-agent", "example", "llama3.2", 3, true, false, []byte(`[]`), []byte(`{}`),
-	); err != nil {
-		return fmt.Errorf("seed agent: %w", err)
-	}
-	return tx.Commit()
 }
 
 // setUpCatalogAndPolicy seeds both tool_catalog rows and one tenant-wide blanket-permit cedar
