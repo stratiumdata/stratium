@@ -521,15 +521,30 @@ how a cap stops applying by accident.
 any of this.** Labelling changes what a *configured* cap means; it does not
 start capping delegations that never had one.
 
-### Nothing in the admin plane can change a cap
+### A cap is set on the agent, and applies at the next issuance
 
 Read this before planning a remedy, because it rules several out. A
-delegation's classification caps are fixed at creation and inherited unchanged
-by every child. **No route, at any role, sets, raises, lowers, or repairs
-one.** Issuance writes an empty cap map on every root delegation and copies
-the parent's map verbatim on every child; the issuance RPC carries no field
-for a cap at all. Every cap that exists in production got there by a route
-outside this API.
+*delegation's* caps are still fixed at creation and inherited unchanged by
+every child — nothing edits a delegation's cap map in place, and the issuance
+RPC carries no field for one.
+
+What changed: **the ceiling is now set on the agent**, and a root delegation
+copies it at issuance.
+
+```bash
+curl -sS -X PUT "http://$PAP/v1/agents/$AGENT/classification-caps" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"classification_caps": {"nato": "CONFIDENTIAL"}}'
+```
+
+`RoleAdmin` on the write, because a classification ceiling is not ordinary
+agent configuration. `DELETE` on the same route clears it; `PUT` will not,
+because turning enforcement off must be a deliberate verb rather than an
+omitted field. See [`../docs/user-guide.md`](user-guide.md) § 5.7.
+
+The consequence that still bites: **a delegation already issued keeps the caps
+it was minted with.** Setting a cap does not reach into live sessions. To make
+one take effect now, revoke the delegation and let the agent re-issue.
 
 Two consequences to have in advance:
 
@@ -1007,13 +1022,14 @@ could not ask" matters, because the fix is different:
 | `approval ... was denied` | The action required human approval, and a human explicitly denied it. | Not a bug — this is the intended outcome of a reviewed escalation. |
 | `approval ... is unknown to the PDP` | The PDP no longer recognizes the approval this session was waiting on. | Unusual; retry the tool call (a fresh escalation will be created) and check the PDP's own logs if it recurs. |
 | `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured and **the resource ended up unlabelled**, so the cap could not be checked and it denies (spec §3.9, R2). Three different causes produce this one text: (a) no rule covers the resource; (b) the tool's `tool_catalog` row names no `resource_field`, so the PDP had no id to resolve rules against; (c) the row *does* name one, but this call's `raw_input` omitted that field, spelled it differently, or carried it as a non-string or an empty string — all of which read as no id. | Fixable, but not by retrying — retrying reproduces it exactly. The three causes have three different fixes: (a) register a rule, or an empty-prefix catch-all; (b) give the tool a `resource_field`, or accept it is unusable under a cap; (c) fix the **call** or the catalogued field *name* — the rule set is not the problem, and editing it will not help. Distinguish them by checking the tool's catalog row first, then a sample `raw_input` against it. See "Labelling resources for classification caps" above. |
-| `resource classification X exceeds delegation cap Y in hierarchy "H"` | The resource **was** labelled, and its level is above this delegation's cap. The cap did its job. | Not a bug. The one adjustment available is the **label**: correct the rule if the resource is mislabelled (`GET /v1/resource-label-rules` shows which rules exist). The cap itself cannot be edited by any route — and revoking to re-issue returns a session with *no* cap at all, not a higher one. See "Nothing in the admin plane can change a cap" above before doing that. |
+| `resource classification X exceeds delegation cap Y in hierarchy "H"` | The resource **was** labelled, and its level is above this delegation's cap. The cap did its job. | Not a bug. Two adjustments are available. The **label**: correct the rule if the resource is mislabelled (`GET /v1/resource-label-rules` shows which rules exist). Or the **ceiling**: `PUT /v1/agents/{id}/classification-caps` raises it for delegations issued from then on — revoke this one so a replacement picks the new value up. Revoking alone no longer returns an uncapped session: the replacement inherits whatever the agent now carries. |
 | `unknown classification hierarchy ...`, `unknown classification level ...` | The **resource label rule** that matched names a hierarchy or level outside the fixed set — a rule written around the API's validation (a direct SQL write, or a read that raced a migration). Unreachable before labelling. | A rule fix, not a policy grant. Compare the value against the hierarchy table in "Labelling resources for classification caps" above, and rewrite the rule through `stratium-pap` so the validator sees it. |
-| `delegation cap "..." is not a known level ...`, `conflicting caps for hierarchy ...` | The **delegation's own cap map** is malformed — a cap naming a non-level, or two keys differing only by case carrying different levels. Nothing is wrong with your label rules, and looking there will find nothing. Unreachable before labelling. | Not fixable from the admin plane at all: no route reads or writes that column. Fix it at whatever process created the delegation, then revoke this one — accepting that its replacement carries no cap (see "Nothing in the admin plane can change a cap" above). |
+| `delegation cap "..." is not a known level ...`, `conflicting caps for hierarchy ...` | The **delegation's own cap map** is malformed — a cap naming a non-level, or two keys differing only by case carrying different levels. Nothing is wrong with your label rules, and looking there will find nothing. Unreachable before labelling. | Not fixable in place: nothing edits a delegation's cap map. Fix the ceiling on the agent (`PUT /v1/agents/{id}/classification-caps`), then revoke this delegation so its replacement is issued with the corrected cap. |
 | Anything else | An actual policy decision: a policy was evaluated and does not permit this tool for this principal. | Whoever manages policy for this tenant needs to grant it. |
 
 `proxy` and `extauthz` are later enforcement surfaces over the same PDP call.
-`session-start`, `hook`, and `mcp` are installed as described above; `proxy`'s
-own limits are documented above ("The `proxy` surface's limits"), though its
-full installation is not — it carries no session file and answers a denial as
-a gRPC status, not either JSON shape this table covers.
+`session-start`, `hook`, and `mcp` are installed as described above. `proxy`
+and `extauthz` carry no session file and answer a denial as a gRPC status,
+not either JSON shape this table covers; both now have worked installation
+examples of their own in [`pep/proxy.md`](pep/proxy.md) and
+[`pep/extauthz.md`](pep/extauthz.md).
