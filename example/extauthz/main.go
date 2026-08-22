@@ -1,0 +1,618 @@
+// Command extauthz is the pep-examples suite's fourth enforcement surface: Envoy's ext_authz
+// filter, backed by `stratium-pep extauthz`, polices which LLM model THIS AGENT ITSELF may call.
+// ask_model(model, prompt) goes over HTTP to Envoy's published port; Envoy calls pep-extauthz's
+// Check RPC before ever routing to LiteLLM, and pep-extauthz asks the PDP. llama3.2 is allowed;
+// gpt-4o is declared in LiteLLM but deliberately unreachable, so a passing run proves policy
+// refused it before reachability was ever consulted. Everything about wiring a session and running
+// the agent loop follows example/proxy/main.go's own shape -- mint what a session needs, run
+// session-start exactly as an operator would, hand a Transport to agent.Run, get out of the way.
+// See that file first if this one is unfamiliar.
+//
+// TWO DIFFERENT ADDRESSES, ON PURPOSE. agent.LLM (the model this program's own agent loop reasons
+// with) points DIRECTLY at LiteLLM's published port; the ask_model Transport (below) points at
+// ENVOY's published port. See the verbatim comment above the LLM's own construction in run() for
+// why routing both through Envoy would deadlock this example the moment the deny fires.
+//
+// TOOL IDENTITY IS THE REQUEST PATH, INCLUDING THE QUERY -- not a friendly name mapped to it, the
+// way proxy's "fetch"/"purge" map to a full gRPC method. cmd/stratium-pep/extauthz.go's own
+// decideRequestFromCheck sets DecideRequest.Tool to httpReq.GetPath() ("M1: the request path IS the
+// tool identity"), and Envoy's ext_authz filter never sees the request BODY (envoy.yaml sets no
+// with_request_body on the filter, and decideRequestFromCheck never reads one) -- so the model name
+// inside the JSON body a caller posts to /chat/completions is invisible to the PDP no matter what it
+// says. The only place a caller can put "which model" where policy can see it is the PATH, and the
+// one route envoy.yaml already wires for this task (a "/chat/completions" PREFIX match, shared by
+// every model) does not create a per-model path on its own. toolIdentity(model) closes that gap the
+// way Envoy's route table already permits, without touching it: it appends the model as a query
+// parameter -- "/chat/completions?model=llama3.2" -- which becomes a DIFFERENT DecideRequest.Tool
+// per model (GetPath() includes the query -- extauthz.go's own observedURI doc comment says so and
+// records it observed live) while Envoy's path PREFIX match, and LiteLLM's own exact-path route,
+// both ignore it: Envoy matches "/chat/completions" against the path component only (the query plays
+// no part in prefix matching), and LiteLLM's /chat/completions handler reads which model to call
+// from the JSON body, never the query string. One function, used to build the seeded tool_catalog
+// row name, the delegation's requested tool, and the literal path this program actually requests --
+// so those three can never drift into three different spellings of the same model.
+//
+// THE DPOP PROOF'S htu DOES NOT CARRY THE QUERY. observedURI (extauthz.go) strips everything from
+// the first "?" onward before comparing against a proof's htu claim (RFC 9449 §4.3 item 9 defines
+// htu comparison that way) -- so both models' calls sign the SAME htu,
+// "http://envoy.stratium.test/chat/completions", even though they carry different Tool identities.
+// Only htu is fixed across the two models; the query -- and therefore the tool_catalog row, and
+// whether the delegation holds it -- still varies per model. htm is the actual method this program
+// sends (POST), not gRPC's constant "POST" borrowed unexamined from proxy's own htm -- it happens to
+// be the same value here because ask_model only ever issues POSTs, not because HTTP and gRPC share a
+// convention.
+//
+// SENDER-CONSTRAINED TOKENS, NOT JUST A BEARER ONE. extauthz refuses an unbound token exactly as
+// proxy's own K5 does (extauthz.go's own package doc, SENDER-CONSTRAINED TOKENS) -- see
+// example/proxy/main.go's own package doc for the fuller case. mintBoundToken here is copied from
+// that file with only the PDP address changed.
+//
+// A PAP FOR THIS TENANT ALREADY EXISTS: pap-extauthz, serving tenant-extauthz-integration
+// (docker-compose.yml) -- provisioned for the suite's own live-Envoy proof before this example
+// existed. setUpCatalogAndPolicy seeds this program's own tool_catalog rows and permit policy
+// through its real HTTP API, exactly like example/proxy's own setUpCatalogAndPolicy.
+//
+// ONE ROW STILL CANNOT GO THROUGH THAT API: pep-extauthz's own STRATIUM_PEP_AGENT_ID is a literal
+// baked into docker-compose.yml, for the identical reason pep-proxy's is (see example/proxy/main.go's
+// own package doc, ONE ROW STILL CANNOT GO THROUGH THAT API) -- deploy/seed/extauthz-example-
+// agent.sql is that fixture's stack-level home, and agentSeededProbe (below) only ever checks it is
+// there; this program holds no database credential and imports no SQL driver.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"time"
+
+	jose "github.com/go-jose/go-jose/v4"
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"stratium/example/agent"
+	"stratium/internal/pdpgrpc"
+)
+
+const (
+	// sessionFile is relative to the CWD `go run ./extauthz` is launched from (example/), matching
+	// mcp/main.go's and proxy/main.go's own sessionFile exactly.
+	sessionFile = ".session.json"
+
+	// exampleAgentID and exampleSubject are fixed, not generated -- see the package doc's ONE ROW
+	// STILL CANNOT GO THROUGH THAT API section for why they must equal docker-compose.yml's
+	// pep-extauthz STRATIUM_PEP_AGENT_ID / STRATIUM_PEP_SUBJECT exactly. The same two values are
+	// independently hardcoded as extauthzAgentID/extauthzSubject in
+	// services/internal/store/extauthz_integration_test.go; this file, that test suite, and
+	// docker-compose.yml must all agree, and none of the three may invent a different value.
+	exampleAgentID = "72d38ebe-2e5c-4918-9e73-b0de3607fbfa"
+	exampleSubject = "extauthz-integration@example.com"
+
+	// exampleTenant is pdp-extauthz's own STRATIUM_TENANT_ID (docker-compose.yml) -- also
+	// pap-extauthz's own tenant, and the one deploy/seed/extauthz-example-agent.sql seeds into.
+	exampleTenant = "tenant-extauthz-integration"
+
+	// extauthzHost must equal docker-compose.yml's pep-extauthz STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS
+	// exactly: Envoy reports the caller's own Host header as the request's authority, and
+	// pep-extauthz refuses any authority it is not configured to serve BEFORE the PDP is ever
+	// dialed (extauthz.go's own matchAllowedHost) -- a request addressed to anything else denies for
+	// the wrong reason and reads as a policy refusal it is not. Every request this program sends
+	// sets http.Request.Host to this value explicitly (extauthzTransport.Call).
+	extauthzHost = "envoy.stratium.test"
+
+	// chatCompletionsPath is the one route envoy.yaml wires to LiteLLM (a "/chat/completions" prefix
+	// match) -- see the package doc's TOOL IDENTITY section for why toolIdentity appends a query
+	// parameter to it rather than a path segment.
+	chatCompletionsPath = "/chat/completions"
+
+	// askModelTier is models.ActionTierExternalComms's own wire value: asking an external LLM
+	// reaches outside the trust boundary. Both tool_catalog rows below are cataloged at this same
+	// tier, and session-start requests it too, so a tier ceiling can never explain why gpt-4o denies
+	// while llama3.2 allows -- only approved_tools can (see the package doc's TOOL IDENTITY
+	// section).
+	askModelTier = 3
+
+	// kcRealm/kcClient/editorUser/editorPass are the same shared, tenant-agnostic Keycloak fixture
+	// example/mcp/main.go and example/proxy/main.go already authenticate against: Keycloak proves
+	// identity and role membership only, never a tenant -- tenant scoping lives entirely in which
+	// PAP instance (here, pap-extauthz) a token is presented to.
+	kcRealm    = "stratium"
+	kcClient   = "stratium-pap"
+	editorUser = "pap-editor"
+	editorPass = "pap_editor_local_dev_only"
+)
+
+// dpopHTU is the fixed, query-free URI every proof this program mints signs as htu -- see the
+// package doc's THE DPOP PROOF'S htu DOES NOT CARRY THE QUERY section for why it is the same string
+// for both models even though their requests carry different tool identities.
+const dpopHTU = "http://" + extauthzHost + chatCompletionsPath
+
+// modelNames is every model LiteLLM declares (deploy/docker/litellm/config.yaml): llama3.2, served
+// by the host's Ollama, and gpt-4o, declared but deliberately unreachable (api_base
+// http://127.0.0.1:1) so a call to it can only ever fail for the reason this example exists to
+// prove -- policy refused it before LiteLLM ever tried to reach it. Both get a tool_catalog row;
+// only llama3.2's is named in session-start's own STRATIUM_PEP_REQUESTED_TOOLS, below.
+var modelNames = []string{"llama3.2", "gpt-4o"}
+
+// toolIdentity is the ONE spelling used for a model's tool_catalog row name, its entry (or
+// deliberate absence) in STRATIUM_PEP_REQUESTED_TOOLS, and the literal request path+query this
+// program sends through Envoy -- see the package doc's TOOL IDENTITY section for why all three must
+// stay the same string, character for character.
+func toolIdentity(model string) string {
+	return chatCompletionsPath + "?model=" + model
+}
+
+func main() {
+	os.Exit(run())
+}
+
+func run() int {
+	pdpAddr := os.Getenv("EXAMPLE_PDP_ADDR")
+	envoyAddr := os.Getenv("EXAMPLE_ENVOY_ADDR")
+	litellmAddr := os.Getenv("EXAMPLE_LITELLM_ADDR")
+	papAddr := os.Getenv("EXAMPLE_PAP_ADDR")
+	kcAddr := os.Getenv("EXAMPLE_KC_ADDR")
+	ollamaAddr := os.Getenv("EXAMPLE_OLLAMA_ADDR")
+	if ollamaAddr == "" {
+		ollamaAddr = "127.0.0.1:11434" // fixed, per this suite's own prerequisites -- not ephemeral like the compose ports
+	}
+	pepBin := os.Getenv("EXAMPLE_PEP_BIN")
+	if pepBin == "" {
+		pepBin = "../bin/stratium-pep"
+	}
+
+	if pdpAddr == "" || envoyAddr == "" || litellmAddr == "" || papAddr == "" || kcAddr == "" {
+		fmt.Fprintln(os.Stderr, "stratium-example: EXAMPLE_PDP_ADDR, EXAMPLE_ENVOY_ADDR, EXAMPLE_LITELLM_ADDR, "+
+			"EXAMPLE_PAP_ADDR and EXAMPLE_KC_ADDR must be set -- this is setup, not a policy denial:")
+		fmt.Fprintln(os.Stderr, `      fix: dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-extauthz 50051 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_ENVOY_ADDR="localhost:$(dc port envoy 10000 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-extauthz 8080 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"`)
+		return 1
+	}
+
+	fmt.Println("stratium-example: prechecking ollama, litellm, envoy, the PDP, pap-extauthz, and the seeded agent fixture...")
+	if err := agent.Precheck(
+		agent.Check{Name: "ollama", Probe: agent.DialCheck(ollamaAddr),
+			Fix: "start Ollama and `ollama pull llama3.2` (expected at " + ollamaAddr + ")"},
+		agent.Check{Name: "litellm", Probe: addrProbe(litellmAddr),
+			Fix: `EXAMPLE_LITELLM_ADDR not set or not reachable`},
+		agent.Check{Name: "envoy", Probe: addrProbe(envoyAddr),
+			Fix: `EXAMPLE_ENVOY_ADDR not set or not reachable`},
+		agent.Check{Name: "pdp-extauthz", Probe: addrProbe(pdpAddr),
+			Fix: `EXAMPLE_PDP_ADDR not set or not reachable`},
+		agent.Check{Name: "pap-extauthz", Probe: addrProbe(papAddr),
+			Fix: `EXAMPLE_PAP_ADDR not set or not reachable -- bring it up: docker compose -f deploy/docker/docker-compose.yml up -d pap-extauthz --wait`},
+		agent.Check{Name: "extauthz-example-agent", Probe: agentSeededProbe(papAddr, kcAddr),
+			Fix: `dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }; dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres psql -h 127.0.0.1 -U stratium_migrate -d stratium -q -f /dev/stdin < deploy/seed/extauthz-example-agent.sql`},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	// The tool catalog and the permit policy go through pap-extauthz's own HTTP API -- the control
+	// plane, not a direct table write. See setUpCatalogAndPolicy's own doc comment. The one agent
+	// row that API cannot create was already confirmed present by Precheck, above -- this program
+	// never writes it.
+	fmt.Println("stratium-example: seeding the tool catalog and permit policy via pap-extauthz...")
+	if err := setUpCatalogAndPolicy(papAddr, kcAddr); err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example:", err)
+		return 1
+	}
+
+	fmt.Println("stratium-example: starting a delegation session (llama3.2 only, gpt-4o deliberately absent)...")
+	if err := runSessionStart(pepBin, pdpAddr); err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example:", err)
+		return 1
+	}
+
+	delegationID, err := readDelegationID(sessionFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example:", err)
+		return 1
+	}
+
+	fmt.Println("stratium-example: minting a DPoP-bound token for the extauthz surface (K5)...")
+	key, boundToken, err := mintBoundToken(pdpAddr, delegationID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example:", err)
+		return 1
+	}
+
+	transport := &extauthzTransport{envoyAddr: envoyAddr, token: boundToken, key: key}
+
+	// The agent's own reasoning goes direct to LiteLLM, bypassing Envoy on
+	// purpose. Only the ask_model TOOL takes the policed path. Route both through
+	// Envoy and this example deadlocks the moment the deny fires: the agent needs
+	// a model call in order to tell you its model call was refused.
+	llm := &agent.LLM{BaseURL: "http://" + litellmAddr, Model: "llama3.2"}
+
+	task := "Ask the llama3.2 model what 2+2 is. Then ask the gpt-4o model the same thing. " +
+		"Report what each said, or why you could not."
+	want := []agent.Expectation{
+		{Tool: "ask_model", ArgContains: "llama3.2", Want: agent.Allow},
+		{Tool: "ask_model", ArgContains: "gpt-4o", Want: agent.Deny},
+	}
+
+	fmt.Println("stratium-example: running the agent...")
+	report := agent.Run(context.Background(), llm, transport, task, want, os.Stdout)
+	report.Print(os.Stdout)
+	return report.ExitCode()
+}
+
+func addrProbe(addr string) func() error {
+	return func() error {
+		if addr == "" {
+			return fmt.Errorf("address not configured")
+		}
+		return agent.DialCheck(addr)()
+	}
+}
+
+// agentSeededProbe is a Precheck probe, not a seeder: it confirms -- via pap-extauthz's own
+// GET /v1/agents/{id} -- that the one agent row this surface needs already exists, and returns an
+// error naming exactly what is missing if it does not. This program holds no database credential
+// and imports no SQL driver; the row itself is a STACK fixture (deploy/seed/extauthz-example-
+// agent.sql), applied once with psql, because POST /v1/agents cannot create it at all -- see the
+// package doc's ONE ROW STILL CANNOT GO THROUGH THAT API section. Modelled directly on
+// example/proxy/main.go's own agentSeededProbe.
+func agentSeededProbe(papAddr, kcAddr string) func() error {
+	return func() error {
+		tok, err := mintToken(kcAddr, editorUser, editorPass)
+		if err != nil {
+			return fmt.Errorf("minting a token to check: %w", err)
+		}
+		req, err := http.NewRequest(http.MethodGet, "http://"+papAddr+"/v1/agents/"+exampleAgentID, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("querying pap-extauthz: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			return nil
+		case http.StatusNotFound:
+			return fmt.Errorf("agent %s does not exist in %s yet", exampleAgentID, exampleTenant)
+		default:
+			b, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("pap-extauthz: %s: %s", resp.Status, b)
+		}
+	}
+}
+
+// setUpCatalogAndPolicy seeds one tool_catalog row per modelNames entry, plus one tenant-wide
+// blanket-permit cedar policy, through pap-extauthz's own HTTP API -- POST /v1/tool-catalog and
+// POST /v1/policies -- the same idempotent-POST convention example/mcp's setUpPolicy and
+// example/proxy's own setUpCatalogAndPolicy already use: a 201 or a 409 (already exists) both count
+// as success. A fresh editor token is minted before each POST group, never cached, per mintToken's
+// own doc comment: an operator token expires after five minutes.
+func setUpCatalogAndPolicy(papAddr, kcAddr string) error {
+	for _, model := range modelNames {
+		tok, err := mintToken(kcAddr, editorUser, editorPass)
+		if err != nil {
+			return fmt.Errorf("minting editor token: %w", err)
+		}
+		if err := ensureToolCatalogEntry(papAddr, tok, toolIdentity(model), "ask_model"); err != nil {
+			return err
+		}
+	}
+
+	tok, err := mintToken(kcAddr, editorUser, editorPass)
+	if err != nil {
+		return fmt.Errorf("minting editor token: %w", err)
+	}
+	// A tenant-wide blanket permit, exactly like example/proxy's own tenant carries: the principal
+	// leg always allows, so this example's own DENY is unambiguously the delegation leg's
+	// approved_tools check, never a cedar refusal underneath it.
+	return ensurePolicy(papAddr, tok, "example-extauthz-blanket-permit", `permit(principal, action, resource);`)
+}
+
+func ensureToolCatalogEntry(papAddr, token, toolName, verb string) error {
+	body, _ := json.Marshal(map[string]any{"tool_name": toolName, "action_tier": askModelTier, "verb": verb})
+	req, err := http.NewRequest(http.MethodPost, "http://"+papAddr+"/v1/tool-catalog", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("tool-catalog %q: %w", toolName, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	b, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("tool-catalog %q: %s: %s", toolName, resp.Status, b)
+}
+
+func ensurePolicy(papAddr, token, name, policyContent string) error {
+	body, _ := json.Marshal(map[string]string{"name": name, "language": "cedar", "policy_content": policyContent, "effect": "allow"})
+	req, err := http.NewRequest(http.MethodPost, "http://"+papAddr+"/v1/policies", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("policies %q: %w", name, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	b, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("policies %q: %s: %s", name, resp.Status, b)
+}
+
+// mintToken gets a fresh operator token from Keycloak. Copied from example/mcp/main.go's and
+// example/proxy/main.go's own mintToken verbatim: same realm, same client, called anew for every
+// PAP request that needs one, never cached -- these tokens expire after five minutes.
+func mintToken(kcAddr, user, pass string) (string, error) {
+	resp, err := http.PostForm(fmt.Sprintf("http://%s/realms/%s/protocol/openid-connect/token", kcAddr, kcRealm),
+		url.Values{
+			"grant_type": {"password"},
+			"client_id":  {kcClient},
+			"username":   {user},
+			"password":   {pass},
+			"scope":      {"openid email"},
+		})
+	if err != nil {
+		return "", fmt.Errorf("keycloak token for %s: %w", user, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var out struct {
+		AccessToken      string `json:"access_token"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("keycloak token for %s: decode: %w", user, err)
+	}
+	if out.AccessToken == "" {
+		return "", fmt.Errorf("keycloak token for %s: %s: %s", user, out.Error, out.ErrorDescription)
+	}
+	return out.AccessToken, nil
+}
+
+// runSessionStart shells out to the real `stratium-pep session-start`, exactly as mcp/main.go's and
+// proxy/main.go's own runSessionStart do -- this example runs the real binary, not a
+// reimplementation of what it does. Requesting ONLY llama3.2's tool identity (never gpt-4o's) is
+// what makes gpt-4o deny with "not in delegation approved_tools" later: both are cataloged at the
+// same action tier (setUpCatalogAndPolicy, above), so a tier ceiling can never be the reason.
+func runSessionStart(pepBin, pdpAddr string) error {
+	cmd := exec.Command(pepBin, "session-start") //nolint:gosec // G204: pepBin is this example's own fixed configuration, never request data.
+	cmd.Env = append(os.Environ(),
+		"STRATIUM_PEP_PDP_ADDR="+pdpAddr,
+		"STRATIUM_PEP_AGENT_ID="+exampleAgentID,
+		"STRATIUM_PEP_SUBJECT="+exampleSubject,
+		"STRATIUM_PEP_SESSION_FILE="+sessionFile,
+		"STRATIUM_PEP_CONNECT_TIMEOUT=5s",
+		"STRATIUM_PEP_REQUESTED_TOOLS="+toolIdentity("llama3.2"),
+		fmt.Sprintf("STRATIUM_PEP_REQUESTED_TIER=%d", askModelTier),
+		"STRATIUM_PEP_PURPOSE=stratium extauthz example",
+		"STRATIUM_PEP_TTL_SECONDS=3600",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("session-start: %w: %s", err, out)
+	}
+	return nil
+}
+
+// readDelegationID reads the delegation id session-start just cached -- the same file and the same
+// wire shape session_file.go's own loadSessionFile reads (plain encoding/json over
+// *pdpgrpc.CreateDelegationResponse). Copied from example/proxy/main.go's own readDelegationID: only
+// the delegation id is used from it, because this surface (like proxy, unlike hook and mcp) refuses
+// an ordinary bearer token outright -- see mintBoundToken, below.
+func readDelegationID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read session file %s: %w", path, err)
+	}
+	var resp pdpgrpc.CreateDelegationResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("decode session file %s: %w", path, err)
+	}
+	if resp.GetDelegationId() == "" {
+		return "", fmt.Errorf("session file %s names no delegation", path)
+	}
+	return resp.GetDelegationId(), nil
+}
+
+// mintBoundToken generates a fresh P-256 keypair and calls the PDP's IssueToken RPC directly --
+// there is no session-start flag for this -- to mint a token bound to that key's public half (spec
+// §4.7.2 K6). Copied from example/proxy/main.go's own mintBoundToken with only the PDP address
+// changed (this program's pdpAddr is pdp-extauthz, not pdp-proxy).
+func mintBoundToken(pdpAddr, delegationID string) (*ecdsa.PrivateKey, string, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, "", fmt.Errorf("generate dpop key: %w", err)
+	}
+	jwkDoc, err := (&jose.JSONWebKey{Key: key.Public()}).MarshalJSON()
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal dpop public jwk: %w", err)
+	}
+	jwk := string(jwkDoc)
+
+	conn, err := grpc.NewClient(pdpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, "", fmt.Errorf("dial pdp: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := pdpgrpc.NewPDPServiceClient(conn).IssueToken(ctx, &pdpgrpc.IssueTokenRequest{
+		DelegationId: delegationID,
+		TtlSeconds:   3600,
+		DpopJwk:      &jwk,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("issue bound token: %w", err)
+	}
+	return key, resp.GetToken(), nil
+}
+
+// askModelSchema is the JSON Schema for ask_model's one argument object: {"model": string, "prompt":
+// string}. The model advertised here chooses WHICH model to ask by NAME; extauthzTransport.Call maps
+// that name to the tool identity (path+query) the choice actually is.
+var askModelSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"model":  map[string]any{"type": "string"},
+		"prompt": map[string]any{"type": "string"},
+	},
+	"required": []string{"model", "prompt"},
+}
+
+// extauthzTransport is this surface's agent.Transport. It advertises a single "ask_model" tool --
+// the model under test picks WHICH model to ask via its own "model" argument -- and Call turns that
+// into an HTTP POST through Envoy at toolIdentity(model), the literal path+query that IS this call's
+// tool identity (see the package doc's TOOL IDENTITY section).
+type extauthzTransport struct {
+	envoyAddr string
+	token     string
+	key       *ecdsa.PrivateKey
+	http      *http.Client
+}
+
+func (t *extauthzTransport) Tools() []agent.ToolSpec {
+	return []agent.ToolSpec{
+		{Name: "ask_model", Description: "Ask a named LLM model a prompt and return what it said.", Schema: askModelSchema},
+	}
+}
+
+// Call builds a fresh RFC 9449 DPoP proof (jti is single-use -- K8 -- so a proof cannot be reused
+// across the two models' calls, or across a retry of either) and POSTs {"model", "messages"} to
+// Envoy at toolIdentity(model) -- NOT at the bare chatCompletionsPath -- with Host set to
+// extauthzHost: Envoy reports the caller's own Host header as the request's authority, and
+// pep-extauthz refuses any authority it is not configured to serve BEFORE the PDP is ever dialed.
+//
+// A 403 is a DECISION: Envoy's ext_authz filter, or the PDP behind it, looked at this exact call and
+// said no. That becomes agent.Result{Allowed:false, Reason: <body>}. A 502 or 503 means Envoy let
+// the request through to LiteLLM and LiteLLM then failed to reach the model's own upstream --
+// exactly gpt-4o's deliberately-unreachable api_base -- which means ext_authz did NOT refuse the
+// call; that is this example failing to hold the delegation's approved_tools list where it should,
+// not policy working, and is returned as a Go error rather than a denial. Any other transport
+// failure -- a dead connection, a malformed response -- is returned as a Go error too, so agent.Run
+// aborts instead of recording a broken example as an enforcement decision.
+func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agent.Result, error) {
+	model, ok := call.Args["model"].(string)
+	if !ok {
+		return agent.Result{}, fmt.Errorf("extauthz transport: ask_model: args[\"model\"] = %#v, want a string", call.Args["model"])
+	}
+	prompt, ok := call.Args["prompt"].(string)
+	if !ok {
+		return agent.Result{}, fmt.Errorf("extauthz transport: ask_model: args[\"prompt\"] = %#v, want a string", call.Args["prompt"])
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":    model,
+		"messages": []map[string]string{{"role": "user", "content": prompt}},
+	})
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("extauthz transport: marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+t.envoyAddr+toolIdentity(model), bytes.NewReader(body))
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("extauthz transport: build request: %w", err)
+	}
+	// The AUTHORITY this request ADDRESSES, not the host:port it dials -- see this function's own
+	// doc comment. Go puts req.Host on the wire as the Host header when it is non-empty.
+	req.Host = extauthzHost
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.token)
+
+	proof, err := t.proof()
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("extauthz transport: build dpop proof: %w", err)
+	}
+	req.Header.Set("DPoP", proof)
+
+	client := t.http
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("extauthz transport: %s: %w", model, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("extauthz transport: %s: read response: %w", model, err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return agent.Result{Allowed: false, Reason: string(respBody)}, nil
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		return agent.Result{}, fmt.Errorf(
+			"%s returned %s -- that is LiteLLM failing to reach the upstream, NOT a policy denial. "+
+				"Envoy let the request through, which means ext_authz did not refuse it. "+
+				"Check the delegation does not hold the %s tool", model, resp.Status, model)
+	case http.StatusOK:
+		var out struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(respBody, &out); err != nil {
+			return agent.Result{}, fmt.Errorf("extauthz transport: %s: decode response: %w", model, err)
+		}
+		if len(out.Choices) == 0 {
+			return agent.Result{}, fmt.Errorf("extauthz transport: %s: no choices in response: %s", model, respBody)
+		}
+		return agent.Result{Allowed: true, Output: out.Choices[0].Message.Content}, nil
+	default:
+		return agent.Result{}, fmt.Errorf("extauthz transport: %s: unexpected status %s: %s", model, resp.Status, respBody)
+	}
+}
+
+// proof builds one RFC 9449 DPoP proof, signed by t.key: htm is the actual method this call uses
+// (POST -- every ask_model call is a POST, not gRPC's constant "POST" borrowed unexamined from
+// proxy), and htu is dpopHTU, the fixed, query-free URI pep-extauthz's own observedURI reconstructs
+// from Envoy's report -- see the package doc's THE DPOP PROOF'S htu DOES NOT CARRY THE QUERY section
+// for why both models sign the identical htu even though they carry different Tool identities. jti
+// is fresh every call so K8's single-use rule never collides with itself across the two models, or
+// across a retry of either.
+func (t *extauthzTransport) proof() (string, error) {
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.ES256, Key: t.key},
+		(&jose.SignerOptions{EmbedJWK: true}).WithType("dpop+jwt"),
+	)
+	if err != nil {
+		return "", fmt.Errorf("new dpop signer: %w", err)
+	}
+	return josejwt.Signed(signer).Claims(map[string]any{
+		"htm": http.MethodPost,
+		"htu": dpopHTU,
+		"jti": uuid.NewString(),
+		"iat": time.Now().Unix(),
+	}).Serialize()
+}
