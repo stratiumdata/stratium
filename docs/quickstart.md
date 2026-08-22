@@ -66,6 +66,8 @@ images):
 [7] Classification caps
     ok   already present (catch-all, so every other probe stays UNCLASSIFIED)
     ok   already present ("/secret-*" -> SECRET)
+    ok   created ("/tmp/secret-*" -> SECRET)
+    ok   created ("/private/tmp/secret-*" -> SECRET)
     ok   quickstart-46384b capped at {'nato': 'CONFIDENTIAL'}
          verify's classification case needs this; state['caps'] is how it knows
 
@@ -178,16 +180,20 @@ Ports and tokens are never written to disk.
 
 ## 4. See it enforce
 
-`up` registered a rule mapping the prefix `/secret-` to `nato SECRET`, so any
-path starting that way is above the agent's `CONFIDENTIAL` ceiling. Make the file
-first — see the warning below — then ask for it in the launched session:
+`up` registered three prefixes at `nato SECRET` — `/secret-`, `/tmp/secret-` and
+`/private/tmp/secret-` — so any path starting one of those ways is above the
+agent's `CONFIDENTIAL` ceiling. Use a `/tmp` one: macOS seals the root volume, so
+`mkdir /secret-demo` fails with `Read-only file system`.
+
+Make the file first — see the warning below — then ask for it in the launched
+session:
 
 ```bash
-mkdir -p /secret-demo && echo 'classified' > /secret-demo/plans.txt
+mkdir -p /tmp/secret-demo && echo 'classified' > /tmp/secret-demo/plans.txt
 ```
 
 ```
-use your Read tool on /secret-demo/plans.txt
+use your Read tool on /tmp/secret-demo/plans.txt
 ```
 
 The tool call is denied before it runs, and the agent is told why:
@@ -198,6 +204,13 @@ resource classification SECRET exceeds delegation cap CONFIDENTIAL in hierarchy 
 
 Reading anything else — `/tmp/notes.txt` — succeeds, because the catch-all rule
 labels it `UNCLASSIFIED`, which is under the cap.
+
+> **Why both `/tmp` and `/private/tmp` are registered.** The label match is on
+> the literal path string the tool call carries, and macOS resolves `/tmp` to
+> `/private/tmp`. Whichever spelling the agent happens to send has to hit a rule,
+> or the path falls through to the catch-all and is allowed — a silent
+> non-enforcement that looks exactly like a broken cap. Observed: both spellings
+> deny, `exit=2`.
 
 > **Ask for a tool, not an outcome, and make the file real.** This is the step
 > most likely to look like a failure when nothing is wrong. Point a capable model

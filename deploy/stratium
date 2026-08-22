@@ -632,7 +632,18 @@ DEMO_TTL = 3600
 # SECRET, which is over the cap, so that one case denies on classification alone.
 DEMO_CAPS = {"nato": "CONFIDENTIAL"}
 CATCH_ALL_RULE = ("", "nato", "UNCLASSIFIED")
-SECRET_RULE = ("/secret-", "nato", "SECRET")
+# Three prefixes, not one. "/secret-" is all verify itself needs -- its probe
+# path is synthetic and never touches disk. The other two exist for a HUMAN
+# following docs/quickstart.md, who has to create a real file: macOS seals the
+# root volume, so `mkdir /secret-demo` fails, and /tmp is writable but does not
+# match "/secret-". Both /tmp and /private/tmp are registered because the label
+# match is on the literal path string the tool call carries, and macOS resolves
+# one to the other -- whichever spelling the agent sends has to hit a rule.
+SECRET_RULES = [
+    ("/secret-", "nato", "SECRET"),
+    ("/tmp/secret-", "nato", "SECRET"),
+    ("/private/tmp/secret-", "nato", "SECRET"),
+]
 
 OPERATORS = {  # realm users from the docker stack, local dev credentials
     "editor": ("pap-editor", "pap_editor_local_dev_only"),
@@ -879,11 +890,44 @@ def in_agent_session():
 
     Claude Code exports CLAUDECODE=1 to everything it spawns, so a quickstart run
     from its Bash tool sees it. Codex sets CODEX_SANDBOX / CODEX_HOME.
+
+    The environment alone is not enough. A subagent's shell need not inherit
+    those variables, and one that does not will sail past this guard, wire a
+    matcher:"*" hook, and gag the PARENT session it was spawned from -- observed,
+    twice. So fall back to walking the process ancestry: if an agent binary is
+    anywhere above us, installing is unsafe no matter what the environment says.
     """
     if os.environ.get("CLAUDECODE"):
         return "claude"
     if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_HOME"):
         return "codex"
+    return _agent_in_ancestry()
+
+
+def _agent_in_ancestry(max_depth=12):
+    """Walk up the parent chain looking for an agent process. Best-effort.
+
+    `ps` is asked one pid at a time rather than parsed wholesale so a weird
+    comm field cannot desync the walk. Any failure returns None: this is a
+    safety net, and a net that errors must not become a blocker.
+    """
+    try:
+        pid = os.getppid()
+        for _ in range(max_depth):
+            if pid <= 1:
+                return None
+            out = subprocess.run(["ps", "-o", "comm=,ppid=", "-p", str(pid)],
+                                 capture_output=True, text=True)
+            if out.returncode != 0 or not out.stdout.strip():
+                return None
+            parts = out.stdout.split()
+            comm, pid = os.path.basename(parts[0]), int(parts[-1])
+            if comm == "claude":
+                return "claude"
+            if comm == "codex":
+                return "codex"
+    except Exception:
+        return None
     return None
 
 
@@ -1051,7 +1095,8 @@ def cmd_up(args):
 
     step("Classification caps")
     ok(ensure_label_rule(*CATCH_ALL_RULE) + " (catch-all, so every other probe stays UNCLASSIFIED)")
-    ok(ensure_label_rule(*SECRET_RULE) + ' ("/secret-*" -> SECRET)')
+    for rule in SECRET_RULES:
+        ok(ensure_label_rule(*rule) + f' ("{rule[0]}*" -> SECRET)')
     ensure_caps(agent_id)
     state = save_state(caps=DEMO_CAPS)
     ok(f"{agent_name} capped at {DEMO_CAPS}")
