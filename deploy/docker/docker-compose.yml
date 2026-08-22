@@ -545,6 +545,38 @@ services:
     ports:
       - "9292"
 
+  # A second PAP, bound to pdp-proxy's own tenant (tenant-proxy-integration),
+  # modelled directly on pap-extauthz below: stratium-pap serves
+  # tenant-pap-e2e-integration and pap-extauthz serves
+  # tenant-extauthz-integration, but nothing served pdp-proxy's tenant until
+  # this -- example/proxy's own main.go needed an HTTP control plane to seed
+  # its agent/tool_catalog/policy rows and had no PAP to call, which is a
+  # topology gap this service closes rather than a reason to reach past the
+  # control plane into Postgres directly.
+  pap-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.pap
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      STRATIUM_PAP_TENANT_ID: tenant-proxy-integration
+      STRATIUM_PAP_DATABASE_URL: postgres://stratium_pap_login:stratium_pap_login_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_PAP_OIDC_ISSUER: http://keycloak:8080/realms/stratium
+      STRATIUM_PAP_OIDC_AUDIENCE: stratium-pap
+      STRATIUM_PAP_OIDC_CLIENT_ID: stratium-pap
+      STRATIUM_PAP_ROLE_CLAIM: groups
+      STRATIUM_PAP_APPROVER_CLAIM: email
+      STRATIUM_PAP_ADMIN_GROUPS: stratium-admins
+      STRATIUM_PAP_EDITOR_GROUPS: stratium-editors
+      STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers,all-staff
+      STRATIUM_PAP_LISTEN_ADDR: :8080
+    ports:
+      - "8080"
+
   # Eighth PDP instance, wired for one purpose: Task 4's live-stack decision-
   # cache proofs (services/internal/store/cache_e2e_integration_test.go) need
   # a PDP that is safe to seed cedar policies and delegations into -- the same

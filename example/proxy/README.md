@@ -19,25 +19,28 @@ mapping is visible to the model, the same friendly-name/wire-identity split
 ```bash
 cd example
 dc() { docker compose -f ../deploy/docker/docker-compose.yml "$@"; }
+dc up -d pap-proxy --wait   # one-time: brings up this tenant's control plane, disturbs nothing else
 export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-proxy 50051 | sed -E 's/.*://')"
 export EXAMPLE_PEP_PROXY_ADDR="localhost:$(dc port pep-proxy 9292 | sed -E 's/.*://')"
 export EXAMPLE_GRPC_TARGET_ADDR="localhost:$(dc port grpc-target 50051 | sed -E 's/.*://')"
+export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-proxy 8080 | sed -E 's/.*://')"
+export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"
 export EXAMPLE_POSTGRES_ADDR="localhost:$(dc port postgres 5432 | sed -E 's/.*://')"
 export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"
 go run ./proxy
 ```
 
-`main.go` then, in order: prechecks Ollama/LiteLLM/the PDP/postgres; seeds its
-own tenant (`tenant-proxy-integration`, pdp-proxy's own `STRATIUM_TENANT_ID`)
-with one agent, both tool_catalog rows, and one blanket-permit cedar policy —
-see **Seeding a tenant with no PAP**, below, for why that is direct SQL rather
-than an HTTP call; runs `stratium-pep session-start` requesting **only**
-Fetch's full method path; mints a second, DPoP-bound token (see **Sender-
-constrained tokens**, below); and hands the whole thing to `agent.Run` with a
-task that calls `fetch` then `purge`, expecting Fetch **ALLOWED** and Purge
-**DENIED** for `not in delegation approved_tools` — both methods are cataloged
-at the identical action tier, so a tier ceiling can never be the reason; only
-the requested-tools list can.
+`main.go` then, in order: prechecks Ollama/LiteLLM/the PDP/pap-proxy/postgres;
+seeds the tool catalog and a blanket-permit policy through **pap-proxy's own
+HTTP API** (see **A control plane for this tenant**, below); ensures the one
+agent row that API cannot create (see **The one row SQL still owns**, below);
+runs `stratium-pep session-start` requesting **only** Fetch's full method
+path; mints a second, DPoP-bound token (see **Sender-constrained tokens**,
+below); and hands the whole thing to `agent.Run` with a task that calls
+`fetch` then `purge`, expecting Fetch **ALLOWED** and Purge **DENIED** for
+`not in delegation approved_tools` — both methods are cataloged at the
+identical action tier, so a tier ceiling can never be the reason; only the
+requested-tools list can.
 
 ## Sender-constrained tokens (K5)
 
@@ -55,17 +58,36 @@ delegation, cache it to `.session.json` — this program just reads the
 delegation id back out of that file and mints a second, bound token from it,
 rather than sending the file's own bearer token over the wire.
 
-## Seeding a tenant with no PAP
+## A control plane for this tenant
 
-`pdp-proxy` is fixed to tenant `tenant-proxy-integration` (docker-compose.yml),
-and unlike `stratium-pap`'s own tenant, no PAP instance in this compose file is
-wired to serve it. `seedTenant` in `main.go` writes the one agent row, the two
-`tool_catalog` rows, and one blanket-permit policy directly, with plain SQL
-under Postgres row-level security's own per-transaction tenant switch — the
-identical shape and the identical target tenant
-`services/internal/store/proxy_integration_test.go` already uses to test this
-same surface. Every insert is `ON CONFLICT DO NOTHING`, so re-running this
-program is safe.
+`pdp-proxy` is fixed to tenant `tenant-proxy-integration` (docker-compose.yml).
+Until this fix round, nothing served it over HTTP — `stratium-pap` serves
+`tenant-pap-e2e-integration` and `pap-extauthz` serves
+`tenant-extauthz-integration`, and that was the whole list. `pap-proxy` closes
+that gap: a second PAP, modelled directly on `pap-extauthz`, bound to
+`tenant-proxy-integration`. `setUpCatalogAndPolicy` in `main.go` seeds both
+`tool_catalog` rows and one blanket-permit policy through its real HTTP API —
+`POST /v1/tool-catalog`, `POST /v1/policies` — the same idempotent-POST
+convention (`example/mcp/main.go`'s own `setUpPolicy`) where a `201` or a
+`409` (already exists) both count as success.
+
+## The one row SQL still owns
+
+`pep-proxy` (docker-compose.yml) is configured with a literal
+`STRATIUM_PEP_AGENT_ID`, read from its own startup config and never from
+anything a caller's session names — so the only agent row its principal leg
+will ever resolve is the one whose `id` matches that exact literal.
+`POST /v1/agents` cannot produce that row: `store.CreateAgent`'s own doc
+comment states plainly that `id` is ignored on input, and the row's id always
+comes from the table's own `uuid_generate_v4()` default. `ensureAgentRow` is
+one idempotent `INSERT ... ON CONFLICT DO NOTHING` with that one pre-known id
+— the identical literal `services/internal/store/proxy_integration_test.go`'s
+own `proxyAgentID` hardcodes, since both this example and that test suite
+must agree with docker-compose.yml's `pep-proxy` and neither may invent a
+different value. This is the one write in this program that cannot move to
+`pap-proxy`, and it is a property of the PAP's own admin-API design (a
+caller-chosen primary key is exactly the kind of write it should refuse), not
+a shortcut.
 
 ## THE PUNCHLINE: why CallCount is dialled directly
 
@@ -80,10 +102,18 @@ dials it on a **separate connection straight to `grpc-target`**, bypassing
 > question through the proxy would make the check depend on the component
 > under test.
 
-The delta between the two reads is **1** — the one Fetch that was ever
-actually pending a policy question. Purge is denied at the proxy every time
-it is tried, and the direct call count proves it, rather than merely trusting
-`pep-proxy`'s own `PermissionDenied` response.
+`proxyTransport` also counts its own `forwarded` calls — every time IT saw a
+call complete successfully (no error, genuinely `Allowed`). The assertion is
+`delta == forwarded`, not a fixed number: every response the client watched
+succeed is one only `grpc-target` itself could have produced, so the two must
+agree exactly, however many times the model asks. `delta > forwarded` would
+mean something reached the target the client was never told about — a
+forwarded-then-errored call, THE PUNCHLINE's own failure mode; `delta <
+forwarded` would mean the client saw successes for calls the target never
+counted, which is impossible unless something else is badly wrong. Purge is
+denied at the proxy every time it is tried and never adds to either side, and
+the direct call count proves it, rather than merely trusting `pep-proxy`'s own
+`PermissionDenied` response.
 
 ## Denial vs. transport error
 
@@ -100,16 +130,16 @@ let a down stack report "enforcement working."
 `llama3.2` is unreliable at recognizing that a step is done: run live, it
 often repeats an already-**ALLOWED** `fetch` call across several turns instead
 of moving on to `purge`, before `agent.go`'s own `maxTurns` cap ends the loop.
-Every one of those repeats is still correctly authorized and still shown in
-the transcript (`agent.Run`'s own `ALLOW fetch ...` line prints once per
-attempt) — but re-forwarding an already-answered idempotent read to
-`grpc-target` would inflate its own call counter with calls that prove nothing
-new and corrupt the one number this example's whole punchline rests on.
-`proxyTransport` memoizes a successful `fetch` result by its arguments within
-one run — never a denial, which must always be asked fresh — so the call
-count stays a true count of how many requests were ever actually pending a
-policy decision, regardless of how many times a weak local model asks for the
-same answer twice.
+Nothing here suppresses that — every repeat is genuinely re-authorized and
+genuinely re-forwarded, exactly as a real caller's repeat would be, and every
+`ALLOW fetch` line in the transcript names a call that really happened. A
+client-side cache that answered "allowed" without asking would be the exact
+anti-pattern a PEP exists to eliminate — it would survive a revocation, an
+epoch bump, or a TTL expiry that a real re-ask would not. So `forwarded`
+(above) simply grows with every genuine repeat, and the `delta == forwarded`
+assertion holds regardless of how chatty the model gets: a run that asks for
+`fetch` five times shows five `ALLOW fetch` lines, a call-count delta of 5,
+and `forwarded` of 5 — still exactly equal, still exit 0.
 
 ## Tenant-wide catch-all label rule
 
