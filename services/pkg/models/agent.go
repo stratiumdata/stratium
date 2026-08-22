@@ -21,6 +21,14 @@ type Agent struct {
 
 	AllowedTools []string `json:"allowed_tools" db:"allowed_tools"`
 
+	// ClassificationCaps is the per-hierarchy ceiling copied onto every ROOT
+	// delegation this agent is issued (internal/pdpgrpc/delegation.go). An
+	// empty map means no classification enforcement -- classification.CheckCap
+	// returns allow for len(caps) == 0 -- so nil and {} are the same thing
+	// here and both mean OFF. Children copy their parent's map, never this
+	// one, so changing it affects only delegations issued after the change.
+	ClassificationCaps map[string]string `json:"classification_caps" db:"classification_caps"`
+
 	// CreatedAt/UpdatedAt were absent from this type before internal/store's
 	// PAP CRUD (Task 3) added them: LoadAgent (internal/store/store.go), the
 	// only reader before that task, reduces to authz.AgentInfo and never

@@ -50,16 +50,16 @@ var ErrAllowedToolsRequired = errors.New("store: allowed_tools is required (use 
 // own doc comment (policy.go) for why: nothing here needs the id before
 // this statement returns, so the schema's own DEFAULT uuid_generate_v4()
 // generates it, read back via RETURNING.
-const insertAgentQuery = `INSERT INTO agents (tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools) ` +
-	`VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at, updated_at`
+const insertAgentQuery = `INSERT INTO agents (tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps) ` +
+	`VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at, updated_at`
 
-const getAgentQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, created_at, updated_at ` +
+const getAgentQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, created_at, updated_at ` +
 	`FROM agents WHERE id = $1`
 
 // listAgentsQuery orders by name, the PAP admin screen's natural order — see
 // policy.go's listPoliciesQuery for the identical reasoning against
 // LoadAllPolicies/LoadAgent's own ORDER BY id.
-const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, created_at, updated_at ` +
+const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, created_at, updated_at ` +
 	`FROM agents ORDER BY name`
 
 // updateAgentQuery leaves updated_at to Postgres (NOW()), returned via
@@ -67,8 +67,8 @@ const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_t
 // clock is authoritative, and reusing it for the audit entry's OccurredAt
 // needs no separate, potentially skewed time.Now() call.
 const updateAgentQuery = `UPDATE agents SET name = $1, provider = $2, model_id = $3, trust_tier = $4, ` +
-	`enabled = $5, suspended = $6, allowed_tools = $7, updated_at = NOW() ` +
-	`WHERE id = $8 RETURNING created_at, updated_at`
+	`enabled = $5, suspended = $6, allowed_tools = $7, classification_caps = $8, updated_at = NOW() ` +
+	`WHERE id = $9 RETURNING created_at, updated_at`
 
 const deleteAgentQuery = `DELETE FROM agents WHERE id = $1 RETURNING name`
 
@@ -83,8 +83,9 @@ func scanFullAgent(row rowScanner) (models.Agent, error) {
 	var trustTier int64
 	var modelID sql.NullString
 	var allowedTools []byte
+	var classificationCaps []byte
 	err := row.Scan(&a.ID, &a.TenantID, &a.Name, &a.Provider, &modelID, &trustTier,
-		&a.Enabled, &a.Suspended, &allowedTools, &a.CreatedAt, &a.UpdatedAt)
+		&a.Enabled, &a.Suspended, &allowedTools, &classificationCaps, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return models.Agent{}, err
 	}
@@ -94,6 +95,12 @@ func scanFullAgent(row rowScanner) (models.Agent, error) {
 	}
 	if err := json.Unmarshal(allowedTools, &a.AllowedTools); err != nil {
 		return models.Agent{}, fmt.Errorf("agent %s allowed_tools decode: %w", a.ID, err)
+	}
+	if err := json.Unmarshal(classificationCaps, &a.ClassificationCaps); err != nil {
+		return models.Agent{}, fmt.Errorf("store: unmarshal classification_caps: %w", err)
+	}
+	if a.ClassificationCaps == nil {
+		a.ClassificationCaps = map[string]string{}
 	}
 	return a, nil
 }
@@ -142,15 +149,29 @@ func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (
 		return models.Agent{}, fmt.Errorf("store: marshal allowed_tools: %w", err)
 	}
 
+	// A nil map must persist as {} and not as SQL NULL: the column is NOT
+	// NULL, and {} is the documented "no cap" value -- classification.CheckCap
+	// treats len(caps) == 0 as allow, so nil and {} are equivalent by meaning
+	// and this normalises them to the one JSON shape the column accepts.
+	caps := a.ClassificationCaps
+	if caps == nil {
+		caps = map[string]string{}
+	}
+	classificationCaps, err := json.Marshal(caps)
+	if err != nil {
+		return models.Agent{}, fmt.Errorf("store: marshal classification_caps: %w", err)
+	}
+
 	row := tx.QueryRowContext(ctx, insertAgentQuery,
 		s.tenantID, a.Name, a.Provider, a.ModelID, int64(a.TrustTier),
-		a.Enabled, a.Suspended, allowedTools)
+		a.Enabled, a.Suspended, allowedTools, classificationCaps)
 	if err := row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if isUniqueViolation(err) {
 			return models.Agent{}, fmt.Errorf("%w: agent named %q", ErrAlreadyExists, a.Name)
 		}
 		return models.Agent{}, fmt.Errorf("store: insert agent %q: %w", a.Name, err)
 	}
+	a.ClassificationCaps = caps // echo the normalised (never-nil) value
 
 	// AgentID is the one audit.Entry field that fits an agent-row write
 	// literally, not by repurposing: it already exists to identify "which
@@ -255,8 +276,20 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		return models.Agent{}, fmt.Errorf("store: marshal allowed_tools: %w", err)
 	}
 
+	// See CreateAgent's identical normalisation: nil must persist as {}, never
+	// as SQL NULL, on the column's NOT NULL constraint.
+	caps := a.ClassificationCaps
+	if caps == nil {
+		caps = map[string]string{}
+	}
+	classificationCaps, err := json.Marshal(caps)
+	if err != nil {
+		return models.Agent{}, fmt.Errorf("store: marshal classification_caps: %w", err)
+	}
+
 	row := tx.QueryRowContext(ctx, updateAgentQuery,
-		a.Name, a.Provider, a.ModelID, int64(a.TrustTier), a.Enabled, a.Suspended, allowedTools, id.String())
+		a.Name, a.Provider, a.ModelID, int64(a.TrustTier), a.Enabled, a.Suspended,
+		allowedTools, classificationCaps, id.String())
 	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.Agent{}, fmt.Errorf("%w: agent %s", ErrNotFound, id)
@@ -268,6 +301,7 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 	}
 	a.ID = id
 	a.TenantID = s.tenantID
+	a.ClassificationCaps = caps // echo the normalised (never-nil) value
 
 	entry := audit.Entry{
 		TenantID:      s.tenantID,

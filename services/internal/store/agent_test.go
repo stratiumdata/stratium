@@ -19,7 +19,7 @@ import (
 
 func agentRowColumns() []string {
 	return []string{"id", "tenant_id", "name", "provider", "model_id",
-		"trust_tier", "enabled", "suspended", "allowed_tools", "created_at", "updated_at"}
+		"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "created_at", "updated_at"}
 }
 
 // validAgent returns a models.Agent that passes validateAgentFields --
@@ -50,7 +50,7 @@ func TestStore_CreateAgent_Success(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "billing-bot", "anthropic", "claude-opus", int64(models.TrustTierCertified),
-			true, false, []byte(`["Read","Bash"]`)).
+			true, false, []byte(`["Read","Bash"]`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -119,7 +119,7 @@ func TestStore_CreateAgent_EmptyAllowedToolsIsAccepted(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "billing-bot", "anthropic", "claude-opus", int64(models.TrustTierCertified),
-			true, false, []byte(`[]`)).
+			true, false, []byte(`[]`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -176,6 +176,74 @@ func TestStore_CreateAgent_AuditFailureRollsBackWrite(t *testing.T) {
 	assertExpectationsMet(t, mock)
 }
 
+// --- ClassificationCaps ---
+
+// TestCreateAgent_RoundTripsClassificationCaps proves the field survives a
+// write and comes back on the response, matching the round-trip discipline
+// TestStore_CreateAgent_Success already applies to AllowedTools.
+func TestCreateAgent_RoundTripsClassificationCaps(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
+		WithArgs(testTenant, "capped", "anthropic", "", int64(models.TrustTierCertified),
+			true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := s.CreateAgent(context.Background(), models.Agent{
+		Name: "capped", Provider: "anthropic", TrustTier: models.TrustTierCertified,
+		Enabled: true, AllowedTools: []string{},
+		ClassificationCaps: map[string]string{"nato": "CONFIDENTIAL"},
+	}, "operator@example.com")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if got.ClassificationCaps["nato"] != "CONFIDENTIAL" {
+		t.Errorf("caps = %v, want nato=CONFIDENTIAL", got.ClassificationCaps)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// A nil map must persist as {} and not as SQL NULL: the column is NOT NULL, and
+// {} is the documented "no cap" value.
+func TestCreateAgent_NilCapsPersistsAsEmptyObject(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
+		WithArgs(testTenant, "uncapped", "anthropic", "", int64(models.TrustTierCertified),
+			true, false, []byte(`[]`), []byte(`{}`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := s.CreateAgent(context.Background(), models.Agent{
+		Name: "uncapped", Provider: "anthropic", TrustTier: models.TrustTierCertified,
+		Enabled: true, AllowedTools: []string{}, ClassificationCaps: nil,
+	}, "operator@example.com")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if got.ClassificationCaps == nil || len(got.ClassificationCaps) != 0 {
+		t.Errorf("caps = %v, want an empty non-nil map", got.ClassificationCaps)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
 // --- GetAgent ---
 
 func TestStore_GetAgent_Success(t *testing.T) {
@@ -189,7 +257,7 @@ func TestStore_GetAgent_Success(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, []byte(`["Read","Bash"]`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`["Read","Bash"]`), []byte(`{"nato":"SECRET"}`), now, now))
 	mock.ExpectCommit()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -198,6 +266,9 @@ func TestStore_GetAgent_Success(t *testing.T) {
 	}
 	if got.Name != "billing-bot" || len(got.AllowedTools) != 2 {
 		t.Errorf("GetAgent() = %+v, want Name=billing-bot with 2 allowed tools", got)
+	}
+	if got.ClassificationCaps["nato"] != "SECRET" {
+		t.Errorf("ClassificationCaps = %v, want nato=SECRET", got.ClassificationCaps)
 	}
 }
 
@@ -214,7 +285,7 @@ func TestStore_GetAgent_NullModelIDDecodesAsEmptyString(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", nil,
-				int64(models.TrustTierCertified), true, false, []byte(`[]`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`[]`), []byte(`{}`), now, now))
 	mock.ExpectCommit()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -241,7 +312,7 @@ func TestStore_GetAgent_CorruptAllowedToolsFailsLoudly(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, []byte(`not-json`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`not-json`), []byte(`{}`), now, now))
 	mock.ExpectRollback()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -284,8 +355,8 @@ func TestStore_ListAgents_IncludesSuspended(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(listAgentsQuery)).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
-			AddRow(uuid.New().String(), testTenant, "active-bot", "anthropic", "", int64(1), true, false, []byte(`[]`), now, now).
-			AddRow(uuid.New().String(), testTenant, "suspended-bot", "anthropic", "", int64(1), true, true, []byte(`[]`), now, now))
+			AddRow(uuid.New().String(), testTenant, "active-bot", "anthropic", "", int64(1), true, false, []byte(`[]`), []byte(`{}`), now, now).
+			AddRow(uuid.New().String(), testTenant, "suspended-bot", "anthropic", "", int64(1), true, true, []byte(`[]`), []byte(`{}`), now, now))
 	mock.ExpectCommit()
 
 	got, err := s.ListAgents(context.Background())
@@ -332,7 +403,7 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
-			false, true, []byte(`["Bash"]`), id.String()).
+			false, true, []byte(`["Bash"]`), []byte(`{}`), id.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at"}).AddRow(now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
