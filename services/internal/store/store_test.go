@@ -56,8 +56,8 @@ func TestStore_LoadAgent_Success(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools"}).
-			AddRow(agentID.String(), int64(2), true, false, []byte(`["Bash","Read"]`)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps"}).
+			AddRow(agentID.String(), int64(2), true, false, []byte(`["Bash","Read"]`), []byte(`{}`)))
 	mock.ExpectCommit()
 
 	got, err := s.LoadAgent(context.Background(), agentID)
@@ -135,8 +135,8 @@ func TestStore_LoadAgent_DecodeFailure(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools"}).
-			AddRow(agentID.String(), int64(0), true, false, []byte(`not-json`)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps"}).
+			AddRow(agentID.String(), int64(0), true, false, []byte(`not-json`), []byte(`{}`)))
 	mock.ExpectRollback()
 
 	got, err := s.LoadAgent(context.Background(), agentID)
@@ -167,6 +167,33 @@ func TestStore_LoadAgent_SetTenantFails(t *testing.T) {
 	_, err := s.LoadAgent(context.Background(), agentID)
 	if err == nil {
 		t.Fatal("LoadAgent() error = nil, want error when SET LOCAL fails")
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_LoadAgent_CarriesClassificationCaps proves the field added to
+// authz.AgentInfo for delegation-issuance's future use (Task 3) actually
+// comes back from a real LoadAgent call, not just that the struct compiles.
+func TestStore_LoadAgent_CarriesClassificationCaps(t *testing.T) {
+	s, mock := newMockStore(t)
+	agentID := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
+		WithArgs(agentID.String()).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps"}).
+			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`)))
+	mock.ExpectCommit()
+
+	info, err := s.LoadAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if info.ClassificationCaps["nato"] != "CONFIDENTIAL" {
+		t.Errorf("caps = %v, want nato=CONFIDENTIAL", info.ClassificationCaps)
 	}
 
 	assertExpectationsMet(t, mock)

@@ -131,6 +131,12 @@ type AgentInfo struct {
 	Enabled      bool
 	Suspended    bool
 	AllowedTools []string
+
+	// ClassificationCaps is the template a ROOT delegation's caps are copied
+	// from at issuance. It is NOT consulted at decision time -- the decision
+	// reads the delegation's own caps (internal/authz/delegation.go) -- so a
+	// change here never affects a delegation already issued.
+	ClassificationCaps map[string]string
 }
 
 // Request is a complete decision input. Chain is ordered root-first, with the
