@@ -1,0 +1,406 @@
+# Quickstart — `deploy/stratium`
+
+How to get from a fresh clone to a coding agent whose tool calls are actually
+being authorized, and back out again.
+
+**Every command below was run against a live stack while writing this. The
+output under each step is what was observed, not what the code suggests should
+happen.** Ids, ports and timings will differ on your run; everything else should
+match.
+
+`deploy/stratium` is a single Python 3 file with no third-party dependencies. It
+drives the product but is not part of it — you can delete it and the system still
+works, you just have to do all of this by hand.
+
+---
+
+## 0. Before you start
+
+You need Docker (with `docker compose`, v2 — not the old `docker-compose`), a Go
+toolchain, and Python 3. The script checks all three before doing anything else
+and names what is missing.
+
+```bash
+git clone <this repo> && cd stratium-data
+```
+
+Everything below runs from the repository root.
+
+---
+
+## 1. Bring it up
+
+```bash
+deploy/stratium up --harness claude
+```
+
+**The harness flag is required and has no default.** The two harnesses write
+different files, and a hook installed on the one you are *not* running is
+silently no enforcement at all — so the script makes you say which. Use
+`--harness codex`, or `--harness both`.
+
+**Observed** (about 80 seconds warm; the first run is longer because it builds
+images):
+
+```
+[1] Preflight
+    ok   docker, docker compose and go are present
+
+[2] Stack up (this is the slow one -- it builds images)
+    ok   compose project: docker
+    ok   pap=localhost:51465  pdp=localhost:51458  kc=localhost:64634
+         resolved now, never stored -- they change on every compose up
+
+[3] Build the PEP
+    ok   /Users/you/stratium-data/bin/stratium-pep
+
+[4] Policy so the principal may delegate
+    ok   already present (subject agent-tester@example.com)
+
+[5] Seed the tool catalog
+    ok   tool_catalog rows: 29 -> 29
+
+[6] Agent row
+    ok   reused: quickstart-46384b (0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19)
+
+[7] Classification caps
+    ok   already present (catch-all, so every other probe stays UNCLASSIFIED)
+    ok   already present ("/secret-*" -> SECRET)
+    ok   quickstart-46384b capped at {'nato': 'CONFIDENTIAL'}
+         verify's classification case needs this; state['caps'] is how it knows
+
+[8] Delegation
+    ok   1f9a667e-1e50-426d-a2c9-f9e9b0321cdb  grants Read,Grep,Glob  tier 3
+
+[9] Wire the hooks
+    ...
+
+[10] Verify -- onboarding is not done until a denial is observed
+```
+
+**PASS if** step 10 ends with four `PASS` lines and `Enforcement proven`. See §3.
+
+> The run above is a **warm** one — `already present`, `reused`, `29 -> 29`. On a
+> genuinely first run those read `created`, `created`, and `0 -> 29`, and the
+> whole thing takes minutes rather than 80 seconds because it builds the images.
+> Every step is idempotent, so re-running `up` is safe and is the fastest way to
+> repair a half-configured stack.
+
+### What those ten steps actually did
+
+Steps 4 and 5 are the two that look like boilerplate and are not. Without the
+policy in step 4, `session-start` fails with *"none of the requested tools are
+held by this principal"* — the delegation cannot be issued at all. Without the
+catalog in step 5 the PDP has no way to know which argument of a tool call names
+the resource, so nothing can be classified.
+
+Step 7 registers two label rules and caps the agent. The catch-all (`""` prefix →
+`nato UNCLASSIFIED`) matters more than it looks: **once any cap is set, a resource
+whose label cannot be resolved is denied.** Without a catch-all, capping an agent
+denies essentially everything. The script refuses to set a cap without one — see
+§7.
+
+Step 8 issues a root delegation granting a deliberately narrow `Read,Grep,Glob`.
+That narrowness is what makes step 10 able to prove anything.
+
+---
+
+## 2. Finish the wiring
+
+If you ran `up` from an ordinary terminal, step 9 wired the hooks and you can
+skip to §3.
+
+If you ran it **from inside a Claude Code or Codex session**, step 9 stopped:
+
+```
+[9] Wire the hooks
+         SKIPPED -- this is running inside a claude session.
+         Installing now would deny every tool call in it, including the ones
+         you would need to recover: the session picks the hook up live, but it
+         was not launched with the environment the hook reads.
+
+         Finish from a plain terminal:
+             deploy/stratium install --claude --bin /Users/you/stratium-data/bin/stratium-pep
+             deploy/stratium run claude
+
+         Or re-run with --wire-anyway if you meant to disable this session.
+```
+
+This is deliberate, and it is the trap most worth understanding. A `PreToolUse`
+hook with `matcher: "*"` takes effect in an already-running session **immediately**.
+That session was not launched with the eleven environment variables the hook
+reads, so every tool call in it starts denying — including the ones you would use
+to undo it. Run the two commands from a plain terminal instead.
+
+```bash
+deploy/stratium install --claude --bin "$PWD/bin/stratium-pep"
+```
+
+**Observed:**
+
+```
+installed SessionStart + PreToolUse (matcher '*', command '/Users/you/stratium-data/bin/stratium-pep') in .claude/settings.json
+```
+
+---
+
+## 3. Launch an agent
+
+**Always start the agent through the launcher:**
+
+```bash
+deploy/stratium run claude
+```
+
+Anything you would pass to `claude` goes after it: `deploy/stratium run claude --resume`.
+
+The launcher resolves the Docker ports and the agent id fresh, exports the eleven
+`STRATIUM_PEP_*` variables, and `exec`s the real binary. **Starting `claude`
+directly leaves it denying every tool call** for want of configuration.
+
+### Why a launcher and not a config file
+
+Two of the eleven values cannot be stored:
+
+- `STRATIUM_PEP_PDP_ADDR` is a Docker **ephemeral port**. It changed three times
+  in one afternoon while this guide was being written — `64645`, then `60087`,
+  then `51458`. Anything written to a file is wrong after the next
+  `compose up`.
+- Operator tokens expire after **five minutes** (Keycloak's default; the realm
+  sets no `accessTokenLifespan`). The script mints them per request rather than
+  holding one.
+
+So the rule the whole tool is built around: **persist identity, never
+addresses.** `.stratium-quickstart.json` holds the agent id and file paths.
+Ports and tokens are never written to disk.
+
+---
+
+## 4. See it enforce
+
+`up` registered a rule mapping the prefix `/secret-` to `nato SECRET`, so any
+path starting that way is above the agent's `CONFIDENTIAL` ceiling. Make the file
+first — see the warning below — then ask for it in the launched session:
+
+```bash
+mkdir -p /secret-demo && echo 'classified' > /secret-demo/plans.txt
+```
+
+```
+use your Read tool on /secret-demo/plans.txt
+```
+
+The tool call is denied before it runs, and the agent is told why:
+
+```
+resource classification SECRET exceeds delegation cap CONFIDENTIAL in hierarchy "nato" (depth 0)
+```
+
+Reading anything else — `/tmp/notes.txt` — succeeds, because the catch-all rule
+labels it `UNCLASSIFIED`, which is under the cap.
+
+> **Ask for a tool, not an outcome, and make the file real.** This is the step
+> most likely to look like a failure when nothing is wrong. Point a capable model
+> at a path that does not exist and it lists the directory instead; point it at an
+> empty file and it may `cat` it through `Bash`. Either way `Read` never fires,
+> the hook is never consulted, and you have proven nothing. Name the tool
+> explicitly, give the file content, or skip the model entirely and use `verify`
+> (§5).
+>
+> Note also that `Bash(cat /secret-demo/plans.txt)` is **not** equivalent. `Bash`
+> is catalogued with a command field and no resource field, so its tier is derived
+> from the command text and no resource label is ever resolved. Classification
+> caps constrain tools that declare a resource; reading the same bytes through a
+> shell is a different check.
+
+---
+
+## 5. `verify` — proof, on demand
+
+```bash
+deploy/stratium verify
+```
+
+**Observed:**
+
+```
+delegation grants Read,Grep,Glob
+
+  PASS  Read               exit=0 (want 0)  granted -- must be allowed
+  PASS  LS                 exit=2 (want 2)  catalogued, held tool not in the grant -- must be denied
+        tool "LS" not in delegation approved_tools at depth 0
+  PASS  Frobnicate05946b8f exit=2 (want 2)  not even catalogued -- must be denied
+        tool "Frobnicate05946b8f" not in delegation approved_tools at depth 0
+  PASS  classification     exit=2 (want 2)  SECRET over a CONFIDENTIAL cap
+        resource classification SECRET exceeds delegation cap CONFIDENTIAL in hierarchy "nato" (depth 0)
+
+Enforcement proven: a held tool allowed, an unheld tool denied.
+```
+
+Exit `0` if every case passes, `1` otherwise. It feeds decisions straight to the
+real binary — no model, no guessing what a tool call will look like.
+
+Each case asserts on the **reason text**, not just the exit code. That matters
+because this system has four independent ways to deny — action tier, tool
+holding, classification, missing configuration — and all four exit `2`. A case
+that checked only the exit code would stay green while silently testing something
+else. That happened during development: a `Write` probe labelled "not in the
+grant" was actually denying on action tier, because of a stale `tier_overrides`
+row left on the shared tenant by an unrelated test suite.
+
+Each run uses a fresh uuid-tagged resource path, so the PDP's 30-second decision
+cache cannot answer for it.
+
+---
+
+## 6. `doctor` — when something is wrong
+
+```bash
+deploy/stratium doctor
+```
+
+**Observed**, run from a shell that is not the launcher:
+
+```
+  OK  toolchain    docker, docker compose, go
+  OK  stack        18 services running
+  OK  ports        pap=localhost:51465 pdp=localhost:51458
+  OK  state        quickstart-46384b (0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19)
+  OK  binary       /Users/you/stratium-data/bin/stratium-pep
+  --  hooks        none in any scope
+  XX  environment  11 of 11 missing in this shell
+     -> you are outside the launcher -- use: deploy/stratium run claude
+  OK  delegation   1f9a667e-1e50-426d-a2c9-f9e9b0321cdb grants Read,Grep,Glob
+  OK  caps         {"nato": "CONFIDENTIAL"} -- classification enforcement is on
+```
+
+It walks the layers in dependency order and names the fix for whatever is broken.
+Exit `1` if anything is wrong.
+
+The `environment XX` above is not a fault — it is `doctor` correctly reporting
+that *this* shell is not the launcher. That line is green only inside
+`deploy/stratium run`.
+
+**`hooks` is checked across every scope both harnesses merge** — project
+`settings.json`, project `settings.local.json`, user `settings.json`, and
+`~/.codex/hooks.json` — and prints the source of each. A hook hiding in a scope
+you did not check denies every tool call in every project, while the one file you
+did check reports clean.
+
+---
+
+## 7. Reading the refusals
+
+The script refuses four things. Each refusal is a real hazard, not fussiness.
+
+**No harness.**
+
+```
+stratium: error: pick a harness: --claude or --codex
+```
+
+**A binary that does not resolve.**
+
+```
+stratium: 'stratium-pep' is not runnable (not on PATH). A PreToolUse hook that
+cannot run exits 127, which Claude Code treats as a non-blocking error — the tool
+call proceeds unchecked. Pass --bin with a real path, or --force if you are
+writing settings for another machine.
+```
+
+This is the important one. A missing hook binary is not a broken enforcement
+point, it is **no enforcement point** — the transcript shows a hook error and
+every tool call proceeds. `--force` exists for writing settings destined for
+another machine.
+
+**A cap with no catch-all rule** — `409`, from the API rather than the script.
+With any cap set, an unresolvable label denies, so a cap without a catch-all
+denies nearly everything. Register a `""`-prefix rule first, or pass
+`?allow_uncovered=true` if a deny-by-default posture is what you want.
+
+**A teardown of the wrong compose project.**
+
+```
+stratium: this would tear down compose project 'docker' with -v (volumes and
+all), but `up` created 'stratium-throwaway'. Refusing.
+```
+
+Docker derives the project name from the compose file's parent directory —
+`docker` here, which is not distinctive. Two checkouts resolve to the same
+project, so `up` records what it created and `down` refuses anything else.
+
+---
+
+## 8. Tear it down
+
+```bash
+deploy/stratium down
+```
+
+**Order matters, and the script enforces it: hooks come off first, then the
+stack.** Reverse that and every tool call in an open agent session denies against
+a PDP that is no longer listening.
+
+`down` removes the hooks from every scope, stops the stack with `-v`, and deletes
+the state file, the built binary and the session file. Volumes go with it, so
+agents, delegations and label rules do not survive.
+
+To keep the stack and only unwire the agent:
+
+```bash
+deploy/stratium --claude uninstall
+```
+
+---
+
+## 9. Command reference
+
+| Command | What it does |
+|---|---|
+| `up --harness {claude,codex,both}` | Everything, ending on an observed denial. `--wire-anyway` overrides the in-session guard. |
+| `run {claude,codex} [args...]` | Resolves ports and env, then `exec`s the agent. |
+| `verify` | Four decisions through the real binary. Exit 0 on all pass. |
+| `doctor` | Layer-by-layer diagnosis across every hook scope. Exit 0 when healthy. |
+| `down [--force]` | Hooks, then stack, then local files. Refuses a foreign compose project. |
+| `install` / `uninstall` / `status` | Hook wiring only. Requires `--claude` or `--codex`. |
+| `selftest` | The script's own assertions. No stack required. |
+
+Shared flags work on **either side** of the subcommand — `--claude install` and
+`install --claude` are the same. Useful ones: `--bin PATH`, `--matcher Read` (start
+narrow), `--only PreToolUse`, `--user`, `-n/--dry-run`.
+
+### `--only PreToolUse`
+
+`up` installs both hooks: `SessionStart` issues a delegation per session,
+`PreToolUse` authorizes each call. If you are working through the manual test
+plan, install **only** `PreToolUse` — a `SessionStart` hook re-issues a fresh
+delegation on every session start, discarding one you built by hand.
+
+---
+
+## 10. Things that will bite you
+
+- **A hook installed inside a running session takes effect immediately.** So does
+  a removal. Do not install `matcher: "*"` from a session you are using.
+- **`session-start`'s eight variables are not `hook`'s eight.** They overlap in
+  five. Export only the first set and every tool call denies with `missing
+  required configuration` — a denial that reads exactly like a policy denial
+  until you open the reason. The launcher sets all eleven.
+- **Every tool call is denied until a session is started and a policy permits
+  it.** Seeing everything denied after installing a hook is usually correct.
+- **Five tools can never satisfy a cap.** `Glob`, `Grep`, `WebFetch`, `WebSearch`
+  and `TodoWrite` declare no resource field, so they produce nothing to label and
+  deny under any cap. The caps API lists them in its response.
+- **Integration suites leave rows on the shared tenant** — `tier_overrides` in
+  particular — and do not clean up. If a decision denies for a reason you did not
+  expect, check that table before suspecting your code.
+
+---
+
+## See also
+
+- `docs/architecture.md` — how the PEP, PDP and PAP fit together.
+- `docs/pep.md` — the operator reference for the enforcement point: every
+  configuration value, and how to read a denial.
+- `docs/testing/2026-08-20-agent-integration-test.md` — the manual walkthrough
+  this script automates, for when you want to see the moving parts.
