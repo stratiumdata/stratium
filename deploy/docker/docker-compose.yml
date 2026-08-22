@@ -868,5 +868,34 @@ services:
     ports:
       - "8080"
 
+  # LiteLLM, fronted by Envoy for the extauthz PEP example: which model an
+  # agent may call becomes a policy decision at the ext_authz filter, not
+  # plumbing. Two models are declared (config.yaml, this directory) --
+  # llama3.2, served by the host's Ollama, and gpt-4o, deliberately
+  # unreachable (api_base http://127.0.0.1:1) so a call to it can only ever
+  # fail for the reason the examples exist to prove: policy refused it,
+  # before LiteLLM ever tried to reach it. See that file's own comment.
+  #
+  # extra_hosts maps host.docker.internal on Linux too (Docker Desktop
+  # already provides it on macOS/Windows) -- config.yaml's llama3.2 entry
+  # depends on it to reach the host's own Ollama.
+  #
+  # Port published without a fixed host port, matching every other service
+  # in this file, so it doesn't collide with a developer's own LiteLLM.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm/config.yaml:/etc/litellm/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   pgdata:

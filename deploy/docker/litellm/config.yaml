@@ -1,0 +1,23 @@
+# deploy/docker/litellm/config.yaml
+model_list:
+  # Served by the host's Ollama. host.docker.internal is mapped via
+  # extra_hosts in docker-compose.yml so this works on Linux too.
+  - model_name: llama3.2
+    litellm_params:
+      model: ollama/llama3.2
+      api_base: http://host.docker.internal:11434
+
+  # Declared and DELIBERATELY UNREACHABLE. The examples expect policy to
+  # refuse this model before reachability is ever consulted. If it were
+  # reachable, an example passing would not prove policy did anything; if it
+  # were absent, LiteLLM would 400 and the denial would come from the wrong
+  # component. Unreachable-but-declared is the only shape that makes the
+  # PDP's answer the reason the call fails.
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_base: http://127.0.0.1:1
+      api_key: not-a-real-key
+
+litellm_settings:
+  drop_params: true

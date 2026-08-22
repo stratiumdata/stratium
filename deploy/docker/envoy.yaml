@@ -39,6 +39,16 @@ static_resources:
                     - name: backend
                       domains: ["*"]
                       routes:
+                        # Matched before the "/" catch-all below (Envoy
+                        # takes the first matching route): the PEP examples'
+                        # LiteLLM route, added for Task 4. Same ext_authz
+                        # filter, same PDP decision, gating which model an
+                        # agent may reach -- the litellm compose service's
+                        # own comment explains the two declared models.
+                        - match: { prefix: "/chat/completions" }
+                          route:
+                            cluster: litellm
+                            timeout: 0s
                         - match: { prefix: "/" }
                           route:
                             cluster: echo_upstream
@@ -104,3 +114,17 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: echo-upstream, port_value: 8080 }
+
+    # litellm: the PEP examples' LLM gateway (Task 4). Plain HTTP/1.1 --
+    # Envoy's default protocol -- since LiteLLM's proxy is an ordinary HTTP
+    # server, same as echo_upstream above.
+    - name: litellm
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: litellm
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: litellm, port_value: 4000 }
