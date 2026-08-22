@@ -106,7 +106,8 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		return nil, err
 	}
 
-	if _, err := s.store.LoadAgent(ctx, agentID); err != nil {
+	agent, err := s.store.LoadAgent(ctx, agentID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, status.Errorf(codes.NotFound, "agent %s: %s", agentID, err)
 		}
@@ -168,12 +169,16 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	now := time.Now()
 	newID := uuid.New()
 	d := &models.Delegation{
-		ID:                  newID,
-		UserID:              req.GetSubject(),
-		AgentID:             agentID,
-		ApprovedTools:       granted.Tools,
-		MaxActionTier:       granted.MaxActionTier,
-		ClassificationCaps:  map[string]string{},
+		ID:            newID,
+		UserID:        req.GetSubject(),
+		AgentID:       agentID,
+		ApprovedTools: granted.Tools,
+		MaxActionTier: granted.MaxActionTier,
+		// Copied from the agent row, which is the only place an operator can
+		// set a ceiling (PUT /v1/agents/{id}/classification-caps). A root has
+		// no parent to clamp against, so this is where the ceiling enters the
+		// chain; children below copy their parent and can only narrow.
+		ClassificationCaps:  copyStringMap(agent.ClassificationCaps),
 		ResourceConstraints: map[string]string{},
 		Purpose:             req.GetPurpose(),
 		ExpiresAt:           now.Add(time.Duration(req.GetTtlSeconds()) * time.Second),

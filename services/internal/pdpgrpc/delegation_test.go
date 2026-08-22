@@ -719,3 +719,81 @@ func TestCreateDelegation_RootIsCreatedWithNoClassificationCap(t *testing.T) {
 			"of a remedy that would in fact work. Update docs/pep.md in this commit.", caps)
 	}
 }
+
+// TestCreateDelegation_RootCopiesAgentCaps is the counterpart to
+// TestCreateDelegation_RootIsCreatedWithNoClassificationCap above: when the
+// agent row does carry a cap, a root delegation must be issued with it, not
+// with an empty map. wellFormedDelegationFixture's own agent has no caps set
+// (its zero value), so this test overrides ClassificationCaps on the fixture
+// agent explicitly rather than relying on the default.
+func TestCreateDelegation_RootCopiesAgentCaps(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	fs.agent.ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
+	srv := newDelegationServer(fs, permissiveGrantSet())
+
+	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+
+	if got := fs.created[0].ClassificationCaps; got["nato"] != "CONFIDENTIAL" {
+		t.Errorf("root caps = %v, want nato=CONFIDENTIAL", got)
+	}
+}
+
+// Pins today's behaviour: an agent with no caps must still produce an
+// uncapped root, so this change cannot silently start capping existing
+// fleets. Unlike TestCreateDelegation_RootIsCreatedWithNoClassificationCap
+// (which relies on the fixture agent's zero-value ClassificationCaps), this
+// sets an explicit non-nil empty map on the agent to pin the copy path
+// itself: copyStringMap(agent.ClassificationCaps) must still come out empty.
+func TestCreateDelegation_RootWithNoAgentCapsStaysUncapped(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	fs.agent.ClassificationCaps = map[string]string{}
+	srv := newDelegationServer(fs, permissiveGrantSet())
+
+	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+
+	if caps := fs.created[0].ClassificationCaps; len(caps) != 0 {
+		t.Errorf("root caps = %v, want empty", caps)
+	}
+}
+
+// A child still copies its PARENT, never the agent row -- the inherit-and-
+// narrow rule the chain argument depends on. The agent here carries a wider
+// cap (TOP-SECRET) than the parent (RESTRICTED); if CreateDelegation ever
+// started reading the agent for a child the way it now does for a root, this
+// would catch it by returning the agent's cap instead of the parent's.
+func TestCreateDelegation_ChildStillCopiesParentNotAgent(t *testing.T) {
+	fs, req, agentID := wellFormedDelegationFixture()
+	fs.agent.ClassificationCaps = map[string]string{"nato": "TOP-SECRET"}
+	parentID := uuid.New()
+	req.ParentDelegationId = parentID.String()
+	fs.chain = []*models.Delegation{{
+		ID:                 parentID,
+		AgentID:            agentID,
+		MaxActionTier:      models.ActionTierDestructive,
+		ApprovedTools:      []string{"Bash", "Read"},
+		ClassificationCaps: map[string]string{"nato": "RESTRICTED"},
+		ChainAgentIDs:      []uuid.UUID{agentID},
+	}}
+	srv := newDelegationServer(fs, permissiveGrantSet())
+
+	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+
+	if got := fs.created[0].ClassificationCaps; got["nato"] != "RESTRICTED" {
+		t.Errorf("child caps = %v, want the parent's RESTRICTED, not the agent's TOP-SECRET", got)
+	}
+}
