@@ -16,8 +16,15 @@ type AgentCapsView struct {
 	CatchAll map[string]*string `json:"catch_all"`
 
 	// UnsatisfiableTools are tools that can never satisfy ANY cap, because they
-	// declare no resource_field and so produce no resource to label. Not
-	// "denied by this cap" -- denied by any cap at all.
+	// produce no resource for classification.CheckCap to label at all -- not
+	// "denied by this cap" -- denied by any cap at all. This covers a
+	// catalogued tool with no resource_field, and, for a RESTRICTED agent
+	// only, an allowed tool with no catalog row at all (both are equally
+	// resource-less, and a restricted allowlist is finite enough to
+	// enumerate). For an UNRESTRICTED agent (AllowedTools == []),
+	// uncatalogued tools CANNOT be enumerated here: there is no finite list
+	// to scan, so an empty-looking result for such an agent is not a
+	// guarantee every tool is satisfiable, only that every CATALOGUED one is.
 	UnsatisfiableTools []string `json:"unsatisfiable_tools"`
 
 	// LiveDelegations counts the agent's delegations that are neither revoked

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,38 @@ func auditArgsWithEventType(want string) []driver.Value {
 		args[i] = sqlmock.AnyArg()
 	}
 	args[eventTypeArgIndex] = want
+	return args
+}
+
+// reasonArgIndex is insertAuditQuery's own zero-based position for `reason`
+// -- the same index resource_label_test.go's own auditReasonArgIndex names,
+// duplicated here (rather than reused across files in the same package)
+// only because that constant is unexported and this file already keeps its
+// own eventTypeArgIndex sibling the same way.
+const reasonArgIndex = 17
+
+// captureReasonArg is a sqlmock.Argument that always matches and copies the
+// string it was compared against into *dst -- used where a test needs to
+// read back what Reason writeAgentCaps actually sent, not merely assert a
+// substring, e.g. to prove two writes audited two DIFFERENT reasons (ITEM 3).
+type captureReasonArg struct{ dst *string }
+
+func (c captureReasonArg) Match(v driver.Value) bool {
+	if s, ok := v.(string); ok {
+		*c.dst = s
+	}
+	return true
+}
+
+// auditArgsCapturingReason builds insertAuditQuery's 22 arguments, all
+// unconstrained except reason, which is captured into *dst rather than
+// asserted against here.
+func auditArgsCapturingReason(dst *string) []driver.Value {
+	args := make([]driver.Value, 22)
+	for i := range args {
+		args[i] = sqlmock.AnyArg()
+	}
+	args[reasonArgIndex] = captureReasonArg{dst: dst}
 	return args
 }
 
@@ -204,23 +237,98 @@ func TestSetAgentClassificationCaps_RefusesWithoutCatchAll(t *testing.T) {
 // completion: catchAllLevels, the write+audit, then agentCapsView's own
 // three reads (GetAgent for AllowedTools, the catalog, the live-delegation
 // count) -- in that order, matching SetAgentClassificationCaps' real call
-// sequence (catchAllLevels -> writeAgentCaps -> agentCapsView).
+// sequence (catchAllLevels -> writeAgentCaps -> agentCapsView). It also pins
+// ITEM 7: CatchAll["nato"] is nil here (there is no catch-all rule for
+// "nato" -- that is the whole reason this write needed the override), the
+// exact field that flags the dangerous state, and this test must actually
+// look at it, not just check err == nil. And ITEM 3: the audited Reason
+// must say the override was used.
 func TestSetAgentClassificationCaps_AllowUncoveredOverrides(t *testing.T) {
 	s, mock := newMockStore(t)
 	id, now := uuid.New(), time.Now().UTC()
 	expectLabelRules(mock, []models.ResourceLabelRule{
 		{Prefix: "/secret/", Hierarchy: "nato", Level: "SECRET"},
 	})
-	expectWriteAndAudit(mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(auditArgsWithReason("allow_uncovered=true")...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	expectGetAgentRow(mock, id, nil, nil)
 	expectCatalog(mock, nil)
 	expectLiveDelegations(mock, 0)
 
-	if _, err := s.SetAgentClassificationCaps(context.Background(), id,
-		map[string]string{"nato": "CONFIDENTIAL"}, true, "operator@example.com", now); err != nil {
+	view, err := s.SetAgentClassificationCaps(context.Background(), id,
+		map[string]string{"nato": "CONFIDENTIAL"}, true, "operator@example.com", now)
+	if err != nil {
 		t.Fatalf("with allowUncovered: %v", err)
 	}
+	if got := view.CatchAll["nato"]; got != nil {
+		t.Errorf("CatchAll[nato] = %v, want nil -- no catch-all rule exists for nato, "+
+			"this write only succeeded because of the override", got)
+	}
 	assertExpectationsMet(t, mock)
+}
+
+// TestSetAgentClassificationCaps_AllowUncoveredIsAuditedVisibly pins ITEM 3
+// from the whole-branch review directly: the spec's Risks section requires
+// ?allow_uncovered=true to "appear in the audit entry" because it is this
+// call's single most dangerous path, and an audit Reason indistinguishable
+// from a normal guarded write would defeat that. Runs the identical cap
+// write twice -- once guarded (a catch-all rule exists, allowUncovered is
+// not even load-bearing) and once overridden (no catch-all rule,
+// allowUncovered=true is the only reason the write succeeds) -- and asserts
+// the two audited Reason strings actually differ, not merely that one of
+// them happens to contain a substring.
+func TestSetAgentClassificationCaps_AllowUncoveredIsAuditedVisibly(t *testing.T) {
+	write := func(t *testing.T, rules []models.ResourceLabelRule, allowUncovered bool) string {
+		t.Helper()
+		s, mock := newMockStore(t)
+		id, now := uuid.New(), time.Now().UTC()
+		var reason string
+
+		expectLabelRules(mock, rules)
+		mock.ExpectBegin()
+		expectSetTenant(mock)
+		mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+		expectAdvisoryLock(mock)
+		mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+		mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+			WithArgs(auditArgsCapturingReason(&reason)...).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+		expectGetAgentRow(mock, id, nil, nil)
+		expectCatalog(mock, nil)
+		expectLiveDelegations(mock, 0)
+
+		if _, err := s.SetAgentClassificationCaps(context.Background(), id,
+			map[string]string{"nato": "CONFIDENTIAL"}, allowUncovered, "operator@example.com", now); err != nil {
+			t.Fatalf("SetAgentClassificationCaps() error = %v", err)
+		}
+		assertExpectationsMet(t, mock)
+		return reason
+	}
+
+	guardedReason := write(t, []models.ResourceLabelRule{
+		{Prefix: "", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	}, false)
+	overriddenReason := write(t, []models.ResourceLabelRule{
+		{Prefix: "/secret/", Hierarchy: "nato", Level: "SECRET"},
+	}, true)
+
+	if strings.Contains(guardedReason, "allow_uncovered") {
+		t.Errorf("guarded reason = %q, must not mention allow_uncovered", guardedReason)
+	}
+	if !strings.Contains(overriddenReason, "allow_uncovered=true") {
+		t.Errorf("overridden reason = %q, want it to contain allow_uncovered=true", overriddenReason)
+	}
+	if guardedReason == overriddenReason {
+		t.Errorf("both writes audited the identical reason %q -- the override is invisible in the chain", guardedReason)
+	}
 }
 
 // TestSetAgentClassificationCaps_RefusesWhenOnlyOneOfTwoHierarchiesHasCatchAll
@@ -229,6 +337,17 @@ func TestSetAgentClassificationCaps_AllowUncoveredOverrides(t *testing.T) {
 // hierarchy would wrongly let this request through. Both label-rule reads
 // happen inside catchAllLevels' one ListResourceLabelRules call, before the
 // guard loop runs at all.
+//
+// ITEM 4 (whole-branch review, spec defect): resource_label_rules is UNIQUE
+// (tenant_id, prefix), not (tenant_id, prefix, hierarchy) -- migrations/
+// 000019's own comment records this was deliberate, and that at most one
+// prefix:"" rule can exist per tenant, in ONE hierarchy. That means a cap
+// naming two hierarchies -- exactly this test's shape -- can NEVER have a
+// catch-all satisfied for both at once: this ErrConflict is the ONLY
+// reachable outcome for a multi-hierarchy cap without ?allow_uncovered=true,
+// not merely one case among several this function can produce. The 409
+// message says so (see the multiHierarchyNote branch in
+// SetAgentClassificationCaps).
 func TestSetAgentClassificationCaps_RefusesWhenOnlyOneOfTwoHierarchiesHasCatchAll(t *testing.T) {
 	s, mock := newMockStore(t)
 	id, now := uuid.New(), time.Now().UTC()
@@ -241,6 +360,9 @@ func TestSetAgentClassificationCaps_RefusesWhenOnlyOneOfTwoHierarchiesHasCatchAl
 		map[string]string{"commercial": "INTERNAL", "nato": "CONFIDENTIAL"}, false, "operator@example.com", now)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("err = %v, want it to wrap ErrConflict (nato has no catch-all, even though commercial does)", err)
+	}
+	if !strings.Contains(err.Error(), "only ONE catch-all") {
+		t.Errorf("err = %v, want the message to explain that only one catch-all rule can exist per tenant", err)
 	}
 	assertExpectationsMet(t, mock)
 }
@@ -278,35 +400,43 @@ func TestSetAgentClassificationCaps_NormalizesCaseAndMatchesCatchAllCaseInsensit
 	assertExpectationsMet(t, mock)
 }
 
-// TestSetAgentClassificationCaps_EmptyCapsAuditsAsCleared pins IMPORTANT 3:
-// Set called with nil/{} is a second off-switch (classification.CheckCap
-// allows everything once len(caps) == 0, same as Clear's own {}), so it must
-// audit as agent_caps_cleared, not agent_caps_set -- otherwise an auditor
-// grepping the chain for agent_caps_cleared misses every one of these.
-func TestSetAgentClassificationCaps_EmptyCapsAuditsAsCleared(t *testing.T) {
-	s, mock := newMockStore(t)
-	id, now := uuid.New(), time.Now().UTC()
+// TestSetAgentClassificationCaps_RequiresNonEmptyCaps pins ITEM 1 from the
+// whole-branch review: PUT must not be able to clear enforcement by
+// omission, because the entire justification for classification-caps being
+// a sub-resource rather than a field on PUT /v1/agents/{id} is that clearing
+// is an explicit DELETE. A nil map (what an absent or misspelled
+// classification_caps key also decodes to, at this layer -- putAgentCaps'
+// decodeJSON never distinguishes them) and an explicit empty map must both
+// be refused, with allowUncovered=true proving the override cannot
+// substitute for a non-empty cap either -- it only ever widens what a
+// non-empty cap is allowed to do. The refusal must happen before any query
+// runs (no mock expectations registered here at all), so the store is safe
+// for any caller, not only cmd/stratium-pap's handler.
+func TestSetAgentClassificationCaps_RequiresNonEmptyCaps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		caps map[string]string
+	}{
+		{"nil map (also what an absent or misspelled key decodes to)", nil},
+		{"explicit empty map", map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, mock := newMockStore(t)
+			id, now := uuid.New(), time.Now().UTC()
 
-	expectLabelRules(mock, nil) // catchAllLevels runs unconditionally, even for an empty caps map
-
-	mock.ExpectBegin()
-	expectSetTenant(mock)
-	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
-	expectAdvisoryLock(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
-		WithArgs(auditArgsWithEventType(eventTypeAgentCapsCleared)...).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-
-	expectGetAgentRow(mock, id, nil, nil)
-	expectCatalog(mock, nil)
-	expectLiveDelegations(mock, 0)
-
-	if _, err := s.SetAgentClassificationCaps(context.Background(), id, nil, true, "operator@example.com", now); err != nil {
-		t.Fatalf("SetAgentClassificationCaps(nil caps) error = %v", err)
+			_, err := s.SetAgentClassificationCaps(context.Background(), id, tc.caps, true, "operator@example.com", now)
+			if !errors.Is(err, ErrClassificationCapsRequired) {
+				t.Fatalf("err = %v, want ErrClassificationCapsRequired", err)
+			}
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("err = %v, want it to wrap ErrInvalidRequest (so writeStoreError maps it to 400)", err)
+			}
+			if !strings.Contains(err.Error(), "DELETE") {
+				t.Errorf("err = %v, want it to name DELETE as the way to turn enforcement off", err)
+			}
+			assertExpectationsMet(t, mock) // refused before catchAllLevels' own query, even with the override set
+		})
 	}
-	assertExpectationsMet(t, mock)
 }
 
 // --- ClearAgentClassificationCaps ---
@@ -377,6 +507,42 @@ func TestStore_GetAgentClassificationCaps_Success(t *testing.T) {
 	assertExpectationsMet(t, mock)
 }
 
+// TestStore_GetAgentClassificationCaps_FoldsCaseLikeSet pins ITEM 5: Set
+// folds a cap's hierarchy key to lowercase before persisting
+// (normalizeClassificationCaps), so every row this API itself ever wrote is
+// already lowercase -- but a row written some other way (direct SQL, a row
+// predating this normalization) can carry any casing. catchAllLevels' own
+// keys are always lowercase (its own doc comment), so without folding on
+// the read path too, a stored "NATO" would look up CatchAll under the wrong
+// case and report CatchAll["NATO"] = nil -- a false "everything under nato
+// denies" reading of a cap that in fact resolves fine. GET must fold the
+// same way PUT does.
+func TestStore_GetAgentClassificationCaps_FoldsCaseLikeSet(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	rawCaps := map[string]string{"NATO": "SECRET"} // as if written directly by SQL, uppercase
+
+	expectGetAgentRow(mock, id, nil, rawCaps)
+	expectLabelRules(mock, []models.ResourceLabelRule{
+		{Prefix: "", Hierarchy: "nato", Level: "CONFIDENTIAL"},
+	})
+	expectGetAgentRow(mock, id, nil, rawCaps)
+	expectCatalog(mock, nil)
+	expectLiveDelegations(mock, 0)
+
+	view, err := s.GetAgentClassificationCaps(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetAgentClassificationCaps() error = %v", err)
+	}
+	if got := view.CatchAll["nato"]; got == nil || *got != "CONFIDENTIAL" {
+		t.Errorf("CatchAll[nato] = %v, want *CONFIDENTIAL -- GET must fold case the same way PUT does", got)
+	}
+	if _, keptOriginalCasing := view.ClassificationCaps["NATO"]; keptOriginalCasing {
+		t.Errorf("ClassificationCaps = %v, kept the row's original casing, want normalized to lowercase", view.ClassificationCaps)
+	}
+	assertExpectationsMet(t, mock)
+}
+
 // --- unsatisfiableTools ---
 
 // An agent with allowed_tools == [] holds EVERY tool, so the warning must be
@@ -405,5 +571,44 @@ func TestUnsatisfiableTools_RestrictedAgentIntersects(t *testing.T) {
 	want := []string{"Grep"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestUnsatisfiableTools_RestrictedAgentIncludesUncataloguedTools pins ITEM
+// 2 from the whole-branch review: a tool named in allowed_tools with NO
+// catalog row at all produces no resource id at decision time either --
+// exactly like a catalogued tool with a nil resource_field -- and for a
+// RESTRICTED agent that tool is enumerable (allowed_tools is a finite,
+// known list), so it belongs in this warning too. Before this fix, a
+// tenant with a partial catalog got unsatisfiable_tools: [] for every
+// uncatalogued tool it had actually granted.
+func TestUnsatisfiableTools_RestrictedAgentIncludesUncataloguedTools(t *testing.T) {
+	catalog := []models.ToolCatalogEntry{
+		{ToolName: "Read", ResourceField: strPtr("file_path")},
+		{ToolName: "Grep", ResourceField: nil},
+		// "Frobnicate" has no catalog row at all.
+	}
+	got := unsatisfiableTools([]string{"Read", "Grep", "Frobnicate"}, catalog)
+	want := []string{"Frobnicate", "Grep"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestUnsatisfiableTools_UnrestrictedAgentCannotEnumerateUncataloguedTools
+// pins the other half of ITEM 2's ruling: an UNRESTRICTED agent's
+// allowed_tools is empty, so there is no finite list of uncatalogued tool
+// names to scan -- the warning can only ever cover what the catalog itself
+// contains for such an agent, a real and permanent gap this function's own
+// doc comment must state, not silently fill in.
+func TestUnsatisfiableTools_UnrestrictedAgentCannotEnumerateUncataloguedTools(t *testing.T) {
+	catalog := []models.ToolCatalogEntry{
+		{ToolName: "Read", ResourceField: strPtr("file_path")},
+		{ToolName: "Grep", ResourceField: nil},
+	}
+	got := unsatisfiableTools([]string{}, catalog)
+	want := []string{"Grep"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v -- an unrestricted agent's uncatalogued tools cannot be enumerated", got, want)
 	}
 }

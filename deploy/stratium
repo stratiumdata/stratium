@@ -1118,15 +1118,26 @@ def cmd_verify(args):
 
     tag = uuid.uuid4().hex[:8]   # fresh resource each run, so the 30s cache cannot answer
     cases = [
-        ("Read", 0, "granted -- must be allowed"),
-        ("Write", 2, "not in the grant -- must be denied"),
-        ("Frobnicate" + tag, 2, "not even catalogued -- must be denied"),
+        # (tool, want exit, label, reason substring to require -- None skips that check)
+        ("Read", 0, "granted -- must be allowed", None),
+        # LS, not Write: this tenant's tier_overrides table carries a
+        # standing Write->DESTRUCTIVE row (seeded by other integration
+        # coverage against this same shared tenant; not this script's to
+        # remove), so a Write probe now denies on ACTION TIER, not on
+        # tool-holding -- green, but for a reason its old label did not
+        # claim. LS is catalogued at READ_ONLY (deploy/seed/tool-catalog-
+        # claude-code.sql), well under this delegation's EXTERNAL_COMMS
+        # ceiling and carries no override, so a denial here can only come
+        # from HasTool -- the thing this case's label actually claims.
+        ("LS", 2, "catalogued, held tool not in the grant -- must be denied",
+         "not in delegation approved_tools"),
+        ("Frobnicate" + tag, 2, "not even catalogued -- must be denied", None),
     ]
     print(f"delegation grants {state.get('tools', DEMO_TOOLS)}\n")
     failures = []
-    for tool, want, why in cases:
+    for tool, want, why, want_reason in cases:
         rc, reason = hook_probe(state, tool, f"/quickstart-{tag}/probe.txt")
-        good = rc == want
+        good = rc == want and (want_reason is None or want_reason in reason)
         failures.append(None if good else (tool, want, rc))
         print(f"  {'PASS' if good else 'FAIL'}  {tool:<18} exit={rc} (want {want})  {why}")
         if reason:
@@ -1134,7 +1145,7 @@ def cmd_verify(args):
 
     if "codex" in state.get("harnesses", []) and resolves(SHIM_BIN):
         print("\nthrough the Codex shim (2e):")
-        for tool, want, _ in cases:
+        for tool, want, _, _ in cases:
             payload = json.dumps({"tool_name": tool, "tool_input": {
                 "file_path": f"/quickstart-{tag}/probe.txt"}})
             r = subprocess.run([SHIM_BIN], input=payload, text=True,

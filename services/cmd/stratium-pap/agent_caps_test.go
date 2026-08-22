@@ -176,6 +176,42 @@ func TestPutAgentCaps_NoCatchAllIsPlainTextConflict(t *testing.T) {
 	assertExpectationsMet(t, f.mock)
 }
 
+// TestPutAgentCaps_EmptyOrAbsentCapsRejected pins ITEM 1 from the
+// whole-branch review at the HTTP layer: PUT must not be able to clear
+// enforcement by omission, only DELETE may. All three of PUT {},
+// PUT {"typo": ...} (an absent/misspelled classification_caps key, which
+// decodeJSON gives no special treatment -- it just leaves the field at its
+// zero value, nil), and an explicit classification_caps: {} must 400 with a
+// plain-text body naming DELETE -- and none of them may reach the store's
+// write path (no mock expectations registered).
+func TestPutAgentCaps_EmptyOrAbsentCapsRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"empty request body", map[string]any{}},
+		{"misspelled field", map[string]any{"typo": map[string]string{"nato": "SECRET"}}},
+		{"explicit empty caps", map[string]any{"classification_caps": map[string]string{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTestServerFixture(t)
+			rec := doJSONRequest(t, f.server, http.MethodPut,
+				"/v1/agents/"+uuid.New().String()+"/classification-caps", f.token(t, "org-admins"), tc.body)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+			}
+			if strings.HasPrefix(strings.TrimSpace(rec.Body.String()), "{") {
+				t.Errorf("body is JSON, want plain text: %s", rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "DELETE") {
+				t.Errorf("body does not name DELETE as the way to turn enforcement off: %s", rec.Body.String())
+			}
+			assertExpectationsMet(t, f.mock) // never reached the store's write path
+		})
+	}
+}
+
 func TestDeleteAgentCaps_ClearsAndReturns204(t *testing.T) {
 	f := newTestServerFixture(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -187,4 +223,18 @@ func TestDeleteAgentCaps_ClearsAndReturns204(t *testing.T) {
 		t.Fatalf("status = %d, want 204, body = %s", rec.Code, rec.Body.String())
 	}
 	assertExpectationsMet(t, f.mock)
+}
+
+// Editor may rename an agent but must not clear its classification ceiling
+// either -- TestPutAgentCaps_EditorForbidden's own DELETE counterpart (ITEM
+// 6 from the whole-branch review: the spec asked for both writes, and only
+// PUT had a test).
+func TestDeleteAgentCaps_EditorForbidden(t *testing.T) {
+	f := newTestServerFixture(t)
+	rec := doRequest(t, f.server, http.MethodDelete,
+		"/v1/agents/"+uuid.New().String()+"/classification-caps", f.token(t, "org-editors"))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	assertExpectationsMet(t, f.mock) // never reached the store
 }
