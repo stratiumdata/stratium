@@ -135,7 +135,7 @@ import (
 
 	"stratium/internal/authz"
 	"stratium/internal/config"
-	"stratium/internal/grpctarget"
+	"stratium/pkg/grpctarget"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/policy"
 	"stratium/internal/policy/cedar"

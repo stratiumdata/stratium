@@ -71,7 +71,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/grpctarget"
+	"stratium/pkg/grpctarget"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/store"
 	"stratium/pkg/models"
