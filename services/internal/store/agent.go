@@ -66,9 +66,23 @@ const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_t
 // RETURNING — the same reasoning updatePolicyQuery documents: the row's own
 // clock is authoritative, and reusing it for the audit entry's OccurredAt
 // needs no separate, potentially skewed time.Now() call.
+//
+// classification_caps is deliberately ABSENT from the SET list. It used to
+// be here, and that was a live escalation: PUT /v1/agents/{id} is
+// RoleEditor (server.go), so a whole-object replace let an editor set an
+// uncapped hierarchy, zero every cap back to {}, or set one with no
+// catch-all rule -- all without going through SetAgentClassificationCaps'
+// validation/guard/audit, and without the RoleAdmin the design requires for
+// a caps change. classification_caps is now written ONLY by
+// SetAgentClassificationCaps/ClearAgentClassificationCaps (agent_caps.go);
+// every other writer of an agents row must leave the column exactly as it
+// was, which "absent from SET" gives for free. classification_caps IS
+// still read back, in RETURNING: UpdateAgent's response should report the
+// column's real, unchanged value, not silently omit it or echo back
+// whatever the caller's request body happened to contain.
 const updateAgentQuery = `UPDATE agents SET name = $1, provider = $2, model_id = $3, trust_tier = $4, ` +
-	`enabled = $5, suspended = $6, allowed_tools = $7, classification_caps = $8, updated_at = NOW() ` +
-	`WHERE id = $9 RETURNING created_at, updated_at`
+	`enabled = $5, suspended = $6, allowed_tools = $7, updated_at = NOW() ` +
+	`WHERE id = $8 RETURNING created_at, updated_at, classification_caps`
 
 const deleteAgentQuery = `DELETE FROM agents WHERE id = $1 RETURNING name`
 
@@ -130,7 +144,9 @@ func validateAgentFields(a models.Agent) error {
 // CreateAgent inserts a and audits its creation inside one transaction
 // (N4). a.ID, a.TenantID, a.CreatedAt, and a.UpdatedAt are ignored on input
 // and set authoritatively here, matching CreatePolicy's identical treatment
-// of its own caller-supplied identity/timestamp fields.
+// of its own caller-supplied identity/timestamp fields. a.ClassificationCaps
+// is ALSO ignored on input, every created agent starts capless ({}) --
+// see the marshal call below for why.
 func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (models.Agent, error) {
 	if err := validateAgentFields(a); err != nil {
 		return models.Agent{}, err
@@ -149,15 +165,19 @@ func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (
 		return models.Agent{}, fmt.Errorf("store: marshal allowed_tools: %w", err)
 	}
 
-	// A nil map must persist as {} and not as SQL NULL: the column is NOT
-	// NULL, and {} is the documented "no cap" value -- classification.CheckCap
-	// treats len(caps) == 0 as allow, so nil and {} are equivalent by meaning
-	// and this normalises them to the one JSON shape the column accepts.
-	caps := a.ClassificationCaps
-	if caps == nil {
-		caps = map[string]string{}
-	}
-	classificationCaps, err := json.Marshal(caps)
+	// classification_caps is ALWAYS {} on create, never whatever the caller's
+	// request body set -- CreateAgent ignores a.ClassificationCaps entirely,
+	// the same "identity/timestamp fields are ignored on input" treatment
+	// this method's own doc comment already gives ID/TenantID/CreatedAt/
+	// UpdatedAt. It has to be a store-level ignore, not just an
+	// undocumented convention: classification_caps is now written ONLY by
+	// SetAgentClassificationCaps (agent_caps.go), which validates hierarchy/
+	// level and gates on a catch-all rule before anything is persisted --
+	// letting Create accept a caller-supplied value would recreate the exact
+	// unvalidated, unaudited write path that column's own RoleAdmin
+	// requirement exists to close (see updateAgentQuery's own doc comment on
+	// the identical hole this closes for PUT).
+	classificationCaps, err := json.Marshal(map[string]string{})
 	if err != nil {
 		return models.Agent{}, fmt.Errorf("store: marshal classification_caps: %w", err)
 	}
@@ -171,7 +191,7 @@ func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (
 		}
 		return models.Agent{}, fmt.Errorf("store: insert agent %q: %w", a.Name, err)
 	}
-	a.ClassificationCaps = caps // echo the normalised (never-nil) value
+	a.ClassificationCaps = map[string]string{} // echo the stored (always empty) value
 
 	// AgentID is the one audit.Entry field that fits an agent-row write
 	// literally, not by repurposing: it already exists to identify "which
@@ -260,6 +280,15 @@ func (s *Store) ListAgents(ctx context.Context) ([]models.Agent, error) {
 // UpdatePolicy. id names the row; a.ID, a.TenantID, a.CreatedAt, and
 // a.UpdatedAt are ignored on input. ErrNotFound if no row with id exists for
 // this tenant.
+//
+// a.ClassificationCaps is ALSO ignored on input, unlike every other mutable
+// field this method replaces: classification_caps is not in updateAgentQuery's
+// SET list at all (see that query's own doc comment for why -- PUT is
+// RoleEditor, and a whole-object replace writing this column was a live
+// escalation around SetAgentClassificationCaps' validation and RoleAdmin
+// gate). The column is genuinely unchanged by this call; what a.ClassificationCaps
+// holds on return is read back from the row via RETURNING below, not echoed
+// from the request body.
 func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, actor string) (models.Agent, error) {
 	if err := validateAgentFields(a); err != nil {
 		return models.Agent{}, err
@@ -276,21 +305,11 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		return models.Agent{}, fmt.Errorf("store: marshal allowed_tools: %w", err)
 	}
 
-	// See CreateAgent's identical normalisation: nil must persist as {}, never
-	// as SQL NULL, on the column's NOT NULL constraint.
-	caps := a.ClassificationCaps
-	if caps == nil {
-		caps = map[string]string{}
-	}
-	classificationCaps, err := json.Marshal(caps)
-	if err != nil {
-		return models.Agent{}, fmt.Errorf("store: marshal classification_caps: %w", err)
-	}
-
 	row := tx.QueryRowContext(ctx, updateAgentQuery,
 		a.Name, a.Provider, a.ModelID, int64(a.TrustTier), a.Enabled, a.Suspended,
-		allowedTools, classificationCaps, id.String())
-	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt); err != nil {
+		allowedTools, id.String())
+	var classificationCaps []byte
+	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt, &classificationCaps); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.Agent{}, fmt.Errorf("%w: agent %s", ErrNotFound, id)
 		}
@@ -299,9 +318,14 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		}
 		return models.Agent{}, fmt.Errorf("store: update agent %s: %w", id, err)
 	}
+	if err := json.Unmarshal(classificationCaps, &a.ClassificationCaps); err != nil {
+		return models.Agent{}, fmt.Errorf("store: unmarshal classification_caps: %w", err)
+	}
+	if a.ClassificationCaps == nil {
+		a.ClassificationCaps = map[string]string{}
+	}
 	a.ID = id
 	a.TenantID = s.tenantID
-	a.ClassificationCaps = caps // echo the normalised (never-nil) value
 
 	entry := audit.Entry{
 		TenantID:      s.tenantID,

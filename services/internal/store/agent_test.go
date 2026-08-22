@@ -178,10 +178,14 @@ func TestStore_CreateAgent_AuditFailureRollsBackWrite(t *testing.T) {
 
 // --- ClassificationCaps ---
 
-// TestCreateAgent_RoundTripsClassificationCaps proves the field survives a
-// write and comes back on the response, matching the round-trip discipline
-// TestStore_CreateAgent_Success already applies to AllowedTools.
-func TestCreateAgent_RoundTripsClassificationCaps(t *testing.T) {
+// TestCreateAgent_IgnoresCallerSuppliedClassificationCaps replaces the old
+// TestCreateAgent_RoundTripsClassificationCaps: that test asserted a caller-
+// supplied cap round-tripped through Create, which is exactly the contract
+// the controller ruling reverses. classification_caps is now written ONLY by
+// SetAgentClassificationCaps/ClearAgentClassificationCaps (agent_caps.go);
+// Create always inserts {} and the insertAgentQuery arg list below pins that
+// -- it names the literal []byte(`{}`), never the request's "nato":"CONFIDENTIAL".
+func TestCreateAgent_IgnoresCallerSuppliedClassificationCaps(t *testing.T) {
 	s, mock := newMockStore(t)
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -190,7 +194,7 @@ func TestCreateAgent_RoundTripsClassificationCaps(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "capped", "anthropic", "", int64(models.TrustTierCertified),
-			true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`)).
+			true, false, []byte(`[]`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -200,13 +204,14 @@ func TestCreateAgent_RoundTripsClassificationCaps(t *testing.T) {
 	got, err := s.CreateAgent(context.Background(), models.Agent{
 		Name: "capped", Provider: "anthropic", TrustTier: models.TrustTierCertified,
 		Enabled: true, AllowedTools: []string{},
+		// A caller trying to set a cap at creation time. It must be ignored.
 		ClassificationCaps: map[string]string{"nato": "CONFIDENTIAL"},
 	}, "operator@example.com")
 	if err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
-	if got.ClassificationCaps["nato"] != "CONFIDENTIAL" {
-		t.Errorf("caps = %v, want nato=CONFIDENTIAL", got.ClassificationCaps)
+	if len(got.ClassificationCaps) != 0 {
+		t.Errorf("caps = %v, want {} -- Create must ignore a caller-supplied cap", got.ClassificationCaps)
 	}
 
 	assertExpectationsMet(t, mock)
@@ -403,8 +408,9 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
-			false, true, []byte(`["Bash"]`), []byte(`{}`), id.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at"}).AddRow(now, now))
+			false, true, []byte(`["Bash"]`), id.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps"}).
+			AddRow(now, now, []byte(`{"nato":"SECRET"}`)))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -424,6 +430,53 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 	}
 	if !got.Suspended {
 		t.Errorf("Suspended = false, want true (round-tripped from the update)")
+	}
+	if got.ClassificationCaps["nato"] != "SECRET" {
+		t.Errorf("ClassificationCaps = %v, want the row's stored nato=SECRET (read back via RETURNING, not echoed from the request, which set none)", got.ClassificationCaps)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody proves
+// the CRITICAL fix directly: a request body that sets ClassificationCaps
+// does not reach the database at all -- updateAgentQuery's arg list has no
+// slot for it (see that query's own doc comment) -- and the row's existing
+// caps come back unchanged. Before this fix, PUT /v1/agents/{id} (RoleEditor)
+// could set an unknown hierarchy, zero every cap to {}, or set one with no
+// catch-all rule, all bypassing SetAgentClassificationCaps' validation and
+// its RoleAdmin gate.
+func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testing.T) {
+	s, mock := newMockStore(t)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
+		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
+			false, true, []byte(`["Bash"]`), id.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps"}).
+			AddRow(now, now, []byte(`{"nato":"SECRET"}`)))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	a := models.Agent{
+		Name: "renamed-bot", Provider: "anthropic", ModelID: "claude-opus",
+		TrustTier: models.TrustTierPlatformTrusted, Enabled: false, Suspended: true,
+		AllowedTools: []string{"Bash"},
+		// An attacker (or a stale-form editor) trying to smuggle a caps
+		// change through the whole-object PUT. It must be ignored.
+		ClassificationCaps: map[string]string{"nato": "UNCLASSIFIED"},
+	}
+	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2")
+	if err != nil {
+		t.Fatalf("UpdateAgent() error = %v", err)
+	}
+	if got.ClassificationCaps["nato"] != "SECRET" {
+		t.Errorf("ClassificationCaps = %v, want the row's real nato=SECRET, not the request body's UNCLASSIFIED", got.ClassificationCaps)
 	}
 
 	assertExpectationsMet(t, mock)

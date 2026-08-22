@@ -44,9 +44,20 @@ var ErrNoCatchAllRule = fmt.Errorf("%w: no catch-all label rule", ErrConflict)
 // case exactly as validateResourceLabelRule's own does (resource_label.go),
 // so an operator who writes "NATO" is not refused for a cap that will match
 // perfectly well once stored -- classification.Index folds the same way.
+//
+// It also rejects two keys that fold to the SAME hierarchy under different
+// casing, e.g. {"nato":"SECRET","NATO":"CONFIDENTIAL"}: each key alone
+// passes the checks above, but classification.lookupCap (pkg/classification/
+// classification.go) scans case-insensitively and treats two differently-
+// cased keys with different values as ambiguous, and CheckCap DENIES
+// ambiguous caps unconditionally. Accepting that combination here would make
+// this function's own doc comment a lie -- it claims to reject anything
+// CheckCap could not act on, and an unconditional deny is exactly that.
 func validateClassificationCaps(caps map[string]string) error {
+	seen := make(map[string]string, len(caps)) // folded hierarchy -> first key seen with that fold
 	for hierarchy, level := range caps {
-		levels, ok := classification.Levels[strings.ToLower(hierarchy)]
+		folded := strings.ToLower(hierarchy)
+		levels, ok := classification.Levels[folded]
 		if !ok {
 			return fmt.Errorf("%w: unknown classification hierarchy %q (known: %s)",
 				ErrInvalidRequest, hierarchy, strings.Join(knownHierarchies(), ", "))
@@ -55,8 +66,33 @@ func validateClassificationCaps(caps map[string]string) error {
 			return fmt.Errorf("%w: %q is not a level in hierarchy %q (levels: %s)",
 				ErrInvalidRequest, level, hierarchy, strings.Join(levels, ", "))
 		}
+		if prior, dup := seen[folded]; dup {
+			return fmt.Errorf(
+				"%w: %q and %q both name hierarchy %q under different casing; "+
+					"classification.CheckCap treats that as ambiguous and denies -- use one key per hierarchy",
+				ErrInvalidRequest, prior, hierarchy, folded)
+		}
+		seen[folded] = hierarchy
 	}
 	return nil
+}
+
+// normalizeClassificationCaps lowercases every hierarchy key. Called only
+// after validateClassificationCaps has already rejected case-duplicate keys
+// (above), so two distinct caller keys can never collide and silently drop
+// one here. Persisting the lowercase form -- not whatever casing the caller
+// sent -- is what keeps a stored cap's key comparing equal, by plain map
+// lookup, to catchAllLevels' own lowercase-folded keys (that function's own
+// doc comment): without this, a cap keyed "NATO" against a rule stored as
+// "nato" would find no catch-all, and SetAgentClassificationCaps would 409 a
+// request that classification.CheckCap (which folds case internally) would
+// actually have enforced correctly.
+func normalizeClassificationCaps(caps map[string]string) map[string]string {
+	out := make(map[string]string, len(caps))
+	for hierarchy, level := range caps {
+		out[strings.ToLower(hierarchy)] = level
+	}
+	return out
 }
 
 // sortedKeys returns caps' keys in sorted order. Go's map iteration order is
@@ -95,6 +131,10 @@ func renderCaps(caps map[string]string) string {
 // rule matching, classification.CheckCap denies every resource whose label
 // cannot be resolved, so the un-guarded version of this call is a foot-gun that
 // looks like a success.
+//
+// now is not forwarded to the write (see updateAgentCapsQuery's own doc
+// comment) -- kept as a parameter only so this and ClearAgentClassificationCaps
+// present the same shape to their HTTP-routes caller.
 func (s *Store) SetAgentClassificationCaps(
 	ctx context.Context, id uuid.UUID, caps map[string]string,
 	allowUncovered bool, actor string, now time.Time,
@@ -105,6 +145,7 @@ func (s *Store) SetAgentClassificationCaps(
 	if err := validateClassificationCaps(caps); err != nil {
 		return models.AgentCapsView{}, err
 	}
+	caps = normalizeClassificationCaps(caps)
 
 	catchAll, err := s.catchAllLevels(ctx)
 	if err != nil {
@@ -121,7 +162,7 @@ func (s *Store) SetAgentClassificationCaps(
 		}
 	}
 
-	if err := s.writeAgentCaps(ctx, id, caps, eventTypeAgentCapsSet, actor, now); err != nil {
+	if err := s.writeAgentCaps(ctx, id, caps, actor); err != nil {
 		return models.AgentCapsView{}, err
 	}
 	return s.agentCapsView(ctx, id, caps, catchAll)
@@ -131,26 +172,47 @@ func (s *Store) SetAgentClassificationCaps(
 // classification enforcement OFF for delegations issued from now on. It is a
 // distinct verb precisely so that turning enforcement off cannot happen by
 // omitting a field from a request body.
+//
+// now is accepted for signature symmetry with SetAgentClassificationCaps
+// (both take the request's timestamp as a parameter, the shape a later
+// HTTP-routes task calls with) but is not forwarded to writeAgentCaps: see
+// updateAgentCapsQuery's own doc comment for why the write uses Postgres's
+// clock, not this one.
 func (s *Store) ClearAgentClassificationCaps(ctx context.Context, id uuid.UUID, actor string, now time.Time) error {
-	return s.writeAgentCaps(ctx, id, map[string]string{}, eventTypeAgentCapsCleared, actor, now)
+	return s.writeAgentCaps(ctx, id, map[string]string{}, actor)
 }
 
-// updateAgentCapsQuery is writeAgentCaps' single write. now is a caller-
-// supplied time.Time, not Postgres's NOW(): both SetAgentClassificationCaps
-// and ClearAgentClassificationCaps already carry one, and RETURNING updated_at
-// hands the stored value straight back for the audit entry's OccurredAt --
-// the row's own persisted clock is authoritative, the same reasoning
-// updateAgentQuery's own doc comment (agent.go) gives for reusing RETURNING
-// rather than a second, potentially skewed time.Now() call.
-const updateAgentCapsQuery = `UPDATE agents SET classification_caps = $2, updated_at = $3 WHERE id = $1 RETURNING updated_at`
+// updateAgentCapsQuery leaves updated_at to Postgres (NOW()), returned via
+// RETURNING -- the identical reasoning updateAgentQuery's own doc comment
+// (agent.go) gives: the row's own persisted clock is authoritative, and
+// that RETURNING value becomes the audit entry's OccurredAt below, so there
+// is exactly one clock in play for this column, not two. Binding a caller-
+// supplied now here instead (as an earlier version of this query did) put
+// this column's writer out of step with UpdateAgent's own -- one used NOW(),
+// the other a Go-side timestamp that could skew from it -- for no benefit,
+// since RETURNING already hands the authoritative value back.
+const updateAgentCapsQuery = `UPDATE agents SET classification_caps = $2, updated_at = NOW() WHERE id = $1 RETURNING updated_at`
 
 // writeAgentCaps is SetAgentClassificationCaps and ClearAgentClassificationCaps's
 // shared write path: replace classification_caps and audit the change in the
 // SAME transaction (N4 -- see CreateAgent's own doc comment, agent.go), inside
-// one beginTenantTx. eventType is the only thing that tells the two verbs
-// apart in the audit chain; caps is {} for Clear, whatever the caller already
-// validated for Set.
-func (s *Store) writeAgentCaps(ctx context.Context, id uuid.UUID, caps map[string]string, eventType, actor string, now time.Time) error {
+// one beginTenantTx.
+//
+// The audit event type is derived from caps itself, len(caps) == 0 means
+// eventTypeAgentCapsCleared, never eventTypeAgentCapsSet -- regardless of
+// which exported method got here. SetAgentClassificationCaps called with nil
+// or {} is a second off-switch (classification.CheckCap allows everything
+// once len(caps) == 0, the same as ClearAgentClassificationCaps' own
+// explicit {}), and an auditor grepping the chain for agent_caps_cleared to
+// find every moment enforcement went off must not miss the ones that came
+// through Set. There is deliberately no separate "eventType" parameter for a
+// caller to get this wrong through.
+func (s *Store) writeAgentCaps(ctx context.Context, id uuid.UUID, caps map[string]string, actor string) error {
+	eventType := eventTypeAgentCapsSet
+	if len(caps) == 0 {
+		eventType = eventTypeAgentCapsCleared
+	}
+
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
 		return err
@@ -163,7 +225,7 @@ func (s *Store) writeAgentCaps(ctx context.Context, id uuid.UUID, caps map[strin
 	}
 
 	var updatedAt time.Time
-	row := tx.QueryRowContext(ctx, updateAgentCapsQuery, id.String(), capsJSON, now)
+	row := tx.QueryRowContext(ctx, updateAgentCapsQuery, id.String(), capsJSON)
 	if err := row.Scan(&updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: agent %s", ErrNotFound, id)
@@ -244,6 +306,15 @@ func unsatisfiableTools(allowedTools []string, catalog []models.ToolCatalogEntry
 // matches every resource id (R7's catch-all -- see ResourceLabelRule.Prefix's
 // own doc comment, pkg/models/resource_label.go), which is exactly the rule
 // SetAgentClassificationCaps' catch-all guard is checking for.
+//
+// Keys are folded to lowercase: rule hierarchies are stored VERBATIM
+// (validateResourceLabelRule's own doc comment, resource_label.go, explains
+// why nothing normalises them on the way in), but caps are normalized to
+// lowercase before this map is ever consulted (normalizeClassificationCaps).
+// Without the same fold here, a rule stored as "NATO" would produce a key
+// this map's caller -- keyed "nato" -- can never look up: a spurious 409 for
+// SetAgentClassificationCaps, and a misleading nil in AgentCapsView.CatchAll
+// for a hierarchy that in fact has a catch-all rule.
 func (s *Store) catchAllLevels(ctx context.Context) (map[string]*string, error) {
 	rules, err := s.ListResourceLabelRules(ctx)
 	if err != nil {
@@ -253,7 +324,7 @@ func (s *Store) catchAllLevels(ctx context.Context) (map[string]*string, error) 
 	for _, r := range rules {
 		if r.Prefix == "" {
 			level := r.Level
-			out[r.Hierarchy] = &level
+			out[strings.ToLower(r.Hierarchy)] = &level
 		}
 	}
 	return out, nil

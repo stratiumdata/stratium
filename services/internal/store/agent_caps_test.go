@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -15,6 +16,25 @@ import (
 
 	"stratium/pkg/models"
 )
+
+// eventTypeArgIndex is insertAuditQuery's zero-based position for event_type
+// ($5 of 22 -- see that query's own column list, audit.go). Named for the
+// same reason auditReasonArgIndex (resource_label_test.go) is: so a test
+// that pins it says what it's pinning.
+const eventTypeArgIndex = 4
+
+// auditArgsWithEventType builds insertAuditQuery's 22 arguments, all
+// unconstrained (sqlmock.AnyArg()) except event_type, pinned to want -- the
+// identical AnyArg-except-one-index shape auditArgsWithReason
+// (resource_label_test.go) already uses for the reason column.
+func auditArgsWithEventType(want string) []driver.Value {
+	args := make([]driver.Value, 22)
+	for i := range args {
+		args[i] = sqlmock.AnyArg()
+	}
+	args[eventTypeArgIndex] = want
+	return args
+}
 
 // --- shared fixtures ---
 //
@@ -138,6 +158,11 @@ func TestValidateClassificationCaps(t *testing.T) {
 		{"level from the wrong hierarchy", map[string]string{"nato": "INTERNAL"}, true},
 		{"empty level", map[string]string{"nato": ""}, true},
 		{"empty hierarchy key", map[string]string{"": "SECRET"}, true},
+		// classification.lookupCap folds case and treats two differently-cased
+		// keys for one hierarchy as ambiguous, which CheckCap denies
+		// unconditionally -- this function's own doc comment claims to reject
+		// anything CheckCap could not act on, so this must be rejected here too.
+		{"case-duplicate keys are ambiguous", map[string]string{"nato": "SECRET", "NATO": "CONFIDENTIAL"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateClassificationCaps(tc.caps)
@@ -194,6 +219,92 @@ func TestSetAgentClassificationCaps_AllowUncoveredOverrides(t *testing.T) {
 	if _, err := s.SetAgentClassificationCaps(context.Background(), id,
 		map[string]string{"nato": "CONFIDENTIAL"}, true, "operator@example.com", now); err != nil {
 		t.Fatalf("with allowUncovered: %v", err)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// TestSetAgentClassificationCaps_RefusesWhenOnlyOneOfTwoHierarchiesHasCatchAll
+// pins the guard loop's direction: "commercial" (covered) sorts before
+// "nato" (uncovered), so a guard that stopped after the first, satisfied
+// hierarchy would wrongly let this request through. Both label-rule reads
+// happen inside catchAllLevels' one ListResourceLabelRules call, before the
+// guard loop runs at all.
+func TestSetAgentClassificationCaps_RefusesWhenOnlyOneOfTwoHierarchiesHasCatchAll(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, now := uuid.New(), time.Now().UTC()
+	expectLabelRules(mock, []models.ResourceLabelRule{
+		{Prefix: "", Hierarchy: "commercial", Level: "PUBLIC"},
+		{Prefix: "/secret/", Hierarchy: "nato", Level: "SECRET"}, // no prefix:"" rule for nato
+	})
+
+	_, err := s.SetAgentClassificationCaps(context.Background(), id,
+		map[string]string{"commercial": "INTERNAL", "nato": "CONFIDENTIAL"}, false, "operator@example.com", now)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want it to wrap ErrConflict (nato has no catch-all, even though commercial does)", err)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// TestSetAgentClassificationCaps_NormalizesCaseAndMatchesCatchAllCaseInsensitively
+// pins IMPORTANT 1 and 2 together: a cap supplied as "NATO" against a rule
+// stored as "nato" must both (a) find its catch-all -- no spurious 409 -- and
+// (b) persist and report under the normalized lowercase key, not the
+// caller's original casing.
+func TestSetAgentClassificationCaps_NormalizesCaseAndMatchesCatchAllCaseInsensitively(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, now := uuid.New(), time.Now().UTC()
+	expectLabelRules(mock, []models.ResourceLabelRule{
+		{Prefix: "", Hierarchy: "nato", Level: "UNCLASSIFIED"},
+	})
+	expectWriteAndAudit(mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectGetAgentRow(mock, id, nil, nil)
+	expectCatalog(mock, nil)
+	expectLiveDelegations(mock, 0)
+
+	view, err := s.SetAgentClassificationCaps(context.Background(), id,
+		map[string]string{"NATO": "CONFIDENTIAL"}, false, "operator@example.com", now)
+	if err != nil {
+		t.Fatalf("SetAgentClassificationCaps() error = %v, want success -- \"NATO\" should match the \"nato\" catch-all rule", err)
+	}
+	if _, keptOriginalCasing := view.ClassificationCaps["NATO"]; keptOriginalCasing {
+		t.Errorf("ClassificationCaps = %v, kept the caller's casing, want normalized to lowercase", view.ClassificationCaps)
+	}
+	if view.ClassificationCaps["nato"] != "CONFIDENTIAL" {
+		t.Errorf("ClassificationCaps[nato] = %q, want CONFIDENTIAL", view.ClassificationCaps["nato"])
+	}
+	if got := view.CatchAll["nato"]; got == nil || *got != "UNCLASSIFIED" {
+		t.Errorf("CatchAll[nato] = %v, want *UNCLASSIFIED (case-insensitive match to the stored rule)", got)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// TestSetAgentClassificationCaps_EmptyCapsAuditsAsCleared pins IMPORTANT 3:
+// Set called with nil/{} is a second off-switch (classification.CheckCap
+// allows everything once len(caps) == 0, same as Clear's own {}), so it must
+// audit as agent_caps_cleared, not agent_caps_set -- otherwise an auditor
+// grepping the chain for agent_caps_cleared misses every one of these.
+func TestSetAgentClassificationCaps_EmptyCapsAuditsAsCleared(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, now := uuid.New(), time.Now().UTC()
+
+	expectLabelRules(mock, nil) // catchAllLevels runs unconditionally, even for an empty caps map
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(auditArgsWithEventType(eventTypeAgentCapsCleared)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	expectGetAgentRow(mock, id, nil, nil)
+	expectCatalog(mock, nil)
+	expectLiveDelegations(mock, 0)
+
+	if _, err := s.SetAgentClassificationCaps(context.Background(), id, nil, true, "operator@example.com", now); err != nil {
+		t.Fatalf("SetAgentClassificationCaps(nil caps) error = %v", err)
 	}
 	assertExpectationsMet(t, mock)
 }

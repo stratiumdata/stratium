@@ -74,8 +74,13 @@ func TestUpdateAgent_Success(t *testing.T) {
 	f := newTestServerFixture(t)
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
+	// classification_caps is a third RETURNING column now (internal/store's
+	// updateAgentQuery no longer writes it -- PUT can't touch this column --
+	// but still reads back its unchanged, real value; see that query's own
+	// doc comment).
 	expectWriteAndAudit(f.mock, "UPDATE agents",
-		sqlmock.NewRows([]string{"created_at", "updated_at"}).AddRow(now, now))
+		sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps"}).
+			AddRow(now, now, []byte(`{}`)))
 
 	body := models.Agent{Name: "renamed-bot", Provider: "anthropic", TrustTier: models.TrustTierRegistered, Suspended: true, AllowedTools: []string{}}
 	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/agents/"+id.String(), f.token(t, "org-admins"), body)
