@@ -148,7 +148,13 @@ func run() int {
 	}
 
 	fmt.Println("stratium-example: seeding this example's own tenant (agent, catalog, permit policy)...")
-	db, err := sql.Open("postgres", "postgres://stratium:stratium_local_dev_only@"+pgAddr+"/stratium?sslmode=disable")
+	// stratium_pap_login, not the "stratium" role pdp-proxy itself connects as: 000005_serving_
+	// app_grants.up.sql grants that PDP-serving role SELECT-only on agents (and nothing at all on
+	// tool_catalog/policies) -- by design, spec §4.10 N3/T1 -- so writing rows for this example
+	// needs the control-plane identity's own credential, the same one stratium-pap authenticates
+	// as (docker-compose.yml's STRATIUM_PAP_DATABASE_URL), granted full CRUD on exactly these
+	// tables by 000016_stratium_pap_role.up.sql.
+	db, err := sql.Open("postgres", "postgres://stratium_pap_login:stratium_pap_login_local_dev_only@"+pgAddr+"/stratium?sslmode=disable")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: opening postgres:", err)
 		return 1
@@ -211,6 +217,7 @@ func run() int {
 		viaProxy: grpctarget.NewTargetServiceClient(proxyConn),
 		token:    boundToken,
 		key:      key,
+		allowed:  map[string]agent.Result{},
 	}
 
 	llm := &agent.LLM{BaseURL: "http://" + litellmAddr, Model: "llama3.2"}
@@ -410,6 +417,20 @@ type proxyTransport struct {
 	viaProxy grpctarget.TargetServiceClient
 	token    string
 	key      *ecdsa.PrivateKey
+
+	// allowed memoizes a successful (Allowed) Result by "tool|args", never a denial. llama3.2 is
+	// unreliable at recognizing a completed step and, observed live, repeats an already-ALLOWED
+	// "fetch" call across later turns instead of moving on to "purge" and stopping (agent.go's own
+	// maxTurns=6 is what eventually ends it) -- a model limitation, not an enforcement one, in the
+	// same family report.go's own inconclusive-turn text already names for prose-instead-of-a-
+	// call. Re-running the identical Fetch every time the model repeats itself would still be
+	// correctly enforced, but it would also inflate grpc-target's own call counter with calls that
+	// prove nothing new, corrupting THE PUNCHLINE's own delta -- which must read 1 for the ONE
+	// request a policy question was ever actually pending on. A denial is never memoized here: an
+	// idempotent read is safe to answer from a prior identical answer within one short-lived run,
+	// but a refusal must always be re-asked, since this is the exact channel that must never tell a
+	// caller "no" from a stale answer instead of from the PDP.
+	allowed map[string]agent.Result
 }
 
 func (t *proxyTransport) Tools() []agent.ToolSpec {
@@ -442,6 +463,15 @@ func (t *proxyTransport) Call(ctx context.Context, call agent.ToolCall) (agent.R
 		return agent.Result{}, fmt.Errorf("proxy transport: unknown tool %q", call.Name)
 	}
 
+	argsJSON, err := json.Marshal(call.Args)
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("proxy transport: marshal args for %s: %w", call.Name, err)
+	}
+	cacheKey := call.Name + "|" + string(argsJSON)
+	if cached, ok := t.allowed[cacheKey]; ok {
+		return cached, nil
+	}
+
 	msg, _ := call.Args["message"].(string)
 
 	proof, err := t.proof(fullMethod)
@@ -463,7 +493,9 @@ func (t *proxyTransport) Call(ctx context.Context, call agent.ToolCall) (agent.R
 		}
 		return agent.Result{}, fmt.Errorf("proxy transport: %s: %w", call.Name, err)
 	}
-	return agent.Result{Allowed: true, Output: fmt.Sprintf("%s (grpc-target call #%d)", resp.GetMessage(), resp.GetCallNumber())}, nil
+	result := agent.Result{Allowed: true, Output: fmt.Sprintf("%s (grpc-target call #%d)", resp.GetMessage(), resp.GetCallNumber())}
+	t.allowed[cacheKey] = result
+	return result, nil
 }
 
 // proof builds one RFC 9449 DPoP proof for fullMethod, signed by t.key: htm is the constant "POST"
