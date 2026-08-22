@@ -17,20 +17,32 @@
 // way proxy's "fetch"/"purge" map to a full gRPC method. cmd/stratium-pep/extauthz.go's own
 // decideRequestFromCheck sets DecideRequest.Tool to httpReq.GetPath() ("M1: the request path IS the
 // tool identity"), and Envoy's ext_authz filter never sees the request BODY (envoy.yaml sets no
-// with_request_body on the filter, and decideRequestFromCheck never reads one) -- so the model name
-// inside the JSON body a caller posts to /chat/completions is invisible to the PDP no matter what it
-// says. The only place a caller can put "which model" where policy can see it is the PATH, and the
-// one route envoy.yaml already wires for this task (a "/chat/completions" PREFIX match, shared by
-// every model) does not create a per-model path on its own. toolIdentity(model) closes that gap the
-// way Envoy's route table already permits, without touching it: it appends the model as a query
-// parameter -- "/chat/completions?model=llama3.2" -- which becomes a DIFFERENT DecideRequest.Tool
-// per model (GetPath() includes the query -- extauthz.go's own observedURI doc comment says so and
-// records it observed live) while Envoy's path PREFIX match, and LiteLLM's own exact-path route,
-// both ignore it: Envoy matches "/chat/completions" against the path component only (the query plays
-// no part in prefix matching), and LiteLLM's /chat/completions handler reads which model to call
-// from the JSON body, never the query string. One function, used to build the seeded tool_catalog
-// row name, the delegation's requested tool, and the literal path this program actually requests --
-// so those three can never drift into three different spellings of the same model.
+// with_request_body on the filter, and decideRequestFromCheck never reads one) -- so a model name
+// sent only in the JSON body would be invisible to the PDP no matter what it said. The only place a
+// caller can put "which model" where policy can see it is the PATH, and the one route envoy.yaml
+// already wires for this task (a "/chat/completions" PREFIX match, shared by every model) does not
+// create a per-model path on its own. toolIdentity(model) closes that gap without touching Envoy's
+// route table: it appends the model as a query parameter -- "/chat/completions?model=llama3.2" --
+// which becomes a DIFFERENT DecideRequest.Tool per model (GetPath() includes the query --
+// extauthz.go's own observedURI doc comment says so and records it observed live) while Envoy's path
+// PREFIX match ignores it entirely (prefix matching operates on the path component only).
+//
+// THE QUERY IS NOT MERELY VISIBLE TO LITELLM -- IT IS WHAT LITELLM ROUTES ON, AHEAD OF THE BODY.
+// LiteLLM's own model-resolution precedence (proxy_server.py) is
+// `general_settings["completion_model"] or user_model or model or data.get("model")`, where `model`
+// is this request's OWN query parameter and `data.get("model")` is the body -- the query wins
+// whenever both are present. That is why Call (below) sends the model ONLY in the query and OMITS
+// it from the body entirely: the policed identity (the query, because that is what toolIdentity
+// puts in the path) and the ROUTED identity must be the same value by construction, not merely by
+// this program's own care to keep two copies in sync. Confirmed live: an "?model=gpt-4o" request
+// with no "model" key in the body still selects gpt-4o's dead upstream. If LiteLLM instead preferred
+// the body, sending both would let a caller police one model while an unpoliced body value routed to
+// another -- the exact bypass this design has to avoid, not a hypothetical: this is precisely why
+// the body's own "model" key is deleted rather than merely duplicated.
+//
+// One function, toolIdentity, builds the seeded tool_catalog row name, the delegation's requested
+// tool, and the literal path+query this program actually requests -- so those three can never drift
+// into three different spellings of the same model.
 //
 // THE DPOP PROOF'S htu DOES NOT CARRY THE QUERY. observedURI (extauthz.go) strips everything from
 // the first "?" onward before comparing against a proof's htu claim (RFC 9449 §4.3 item 9 defines
@@ -231,7 +243,10 @@ func run() int {
 		return 1
 	}
 
-	transport := &extauthzTransport{envoyAddr: envoyAddr, token: boundToken, key: key}
+	transport := &extauthzTransport{
+		envoyAddr: envoyAddr, token: boundToken, key: key,
+		http: &http.Client{Timeout: 60 * time.Second},
+	}
 
 	// The agent's own reasoning goes direct to LiteLLM, bypassing Envoy on
 	// purpose. Only the ask_model TOOL takes the policed path. Route both through
@@ -503,19 +518,32 @@ func (t *extauthzTransport) Tools() []agent.ToolSpec {
 }
 
 // Call builds a fresh RFC 9449 DPoP proof (jti is single-use -- K8 -- so a proof cannot be reused
-// across the two models' calls, or across a retry of either) and POSTs {"model", "messages"} to
-// Envoy at toolIdentity(model) -- NOT at the bare chatCompletionsPath -- with Host set to
-// extauthzHost: Envoy reports the caller's own Host header as the request's authority, and
+// across the two models' calls, or across a retry of either) and POSTs {"messages"} -- deliberately
+// no "model" key -- to Envoy at toolIdentity(model), NOT at the bare chatCompletionsPath, with Host
+// set to extauthzHost: Envoy reports the caller's own Host header as the request's authority, and
 // pep-extauthz refuses any authority it is not configured to serve BEFORE the PDP is ever dialed.
 //
+// THE MODEL RIDES ONLY IN THE QUERY, NEVER IN THE BODY. LiteLLM resolves the model to call from
+// `... or model or data.get("model")` (proxy_server.py) -- `model` is this request's query
+// parameter, checked BEFORE `data.get("model")`, the body -- so sending it in the query alone is
+// sufficient for routing (see the package doc's own citation) and omitting it from the body is what
+// makes the policed value and the routed value the SAME value BY CONSTRUCTION rather than by this
+// program's own care to keep two copies in sync. Sending both would still work today, but would
+// degrade silently into a bypass surface the moment a future LiteLLM release reverses that
+// precedence -- nothing in this example would fail, because body and query would always agree with
+// each other, never with an attacker's intent to have them differ. With the body empty of "model",
+// there is only one value in the request for the PDP's decision and LiteLLM's routing to possibly
+// disagree about, and that value is the one in the path this program already asked policy about.
+//
 // A 403 is a DECISION: Envoy's ext_authz filter, or the PDP behind it, looked at this exact call and
-// said no. That becomes agent.Result{Allowed:false, Reason: <body>}. A 502 or 503 means Envoy let
-// the request through to LiteLLM and LiteLLM then failed to reach the model's own upstream --
-// exactly gpt-4o's deliberately-unreachable api_base -- which means ext_authz did NOT refuse the
-// call; that is this example failing to hold the delegation's approved_tools list where it should,
-// not policy working, and is returned as a Go error rather than a denial. Any other transport
-// failure -- a dead connection, a malformed response -- is returned as a Go error too, so agent.Run
-// aborts instead of recording a broken example as an enforcement decision.
+// said no. That becomes agent.Result{Allowed:false, Reason: <body>}. A 500, 502, or 503 means Envoy
+// let the request through to LiteLLM and LiteLLM then failed to reach the model's own upstream --
+// exactly gpt-4o's deliberately-unreachable api_base, which LiteLLM reports as a 500
+// (litellm.InternalServerError, "Connection error") not a 502/503 -- either way this means ext_authz
+// did NOT refuse the call; that is this example failing to hold the delegation's approved_tools list
+// where it should, not policy working, and is returned as a Go error rather than a denial. Any other
+// transport failure -- a dead connection, a malformed response -- is returned as a Go error too, so
+// agent.Run aborts instead of recording a broken example as an enforcement decision.
 func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agent.Result, error) {
 	model, ok := call.Args["model"].(string)
 	if !ok {
@@ -526,8 +554,8 @@ func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agen
 		return agent.Result{}, fmt.Errorf("extauthz transport: ask_model: args[\"prompt\"] = %#v, want a string", call.Args["prompt"])
 	}
 
+	// No "model" key here -- see this function's own doc comment, THE MODEL RIDES ONLY IN THE QUERY.
 	body, err := json.Marshal(map[string]any{
-		"model":    model,
 		"messages": []map[string]string{{"role": "user", "content": prompt}},
 	})
 	if err != nil {
@@ -551,11 +579,7 @@ func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agen
 	}
 	req.Header.Set("DPoP", proof)
 
-	client := t.http
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
-	resp, err := client.Do(req)
+	resp, err := t.http.Do(req)
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("extauthz transport: %s: %w", model, err)
 	}
@@ -569,7 +593,11 @@ func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agen
 	switch resp.StatusCode {
 	case http.StatusForbidden:
 		return agent.Result{Allowed: false, Reason: string(respBody)}, nil
-	case http.StatusBadGateway, http.StatusServiceUnavailable:
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable:
+		// 500 is LiteLLM's OWN reported status for an unreachable api_base
+		// (litellm.InternalServerError, "Connection error") -- gpt-4o's exact deliberately-broken
+		// deployment -- confirmed live; 502/503 are also caught here for the same "let through, not
+		// refused" reading in case a future LiteLLM version reports the failure differently.
 		return agent.Result{}, fmt.Errorf(
 			"%s returned %s -- that is LiteLLM failing to reach the upstream, NOT a policy denial. "+
 				"Envoy let the request through, which means ext_authz did not refuse it. "+

@@ -85,14 +85,45 @@ appends the model as a **query parameter**,
 `/chat/completions?model=llama3.2`. Envoy's `Path` attribute
 [includes the query string](https://github.com/envoyproxy/envoy/blob/v1.37.0/api/envoy/service/auth/v3/attribute_context.proto)
 (confirmed live — see `extauthz.go`'s own `observedURI` doc comment), so this
-becomes a genuinely different `DecideRequest.Tool` per model — while Envoy's
-prefix *route* match and LiteLLM's own exact-path *handler* match both ignore
-it: prefix matching in Envoy operates on the path component only, and
-LiteLLM's `/chat/completions` handler reads which model to call from the
-JSON body, never the query string. One function builds the tool_catalog row
-name, the delegation's requested tool, and the literal path this program
-sends — so the three can never drift into three different spellings of the
-same model.
+becomes a genuinely different `DecideRequest.Tool` per model, while Envoy's
+own prefix *route* match ignores it entirely (prefix matching operates on
+the path component only).
+
+**The query is not merely visible to LiteLLM — it is what LiteLLM routes
+on, ahead of the body.** LiteLLM's own model-resolution precedence
+(`proxy_server.py`) is
+`general_settings["completion_model"] or user_model or model or data.get("model")`,
+where `model` is the request's **query parameter** and `data.get("model")`
+is the **body** — the query wins whenever both are present. Confirmed live:
+an `?model=gpt-4o` request with no `"model"` key in the body still selects
+`gpt-4o`'s dead upstream. That is why `Call` sends the model **only** in the
+query and omits it from the body entirely (see **Only one value to
+disagree with**, below) — the value policy sees and the value LiteLLM routes
+on are the same value by construction, not merely by this program's own care
+to keep two copies in sync. One function, `toolIdentity`, builds the
+tool_catalog row name, the delegation's requested tool, and the literal
+path+query this program sends — so the three can never drift into three
+different spellings of the same model.
+
+## Only one value to disagree with
+
+An earlier version of this example sent `"model"` in both the query and the
+JSON body — always the same value, so it worked, but for a reason that
+depended on LiteLLM's own precedence order holding. `docker-compose.yml`
+pins `ghcr.io/berriai/litellm:main-latest`, a **floating** tag, on an
+internal precedence chain whose own inline comment reads "for azure
+deployments" — not a guarantee this example is entitled to lean on forever.
+Had that order ever reversed, sending a policed model in the query and a
+different, unpoliced one in the body would have been silently accepted:
+nothing in this suite would fail, because this program always sent body ==
+query, so the two could never be caught disagreeing. That is the bypass this
+design exists to avoid, sitting one config change away.
+
+`Call` now omits `"model"` from the body entirely — the query is the *only*
+value present for the PDP's decision and LiteLLM's routing to possibly
+disagree about, and it is the same value either way it is resolved. One
+deleted JSON key converts a coincidence (both orderings happen to agree
+today) into a structural guarantee (there is nothing left to disagree).
 
 ## The DPoP proof's `htu` does not carry the query
 
@@ -107,13 +138,16 @@ different `Tool` identities. Only the query varies per model; `htu` is fixed.
 - **403** from Envoy is a **decision**: `ext_authz`, or the PDP behind it,
   looked at this exact call and said no —
   `agent.Result{Allowed:false, Reason: <body>}`.
-- **502/503** means Envoy let the request through to LiteLLM and LiteLLM then
-  failed to reach the model's own upstream — exactly `gpt-4o`'s deliberately
-  unreachable `api_base`. That means `ext_authz` did **not** refuse the call:
-  this example is broken (the delegation must be holding the `gpt-4o` tool
-  when it should not), not policy working, and is returned as a Go `error`
-  so `agent.Run` aborts instead of recording a transport failure as a
-  decision.
+- **500/502/503** means Envoy let the request through to LiteLLM and LiteLLM
+  then failed to reach the model's own upstream — exactly `gpt-4o`'s
+  deliberately unreachable `api_base`, which LiteLLM reports as a **500**
+  (`litellm.InternalServerError`, "Connection error"), confirmed live — not a
+  502/503, which are also caught for the same "let through, not refused"
+  reading in case a future LiteLLM version reports it differently. Any of the
+  three means `ext_authz` did **not** refuse the call: this example is broken
+  (the delegation must be holding the `gpt-4o` tool when it should not), not
+  policy working, and is returned as a Go `error` so `agent.Run` aborts
+  instead of recording a transport failure as a decision.
 - Any other transport failure is a Go `error` too, never a decision.
 
 ## The one row that lives in `deploy/seed/`
