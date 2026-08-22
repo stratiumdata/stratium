@@ -252,10 +252,13 @@ func seedExtauthzAgentOnce(t *testing.T) {
 	t.Helper()
 	withTenantTx(t, envoyTenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(),
-			`INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING`,
+			// classification_caps: NOT NULL, no default (migrations/
+			// 000020_agent_classification_caps) -- '{}' matches CreateAgent's
+			// own "every created agent starts capless" default.
+			`INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
 			extauthzAgentID.String(), envoyTenant, "extauthz-integration-agent", "anthropic", "claude",
-			int64(models.TrustTierPlatformTrusted), true, false, []byte(`[]`),
+			int64(models.TrustTierPlatformTrusted), true, false, []byte(`[]`), []byte(`{}`),
 		); err != nil {
 			t.Fatalf("seed extauthz agent: %v", err)
 		}

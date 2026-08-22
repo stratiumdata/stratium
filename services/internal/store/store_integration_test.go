@@ -870,8 +870,8 @@ func withTenantTx(t *testing.T, tenant string, fn func(tx *sql.Tx)) {
 	}
 }
 
-const insertAgentQuery = `INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
+const insertAgentQuery = `INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`
 
 // seedAgent inserts one enabled, unsuspended agent row. trustTier is an
 // explicit parameter, not a hardcoded default, because Phase 2c Task 5's
@@ -879,11 +879,19 @@ const insertAgentQuery = `INSERT INTO agents (id, tenant_id, name, provider, mod
 // action (PLATFORM_TRUSTED — see authz.DefaultTrustTable) so its agent leg
 // legitimately allows; every earlier caller passes TrustTierUnverified,
 // preserving exactly the value this function used to hardcode.
+//
+// classification_caps is hardcoded to '{}' (no caps, matching CreateAgent's
+// own "every created agent starts capless" default) rather than a parameter:
+// migrations/000020_agent_classification_caps added the column NOT NULL with
+// no default, so this INSERT stopped compiling against a live schema the
+// moment that migration landed -- every existing caller here already assumed
+// a capless agent (the column did not exist yet), so this is the value that
+// preserves their behaviour exactly, not a new decision.
 func seedAgent(t *testing.T, tenant string, id uuid.UUID, name string, trustTier models.AgentTrustTier) {
 	t.Helper()
 	withTenantTx(t, tenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(), insertAgentQuery,
-			id.String(), tenant, name, "anthropic", "claude", int64(trustTier), true, false, []byte(`[]`),
+			id.String(), tenant, name, "anthropic", "claude", int64(trustTier), true, false, []byte(`[]`), []byte(`{}`),
 		); err != nil {
 			t.Fatalf("seed agent %s: %v", name, err)
 		}
