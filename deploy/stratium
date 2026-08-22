@@ -1120,12 +1120,13 @@ def cmd_verify(args):
     cases = [
         # (tool, want exit, label, reason substring to require -- None skips that check)
         ("Read", 0, "granted -- must be allowed", None),
-        # LS, not Write: this tenant's tier_overrides table carries a
-        # standing Write->DESTRUCTIVE row (seeded by other integration
-        # coverage against this same shared tenant; not this script's to
-        # remove), so a Write probe now denies on ACTION TIER, not on
-        # tool-holding -- green, but for a reason its old label did not
-        # claim. LS is catalogued at READ_ONLY (deploy/seed/tool-catalog-
+        # LS, not Write. The integration suites write tier_overrides rows
+        # against this same shared tenant and do not clean them up; a
+        # standing Write->DESTRUCTIVE row once made this probe deny on
+        # ACTION TIER rather than tool-holding -- green, but for a reason
+        # its label did not claim. That row has been deleted, and a later
+        # integration run will put it back. LS is a probe the residue
+        # cannot reach: catalogued at READ_ONLY (deploy/seed/tool-catalog-
         # claude-code.sql), well under this delegation's EXTERNAL_COMMS
         # ceiling and carries no override, so a denial here can only come
         # from HasTool -- the thing this case's label actually claims.
