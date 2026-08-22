@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 // fakeTransport records what it was asked and answers from a script.
 type fakeTransport struct {
 	results map[string]Result
+	errs    map[string]error // keyed by tool name; checked before results
 	seen    []ToolCall
 }
 
@@ -24,6 +26,9 @@ func (f *fakeTransport) Tools() []ToolSpec {
 
 func (f *fakeTransport) Call(_ context.Context, c ToolCall) (Result, error) {
 	f.seen = append(f.seen, c)
+	if err, ok := f.errs[c.Name]; ok {
+		return Result{}, err
+	}
 	return f.results[c.Args["path"].(string)], nil
 }
 
@@ -91,6 +96,30 @@ func TestRun_DenialReasonIsSentBackAsAToolMessage(t *testing.T) {
 	raw, _ := json.Marshal(second)
 	if !strings.Contains(string(raw), "exceeds delegation cap CONFIDENTIAL") {
 		t.Errorf("the denial reason never reached the model:\n%s", raw)
+	}
+}
+
+// A transport error is the example being broken (network down, process
+// dead), not the PDP answering. It must abort the run immediately -- proven
+// here by scripting only ONE reply, so a second Chat call fails the stub --
+// and must leave the matching expectation NEVER TRIED rather than satisfied.
+// If the loop instead recorded a zero-valued Result{Allowed:false} as a
+// decision, the Deny expectation below would be wrongly satisfied and
+// ExitCode() would come back 0 on a stack that enforced nothing.
+func TestRun_TransportErrorAbortsAndRecordsNoDecision(t *testing.T) {
+	srv := litellmStub(t, []string{replyCallsRead})
+	defer srv.Close()
+
+	ft := &fakeTransport{errs: map[string]error{"read": errors.New("connection reset by peer")}}
+
+	rep := Run(context.Background(), &LLM{BaseURL: srv.URL, Model: "m", HTTP: srv.Client()},
+		ft, "read the file", []Expectation{{Tool: "read", ArgContains: "secret-", Want: Deny}}, io.Discard)
+
+	if len(ft.seen) != 1 {
+		t.Fatalf("transport saw %d calls, want 1 -- the loop must abort on error, not continue", len(ft.seen))
+	}
+	if rep.ExitCode() == 0 {
+		t.Fatal("ExitCode() = 0 after a transport error; the expectation was never tried and must fail")
 	}
 }
 

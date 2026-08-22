@@ -85,7 +85,15 @@ func (l *LLM) Chat(ctx context.Context, msgs []Message, tools []ToolSpec) (Messa
 	m := out.Choices[0].Message
 	for _, rc := range m.RawToolCalls {
 		args := map[string]any{}
-		_ = json.Unmarshal([]byte(rc.Function.Arguments), &args)
+		// A model that emits malformed arguments must not silently degrade to
+		// a call with an empty args map -- that reads as a deliberate call
+		// with no arguments, not the parse failure it actually was. Surface
+		// it as an error instead: this whole loop exists to make governance
+		// visible, and a swallowed parse error is the same failure family.
+		if err := json.Unmarshal([]byte(rc.Function.Arguments), &args); err != nil {
+			return Message{}, fmt.Errorf("litellm: tool call %q: malformed arguments %q: %w",
+				rc.Function.Name, rc.Function.Arguments, err)
+		}
 		m.ToolCalls = append(m.ToolCalls, ToolCall{Name: rc.Function.Name, Args: args})
 	}
 	return m, nil
