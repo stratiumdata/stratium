@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep session-start", "timeout": 15 } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 10 } ] }
+    ]
+  }
+}

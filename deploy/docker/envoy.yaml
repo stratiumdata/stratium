@@ -1,3 +1,10 @@
+# Editing this file and running `docker compose up -d envoy --wait` does NOT
+# reload it: this config is bind-mounted, compose won't recreate a service
+# whose definition is unchanged, and Envoy only reads its bootstrap at
+# process start -- use `docker compose up -d --force-recreate envoy --wait`
+# (or `restart envoy`) or you'll get a healthy container still serving the
+# old routes.
+#
 # Static bootstrap for Task 4's real-Envoy proof: one HTTP listener with the
 # ext_authz filter pointed at stratium-pep's extauthz mode (the pep-extauthz
 # compose service), in front of a trivial echo upstream (the echo-upstream
