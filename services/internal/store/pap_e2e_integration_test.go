@@ -54,6 +54,7 @@
 package store_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1195,6 +1196,162 @@ func TestIntegration_PAPE2E_ResourceLabelRuleWriteBumpsEpochAndReachesTheNextDec
 		t.Errorf("Decide() on the capped id after the delete: reason = %q, want it still labelled TOP-SECRET "+
 			"by the longer rule -- deleting a catch-all does not un-label what another rule covers",
 			survived.GetReason())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Proof 8
+// ---------------------------------------------------------------------------
+
+// TestIntegration_PAPE2E_ClassificationDenialReachableWithoutSQL is Task 8's
+// proof (.superpowers/sdd/2026-08-21-classification-caps-api/task-8-brief.md):
+// the denial string documented at docs/architecture.md:366 --
+// `resource classification SECRET exceeds delegation cap CONFIDENTIAL in
+// hierarchy "nato" (depth 0)` -- has never been reachable through a supported
+// interface. This test reaches it through nothing but supported interfaces:
+// two resource-label-rules and an agent's classification-caps are written
+// through the real admin plane (papJSON, same as every proof above), and the
+// delegation is minted through the real CreateDelegation RPC
+// (internal/pdpgrpc/delegation.go), never seedDelegation -- seedDelegation
+// would let the test set ClassificationCaps itself, which is exactly the one
+// thing this proof cannot assume: that a ROOT delegation inherits its cap
+// from the agent is Task 4's own claim, so the delegation's caps are read
+// back afterward through GET /v1/delegations rather than trusted.
+func TestIntegration_PAPE2E_ClassificationDenialReachableWithoutSQL(t *testing.T) {
+	const tool = "papCapsProofReadTool"
+	const principal = "pap-caps-proof@example.com"
+	const allowedID = "/tmp/pap-caps-proof/notes.txt"
+	const deniedID = "/secret/pap-caps-proof/plans.txt"
+
+	papBlanketPermit(t, "pap-caps-proof-blanket-permit")
+	admin := papAccessToken(t, papAdminUser, papAdminPass)
+
+	// The catalog row: without a resource_field naming "path", the PDP can
+	// never resolve either id to a label and every Decide below would deny
+	// identically -- see proof 7's own catalog row for the same reason.
+	papJSON(t, papAddr, http.MethodPost, "/v1/tool-catalog", admin, map[string]any{
+		"tool_name": tool, "action_tier": int(models.ActionTierReadOnly),
+		"verb": "read", "resource_field": "path",
+	}, nil)
+
+	// Both rules are cleaned up unconditionally: resource_label_rules has a
+	// UNIQUE(tenant_id, prefix) constraint (internal/store/resource_label.go),
+	// so a prefix "" left behind by a failed or repeated run would 409 the
+	// next one. Proof 7 above cleans up its own catch-all for the same reason.
+	createRule := func(prefix, hierarchy, level string) models.ResourceLabelRule {
+		t.Helper()
+		var created models.ResourceLabelRule
+		papJSON(t, papAddr, http.MethodPost, "/v1/resource-label-rules", admin, map[string]any{
+			"prefix": prefix, "hierarchy": hierarchy, "level": level,
+		}, &created)
+		if created.ID == uuid.Nil {
+			t.Fatalf("POST /v1/resource-label-rules (prefix %q) returned the zero UUID -- nothing was created", prefix)
+		}
+		// context.Background(), not t.Context(): a Cleanup func runs AFTER
+		// the test's own context is already canceled (testing.T.Context's own
+		// doc comment), so a papJSON call here would fail on a canceled
+		// context rather than actually deleting anything.
+		t.Cleanup(func() {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodDelete,
+				"http://"+papAddr+"/v1/resource-label-rules/"+created.ID.String(), nil)
+			if err != nil {
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+admin)
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		})
+		return created
+	}
+	// The catch-all has to exist BEFORE the caps write below: SetAgentClassificationCaps
+	// refuses an uncovered hierarchy (ErrNoCatchAllRule) unless one already covers it.
+	createRule("", "nato", "UNCLASSIFIED")
+	createRule("/secret/", "nato", "SECRET")
+
+	// The agent: an empty allowed_tools is unrestricted (models.Agent.HasTool),
+	// and platform-trusted so nothing about its own trust tier can be what
+	// denies below -- the cap is meant to be the only axis that can.
+	var agent models.Agent
+	papJSON(t, papAddr, http.MethodPost, "/v1/agents", admin, map[string]any{
+		"name": "pap-caps-proof-agent", "provider": "anthropic", "model_id": "claude",
+		"trust_tier": int(models.TrustTierPlatformTrusted), "enabled": true, "allowed_tools": []string{},
+	}, &agent)
+	if agent.ID == uuid.Nil {
+		t.Fatal("POST /v1/agents returned the zero UUID -- nothing was created")
+	}
+
+	// Task 7's route: the ceiling only an operator can set, through the front
+	// door it now has.
+	var view models.AgentCapsView
+	papJSON(t, papAddr, http.MethodPut, "/v1/agents/"+agent.ID.String()+"/classification-caps", admin,
+		map[string]any{"classification_caps": map[string]string{"nato": "CONFIDENTIAL"}}, &view)
+	if got := view.ClassificationCaps["nato"]; got != "CONFIDENTIAL" {
+		t.Fatalf("PUT classification-caps returned nato=%q, want CONFIDENTIAL", got)
+	}
+
+	// The root delegation: issued through the real CreateDelegation RPC, the
+	// same path a delegating agent uses in production, so Task 4's copy from
+	// the agent row is what actually runs here -- see this test's own doc
+	// comment for why seedDelegation cannot stand in for this step.
+	created, err := papPdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
+		Subject: principal, AgentId: agent.ID.String(),
+		RequestedScope: &pdpgrpc.RequestedScope{
+			MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{tool},
+		},
+		Purpose: "pap-caps-proof", TtlSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation: %v", err)
+	}
+	if created.GetDelegationId() == "" {
+		t.Fatal("CreateDelegation returned no delegation_id")
+	}
+
+	// Read the delegation back through the admin plane, proving the agent's
+	// cap actually landed on the delegation the RPC issued rather than
+	// merely that the RPC succeeded.
+	var delegations []models.Delegation
+	papJSON(t, papAddr, http.MethodGet, "/v1/delegations", admin, nil, &delegations)
+	var deleg *models.Delegation
+	for i := range delegations {
+		if delegations[i].ID.String() == created.GetDelegationId() {
+			deleg = &delegations[i]
+			break
+		}
+	}
+	if deleg == nil {
+		t.Fatalf("GET /v1/delegations did not list %s", created.GetDelegationId())
+	}
+	if got := deleg.ClassificationCaps["nato"]; got != "CONFIDENTIAL" {
+		t.Fatalf("delegation classification_caps[nato] = %q, want CONFIDENTIAL -- Task 4's inheritance did not run",
+			got)
+	}
+
+	decide := func(id string) *pdpgrpc.DecideResponse {
+		return papDecide(t, &pdpgrpc.DecideRequest{
+			Token: created.GetToken(), AgentId: agent.ID.String(), Subject: principal, Tool: tool,
+			RawInput: `{"path":"` + id + `"}`,
+		})
+	}
+
+	allow := decide(allowedID)
+	if allow.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+		t.Fatalf("Decide(%s) = %v (reason: %s), want ALLOW -- UNCLASSIFIED under a CONFIDENTIAL cap",
+			allowedID, allow.GetEffect(), allow.GetReason())
+	}
+
+	deny := decide(deniedID)
+	if deny.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+		t.Fatalf("Decide(%s) = %v (reason: %s), want DENY -- SECRET exceeds a CONFIDENTIAL cap",
+			deniedID, deny.GetEffect(), deny.GetReason())
+	}
+	const want = `resource classification SECRET exceeds delegation cap CONFIDENTIAL in hierarchy "nato" (depth 0)`
+	if deny.GetReason() != want {
+		t.Errorf("Reason = %q, want %q -- this exact string is documented at docs/architecture.md:366 as "+
+			"unreachable through any supported interface; this proof is what makes that false",
+			deny.GetReason(), want)
 	}
 }
 

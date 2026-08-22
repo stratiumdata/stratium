@@ -16,24 +16,28 @@ There is a pass/fail checklist at the end.
 
 ---
 
-## What you can test, and the one thing you cannot
+## What you can test
 
 The feature lets an operator register per-tenant rules mapping a **resource-id
 prefix** to a `(hierarchy, level)` classification. At decision time the PDP
 resolves a resource's label by **longest matching prefix** and hands it to the
 delegation's classification cap check.
 
-**Everything on the labelling side is reachable through the admin plane.**
+**Everything on the labelling side is reachable through the admin plane, and so
+is the cap.** `PUT /v1/agents/{id}/classification-caps` (RoleAdmin) sets it on
+the agent; a root delegation copies it at issuance
+(`internal/pdpgrpc/delegation.go`), and children copy their parent's, never
+widening. B2 exercises the route live.
 
-**The cap itself is not.** Nothing in the API sets, raises, lowers, or repairs a
-delegation's `classification_caps`: issuance writes an empty map on every root
-delegation, children copy their parent's map unchanged, and the create RPC
-carries no field for one. So **Part B requires one direct SQL write** to reach
-the enforcement path at all — the project's own integration fixtures do the same
-thing for the same reason.
+**One SQL statement survives in Part B, for a reason that has nothing to do
+with the cap.** This plan deliberately keeps the tenant free of principal
+policies, so B3 can show `delegationEffect` diverging from the top-level
+`effect` — and `CreateDelegation` over gRPC refuses to issue anything to a
+principal with no policy at all. B2's delegation row is still built by hand
+because of that, not because the cap is unreachable; the statement no longer
+hand-types a cap, it copies whatever the PUT above just set.
 
-That gap is recorded in the spec's open items, not hidden. Part D covers what it
-means in practice, including a trap that silently disables enforcement.
+Part D3 needs a caveat as a result — read it after B2, not before.
 
 ---
 
@@ -357,11 +361,12 @@ AGENT=4eced803-d8bd-4a51-8e2c-4d846b47a189
 call's `raw_input` is the resource identity. A tool whose row names none
 produces no resource id, and therefore gets no label at all — see D2.
 
-### B2 — Seed a delegation, with its cap, in one step
+### B2 — Set the agent's cap through the API, then seed a delegation that carries it
 
-**`CreateDelegation` over gRPC will not work here.** A root delegation is
-clamped by what the *principal* holds, so with no principal policy configured
-for this tenant it fails:
+**`CreateDelegation` over gRPC still will not work here** — a root delegation
+is clamped by what the *principal* holds, and this tenant deliberately carries
+no principal policy (that absence is what makes B3 worth doing: reading
+`delegationEffect` instead of the top-level `effect`). So it still fails:
 
 ```
 ERROR:
@@ -369,9 +374,32 @@ ERROR:
   Message: none of the requested tools are held by this principal
 ```
 
-The project's own integration fixtures do not use that RPC either — they insert
-the row. Do the same, and put the cap in the same statement, since no route can
-add one later.
+That is a different gap from the one this step used to route around. The cap
+itself is no longer one of them:
+
+```bash
+curl -sS -w '\n%{http_code}\n' -X PUT "http://$PAP/v1/agents/$AGENT/classification-caps" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"classification_caps":{"nato":"CONFIDENTIAL"}}'
+```
+
+**Expected:**
+
+```
+{"agent_id":"...","classification_caps":{"nato":"CONFIDENTIAL"},"catch_all":{"nato":"UNCLASSIFIED"},"unsatisfiable_tools":[...],"live_delegations":0,"applies":"at next issuance"}
+200
+```
+
+**PASS if** `200` and `classification_caps.nato` echoes back `CONFIDENTIAL`.
+This needs the catch-all rule from A1 (`mkrule "" nato UNCLASSIFIED`) to already
+exist — `SetAgentClassificationCaps` refuses an uncovered hierarchy otherwise,
+naming it in the error.
+
+The delegation row itself still needs the SQL insert this plan always used —
+for the principal-policy reason above, unrelated to the cap. What changes is
+`classification_caps`: it is no longer a hand-typed literal. It reads back the
+value the PUT above just set, off the agent row, so the statement copies an
+operator-set value rather than choosing one of its own:
 
 ```bash
 export DELEG=$(python3 -c 'import uuid;print(uuid.uuid4())')
@@ -381,7 +409,8 @@ psqlm -q -c "BEGIN;
    classification_caps,resource_constraints,purpose,expires_at,revoked,
    parent_delegation_id,root_delegation_id,depth,chain_agent_ids,escalate_at)
  VALUES ('$DELEG','$TENANT','tester@example.com','$AGENT',
-   '[\"read_file\",\"Read\",\"list_dir\"]',3,'{\"nato\":\"CONFIDENTIAL\"}','{}',
+   '[\"read_file\",\"Read\",\"list_dir\"]',3,
+   (SELECT classification_caps FROM agents WHERE id='$AGENT'),'{}',
    'manual test',now()+interval '1 hour',false,NULL,'$DELEG',0,'[\"$AGENT\"]',NULL);
  COMMIT;"
 ```
@@ -398,7 +427,9 @@ psqlm -q -c "BEGIN;
 **PASS if** no error appears. `set_config` is required in the same transaction:
 RLS is the only tenant boundary and the table is `FORCE ROW LEVEL SECURITY`, so
 even the owner is subject to the policy — without it the `INSERT` is rejected by
-`WITH CHECK`.
+`WITH CHECK`. The `(SELECT … FROM agents …)` subquery, not a literal, is what
+proves the two are the same value: rerun the PUT with a different level and the
+next delegation you seed picks it up with no edit to this statement.
 
 Then issue a token. **`ttl_seconds` is required** — omitting it fails with
 `ttl_seconds must be positive`:
@@ -702,7 +733,18 @@ the shipped seed leaves `Glob`, `Grep`, `WebFetch` and `WebSearch` fieldless on
 purpose. Before concluding the cliff is closed, walk the delegation's approved
 tools and check each catalog row.
 
-### D3 — Revoking and re-issuing removes the cap entirely
+### D3 — Revoking and re-issuing follows the AGENT's cap now, not the old delegation's
+
+> **Updated for the classification-caps route** (see the intro and B2). This
+> trap predates `PUT /v1/agents/{id}/classification-caps`. It used to be
+> absolute — every root came back with `{}`, no matter what. It no longer is:
+> `TestCreateDelegation_RootCopiesAgentCaps`
+> (`internal/pdpgrpc/delegation_test.go`) pins that a root now copies whatever
+> cap is on its agent. The trap is narrower, not gone: it now catches an
+> operator who caps a *delegation* (by hand, as B2 still does, or believes the
+> UI did) without capping the *agent* — that delegation's replacement, on
+> revoke-and-reissue, still comes back with whatever the agent has, `{}`
+> unless `PUT .../classification-caps` was also called.
 
 ```bash
 psqlm -tAc "SELECT set_config('app.tenant_id','$TENANT',false);
@@ -716,25 +758,32 @@ psqlm -tAc "SELECT set_config('app.tenant_id','$TENANT',false);
 48605d6d-…|{"nato": "CONFIDENTIAL"}
 ```
 
-**PASS if** the caps are there. **You will not see a `{}` row to compare
-against, and that absence is the finding** — on this tenant no delegation can
-be created through the API at all (B2), so the only rows that exist are ones
-written by hand with a cap already in them.
+**PASS if** the caps are there. You still will not see a `{}` row to compare
+against on *this* tenant — B2's delegation is still SQL-seeded, for the
+principal-policy reason B2 explains, not because the API cannot produce a
+capped row: `deploy/stratium verify` issues one through the real
+`CreateDelegation` RPC on its own tenant and observes the same enforcement,
+end to end, with no SQL at all.
 
-The claim this step exists to convey therefore cannot be demonstrated by
-observation here; it is established by reading the code and pinned by three
-guard tests:
+The narrower claim this step now demonstrates — a delegation's cap tracks its
+*agent's* cap at issuance, not whatever an earlier delegation happened to
+carry — is pinned by these guard tests:
 
 | Guard | Holds |
 |---|---|
-| `TestRouteTable_ExposesNoWriteSurfaceForAClassificationCap` | No route writes a cap |
-| `TestCreateDelegationRPC_CarriesNoClassificationCapField` | The RPC has no field for one |
-| `TestCreateDelegation_RootIsCreatedWithNoClassificationCap` | A root is created with `{}` |
+| `TestCreateDelegation_RootIsCreatedWithNoClassificationCap` | A CAPLESS agent's root is created with `{}` |
+| `TestCreateDelegation_RootCopiesAgentCaps` | A CAPPED agent's root copies it |
+| `TestRouteTable_ExposesNoWriteSurfaceForAClassificationCap` | No route sets a cap on the *delegation* directly — only `PUT .../classification-caps` on the *agent* does |
 
 An **empty map is not a low cap** — the check allows immediately when no cap is
-configured, so a session re-issued through the API has classification
+configured, so a session re-issued for a still-capless agent has classification
 enforcement switched off entirely on every hierarchy, silently. Revoke-and-
-re-issue is a way to *stop* a capped delegation, never to adjust one.
+re-issue now *does* adjust enforcement, but only through the agent: change what
+`PUT .../classification-caps` set, then revoke and re-issue, and the new
+delegation carries the new value. Revoking and re-issuing with the agent
+untouched still just repeats whatever it already had — capping one delegation
+by hand, as B2 does, and expecting a *later* re-issue to remember it, is the
+one way this still bites.
 
 ### D4 — `/data` matches `/database/x`
 
@@ -775,7 +824,7 @@ Clean up, or later runs inherit it: delete the `/exp` rule via
 | A4 | `403` for viewer-create and editor-delete |
 | A5 | Epoch strictly increases |
 | B1 | Agent UUID; catalog `201` echoing `resource_field` |
-| B2 | Insert with no `ERROR:`; token a few hundred chars |
+| B2 | Caps `PUT` returns `200` with `nato: CONFIDENTIAL`; insert with no `ERROR:`; token a few hundred chars |
 | B4 | Deny / **allow** / allow — the middle one is longest-prefix-lowers |
 | B5 | Delete `204`; the previously-allowed path now denies |
 | B6 | One INFO line, six rule fields, **no resource id** |
@@ -786,7 +835,7 @@ Clean up, or later runs inherit it: delete the `/exp` rule via
 | C5 | Count `0` as the table owner |
 | D1 | Carve-out log count unchanged across a raise |
 | D2 | Fieldless tool denies with the catch-all present |
-| D3 | Seeded delegation has a cap; RPC-created ones have `{}` |
+| D3 | Seeded delegations have a cap; a CAPLESS agent's root still comes back `{}` |
 | D4 | `/exp` classifies `/expenses/…` — hazard reproduced |
 
 **The four that matter most** are C1, C2, C3 and B4's middle line. The first

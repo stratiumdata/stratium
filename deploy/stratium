@@ -623,6 +623,17 @@ DEMO_TOOLS = "Read,Grep,Glob"
 DEMO_TIER = 3
 DEMO_TTL = 3600
 
+# The cap verify's classification case needs, plus the two label rules that make
+# it evaluable. "" is the catch-all every OTHER probe's resource id falls under
+# once a cap is set (R7's cliff: a configured cap with no matching rule denies
+# everything, not just what you meant to restrict) -- UNCLASSIFIED is comfortably
+# under CONFIDENTIAL, so the existing Read/Write/Frobnicate cases keep their
+# outcomes. "/secret-" covers verify's own per-run tag (f"/secret-{tag}/...") at
+# SECRET, which is over the cap, so that one case denies on classification alone.
+DEMO_CAPS = {"nato": "CONFIDENTIAL"}
+CATCH_ALL_RULE = ("", "nato", "UNCLASSIFIED")
+SECRET_RULE = ("/secret-", "nato", "SECRET")
+
 OPERATORS = {  # realm users from the docker stack, local dev credentials
     "editor": ("pap-editor", "pap_editor_local_dev_only"),
     "admin": ("pap-admin", "pap_admin_local_dev_only"),
@@ -964,6 +975,33 @@ def ensure_agent(state):
     return body["id"], name, "created"
 
 
+def ensure_label_rule(prefix, hierarchy, level):
+    """POST one resource-label-rule. Idempotent like ensure_policy: a rerun
+    hits UNIQUE (tenant_id, prefix) and 409s rather than erroring.
+    """
+    code, body = api("POST", "/v1/resource-label-rules", body={
+        "prefix": prefix, "hierarchy": hierarchy, "level": level})
+    if code == 201:
+        return "created"
+    if code == 409:
+        return "already present"
+    raise Fail(f"resource-label-rules POST {prefix!r} returned {code}: {body}")
+
+
+def ensure_caps(agent_id):
+    """PUT Task 7's route (RoleAdmin): the ceiling verify's classification
+    case needs. Requires the catch-all rule to exist first -- without one,
+    SetAgentClassificationCaps refuses an uncovered hierarchy -- so this must
+    run after ensure_label_rule(*CATCH_ALL_RULE). A PUT is a full replace, so
+    calling it again on a reused agent just re-asserts the same caps.
+    """
+    code, body = api("PUT", f"/v1/agents/{agent_id}/classification-caps",
+                     role="admin", body={"classification_caps": DEMO_CAPS})
+    if code != 200:
+        raise Fail(f"classification-caps PUT returned {code}: {body}")
+    return body
+
+
 def start_session(state):
     r = subprocess.run([PEP_BIN, "session-start"], capture_output=True, text=True,
                        env=pep_env(state))
@@ -1010,6 +1048,14 @@ def cmd_up(args):
                        session_file=state["session_file"], tools=DEMO_TOOLS,
                        project=project)
     ok(f"{how}: {agent_name} ({agent_id})")
+
+    step("Classification caps")
+    ok(ensure_label_rule(*CATCH_ALL_RULE) + " (catch-all, so every other probe stays UNCLASSIFIED)")
+    ok(ensure_label_rule(*SECRET_RULE) + ' ("/secret-*" -> SECRET)')
+    ensure_caps(agent_id)
+    state = save_state(caps=DEMO_CAPS)
+    ok(f"{agent_name} capped at {DEMO_CAPS}")
+    note("verify's classification case needs this; state['caps'] is how it knows")
 
     step("Delegation")
     session = start_session(state)
@@ -1099,12 +1145,20 @@ def cmd_verify(args):
                   f"(want {want})  reason on stderr: {bool(r.stderr.strip())}")
         note("the live-session leg is unverified -- see 2f of the agent test plan")
 
+    # Classification is now reachable through the API, so verify proves it
+    # rather than printing a disclaimer. Requires a catch-all rule and a cap;
+    # cmd_up sets both and records it in state["caps"] -- absent (an older
+    # `up` ran before this existed), the case is skipped rather than failing
+    # on a precondition verify itself did not set up.
+    if state.get("caps"):
+        rc, reason = hook_probe(state, "Read", f"/secret-{tag}/plans.txt")
+        good = rc == 2 and "exceeds delegation cap" in reason
+        failures.append(None if good else ("classification", 2, rc))
+        print(f"  {'PASS' if good else 'FAIL'}  {'classification':<18} exit={rc} (want 2)  "
+              f"SECRET over a CONFIDENTIAL cap")
+        print(f"        {reason[:150]}")
+
     bad = [f for f in failures if f]
-    print("\nNOT DEMONSTRATED: classification enforcement. `classification_caps` is\n"
-          "unreachable through the API -- issuance writes {} on every root delegation\n"
-          "and an empty map denies nothing. Exercising it needs a direct SQL write;\n"
-          "see Part B of the resource-labelling plan. This tool will not do that for\n"
-          "you, so what you see above is the whole of what is proven.")
     if bad:
         print("\n%d assertion(s) failed: %s" % (len(bad), bad))
         return 1
