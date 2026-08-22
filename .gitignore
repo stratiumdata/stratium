@@ -31,3 +31,6 @@ dist/
 /.stratium-session.json
 /.stratium-session.json.cache.json
 /bin/
+
+# the examples' shared delegation — bearer authority, never committed
+/example/.session.json
