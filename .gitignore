@@ -34,3 +34,4 @@ dist/
 
 # the examples' shared delegation — bearer authority, never committed
 /example/.session.json
+/example/.session.json.cache.json

@@ -173,3 +173,4 @@ Four unrelated causes all exit `2`, so read the reason, never the code:
 - [`session-start.md`](session-start.md) — required first.
 - [`mcp.md`](mcp.md) — the same enforcement for MCP tool calls.
 - [`../pep.md`](../pep.md) § "Reading a denial" — every reason string decoded.
+- [`../../example/hook/`](../../example/hook/) — this surface's configuration plus a real, captured Claude Code transcript hitting the deny path.

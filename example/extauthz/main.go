@@ -75,13 +75,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"time"
@@ -89,11 +86,8 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"stratium/example/agent"
-	"stratium/internal/pdpgrpc"
 )
 
 const (
@@ -134,12 +128,11 @@ const (
 	// section).
 	askModelTier = 3
 
-	// kcRealm/kcClient/editorUser/editorPass are the same shared, tenant-agnostic Keycloak fixture
-	// example/mcp/main.go and example/proxy/main.go already authenticate against: Keycloak proves
-	// identity and role membership only, never a tenant -- tenant scoping lives entirely in which
-	// PAP instance (here, pap-extauthz) a token is presented to.
-	kcRealm    = "stratium"
-	kcClient   = "stratium-pap"
+	// editorUser/editorPass are the same shared, tenant-agnostic Keycloak fixture
+	// example/mcp/main.go and example/proxy/main.go already authenticate against (agent.MintToken's
+	// own realm/client): Keycloak proves identity and role membership only, never a tenant --
+	// tenant scoping lives entirely in which PAP instance (here, pap-extauthz) a token is presented
+	// to.
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
 )
@@ -169,10 +162,10 @@ func main() {
 }
 
 func run() int {
-	pdpAddr := os.Getenv("EXAMPLE_PDP_ADDR")
+	pdpAddr := os.Getenv("EXAMPLE_EXTAUTHZ_PDP_ADDR")
 	envoyAddr := os.Getenv("EXAMPLE_ENVOY_ADDR")
 	litellmAddr := os.Getenv("EXAMPLE_LITELLM_ADDR")
-	papAddr := os.Getenv("EXAMPLE_PAP_ADDR")
+	papAddr := os.Getenv("EXAMPLE_EXTAUTHZ_PAP_ADDR")
 	kcAddr := os.Getenv("EXAMPLE_KC_ADDR")
 	ollamaAddr := os.Getenv("EXAMPLE_OLLAMA_ADDR")
 	if ollamaAddr == "" {
@@ -184,13 +177,13 @@ func run() int {
 	}
 
 	if pdpAddr == "" || envoyAddr == "" || litellmAddr == "" || papAddr == "" || kcAddr == "" {
-		fmt.Fprintln(os.Stderr, "stratium-example: EXAMPLE_PDP_ADDR, EXAMPLE_ENVOY_ADDR, EXAMPLE_LITELLM_ADDR, "+
-			"EXAMPLE_PAP_ADDR and EXAMPLE_KC_ADDR must be set -- this is setup, not a policy denial:")
+		fmt.Fprintln(os.Stderr, "stratium-example: EXAMPLE_EXTAUTHZ_PDP_ADDR, EXAMPLE_ENVOY_ADDR, EXAMPLE_LITELLM_ADDR, "+
+			"EXAMPLE_EXTAUTHZ_PAP_ADDR and EXAMPLE_KC_ADDR must be set -- this is setup, not a policy denial:")
 		fmt.Fprintln(os.Stderr, `      fix: dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }`)
-		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-extauthz 50051 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_EXTAUTHZ_PDP_ADDR="localhost:$(dc port pdp-extauthz 50051 | sed -E 's/.*://')"`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_ENVOY_ADDR="localhost:$(dc port envoy 10000 | sed -E 's/.*://')"`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"`)
-		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-extauthz 8080 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_EXTAUTHZ_PAP_ADDR="localhost:$(dc port pap-extauthz 8080 | sed -E 's/.*://')"`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"`)
 		return 1
 	}
@@ -199,14 +192,14 @@ func run() int {
 	if err := agent.Precheck(
 		agent.Check{Name: "ollama", Probe: agent.DialCheck(ollamaAddr),
 			Fix: "start Ollama and `ollama pull llama3.2` (expected at " + ollamaAddr + ")"},
-		agent.Check{Name: "litellm", Probe: addrProbe(litellmAddr),
-			Fix: `EXAMPLE_LITELLM_ADDR not set or not reachable`},
-		agent.Check{Name: "envoy", Probe: addrProbe(envoyAddr),
-			Fix: `EXAMPLE_ENVOY_ADDR not set or not reachable`},
-		agent.Check{Name: "pdp-extauthz", Probe: addrProbe(pdpAddr),
-			Fix: `EXAMPLE_PDP_ADDR not set or not reachable`},
-		agent.Check{Name: "pap-extauthz", Probe: addrProbe(papAddr),
-			Fix: `EXAMPLE_PAP_ADDR not set or not reachable -- bring it up: docker compose -f deploy/docker/docker-compose.yml up -d pap-extauthz --wait`},
+		agent.Check{Name: "litellm", Probe: agent.AddrProbe(litellmAddr),
+			Fix: `EXAMPLE_LITELLM_ADDR not set or not reachable; export EXAMPLE_LITELLM_ADDR="localhost:$(docker compose -f deploy/docker/docker-compose.yml port litellm 4000 | sed -E 's/.*://')"`},
+		agent.Check{Name: "envoy", Probe: agent.AddrProbe(envoyAddr),
+			Fix: `EXAMPLE_ENVOY_ADDR not set or not reachable; export EXAMPLE_ENVOY_ADDR="localhost:$(docker compose -f deploy/docker/docker-compose.yml port envoy 10000 | sed -E 's/.*://')"`},
+		agent.Check{Name: "pdp-extauthz", Probe: agent.AddrProbe(pdpAddr),
+			Fix: `EXAMPLE_EXTAUTHZ_PDP_ADDR not set or not reachable; export EXAMPLE_EXTAUTHZ_PDP_ADDR="localhost:$(docker compose -f deploy/docker/docker-compose.yml port pdp-extauthz 50051 | sed -E 's/.*://')"`},
+		agent.Check{Name: "pap-extauthz", Probe: agent.AddrProbe(papAddr),
+			Fix: `EXAMPLE_EXTAUTHZ_PAP_ADDR not set or not reachable -- bring it up: docker compose -f deploy/docker/docker-compose.yml up -d pap-extauthz --wait`},
 		agent.Check{Name: "extauthz-example-agent", Probe: agentSeededProbe(papAddr, kcAddr),
 			Fix: `dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }; dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres psql -h 127.0.0.1 -U stratium_migrate -d stratium -q -f /dev/stdin < deploy/seed/extauthz-example-agent.sql`},
 	); err != nil {
@@ -230,14 +223,14 @@ func run() int {
 		return 1
 	}
 
-	delegationID, err := readDelegationID(sessionFile)
+	delegationID, err := agent.ReadDelegationID(sessionFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example:", err)
 		return 1
 	}
 
 	fmt.Println("stratium-example: minting a DPoP-bound token for the extauthz surface (K5)...")
-	key, boundToken, err := mintBoundToken(pdpAddr, delegationID)
+	key, boundToken, err := agent.MintBoundToken(pdpAddr, delegationID)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example:", err)
 		return 1
@@ -258,22 +251,13 @@ func run() int {
 		"Report what each said, or why you could not."
 	want := []agent.Expectation{
 		{Tool: "ask_model", ArgContains: "llama3.2", Want: agent.Allow},
-		{Tool: "ask_model", ArgContains: "gpt-4o", Want: agent.Deny},
+		{Tool: "ask_model", ArgContains: "gpt-4o", Want: agent.Deny, ReasonContains: "not in delegation approved_tools"},
 	}
 
 	fmt.Println("stratium-example: running the agent...")
 	report := agent.Run(context.Background(), llm, transport, task, want, os.Stdout)
 	report.Print(os.Stdout)
 	return report.ExitCode()
-}
-
-func addrProbe(addr string) func() error {
-	return func() error {
-		if addr == "" {
-			return fmt.Errorf("address not configured")
-		}
-		return agent.DialCheck(addr)()
-	}
 }
 
 // agentSeededProbe is a Precheck probe, not a seeder: it confirms -- via pap-extauthz's own
@@ -285,7 +269,7 @@ func addrProbe(addr string) func() error {
 // example/proxy/main.go's own agentSeededProbe.
 func agentSeededProbe(papAddr, kcAddr string) func() error {
 	return func() error {
-		tok, err := mintToken(kcAddr, editorUser, editorPass)
+		tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
 		if err != nil {
 			return fmt.Errorf("minting a token to check: %w", err)
 		}
@@ -319,7 +303,7 @@ func agentSeededProbe(papAddr, kcAddr string) func() error {
 // own doc comment: an operator token expires after five minutes.
 func setUpCatalogAndPolicy(papAddr, kcAddr string) error {
 	for _, model := range modelNames {
-		tok, err := mintToken(kcAddr, editorUser, editorPass)
+		tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
 		if err != nil {
 			return fmt.Errorf("minting editor token: %w", err)
 		}
@@ -328,14 +312,14 @@ func setUpCatalogAndPolicy(papAddr, kcAddr string) error {
 		}
 	}
 
-	tok, err := mintToken(kcAddr, editorUser, editorPass)
+	tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
 	if err != nil {
 		return fmt.Errorf("minting editor token: %w", err)
 	}
 	// A tenant-wide blanket permit, exactly like example/proxy's own tenant carries: the principal
 	// leg always allows, so this example's own DENY is unambiguously the delegation leg's
 	// approved_tools check, never a cedar refusal underneath it.
-	return ensurePolicy(papAddr, tok, "example-extauthz-blanket-permit", `permit(principal, action, resource);`)
+	return agent.EnsurePolicy(papAddr, tok, "example-extauthz-blanket-permit", `permit(principal, action, resource);`)
 }
 
 func ensureToolCatalogEntry(papAddr, token, toolName, verb string) error {
@@ -356,57 +340,6 @@ func ensureToolCatalogEntry(papAddr, token, toolName, verb string) error {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("tool-catalog %q: %s: %s", toolName, resp.Status, b)
-}
-
-func ensurePolicy(papAddr, token, name, policyContent string) error {
-	body, _ := json.Marshal(map[string]string{"name": name, "language": "cedar", "policy_content": policyContent, "effect": "allow"})
-	req, err := http.NewRequest(http.MethodPost, "http://"+papAddr+"/v1/policies", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("policies %q: %w", name, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusConflict {
-		return nil
-	}
-	b, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("policies %q: %s: %s", name, resp.Status, b)
-}
-
-// mintToken gets a fresh operator token from Keycloak. Copied from example/mcp/main.go's and
-// example/proxy/main.go's own mintToken verbatim: same realm, same client, called anew for every
-// PAP request that needs one, never cached -- these tokens expire after five minutes.
-func mintToken(kcAddr, user, pass string) (string, error) {
-	resp, err := http.PostForm(fmt.Sprintf("http://%s/realms/%s/protocol/openid-connect/token", kcAddr, kcRealm),
-		url.Values{
-			"grant_type": {"password"},
-			"client_id":  {kcClient},
-			"username":   {user},
-			"password":   {pass},
-			"scope":      {"openid email"},
-		})
-	if err != nil {
-		return "", fmt.Errorf("keycloak token for %s: %w", user, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var out struct {
-		AccessToken      string `json:"access_token"`
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("keycloak token for %s: decode: %w", user, err)
-	}
-	if out.AccessToken == "" {
-		return "", fmt.Errorf("keycloak token for %s: %s: %s", user, out.Error, out.ErrorDescription)
-	}
-	return out.AccessToken, nil
 }
 
 // runSessionStart shells out to the real `stratium-pep session-start`, exactly as mcp/main.go's and
@@ -432,60 +365,6 @@ func runSessionStart(pepBin, pdpAddr string) error {
 		return fmt.Errorf("session-start: %w: %s", err, out)
 	}
 	return nil
-}
-
-// readDelegationID reads the delegation id session-start just cached -- the same file and the same
-// wire shape session_file.go's own loadSessionFile reads (plain encoding/json over
-// *pdpgrpc.CreateDelegationResponse). Copied from example/proxy/main.go's own readDelegationID: only
-// the delegation id is used from it, because this surface (like proxy, unlike hook and mcp) refuses
-// an ordinary bearer token outright -- see mintBoundToken, below.
-func readDelegationID(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read session file %s: %w", path, err)
-	}
-	var resp pdpgrpc.CreateDelegationResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("decode session file %s: %w", path, err)
-	}
-	if resp.GetDelegationId() == "" {
-		return "", fmt.Errorf("session file %s names no delegation", path)
-	}
-	return resp.GetDelegationId(), nil
-}
-
-// mintBoundToken generates a fresh P-256 keypair and calls the PDP's IssueToken RPC directly --
-// there is no session-start flag for this -- to mint a token bound to that key's public half (spec
-// §4.7.2 K6). Copied from example/proxy/main.go's own mintBoundToken with only the PDP address
-// changed (this program's pdpAddr is pdp-extauthz, not pdp-proxy).
-func mintBoundToken(pdpAddr, delegationID string) (*ecdsa.PrivateKey, string, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, "", fmt.Errorf("generate dpop key: %w", err)
-	}
-	jwkDoc, err := (&jose.JSONWebKey{Key: key.Public()}).MarshalJSON()
-	if err != nil {
-		return nil, "", fmt.Errorf("marshal dpop public jwk: %w", err)
-	}
-	jwk := string(jwkDoc)
-
-	conn, err := grpc.NewClient(pdpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, "", fmt.Errorf("dial pdp: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := pdpgrpc.NewPDPServiceClient(conn).IssueToken(ctx, &pdpgrpc.IssueTokenRequest{
-		DelegationId: delegationID,
-		TtlSeconds:   3600,
-		DpopJwk:      &jwk,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("issue bound token: %w", err)
-	}
-	return key, resp.GetToken(), nil
 }
 
 // askModelSchema is the JSON Schema for ask_model's one argument object: {"model": string, "prompt":
@@ -603,7 +482,13 @@ func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agen
 				"Envoy let the request through, which means ext_authz did not refuse it. "+
 				"Check the delegation does not hold the %s tool", model, resp.Status, model)
 	case http.StatusOK:
+		// Model is decoded too, not just choices[].message.content: without it, this proves only
+		// that the POLICED value (the query this program itself sent) was the only "model" present
+		// on the wire, never that the model which actually answered was the one policy approved.
+		// Reading LiteLLM's own response envelope back closes that gap -- the transcript names
+		// which model really replied, not just which model was asked.
 		var out struct {
+			Model   string `json:"model"`
 			Choices []struct {
 				Message struct {
 					Content string `json:"content"`
@@ -616,7 +501,7 @@ func (t *extauthzTransport) Call(ctx context.Context, call agent.ToolCall) (agen
 		if len(out.Choices) == 0 {
 			return agent.Result{}, fmt.Errorf("extauthz transport: %s: no choices in response: %s", model, respBody)
 		}
-		return agent.Result{Allowed: true, Output: out.Choices[0].Message.Content}, nil
+		return agent.Result{Allowed: true, Output: fmt.Sprintf("answered as %s: %s", out.Model, out.Choices[0].Message.Content)}, nil
 	default:
 		return agent.Result{}, fmt.Errorf("extauthz transport: %s: unexpected status %s: %s", model, resp.Status, respBody)
 	}

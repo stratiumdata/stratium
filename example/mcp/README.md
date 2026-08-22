@@ -16,12 +16,18 @@ and in the two arguments handed to `startMCP`.
 
 ```bash
 cd example
-export EXAMPLE_PAP_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port stratium-pap 8080 | sed -E 's/.*://')"
-export EXAMPLE_PDP_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port pdp-pap 50051   | sed -E 's/.*://')"
+export EXAMPLE_MCP_PAP_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port stratium-pap 8080 | sed -E 's/.*://')"
+export EXAMPLE_MCP_PDP_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port pdp-pap 50051   | sed -E 's/.*://')"
 export EXAMPLE_KC_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port keycloak 8080    | sed -E 's/.*://')"
 export EXAMPLE_LITELLM_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port litellm 4000 | sed -E 's/.*://')"
 go run ./mcp
 ```
+
+`EXAMPLE_MCP_PAP_ADDR` must point at `stratium-pap` and `EXAMPLE_MCP_PDP_ADDR`
+at `pdp-pap` — named per example, not shared, because `proxy` and `extauthz`
+each point at a *different* PAP/PDP pair for a different tenant; exporting one
+example's PDP/PAP address and then running another would otherwise send that
+program to the wrong tenant.
 
 `main.go` then, in order: prechecks Ollama/LiteLLM/the PDP/`npx` (a missing
 prerequisite is reported as setup, never as a policy denial); seeds

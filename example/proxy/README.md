@@ -32,14 +32,21 @@ dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres \
 Then, every run:
 
 ```bash
-export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-proxy 50051 | sed -E 's/.*://')"
+export EXAMPLE_PROXY_PDP_ADDR="localhost:$(dc port pdp-proxy 50051 | sed -E 's/.*://')"
 export EXAMPLE_PEP_PROXY_ADDR="localhost:$(dc port pep-proxy 9292 | sed -E 's/.*://')"
 export EXAMPLE_GRPC_TARGET_ADDR="localhost:$(dc port grpc-target 50051 | sed -E 's/.*://')"
-export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-proxy 8080 | sed -E 's/.*://')"
+export EXAMPLE_PROXY_PAP_ADDR="localhost:$(dc port pap-proxy 8080 | sed -E 's/.*://')"
 export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"
 export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"
 go run ./proxy
 ```
+
+`EXAMPLE_PROXY_PDP_ADDR` must point at `pdp-proxy` and `EXAMPLE_PROXY_PAP_ADDR`
+at `pap-proxy` — named per example, not a single shared `EXAMPLE_PDP_ADDR`/
+`EXAMPLE_PAP_ADDR`, because this tenant's PDP and PAP are different processes
+than `mcp`'s or `extauthz`'s; a shared name exported once and reused across
+examples in one shell would point this program at the wrong tenant, and
+`agentSeededProbe` would 404 against a PAP that never got the seed.
 
 `main.go` then, in order: prechecks Ollama/LiteLLM/the PDP/pap-proxy, **and
 that the seed above was applied** (see **The one row that lives in
@@ -169,11 +176,3 @@ epoch bump, or a TTL expiry that a real re-ask would not. So `forwarded`
 assertion holds regardless of how chatty the model gets: a run that asks for
 `fetch` five times shows five `ALLOW fetch` lines, a call-count delta of 5,
 and `forwarded` of 5 — still exactly equal, still exit 0.
-
-## Tenant-wide catch-all label rule
-
-An earlier example in this suite registered a tenant-wide catch-all resource
-label rule (prefix `""` → `nato UNCLASSIFIED`) on **its own** tenant. It has no
-effect here: this program owns a different tenant
-(`tenant-proxy-integration`) end to end, and this surface's own denial is
-tool-not-held on a gRPC method, never a missing classification label.

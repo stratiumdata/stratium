@@ -35,17 +35,31 @@ func (o Outcome) verb() string {
 // Expectation is one enforcement claim the example makes. ArgContains
 // distinguishes two calls to the same tool -- reading notes.txt from reading
 // secret-x/plans.txt -- by substring against any string argument. Empty
-// matches any arguments.
+// matches any arguments. ReasonContains, when set, pins WHY a Deny must have
+// happened: without it, a spawn failure, a missing file, and the specific
+// policy refusal the example claims to demonstrate are indistinguishable --
+// any error at all satisfies a bare Want: Deny. It is checked only against
+// the FIRST observation that proves the expectation, never against a repeat:
+// a model that retries an already-denied call can be served the identical
+// decision from stratium-pep's own decision cache, which answers with a
+// generic "cached decision" message rather than the original PDP reason text
+// (confirmed live) -- that is the caching layer working as documented, not
+// the wrong reason.
 type Expectation struct {
-	Tool        string
-	ArgContains string
-	Want        Outcome
+	Tool           string
+	ArgContains    string
+	Want           Outcome
+	ReasonContains string
 }
 
 type observation struct {
 	call    ToolCall
 	result  Result
 	matched *Expectation
+	// firstProof is true when this observation is the one that first
+	// satisfied matched -- see ReasonContains's own doc comment for why only
+	// this one is checked against it.
+	firstProof bool
 }
 
 type Report struct {
@@ -66,6 +80,7 @@ func (r *Report) Record(c ToolCall, res Result) {
 	obs := observation{call: c, result: res}
 	for i := range r.want {
 		if r.want[i].matches(c) {
+			obs.firstProof = !r.met[i]
 			r.met[i] = true
 			obs.matched = &r.want[i]
 			break
@@ -104,6 +119,20 @@ func (r *Report) mismatches() []string {
 		if got != o.matched.Want {
 			out = append(out, fmt.Sprintf("  MISMATCH  %-24s expected %s, was %s",
 				o.call.Name, o.matched.Want, got.verb()))
+			continue
+		}
+		// The outcome matches, but for a Deny that is not yet proof of the
+		// SPECIFIC claim the example makes: a spawn failure, a missing file,
+		// and "exceeds delegation cap" all present as Deny alike. When the
+		// expectation names a reason substring, the FIRST observation that
+		// proves it must contain that substring, or this is a MISMATCH for
+		// the wrong reason. Only the first: a repeat of the same call can be
+		// served from stratium-pep's own decision cache, which legitimately
+		// answers with a generic message instead of the original reason --
+		// see ReasonContains's own doc comment.
+		if got == Deny && o.firstProof && o.matched.ReasonContains != "" && !strings.Contains(o.result.Reason, o.matched.ReasonContains) {
+			out = append(out, fmt.Sprintf("  MISMATCH  %-24s expected reason containing %q, was %q",
+				o.call.Name, o.matched.ReasonContains, o.result.Reason))
 		}
 	}
 	for i, met := range r.met {

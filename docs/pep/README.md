@@ -85,3 +85,6 @@ doctor` does this for the `hook` case.
   install, if you would rather not do it by hand.
 - [`../architecture.md`](../architecture.md) — how the PEP, PDP and PAP fit
   together.
+- [`../../example/`](../../example/) — all five surfaces as runnable programs
+  (or, for `hook`, a configuration plus a real captured transcript): a real
+  local model, real enforcement, a passing or denied run you can reproduce.

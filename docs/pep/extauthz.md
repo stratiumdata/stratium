@@ -154,3 +154,4 @@ budget cannot accommodate a human. Retry once the approval lands.
 
 - [`proxy.md`](proxy.md) — the same idea for gRPC, without needing Envoy.
 - [`../pep.md`](../pep.md) § "Reading a denial".
+- [`../../example/extauthz/`](../../example/extauthz/) — this surface as a runnable program, policing which LLM model an agent may call.

@@ -46,13 +46,20 @@ dc exec -T -e PGPASSWORD=stratium_migrate_local_dev_only postgres \
   psql -h 127.0.0.1 -U stratium_migrate -d stratium -q \
   -f /dev/stdin < ../deploy/seed/extauthz-example-agent.sql
 
-export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-extauthz 50051 | sed -E 's/.*://')"
+export EXAMPLE_EXTAUTHZ_PDP_ADDR="localhost:$(dc port pdp-extauthz 50051 | sed -E 's/.*://')"
 export EXAMPLE_ENVOY_ADDR="localhost:$(dc port envoy 10000 | sed -E 's/.*://')"
 export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"
-export EXAMPLE_PAP_ADDR="localhost:$(dc port pap-extauthz 8080 | sed -E 's/.*://')"
+export EXAMPLE_EXTAUTHZ_PAP_ADDR="localhost:$(dc port pap-extauthz 8080 | sed -E 's/.*://')"
 export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"
 go run ./extauthz
 ```
+
+`EXAMPLE_EXTAUTHZ_PDP_ADDR` must point at `pdp-extauthz` and
+`EXAMPLE_EXTAUTHZ_PAP_ADDR` at `pap-extauthz` — named per example, not a
+single shared `EXAMPLE_PDP_ADDR`/`EXAMPLE_PAP_ADDR`, because this tenant's PDP
+and PAP are different processes than `mcp`'s or `proxy`'s; a shared name
+exported once and reused across examples in one shell would point this
+program at the wrong tenant.
 
 `main.go` then, in order: prechecks Ollama/LiteLLM/Envoy/the PDP/pap-extauthz,
 **and that the seed above was applied** — a missing fixture reads as setup,

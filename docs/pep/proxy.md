@@ -137,3 +137,4 @@ becomes a denial plus an approval id. Retry after the approval lands.
 - [`extauthz.md`](extauthz.md) — the same idea for HTTP behind Envoy.
 - [`../pep.md`](../pep.md) § "The `proxy` surface's limits" — each limit above
   with its full reasoning.
+- [`../../example/proxy/`](../../example/proxy/) — this surface as a runnable program, including the direct-to-service call count that catches a forward-then-error leak.

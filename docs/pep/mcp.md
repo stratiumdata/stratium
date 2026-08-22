@@ -152,3 +152,4 @@ model may plan around tools it cannot use.
 - [`hook.md`](hook.md) — the equivalent for harnesses that do have hooks.
 - [`../pep.md`](../pep.md) § "Installing the `mcp` proxy" and § "Seeding the tool
   catalog".
+- [`../../example/mcp/`](../../example/mcp/) — this surface as a runnable program: a real local model, a real MCP server, a real deny.

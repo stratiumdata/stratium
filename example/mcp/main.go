@@ -13,8 +13,8 @@
 // (`export PAP=...`, `export PDP=...`) applied to a program instead of a shell session:
 //
 //	dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }
-//	export EXAMPLE_PAP_ADDR="localhost:$(dc port stratium-pap 8080 | sed -E 's/.*://')"
-//	export EXAMPLE_PDP_ADDR="localhost:$(dc port pdp-pap 50051   | sed -E 's/.*://')"
+//	export EXAMPLE_MCP_PAP_ADDR="localhost:$(dc port stratium-pap 8080 | sed -E 's/.*://')"
+//	export EXAMPLE_MCP_PDP_ADDR="localhost:$(dc port pdp-pap 50051   | sed -E 's/.*://')"
 //	export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080    | sed -E 's/.*://')"
 //	export EXAMPLE_LITELLM_ADDR="localhost:$(dc port litellm 4000 | sed -E 's/.*://')"
 package main
@@ -23,11 +23,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -55,8 +53,6 @@ const (
 	// example does not own and should not silently duplicate.
 	subject = "agent-tester@example.com"
 
-	kcRealm    = "stratium"
-	kcClient   = "stratium-pap"
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
 	adminUser  = "pap-admin"
@@ -77,10 +73,10 @@ func main() {
 }
 
 func run() int {
-	papAddr := os.Getenv("EXAMPLE_PAP_ADDR")
+	papAddr := os.Getenv("EXAMPLE_MCP_PAP_ADDR")
 	kcAddr := os.Getenv("EXAMPLE_KC_ADDR")
 	litellmAddr := os.Getenv("EXAMPLE_LITELLM_ADDR")
-	pdpAddr := os.Getenv("EXAMPLE_PDP_ADDR")
+	pdpAddr := os.Getenv("EXAMPLE_MCP_PDP_ADDR")
 	ollamaAddr := os.Getenv("EXAMPLE_OLLAMA_ADDR")
 	if ollamaAddr == "" {
 		ollamaAddr = "127.0.0.1:11434" // fixed, per this example's own prerequisites -- not ephemeral like the compose ports
@@ -95,9 +91,9 @@ func run() int {
 	// (Ollama, LiteLLM, the PDP, npx). Missing here is still setup, not a policy denial, so it is
 	// reported the same way: named plainly, with the exact fix, before anything else runs.
 	if papAddr == "" || kcAddr == "" {
-		fmt.Fprintln(os.Stderr, "stratium-example: EXAMPLE_PAP_ADDR and EXAMPLE_KC_ADDR must be set — this is setup, not a policy denial:")
+		fmt.Fprintln(os.Stderr, "stratium-example: EXAMPLE_MCP_PAP_ADDR and EXAMPLE_KC_ADDR must be set — this is setup, not a policy denial:")
 		fmt.Fprintln(os.Stderr, `      fix: dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }`)
-		fmt.Fprintln(os.Stderr, `           export EXAMPLE_PAP_ADDR="localhost:$(dc port stratium-pap 8080 | sed -E 's/.*://')"`)
+		fmt.Fprintln(os.Stderr, `           export EXAMPLE_MCP_PAP_ADDR="localhost:$(dc port stratium-pap 8080 | sed -E 's/.*://')"`)
 		fmt.Fprintln(os.Stderr, `           export EXAMPLE_KC_ADDR="localhost:$(dc port keycloak 8080 | sed -E 's/.*://')"`)
 		return 1
 	}
@@ -105,10 +101,10 @@ func run() int {
 	if err := agent.Precheck(
 		agent.Check{Name: "ollama", Probe: agent.DialCheck(ollamaAddr),
 			Fix: "start Ollama and `ollama pull llama3.2` (expected at " + ollamaAddr + ")"},
-		agent.Check{Name: "litellm", Probe: addrProbe(litellmAddr),
+		agent.Check{Name: "litellm", Probe: agent.AddrProbe(litellmAddr),
 			Fix: `EXAMPLE_LITELLM_ADDR not set or not reachable; export EXAMPLE_LITELLM_ADDR="localhost:$(docker compose -f deploy/docker/docker-compose.yml port litellm 4000 | sed -E 's/.*://')"`},
-		agent.Check{Name: "pdp", Probe: addrProbe(pdpAddr),
-			Fix: `EXAMPLE_PDP_ADDR not set or not reachable; export EXAMPLE_PDP_ADDR="localhost:$(docker compose -f deploy/docker/docker-compose.yml port pdp-pap 50051 | sed -E 's/.*://')"`},
+		agent.Check{Name: "pdp", Probe: agent.AddrProbe(pdpAddr),
+			Fix: `EXAMPLE_MCP_PDP_ADDR not set or not reachable; export EXAMPLE_MCP_PDP_ADDR="localhost:$(docker compose -f deploy/docker/docker-compose.yml port pdp-pap 50051 | sed -E 's/.*://')"`},
 		agent.Check{Name: "npx", Probe: func() error { _, err := exec.LookPath("npx"); return err },
 			Fix: "install Node.js — npx ships with it"},
 	); err != nil {
@@ -126,7 +122,7 @@ func run() int {
 		return 1
 	}
 
-	agentTok, err := mintToken(kcAddr, editorUser, editorPass)
+	agentTok, err := agent.MintToken(kcAddr, editorUser, editorPass)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting editor token:", err)
 		return 1
@@ -140,7 +136,7 @@ func run() int {
 	// The cap applies at next issuance (docs/user-guide.md §5.7) -- it must be set BEFORE
 	// session-start below mints the delegation, or this run's delegation would come back
 	// uncapped.
-	capTok, err := mintToken(kcAddr, adminUser, adminPass) // ADMIN, not editor -- this route is RoleAdmin
+	capTok, err := agent.MintToken(kcAddr, adminUser, adminPass) // ADMIN, not editor -- this route is RoleAdmin
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting admin token:", err)
 		return 1
@@ -173,21 +169,12 @@ func run() int {
 		"Then read /tmp/example-data/secret-x/plans.txt and tell me what that says."
 	want := []agent.Expectation{
 		{Tool: "read_text_file", ArgContains: "notes.txt", Want: agent.Allow},
-		{Tool: "read_text_file", ArgContains: "secret-x", Want: agent.Deny},
+		{Tool: "read_text_file", ArgContains: "secret-x", Want: agent.Deny, ReasonContains: "exceeds delegation cap"},
 	}
 
 	report := agent.Run(context.Background(), llm, transport, task, want, os.Stdout)
 	report.Print(os.Stdout)
 	return report.ExitCode()
-}
-
-func addrProbe(addr string) func() error {
-	return func() error {
-		if addr == "" {
-			return errors.New("address not configured")
-		}
-		return agent.DialCheck(addr)()
-	}
 }
 
 func seedData() error {
@@ -251,7 +238,7 @@ func runSessionStart(pepBin, pdpAddr, agentID, subject, sessionFile string, tool
 // docs/user-guide.md §5.7 trap 1) and the secret- prefix at SECRET. Both POSTs are idempotent: a
 // 409 means the rule already exists and is treated as success, exactly like the brief specifies.
 func setUpPolicy(papAddr, kcAddr string) error {
-	tok, err := mintToken(kcAddr, editorUser, editorPass)
+	tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
 	if err != nil {
 		return fmt.Errorf("minting editor token: %w", err)
 	}
@@ -259,7 +246,7 @@ func setUpPolicy(papAddr, kcAddr string) error {
 		return err
 	}
 
-	tok, err = mintToken(kcAddr, editorUser, editorPass) // minted fresh -- operator tokens expire after five minutes; never cache one
+	tok, err = agent.MintToken(kcAddr, editorUser, editorPass) // minted fresh -- operator tokens expire after five minutes; never cache one
 	if err != nil {
 		return fmt.Errorf("minting editor token: %w", err)
 	}
@@ -370,35 +357,4 @@ func capClassification(papAddr, token, agentID, hierarchy, level string) error {
 		return fmt.Errorf("classification-caps: %s: %s", resp.Status, b)
 	}
 	return nil
-}
-
-// mintToken gets a fresh operator token from Keycloak. Called anew for every PAP request that
-// needs one, never cached: these tokens expire after five minutes, and this program's setup calls
-// plus a live model conversation can outlast that window.
-func mintToken(kcAddr, user, pass string) (string, error) {
-	resp, err := http.PostForm(fmt.Sprintf("http://%s/realms/%s/protocol/openid-connect/token", kcAddr, kcRealm),
-		url.Values{
-			"grant_type": {"password"},
-			"client_id":  {kcClient},
-			"username":   {user},
-			"password":   {pass},
-			"scope":      {"openid email"},
-		})
-	if err != nil {
-		return "", fmt.Errorf("keycloak token for %s: %w", user, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var out struct {
-		AccessToken      string `json:"access_token"`
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("keycloak token for %s: decode: %w", user, err)
-	}
-	if out.AccessToken == "" {
-		return "", fmt.Errorf("keycloak token for %s: %s: %s", user, out.Error, out.ErrorDescription)
-	}
-	return out.AccessToken, nil
 }
