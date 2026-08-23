@@ -25,6 +25,27 @@ happened), and `Precheck` (fail fast on a missing prerequisite, never mistaken
 for a policy denial). Only the transport — the wire the tool call actually
 travels — differs per directory.
 
+## The `depth/` group — one surface, two depths, one chain
+
+The four directories above each answer "does a delegation holding X let a call through?" — one
+delegation, one depth, ALLOW or DENY. `depth/` answers a different question: **does authority
+survive a hop?** Each `depth/*` example mints a two-link delegation chain (`agent.BuildChain`) — a
+root at depth 0 and a child at depth 1 that narrows it — and shows the identical tool call answered
+differently depending on which link in the chain presented it. A child can never recover what its
+own parent didn't hold; narrowing only ever removes authority as a chain descends, never restores
+it. That property is invisible to any of the four examples above, each of which only ever holds one
+delegation at a time.
+
+| Directory | Surface | What depth adds |
+|---|---|---|
+| [`depth/hook`](depth/hook/README.md) | `stratium-pep hook` | Two agents (orchestrator, worker); the SAME `Grep` call is ALLOWED for the parent's root delegation and DENIED for the child's narrowed one, deterministically, with no live model. |
+| [`depth/mcp`](depth/mcp/README.md) | `stratium-pep mcp` | The same two-agent chain, driven by a live local model this time: the identical task, run twice against `stratium-pep mcp`, gets two different answers depending on which depth's session it runs under. |
+| [`depth/proxy`](depth/proxy/README.md) | `stratium-pep proxy` | The odd one out, deliberately: `pep-proxy` runs with a fixed, hardcoded agent id, so there is no second "worker" identity to delegate to. This chain is **one agent narrowing its own authority** — both links belong to the same agent id — rather than an orchestrator handing a worker less. Still a genuine depth-1 chain; `grpc-target`'s own call counter, read directly and bypassing the proxy, corroborates the denial independently of the proxy's own response. |
+
+Every `depth/*` example also proves a fourth thing the four surfaces above never need to: a *child*
+delegation that asks for **more** than its parent holds is refused at creation time, before any call
+is ever attempted, naming the dimension that would have widened.
+
 ## The one sentence that ties it together
 
 **Each surface issues its OWN delegation, through the identical `session-start`,

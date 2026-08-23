@@ -89,22 +89,25 @@ literally named `sentinel.txt` answers `"No matches found"` — glob semantics, 
 program's task asks for `pattern="sentinel*"` explicitly; the wildcard is load-bearing, not
 decorative.
 
-## A real bug this example's own flakiness exposed, fixed for the whole suite
+## A schema-fidelity bug this example's own flakiness surfaced, fixed for the whole suite
 
-Chasing why `search_files` — and only `search_files`, never `read_text_file` — was unreliable led to
-`agent.ToolSpec.Schema` (`example/agent/transport.go`) and `agent/litellm.go`'s own tool-definition
-wrapper: both held a tool's JSON Schema as `map[string]any`, and `encoding/json` always
-re-serializes a Go map's keys **sorted alphabetically**, regardless of insertion order. A real MCP
-tool's `inputSchema`, as the wire actually sends it, opens `"$schema"`, then `"type":"object"`, then
-`"properties"`. Round-tripped through a Go map, it comes back out as `$schema`, `properties`,
-`required`, `type` — `"type":"object"` moved away from where the server put it. Confirmed
-empirically, repeatedly, and in isolation from every other candidate explanation (top-level request
-key order, JSON whitespace, HTTP headers, `tool_choice` forcing — all ruled out one at a time against
-a live litellm/ollama): an otherwise byte-for-byte identical request whose tool schemas were
-reordered this way made llama3.2 answer with prose instead of a genuine `tool_calls` entry, for a
-schema with more than one property. `search_files`' own schema (`path`, `pattern`,
-`excludePatterns`) has three; `read_text_file`'s (`path`, `head`, `tail`) mostly survived the same
-reordering by luck rather than by being immune to it.
+Chasing why `search_files` was unreliable led to `agent.ToolSpec.Schema`
+(`example/agent/transport.go`) and `agent/litellm.go`'s own tool-definition wrapper: both held a
+tool's JSON Schema as `map[string]any`, and `encoding/json` always re-serializes a Go map's keys
+**sorted alphabetically**, regardless of insertion order. A real MCP tool's `inputSchema`, as the
+wire actually sends it, opens `"$schema"`, then `"type":"object"`, then `"properties"`.
+Round-tripped through a Go map, it came back out as `$schema`, `properties`, `required`, `type` —
+a different document than the one the server declared, even though every key/value pair survived.
+
+That is the whole justification for the fix, and it needs no measurement to stand: an MCP proxy
+should forward the schema the upstream server declared, byte for byte, not a re-serialization that
+reorders its keys, independent of whether any model happens to mind. One local model did mind,
+observed during development: with the map-shaped schema, `llama3.2` more often answered
+`search_files` — a multi-property schema (`path`, `pattern`, `excludePatterns`) — with prose
+describing a fake tool call instead of emitting a genuine one; `read_text_file`'s simpler schema
+(`path`, `head`, `tail`) mostly survived the same reordering. That observation is what led to
+finding the defect, not what makes the fix correct — the fidelity argument above is sufficient on
+its own.
 
 The fix — `Schema`/`InputSchema`/`Parameters` are now `json.RawMessage` end to end
 (`example/mcpwire`, `example/agent/transport.go`, `example/agent/litellm.go`) — carries a tool's
@@ -120,23 +123,19 @@ This fix lives in the SHARED `example/agent` and `example/mcpwire` packages, not
 directory, because the defect was never specific to `depth/mcp` — it is a property of every tool
 schema this suite has ever sent a model, including `example/mcp`'s own. Re-running `example/mcp`
 after this fix (see its own transcript) shows real tool calls on every turn, with no prose fallback
-at all — an improvement that fix happened to surface, not something this directory needed for its
-own sake.
+at all.
 
-## `agent.LLM.ToolChoice`: a model-reliability knob, not a policy one
+## `agent.LLM.ToolChoice`: a reliability knob used alongside the fix above, not instead of it
 
-Even with the schema fix above, this example still forces which tool each conversation probes via
-`agent.LLM`'s new `ToolChoice` field (empty by default; every other example leaves it unset and gets
-today's unchanged "auto" behavior). This is belt-and-suspenders, not a second bug being patched over
-by the same mechanism: forcing which tool the model *attempts* never predetermines whether the real
-PDP **allows or denies** that attempt — `stratium-pep mcp` still authorizes the call exactly as it
+This example also forces which tool each conversation probes via `agent.LLM`'s new `ToolChoice`
+field (empty by default; every other example leaves it unset and gets today's unchanged "auto"
+behavior). It is insurance layered on top of the schema fix, not a second attempt at patching the
+same bug: forcing which tool the model *attempts* never predetermines whether the real PDP
+**allows or denies** that attempt — `stratium-pep mcp` still authorizes the call exactly as it
 would for a call the model chose on its own, and the transcripts below show genuine `ALLOW`/`DENY`
-lines from that live decision, not a canned response. It exists because CPU-based `llama.cpp`
-inference is documented not to be bit-for-bit reproducible across runs even at `temperature: 0` —
-confirmed here too: the exact same request, replayed later, sometimes answered differently with no
-code-path difference behind the change. Forcing the one tool a conversation exists to probe removes
-that last bit of drift from a demo that would otherwise occasionally need a retry to catch a live
-pass.
+lines from that live decision, not a canned response. It costs nothing to set and removes free-form
+tool selection as a variable for the two probes that exist specifically to prove which tool a
+delegation does or doesn't hold at a given depth.
 
 ## Denial vs. transport error, and the local decision cache
 

@@ -7,21 +7,20 @@ import (
 
 // ToolSpec is one tool as advertised to the model.
 //
-// Schema is a raw JSON Schema object, not map[string]any, deliberately: a Go map has no key
-// order, and json.Marshal on map[string]any always re-serializes its keys ALPHABETICALLY --
-// confirmed empirically to matter, not merely cosmetic. A tool's real inputSchema, decoded from an
+// Schema is a raw JSON Schema object, not map[string]any, on FIDELITY grounds alone: this whole
+// suite's own principle for a proxy is "relay faithfully, never re-encode" (stratium-pep's own
+// mcp.go package doc, stated there for JSON-RPC frames) -- a tool's schema deserves the identical
+// discipline. A Go map has no key order, and json.Marshal on map[string]any always re-serializes
+// its keys ALPHABETICALLY regardless of insertion order. A tool's real inputSchema, decoded from an
 // upstream MCP server's own tools/list response, typically opens with `"$schema"` then
 // `"type":"object"` then `"properties"`; round-tripped through a Go map it comes back out
-// alphabetized ($schema, properties, required, type), moving "type":"object" away from where the
-// server itself put it. litellm's own local function-calling translation for a model that has no
-// native tool-calling support (llama3.2 via ollama, every runnable example in this suite) turned
-// out to be sensitive to exactly that: an otherwise byte-for-byte identical request whose tool
-// schemas were re-ordered this way made llama3.2 reliably answer with prose describing a fake tool
-// call instead of a genuine one, for schemas with more than one property (search_files, see
-// example/depth/mcp) -- not a plausible-sounding theory but a reproducible, isolated finding.
-// json.RawMessage carries a tool's schema through this whole pipeline byte-for-byte unchanged, the
-// same "relay faithfully" principle stratium-pep's own mcp.go package doc states for JSON-RPC
-// frames, applied here to a different payload.
+// alphabetized ($schema, properties, required, type) -- a different document than the one the
+// server declared, even though every key/value pair survived. That alone is reason enough:
+// forwarding a re-ordered schema to the model is not what an honest relay does, independent of
+// whether any model happens to mind. (One local model did, during development, for a
+// multi-property schema -- see agent.LLM.ToolChoice's own doc comment -- but this field's
+// justification does not rest on that observation.) json.RawMessage carries a tool's schema through
+// this whole pipeline byte-for-byte unchanged, closing that gap.
 type ToolSpec struct {
 	Name        string
 	Description string

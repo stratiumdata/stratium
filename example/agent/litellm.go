@@ -23,15 +23,16 @@ type LLM struct {
 	// example already relies on). This is a MODEL-RELIABILITY knob, never a policy one: forcing
 	// which tool the model ATTEMPTS never predetermines whether the surface under test ALLOWS or
 	// DENIES that attempt -- the real PDP still decides that live, exactly as it would for a call
-	// the model chose on its own. It exists because llama3.2's own free-form tool selection for at
-	// least one real tool schema in this suite (search_files, offered alongside the upstream MCP
-	// filesystem server's full 14-tool catalog -- see example/depth/mcp) was confirmed, empirically
-	// and repeatedly, to drift between fully reliable and fully unreliable across otherwise
-	// byte-for-byte identical requests over time, with no code-path difference behind the drift --
-	// consistent with llama.cpp's own documented lack of bit-for-bit reproducibility under
-	// multi-threaded CPU inference, not a bug this client can fix by construction. Forcing the one
-	// tool a given conversation exists to probe removes that source of flakiness from the parts of
-	// this suite that would otherwise need many retries to catch a live pass.
+	// the model chose on its own.
+	//
+	// It exists for example/depth/mcp's two forced probes, as insurance alongside the
+	// json.RawMessage schema fix (ToolSpec's own doc comment, transport.go), not a workaround for
+	// it: that fix is what made this suite's schemas honest; ToolChoice is a separate, unrelated
+	// lever that removes free-form tool SELECTION as a variable entirely, for the two probes that
+	// exist specifically to prove which tool a delegation does or doesn't hold at a given depth.
+	// Cheap to set, harmless when unset (every other example leaves it empty), and never a
+	// substitute for fixing an actual defect -- see this field's own callers for why it is used
+	// only where forcing genuinely helps rather than papering over one.
 	ToolChoice string
 }
 
@@ -53,17 +54,18 @@ type rawToolCall struct {
 	} `json:"function"`
 }
 
-// toolDef/toolFunction are typed, not map[string]any, so that json.Marshal emits "type" before
-// "function" in that declared field order -- a plain map[string]any would marshal with its keys
-// SORTED ALPHABETICALLY instead ("function" before "type"), regardless of insertion order. That
-// reordering is not cosmetic: confirmed empirically against a live litellm/ollama, an otherwise
-// byte-for-byte identical request whose per-tool object leads with "function" instead of "type"
-// makes llama3.2 reliably answer a tool call as prose text in its own message content instead of a
-// genuine tool_calls entry, for at least one real tool schema in this suite (search_files, see
-// example/depth/mcp) -- the exact "model answered in prose" failure mode Report.Print already
-// warns is "a model limitation, not an enforcement failure." This ordering fix removes one
-// self-inflicted cause of it. Parameters is json.RawMessage, not map[string]any, for the identical
-// reason one level down -- see ToolSpec's own Schema field (transport.go) for the fuller story.
+// toolDef/toolFunction are typed, not map[string]any, on the same FIDELITY grounds ToolSpec's own
+// Schema field is (transport.go): a plain map[string]any marshals its keys SORTED ALPHABETICALLY
+// regardless of insertion order, so a map-shaped {"type":"function","function":{...}} would
+// silently go out on the wire as {"function":{...},"type":"function"} -- not the shape this file's
+// own code above expresses. Declared struct fields keep the order this file actually writes.
+// (One local model answered with prose instead of a genuine tool call more often when a tool's own
+// object was reordered this way, observed during development on a multi-property schema -- see
+// agent.LLM.ToolChoice's own doc comment for how this suite responds to that kind of model
+// variance. That observation is not why this type exists; a request whose shape does not match
+// what the code sending it says it sends is a defect regardless of whether any model minds.)
+// Parameters is json.RawMessage for the identical reason one level down -- see ToolSpec's own
+// Schema field for the fuller story.
 type toolDef struct {
 	Type     string       `json:"type"`
 	Function toolFunction `json:"function"`
