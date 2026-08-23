@@ -35,3 +35,7 @@ dist/
 # the examples' shared delegation — bearer authority, never committed
 /example/.session.json
 /example/.session.json.cache.json
+/example/depth/hook/.session-parent.json
+/example/depth/hook/.session-parent.json.cache.json
+/example/depth/hook/.session-child.json
+/example/depth/hook/.session-child.json.cache.json
