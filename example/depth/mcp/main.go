@@ -26,10 +26,21 @@
 // THE RUN-TWICE SHAPE. main() launches `stratium-pep mcp` wrapping the identical real
 // @modelcontextprotocol/server-filesystem, against the identical directory, TWICE: once configured
 // with the parent's session file and agent id (depth 0), once with the child's (depth 1). Both runs
-// hand agent.Run the identical task string and the identical upstream tool list (mcp's own
+// hand agent.Run the identical taskSearch string and the identical upstream tool list (mcp's own
 // tools/list is never filtered by depth -- see stratium-pep's mcp.go package doc, "TOOLS/LIST IS
 // DELIBERATELY NOT FILTERED") -- identical request, two depths, two answers, and the reason on the
 // deny says which depth decided.
+//
+// TWO SEPARATE SINGLE-TOOL TASKS, NOT ONE CHAINED TASK. taskSearch (search_files) and taskRead
+// (read_text_file) are each their own one-shot agent.Run call -- the "still works" read_text_file
+// probe at depth 1 is a SECOND, fresh conversation against the same child transport, not a second
+// turn continuing the search conversation. Confirmed empirically against a live litellm/ollama:
+// llama3.2 reliably emits a genuine tool_calls entry for either tool on the FIRST turn of a fresh
+// conversation, but reliably degrades to prose describing a fake tool call on the turn immediately
+// AFTER it has already made one real tool call and been handed that call's result back -- a
+// multi-turn, tool-switching weakness distinct from (and additional to) the map-key-ordering defect
+// agent/litellm.go's own toolDef/toolFunction doc comment fixed. Splitting the two probes into two
+// one-shot conversations sidesteps that weakness entirely rather than working around it.
 //
 // Run from the example/ directory: `cd example && go run ./depth/mcp`. Needs everything
 // example/mcp needs (Ollama with llama3.2 pulled, LiteLLM, npx, the Docker Compose stack, a built
@@ -234,9 +245,26 @@ func run() int {
 	printDecision(os.Stdout, "create_delegation", widenArgs, widenResult)
 	widenRep.Record(agent.ToolCall{Name: "create_delegation", Args: widenArgs}, widenResult)
 
-	llm := &agent.LLM{BaseURL: "http://" + litellmAddr, Model: "llama3.2"}
-	task := "Use the search_files tool to find files under /tmp/example-depth-mcp whose name contains 'sentinel'. " +
-		"Then read /tmp/example-depth-mcp/sentinel.txt and tell me exactly what it says."
+	// Two LLM values, not one, each forcing (agent.LLM's own ToolChoice) the one tool its own
+	// conversation exists to probe -- see that field's own doc comment for why this is a
+	// model-reliability knob, never a policy one: the real PDP still decides ALLOW/DENY on every
+	// call exactly as it would for a call the model chose on its own. llama3.2's own free-form
+	// choice of search_files, offered alongside the upstream server's full 14-tool catalog, was
+	// confirmed (repeatedly, over time, with an otherwise byte-for-byte identical request) to drift
+	// between fully reliable and fully unreliable with no code-path difference behind the drift.
+	// Forcing removes that source of flakiness from this file's own two enforcement claims.
+	searchLLM := &agent.LLM{BaseURL: "http://" + litellmAddr, Model: "llama3.2", ToolChoice: "search_files"}
+	readLLM := &agent.LLM{BaseURL: "http://" + litellmAddr, Model: "llama3.2", ToolChoice: "read_text_file"}
+
+	// Phrased as a near-literal call, not natural prose, for the same reason the ToolChoice fields
+	// above exist: a clearer instruction measurably helps even when tool_choice is doing the actual
+	// forcing. The pattern is a glob, not a substring (search_files' own contract -- confirmed
+	// against the real server: pattern "sentinel" against a file literally named sentinel.txt
+	// answers "No matches found"; "sentinel*" matches it), so the wildcard is not decorative.
+	taskSearch := `Call search_files(path="/tmp/example-depth-mcp", pattern="sentinel*") to find matching files.`
+	// taskRead is its own, separate one-shot conversation -- see this file's own package doc, "TWO
+	// SEPARATE SINGLE-TOOL TASKS", for why this is never turn two of taskSearch's own conversation.
+	taskRead := `Call read_text_file(path="/tmp/example-depth-mcp/sentinel.txt") to read the file and tell me exactly what it says.`
 
 	fmt.Println("\nstratium-example: running the agent at DEPTH 0 (parent session -- holds both tools)...")
 	parentTransport, err := startMCP(pepBin, []string{"mcp"}, mcpEnv(pdpAddr, orchestratorID, parentSessionFile), os.Stderr)
@@ -247,7 +275,7 @@ func run() int {
 	wantParent := []agent.Expectation{
 		{Tool: "search_files", ArgContains: "sentinel", Want: agent.Allow},
 	}
-	parentReport := agent.Run(context.Background(), llm, parentTransport, task, wantParent, os.Stdout)
+	parentReport := agent.Run(context.Background(), searchLLM, parentTransport, taskSearch, wantParent, os.Stdout)
 	_ = parentTransport.Close()
 	parentReport.Print(os.Stdout)
 
@@ -257,19 +285,25 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "stratium-example: launching stratium-pep mcp (child):", err)
 		return 1
 	}
-	wantChild := []agent.Expectation{
+	wantChildSearch := []agent.Expectation{
 		{Tool: "search_files", ArgContains: "sentinel", Want: agent.Deny, ReasonContains: "at depth 1"},
+	}
+	childSearchReport := agent.Run(context.Background(), searchLLM, childTransport, taskSearch, wantChildSearch, os.Stdout)
+	childSearchReport.Print(os.Stdout)
+
+	fmt.Println("\nstratium-example: same DEPTH 1 session, a tool the child DOES hold -- proving it still works...")
+	wantChildRead := []agent.Expectation{
 		{Tool: "read_text_file", ArgContains: "sentinel.txt", Want: agent.Allow},
 	}
-	childReport := agent.Run(context.Background(), llm, childTransport, task, wantChild, os.Stdout)
+	childReadReport := agent.Run(context.Background(), readLLM, childTransport, taskRead, wantChildRead, os.Stdout)
 	_ = childTransport.Close()
-	childReport.Print(os.Stdout)
+	childReadReport.Print(os.Stdout)
 
 	fmt.Println("\nstratium-example: claim 3 (child creation refused for widening its parent):")
 	widenRep.Print(os.Stdout)
 
 	exit := 0
-	if parentReport.ExitCode() != 0 || childReport.ExitCode() != 0 || widenRep.ExitCode() != 0 {
+	if parentReport.ExitCode() != 0 || childSearchReport.ExitCode() != 0 || childReadReport.ExitCode() != 0 || widenRep.ExitCode() != 0 {
 		exit = 1
 	}
 	return exit

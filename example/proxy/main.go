@@ -390,14 +390,11 @@ func runSessionStart(pepBin, pdpAddr string) error {
 }
 
 // messageSchema is the JSON Schema both tools share: {"message": string}, matching
-// grpctarget.EchoRequest's own single field.
-var messageSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"message": map[string]any{"type": "string"},
-	},
-	"required": []string{"message"},
-}
+// grpctarget.EchoRequest's own single field. A json.RawMessage literal, not map[string]any built
+// up from nested maps -- see agent.ToolSpec's own Schema field for why a Go map's key order
+// (always alphabetized on marshal) is not safe to round-trip through when a tool schema reaches
+// the model.
+var messageSchema = json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`)
 
 // proxyTransport is this surface's agent.Transport. It advertises "fetch"/"purge" -- friendly
 // names, exactly the shape mcp's tool names already take -- and maps each to the real gRPC method

@@ -20,8 +20,7 @@ type fakeTransport struct {
 
 func (f *fakeTransport) Tools() []ToolSpec {
 	return []ToolSpec{{Name: "read", Description: "read a file",
-		Schema: map[string]any{"type": "object", "properties": map[string]any{
-			"path": map[string]any{"type": "string"}}}}}
+		Schema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)}}
 }
 
 func (f *fakeTransport) Call(_ context.Context, c ToolCall) (Result, error) {

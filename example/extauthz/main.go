@@ -369,15 +369,10 @@ func runSessionStart(pepBin, pdpAddr string) error {
 
 // askModelSchema is the JSON Schema for ask_model's one argument object: {"model": string, "prompt":
 // string}. The model advertised here chooses WHICH model to ask by NAME; extauthzTransport.Call maps
-// that name to the tool identity (path+query) the choice actually is.
-var askModelSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"model":  map[string]any{"type": "string"},
-		"prompt": map[string]any{"type": "string"},
-	},
-	"required": []string{"model", "prompt"},
-}
+// that name to the tool identity (path+query) the choice actually is. A json.RawMessage literal,
+// not map[string]any -- see agent.ToolSpec's own Schema field for why a Go map's key order (always
+// alphabetized on marshal) is not safe to round-trip through when a tool schema reaches the model.
+var askModelSchema = json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"prompt":{"type":"string"}},"required":["model","prompt"]}`)
 
 // extauthzTransport is this surface's agent.Transport. It advertises a single "ask_model" tool --
 // the model under test picks WHICH model to ask via its own "model" argument -- and Call turns that

@@ -1,12 +1,31 @@
 package agent
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ToolSpec is one tool as advertised to the model.
+//
+// Schema is a raw JSON Schema object, not map[string]any, deliberately: a Go map has no key
+// order, and json.Marshal on map[string]any always re-serializes its keys ALPHABETICALLY --
+// confirmed empirically to matter, not merely cosmetic. A tool's real inputSchema, decoded from an
+// upstream MCP server's own tools/list response, typically opens with `"$schema"` then
+// `"type":"object"` then `"properties"`; round-tripped through a Go map it comes back out
+// alphabetized ($schema, properties, required, type), moving "type":"object" away from where the
+// server itself put it. litellm's own local function-calling translation for a model that has no
+// native tool-calling support (llama3.2 via ollama, every runnable example in this suite) turned
+// out to be sensitive to exactly that: an otherwise byte-for-byte identical request whose tool
+// schemas were re-ordered this way made llama3.2 reliably answer with prose describing a fake tool
+// call instead of a genuine one, for schemas with more than one property (search_files, see
+// example/depth/mcp) -- not a plausible-sounding theory but a reproducible, isolated finding.
+// json.RawMessage carries a tool's schema through this whole pipeline byte-for-byte unchanged, the
+// same "relay faithfully" principle stratium-pep's own mcp.go package doc states for JSON-RPC
+// frames, applied here to a different payload.
 type ToolSpec struct {
 	Name        string
 	Description string
-	Schema      map[string]any // JSON Schema for the arguments object
+	Schema      json.RawMessage
 }
 
 // ToolCall is the model's request to invoke one.

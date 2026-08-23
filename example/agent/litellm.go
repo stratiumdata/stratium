@@ -16,6 +16,23 @@ type LLM struct {
 	BaseURL string // e.g. http://localhost:4000
 	Model   string
 	HTTP    *http.Client
+
+	// ToolChoice, when non-empty, is sent as an OpenAI tool_choice forcing exactly this named
+	// tool, on every turn, instead of leaving tool selection to the model (the default, empty
+	// string, omits tool_choice entirely -- today's unchanged "auto" behavior every existing
+	// example already relies on). This is a MODEL-RELIABILITY knob, never a policy one: forcing
+	// which tool the model ATTEMPTS never predetermines whether the surface under test ALLOWS or
+	// DENIES that attempt -- the real PDP still decides that live, exactly as it would for a call
+	// the model chose on its own. It exists because llama3.2's own free-form tool selection for at
+	// least one real tool schema in this suite (search_files, offered alongside the upstream MCP
+	// filesystem server's full 14-tool catalog -- see example/depth/mcp) was confirmed, empirically
+	// and repeatedly, to drift between fully reliable and fully unreliable across otherwise
+	// byte-for-byte identical requests over time, with no code-path difference behind the drift --
+	// consistent with llama.cpp's own documented lack of bit-for-bit reproducibility under
+	// multi-threaded CPU inference, not a bug this client can fix by construction. Forcing the one
+	// tool a given conversation exists to probe removes that source of flakiness from the parts of
+	// this suite that would otherwise need many retries to catch a live pass.
+	ToolChoice string
 }
 
 type Message struct {
@@ -36,6 +53,28 @@ type rawToolCall struct {
 	} `json:"function"`
 }
 
+// toolDef/toolFunction are typed, not map[string]any, so that json.Marshal emits "type" before
+// "function" in that declared field order -- a plain map[string]any would marshal with its keys
+// SORTED ALPHABETICALLY instead ("function" before "type"), regardless of insertion order. That
+// reordering is not cosmetic: confirmed empirically against a live litellm/ollama, an otherwise
+// byte-for-byte identical request whose per-tool object leads with "function" instead of "type"
+// makes llama3.2 reliably answer a tool call as prose text in its own message content instead of a
+// genuine tool_calls entry, for at least one real tool schema in this suite (search_files, see
+// example/depth/mcp) -- the exact "model answered in prose" failure mode Report.Print already
+// warns is "a model limitation, not an enforcement failure." This ordering fix removes one
+// self-inflicted cause of it. Parameters is json.RawMessage, not map[string]any, for the identical
+// reason one level down -- see ToolSpec's own Schema field (transport.go) for the fuller story.
+type toolDef struct {
+	Type     string       `json:"type"`
+	Function toolFunction `json:"function"`
+}
+
+type toolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
 func (l *LLM) Chat(ctx context.Context, msgs []Message, tools []ToolSpec) (Message, error) {
 	body := map[string]any{
 		"model":       l.Model,
@@ -43,12 +82,15 @@ func (l *LLM) Chat(ctx context.Context, msgs []Message, tools []ToolSpec) (Messa
 		"temperature": 0,
 	}
 	if len(tools) > 0 {
-		var ts []map[string]any
+		var ts []toolDef
 		for _, t := range tools {
-			ts = append(ts, map[string]any{"type": "function", "function": map[string]any{
-				"name": t.Name, "description": t.Description, "parameters": t.Schema}})
+			ts = append(ts, toolDef{Type: "function", Function: toolFunction{
+				Name: t.Name, Description: t.Description, Parameters: t.Schema}})
 		}
 		body["tools"] = ts
+		if l.ToolChoice != "" {
+			body["tool_choice"] = map[string]any{"type": "function", "function": map[string]string{"name": l.ToolChoice}}
+		}
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

@@ -47,10 +47,15 @@ type rpcResponse struct {
 // Tool is one entry from `tools/list`, before a caller turns it into its own tool-spec shape --
 // this package deliberately stays free of stratium/example/agent's own ToolSpec type so it can be
 // reused without pulling that dependency in just to describe a tool.
+//
+// InputSchema is json.RawMessage, not map[string]any: json.Unmarshal into a RawMessage field
+// captures that sub-object's exact original bytes -- key order included -- rather than decoding
+// into a Go map, which has no order and comes back out of a later json.Marshal re-sorted
+// alphabetically. See agent.ToolSpec's own Schema field for why that reordering is not cosmetic.
 type Tool struct {
 	Name        string
 	Description string
-	InputSchema map[string]any
+	InputSchema json.RawMessage
 }
 
 // Client is a child process speaking MCP over stdio, already past the initialize handshake.
@@ -109,9 +114,9 @@ func Start(command string, args []string, env []string, stderr io.Writer) (*Clie
 	}
 	var parsed struct {
 		Tools []struct {
-			Name        string         `json:"name"`
-			Description string         `json:"description"`
-			InputSchema map[string]any `json:"inputSchema"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
 		} `json:"tools"`
 	}
 	if err := json.Unmarshal(result, &parsed); err != nil {
