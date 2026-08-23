@@ -39,3 +39,7 @@ dist/
 /example/depth/hook/.session-parent.json.cache.json
 /example/depth/hook/.session-child.json
 /example/depth/hook/.session-child.json.cache.json
+/example/depth/mcp/.session-parent.json
+/example/depth/mcp/.session-parent.json.cache.json
+/example/depth/mcp/.session-child.json
+/example/depth/mcp/.session-child.json.cache.json
