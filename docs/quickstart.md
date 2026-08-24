@@ -105,6 +105,17 @@ denies essentially everything. The script refuses to set a cap without one — s
 Step 8 issues a root delegation granting a deliberately narrow `Read,Grep,Glob`.
 That narrowness is what makes step 10 able to prove anything.
 
+### Open the console
+
+Step 2 above printed a `pap=host:port` line — `up` and `status` both do, and
+neither ever writes it to disk (ports are ephemeral; §3 covers why the tool
+persists identity and never addresses). Open `http://<that address>/` in a
+browser and sign in with one of the seeded Keycloak accounts, e.g. `pap-admin`
+/ `pap_admin_local_dev_only` (`docs/user-guide.md` §2.2 lists all three). The
+label rules and the classification cap step 7 just registered are editable
+there too, alongside policies, agents, the tool catalog, and approvals —
+`docs/user-guide.md` §5 is the full reference.
+
 ---
 
 ## 2. Finish the wiring

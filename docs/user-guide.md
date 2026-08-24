@@ -695,6 +695,30 @@ curl -H "Authorization: Bearer $ADMIN" "http://$PAP/v1/policies"
 Everything below is reachable either way; the API is documented because it is
 what the UI itself calls and what you will script against.
 
+**The console has one screen per resource**, and every screen is a thin
+wrapper over the routes below:
+
+| Screen | What it does |
+|---|---|
+| Policies | full CRUD, plus **Validate** and **Test** against sample input — §5.4 |
+| Agents | full CRUD, plus a classification-caps panel — edited separately from the agent, once one exists, at a higher role floor — §5.5, §5.7 |
+| Tier overrides | full CRUD — §5.8 |
+| Tool catalog | create, read, update — **no delete**, because the API has none — §5.6 |
+| Label rules | full CRUD — §5.7 |
+| Approvals | approve or deny a pending, unexpired request; a decided or expired one offers neither — §5.9 |
+| Delegations | read-only, plus revoke — §5.10 |
+
+Policy text is authored in a plain textarea — no syntax highlighting — and
+**Validate** and **Test** are both round trips to the server, never
+client-side checks.
+
+**Every action is offered to every signed-in operator, whatever their role.**
+The console never hides, greys, or pre-flights a button based on a guess about
+what an operator may do — that is the server's answer to give, not the UI's.
+A viewer sees every Save and Delete button and, on submitting one, gets back
+the server's own `403` text verbatim. The console is not role-aware by design;
+treat the route table below as the actual authority on who can do what.
+
 ### 5.1 Authentication and roles
 
 Every `/v1` route requires `Authorization: Bearer <oidc-token>`. Roles are
