@@ -73,7 +73,7 @@ function NewCapRow({ onAdd }: { onAdd: (hierarchy: string, level: string) => voi
         <TextInput id="new-cap-hierarchy" value={hierarchy} onChange={(e) => setHierarchy(e.target.value)} />
       </Field>
       <Field label="Level" htmlFor="new-cap-level"
-        hint={"The ceiling within that hierarchy, e.g. SECRET. Stored exactly as typed."}
+        hint={"The ceiling within that hierarchy. Each hierarchy defines its own levels, so one that is valid in another is refused here — the server names the accepted list when it refuses. Stored exactly as typed."}
       >
         <TextInput id="new-cap-level" value={level} onChange={(e) => setLevel(e.target.value)} />
       </Field>
