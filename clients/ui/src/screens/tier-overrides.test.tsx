@@ -58,4 +58,25 @@ describe('TierOverridesScreen', () => {
       expect.objectContaining({ tool_or_verb: 'Write', action_tier: 0 }),
     ))
   })
+
+  it('offers action tiers by name and sends the number they stand for', async () => {
+    vi.spyOn(api, 'tierOverrides').mockResolvedValue([])
+    const create = vi.spyOn(api, 'createTierOverride').mockResolvedValue(override())
+
+    render(<TierOverridesScreen />)
+    await screen.findByText('No tier overrides.')
+    screen.getByRole('button', { name: 'New override' }).click()
+
+    const select = await screen.findByLabelText('Action tier')
+    expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value))
+      .toEqual(['REASONING', 'READ_ONLY', 'INTERNAL_MODIFY', 'EXTERNAL_COMMS', 'DESTRUCTIVE'])
+
+    fireEvent.change(await screen.findByLabelText('Tool or verb'), { target: { value: 'Write' } })
+    fireEvent.change(select, { target: { value: 'DESTRUCTIVE' } })
+    screen.getByRole('button', { name: 'Save' }).click()
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ tool_or_verb: 'Write', action_tier: 4 }),
+    ))
+  })
 })

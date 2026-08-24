@@ -256,4 +256,43 @@ describe('AgentsScreen', () => {
     ;(await screen.findByRole('button', { name: 'Edit' })).click()
     expect(await screen.findByText(/no classification ceiling is enforced/i)).toBeInTheDocument()
   })
+
+  it('offers trust tiers by name and sends the number they stand for', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([])
+    const create = vi.spyOn(api, 'createAgent').mockResolvedValue(agent())
+
+    render(<AgentsScreen />)
+    await screen.findByText('No agents.')
+    screen.getByRole('button', { name: 'New agent' }).click()
+
+    const select = await screen.findByLabelText('Trust tier')
+    expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value))
+      .toEqual(['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED'])
+
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'a' } })
+    fireEvent.change(select, { target: { value: 'CERTIFIED' } })
+    screen.getByRole('button', { name: 'Save' }).click()
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'a', trust_tier: 2 }),
+    ))
+  })
+
+  // A <select> whose value matches no option renders the FIRST one. Without
+  // the stored value appearing among the options, an agent stored at a tier
+  // this build does not know would be displayed as UNVERIFIED -- a security
+  // field showing a value that was never stored. display.ts already holds this
+  // rule for the read path ("shown as itself rather than silently floored").
+  it('shows an out-of-range stored tier as itself, never as UNVERIFIED', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent({ trust_tier: 7 })])
+    vi.spyOn(api, 'agent').mockResolvedValue(agent({ trust_tier: 7 }))
+    vi.spyOn(api, 'agentCaps').mockResolvedValue(capsView())
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+
+    const select = await screen.findByLabelText('Trust tier')
+    expect((select as HTMLSelectElement).value).toBe('INVALID_TRUST_TIER(7)')
+    expect((select as HTMLSelectElement).value).not.toBe('UNVERIFIED')
+  })
 })

@@ -71,6 +71,9 @@ describe('ToolCatalogScreen', () => {
     expect('resource_field' in sent && sent.resource_field === '').toBe(false)
   })
 
+  // The control shows names and the wire carries numbers. Driving it by name
+  // and asserting the number is what proves the two stay in step -- a mapping
+  // that silently drifted would send the wrong tier under the right label.
   it('sends a number once the tier is set explicitly', async () => {
     vi.spyOn(api, 'toolCatalog').mockResolvedValue([])
     const create = vi.spyOn(api, 'createToolCatalogEntry').mockResolvedValue(entry())
@@ -80,11 +83,23 @@ describe('ToolCatalogScreen', () => {
     screen.getByRole('button', { name: 'New entry' }).click()
 
     ;(await screen.findByLabelText('Derive the tier from the command')).click()
-    fireEvent.change(screen.getByLabelText('Action tier'), { target: { value: '3' } })
+    fireEvent.change(screen.getByLabelText('Action tier'), { target: { value: 'EXTERNAL_COMMS' } })
     screen.getByRole('button', { name: 'Save' }).click()
 
     await waitFor(() => expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ action_tier: 3 }),
     ))
+  })
+
+  it('offers the tier names, not raw numbers', async () => {
+    vi.spyOn(api, 'toolCatalog').mockResolvedValue([])
+    render(<ToolCatalogScreen />)
+    await screen.findByText('No tool catalog entries.')
+    screen.getByRole('button', { name: 'New entry' }).click()
+
+    ;(await screen.findByLabelText('Derive the tier from the command')).click()
+    const select = screen.getByLabelText('Action tier')
+    expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value))
+      .toEqual(['REASONING', 'READ_ONLY', 'INTERNAL_MODIFY', 'EXTERNAL_COMMS', 'DESTRUCTIVE'])
   })
 })

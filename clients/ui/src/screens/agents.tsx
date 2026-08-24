@@ -16,11 +16,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   APIError, api, describeError, type Agent, type AgentCapsView, type ClassificationCaps,
 } from '../api'
-import { toolList, trustTier } from '../display'
+import { TRUST_TIERS, toolList, trustTier, trustTierOptions } from '../display'
 import { Loading, useEditor, useList } from '../crud'
 import {
-  Badge, Button, Checkbox, ConfirmRow, EmptyRow, ErrorBanner, Field, NumberInput, Panel,
-  ScreenHeader, StringListInput, TCell, THead, TRow, Table, TextInput,
+  Badge, Button, Checkbox, ConfirmRow, EmptyRow, ErrorBanner, Field, Panel,
+  ScreenHeader, Select, StringListInput, TCell, THead, TRow, Table, TextInput,
 } from '../ui'
 
 /** Agent minus classification_caps -- what UpdateAgent's PUT actually writes.
@@ -298,12 +298,20 @@ export function AgentsScreen() {
           />
         </Field>
         <Field label="Trust tier" htmlFor="trust_tier">
-          <NumberInput
+          {/* The option's index IS the tier, so the name shown and the number
+              sent cannot drift apart. An out-of-range stored value appears as
+              itself: a select whose value matches no option renders the FIRST
+              one, which would claim UNVERIFIED for an agent that is not. */}
+          <Select
             id="trust_tier"
-            min={0}
-            max={3}
-            value={editor.draft.trust_tier}
-            onChange={(e) => editor.patch({ trust_tier: Number(e.target.value) })}
+            options={trustTierOptions(editor.draft.trust_tier)}
+            value={trustTier(editor.draft.trust_tier)}
+            onChange={(e) => {
+              const tier = TRUST_TIERS.indexOf(e.target.value)
+              // -1 is the INVALID_ option, which stands for the value already
+              // stored; picking it changes nothing rather than writing -1.
+              if (tier >= 0) editor.patch({ trust_tier: tier })
+            }}
           />
         </Field>
         <Checkbox

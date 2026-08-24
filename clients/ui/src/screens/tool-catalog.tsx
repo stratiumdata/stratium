@@ -1,10 +1,10 @@
 import { useMemo } from 'react'
 
 import { api, type ToolCatalogEntry } from '../api'
-import { actionTier } from '../display'
+import { ACTION_TIERS, actionTier, actionTierOptions } from '../display'
 import { Loading, useEditor, useList } from '../crud'
 import {
-  Button, Checkbox, EmptyRow, ErrorBanner, Field, NumberInput, Panel, ScreenHeader,
+  Button, Checkbox, EmptyRow, ErrorBanner, Field, Panel, ScreenHeader, Select,
   TCell, THead, TRow, Table, TextInput,
 } from '../ui'
 
@@ -62,12 +62,16 @@ export function ToolCatalogScreen() {
         />
         {editor.draft.action_tier !== null ? (
           <Field label="Action tier" htmlFor="action_tier">
-            <NumberInput
+            <Select
               id="action_tier"
-              min={0}
-              max={4}
-              value={editor.draft.action_tier}
-              onChange={(e) => editor.patch({ action_tier: Number(e.target.value) })}
+              options={actionTierOptions(editor.draft.action_tier)}
+              value={actionTier(editor.draft.action_tier)}
+              onChange={(e) => {
+                const tier = ACTION_TIERS.indexOf(e.target.value)
+                // -1 is the INVALID_ option, standing for the value already
+                // stored; picking it changes nothing rather than writing -1.
+                if (tier >= 0) editor.patch({ action_tier: tier })
+              }}
             />
           </Field>
         ) : null}

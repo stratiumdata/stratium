@@ -68,7 +68,7 @@ export function declaresEffect(language: string): boolean {
 /** models.ActionTier.String(), for the numeric tier the API sends. An
  *  out-of-range value is shown as itself rather than silently floored to
  *  REASONING, which is what an invalid tier must never be mistaken for. */
-const ACTION_TIERS = ['REASONING', 'READ_ONLY', 'INTERNAL_MODIFY', 'EXTERNAL_COMMS', 'DESTRUCTIVE']
+export const ACTION_TIERS = ['REASONING', 'READ_ONLY', 'INTERNAL_MODIFY', 'EXTERNAL_COMMS', 'DESTRUCTIVE']
 
 export function actionTier(tier: number | null | undefined): string {
   if (tier === null || tier === undefined) return '—'
@@ -76,7 +76,7 @@ export function actionTier(tier: number | null | undefined): string {
 }
 
 /** models.AgentTrustTier. Same out-of-range discipline as actionTier. */
-const TRUST_TIERS = ['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED']
+export const TRUST_TIERS = ['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED']
 
 export function trustTier(tier: number): string {
   return TRUST_TIERS[tier] ?? `INVALID_TRUST_TIER(${tier})`
@@ -102,4 +102,30 @@ export function shortDigest(hex: string): string {
  *  allowed", the exact opposite. */
 export function toolList(tools: string[] | null | undefined): string {
   return tools && tools.length > 0 ? tools.join(', ') : 'unrestricted'
+}
+
+/**
+ * The options a tier dropdown offers for a value already stored.
+ *
+ * Normally just the tier names, in tier order, so the option's index IS the
+ * tier. When the stored value is out of range the list gains that value's own
+ * INVALID_… rendering and the control selects it — because a <select> whose
+ * value matches no option displays the FIRST one, which would tell an operator
+ * an agent is UNVERIFIED, or a tool REASONING, when it is neither.
+ *
+ * This is the same rule actionTier and trustTier already apply above: an
+ * out-of-range value is shown as itself and never silently floored. The
+ * operator has to choose a real tier deliberately rather than being shown one
+ * that was never stored.
+ */
+function tierOptions(names: string[], render: string): string[] {
+  return names.includes(render) ? names : [...names, render]
+}
+
+export function actionTierOptions(stored: number): string[] {
+  return tierOptions(ACTION_TIERS, actionTier(stored))
+}
+
+export function trustTierOptions(stored: number): string[] {
+  return tierOptions(TRUST_TIERS, trustTier(stored))
 }

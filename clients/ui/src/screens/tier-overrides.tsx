@@ -1,10 +1,10 @@
 import { useCallback, useMemo, useState } from 'react'
 
 import { api, describeError, type TierOverride } from '../api'
-import { actionTier, timestamp } from '../display'
+import { ACTION_TIERS, actionTier, actionTierOptions, timestamp } from '../display'
 import { Loading, useEditor, useList } from '../crud'
 import {
-  Button, ConfirmRow, EmptyRow, ErrorBanner, Field, NumberInput, Panel, ScreenHeader,
+  Button, ConfirmRow, EmptyRow, ErrorBanner, Field, Panel, ScreenHeader, Select,
   TCell, THead, TRow, Table, TextInput,
 } from '../ui'
 
@@ -57,12 +57,16 @@ export function TierOverridesScreen() {
         </Field>
         <Field label="Action tier" htmlFor="action_tier"
           hint="Overrides the builtin tier, which the server computes and this form cannot set.">
-          <NumberInput
+          <Select
             id="action_tier"
-            min={0}
-            max={4}
-            value={editor.draft.action_tier}
-            onChange={(e) => editor.patch({ action_tier: Number(e.target.value) })}
+            options={actionTierOptions(editor.draft.action_tier)}
+            value={actionTier(editor.draft.action_tier)}
+            onChange={(e) => {
+              const tier = ACTION_TIERS.indexOf(e.target.value)
+              // -1 is the INVALID_ option, standing for the value already
+              // stored; picking it changes nothing rather than writing -1.
+              if (tier >= 0) editor.patch({ action_tier: tier })
+            }}
           />
         </Field>
 
