@@ -1,8 +1,8 @@
 // App.tsx is the shell: fetch the PAP's public configuration, sign in, pick a
 // screen. Nothing more, on purpose.
 //
-// No router. Six screens with no deep links and no shareable URLs do not need
-// one, and a URL-driven route would be the one thing in this application
+// No router. Seven screens with no deep links and no shareable URLs do not
+// need one, and a URL-driven route would be the one thing in this application
 // tempted to survive a reload — which, given the token cannot (N12), would
 // only produce a bookmarked screen that immediately asks you to sign in.
 

@@ -295,9 +295,11 @@ export const api = {
     request<Agent>('PUT', `/v1/agents/${encodeURIComponent(id)}`, a),
   deleteAgent: (id: string) => request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}`),
 
-  // The caps sub-resource is a separate route at a separate role floor
-  // (RoleAdmin, where the agent body is RoleEditor). store.UpdateAgent ignores
-  // classification_caps on input, so this is the ONLY way to write one.
+  // The caps sub-resource is a separate route at a separate role floor from
+  // the agent body: GET is RoleViewer (server.go), same as every other list
+  // read, but the two writes are RoleAdmin, above the agent body's
+  // RoleEditor. store.UpdateAgent ignores classification_caps on input, so
+  // putAgentCaps is the ONLY way to write one.
   agentCaps: (id: string) =>
     request<AgentCapsView>('GET', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
   putAgentCaps: (id: string, caps: ClassificationCaps, allowUncovered = false) =>
