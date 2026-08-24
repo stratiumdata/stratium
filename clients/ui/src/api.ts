@@ -116,12 +116,51 @@ export interface AgentCapsView {
   applies: string
 }
 
-/** One leg of POST /v1/policies/test's answer. */
-export interface PolicyTestVerdict {
+/** One leg of POST /v1/policies/test's answer -- legVerdict (test_input.go). */
+export interface PolicyTestLeg {
   effect: string
   reason: string
   source?: string
   policy_id?: string
+}
+
+/** POST /v1/policies/test's actual response -- policyTestResponse
+ *  (test_input.go:185). Two verdicts, not one: `isolated` folds the
+ *  candidate alone (singlePolicySource), answering "did I write this rule
+ *  correctly"; `with_existing_policies` folds it in alongside everything the
+ *  tenant already has, answering what would actually happen. They can
+ *  disagree -- an existing policy may override or duplicate the candidate --
+ *  and that divergence is the most valuable thing this endpoint reports. */
+export interface PolicyTestResult {
+  isolated: PolicyTestLeg
+  with_existing_policies: PolicyTestLeg
+  tier: { value: number; source: string }
+  legs_evaluated: { principal: boolean; agent: boolean; delegation: boolean }
+}
+
+/** POST /v1/policies/test's request body -- mirrors policyTestRequest's own
+ *  json tags (test_input.go). decodeJSON rejects neither unknown nor missing
+ *  fields, so a caller with no named type for this request can misname a
+ *  nested key (rawInput for raw_input) and get a 200 back carrying a silently
+ *  different evaluation; this type is what a caller checks itself against. */
+export interface PolicyTestRequest {
+  language: string
+  policy_content: string
+  principal: { subject: string; attributes: Record<string, string> }
+  action: { tool: string; raw_input: string }
+  resource: Record<string, string>
+  agent: {
+    trust_tier: number
+    enabled: boolean
+    suspended: boolean
+    allowed_tools: string[]
+  }
+  delegation: {
+    depth: number
+    max_action_tier: number
+    classification_caps: Record<string, string>
+    purpose: string
+  }
 }
 
 /** models.Approval. input_digest is hex; see that type's MarshalJSON. */
@@ -248,7 +287,7 @@ export const api = {
   // body, so this returns void and lets the rejection speak.
   validatePolicy: (language: string, policyContent: string) =>
     request<void>('POST', '/v1/policies/validate', { language, policy_content: policyContent }),
-  testPolicy: (req: unknown) => request<PolicyTestVerdict>('POST', '/v1/policies/test', req),
+  testPolicy: (req: PolicyTestRequest) => request<PolicyTestResult>('POST', '/v1/policies/test', req),
 
   agent: (id: string) => request<Agent>('GET', `/v1/agents/${encodeURIComponent(id)}`),
   createAgent: (a: Agent) => request<Agent>('POST', '/v1/agents', a),

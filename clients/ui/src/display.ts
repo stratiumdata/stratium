@@ -54,6 +54,17 @@ export function policyEffect(language: string, effect: string): PolicyEffect {
   }
 }
 
+/** Whether an operator may choose this language's stored `effect`.
+ *
+ *  For cedar and json the store checks the column against what the text
+ *  declares and refuses a disagreement. For rego and xacml it refuses
+ *  anything except multiValuedLanguageEffect ("deny") outright
+ *  (ErrEffectNotDeclarable) -- so an effect selector on those languages would
+ *  offer two options of which one is a guaranteed rejection. */
+export function declaresEffect(language: string): boolean {
+  return DECLARED_EFFECT_LANGUAGES.has(language)
+}
+
 /** models.ActionTier.String(), for the numeric tier the API sends. An
  *  out-of-range value is shown as itself rather than silently floored to
  *  REASONING, which is what an invalid tier must never be mistaken for. */
