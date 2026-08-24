@@ -58,6 +58,34 @@ let accessToken: string | null = null
 // login attempt can never be completed with a first attempt's verifier.
 let pending: { verifier: string; state: string } | null = null
 
+/** A PKCE verifier/state/challenge triple, generated BEFORE the click that
+ *  opens the popup. See preparePkce. */
+export interface Pkce {
+  verifier: string
+  state: string
+  challenge: string
+}
+
+/**
+ * Generates one single-use PKCE triple.
+ *
+ * This exists so signIn has nothing left to await. Deriving the S256
+ * challenge is asynchronous (crypto.subtle.digest), and an await anywhere
+ * before window.open spends the user-activation token the popup needs — the
+ * same reason discovery is resolved on mount rather than inside signIn. The
+ * resulting failure is worse than a plain bug: the browser reports a blocked
+ * popup, so it reads as a popup-blocker setting rather than as a missing user
+ * gesture, and the message this file prints says "allow pop-ups" and sends
+ * the operator to fix something that was never wrong.
+ *
+ * Single-use: a verifier is spent by the exchange it authorises. The caller
+ * generates a fresh one after every attempt, successful or not.
+ */
+export async function preparePkce(): Promise<Pkce> {
+  const verifier = randomString(32)
+  return { verifier, state: randomString(16), challenge: await s256(verifier) }
+}
+
 // Notified on every accessToken write -- signIn's success, signOut, and
 // onUnauthorized alike. App subscribes via subscribeAuthChange so its shell
 // can never again go stale the way onUnauthorized used to leave it: it only
@@ -202,13 +230,14 @@ function awaitCode(popup: Window, state: string): Promise<string> {
  * Runs the whole flow and stores the access token in memory. Must be called
  * from a user gesture; see the popup note in this file's header.
  *
- * discovery is a parameter rather than a call to discover() made here,
- * because an await before window.open spends the user-activation token the
- * popup needs -- Safari in particular blocks a popup opened after an await
+ * discovery AND pkce are parameters rather than work done here, because an
+ * await before window.open spends the user-activation token the popup needs -- Safari in particular blocks a popup opened after an await
  * in the same handler, and the resulting error ("allow pop-ups") misdiagnoses
  * a popup blocker that was never the problem. App.tsx's mount effect resolves
  * discovery once, alongside config, so by the time this can be called from a
- * click, there is nothing left to await before window.open.
+ * click, there is nothing left to await before window.open. Deriving the S256
+ * challenge is itself asynchronous, which is why it is preparePkce's job and
+ * not this function's.
  *
  * No refresh token is requested (offline_access is deliberately absent from
  * the default scope): a refresh token is a longer-lived credential than the
@@ -216,20 +245,22 @@ function awaitCode(popup: Window, state: string): Promise<string> {
  * safer than where it puts the access token. Losing the session on reload is
  * the accepted cost.
  */
-export async function signIn(config: UIConfig, discovery: Discovery): Promise<void> {
+export async function signIn(config: UIConfig, discovery: Discovery, pkce: Pkce): Promise<void> {
   const { authorization_endpoint, token_endpoint } = discovery
+  const { verifier, state, challenge } = pkce
 
-  const verifier = randomString(32)
-  const state = randomString(16)
   pending = { verifier, state }
 
+  // Every value below is already in hand. Nothing in this function awaits
+  // before window.open, which is the whole point of taking discovery and pkce
+  // as parameters -- see preparePkce, and App.tsx's mount effect.
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: config.client_id,
     redirect_uri: redirectURI(),
     scope: config.scope,
     state,
-    code_challenge: await s256(verifier),
+    code_challenge: challenge,
     code_challenge_method: 'S256',
   })
   // Sent only when configured. IdPs that mint a JWT access token per API

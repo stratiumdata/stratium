@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { authHeader, isAuthenticated, redirectURI, signIn, signOut, type UIConfig } from './auth'
+import {
+  authHeader, isAuthenticated, preparePkce, redirectURI, signIn, signOut, type UIConfig,
+} from './auth'
 
 const config: UIConfig = {
   issuer: 'https://idp.example.com',
@@ -76,7 +78,7 @@ describe('signIn', () => {
     fakePopup((state) => ({ source: 'stratium-oidc-callback', code: 'the-code', state }))
 
     expect(isAuthenticated()).toBe(false)
-    await signIn(config, discovery)
+    await signIn(config, discovery, await preparePkce())
 
     expect(isAuthenticated()).toBe(true)
     expect(authHeader()).toEqual({ Authorization: 'Bearer operator-token' })
@@ -99,7 +101,7 @@ describe('signIn', () => {
       return { closed: false, close: vi.fn() } as unknown as Window
     })
 
-    await signIn(config, discovery)
+    await signIn(config, discovery, await preparePkce())
 
     const params = new URL(authorizeURL).searchParams
     expect(params.get('response_type')).toBe('code')
@@ -134,7 +136,7 @@ describe('signIn', () => {
       return { closed: false, close: vi.fn() } as unknown as Window
     })
 
-    await signIn(config, discovery)
+    await signIn(config, discovery, await preparePkce())
     expect(new URL(authorizeURL).searchParams.get('scope')).not.toContain('offline_access')
   })
 
@@ -142,7 +144,7 @@ describe('signIn', () => {
     mockFetch()
     fakePopup(() => ({ source: 'stratium-oidc-callback', code: 'attacker-code', state: 'wrong' }))
 
-    await expect(signIn(config, discovery)).rejects.toThrow(/state mismatch/)
+    await expect(signIn(config, discovery, await preparePkce())).rejects.toThrow(/state mismatch/)
     expect(isAuthenticated()).toBe(false)
   })
 
@@ -166,7 +168,7 @@ describe('signIn', () => {
       return popup as unknown as Window
     })
 
-    await expect(signIn(config, discovery)).rejects.toThrow(/closed before completing/)
+    await expect(signIn(config, discovery, await preparePkce())).rejects.toThrow(/closed before completing/)
     expect(isAuthenticated()).toBe(false)
   })
 
@@ -176,7 +178,7 @@ describe('signIn', () => {
 
     // The message must say what to do, because the alternative — a redirect
     // flow — needs storage, which N12 forbids outright.
-    await expect(signIn(config, discovery)).rejects.toThrow(/Allow pop-ups/)
+    await expect(signIn(config, discovery, await preparePkce())).rejects.toThrow(/Allow pop-ups/)
     expect(isAuthenticated()).toBe(false)
   })
 
@@ -184,9 +186,52 @@ describe('signIn', () => {
     mockFetch({ id_token: 'an id token is not an access token' })
     fakePopup((state) => ({ source: 'stratium-oidc-callback', code: 'c', state }))
 
-    await expect(signIn(config, discovery)).rejects.toThrow(/no access_token/)
+    await expect(signIn(config, discovery, await preparePkce())).rejects.toThrow(/no access_token/)
     expect(isAuthenticated()).toBe(false)
   })
+
+  // THE bug this signature exists to prevent. signIn used to derive the S256
+  // challenge itself -- `code_challenge: await s256(verifier)` -- which put an
+  // await before window.open and spent the user-activation token the popup
+  // needs. Safari blocks the popup outright; the error it produces says "allow
+  // pop-ups", sending the operator to fix a setting that was never wrong.
+  //
+  // Asserting synchronously, on a promise deliberately not awaited, is the
+  // only way to state it: if anything in signIn awaits before window.open,
+  // the call has not happened yet when this line runs.
+  it('opens the popup synchronously, with nothing awaited first', async () => {
+    mockFetch()
+    const popup = { closed: false, close: vi.fn() }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+
+    const pkce = { verifier: 'v'.repeat(32), state: 'st', challenge: 'ch' }
+    // Deliberately not awaited yet -- the assertion below is the whole point.
+    // It is settled at the end of the test rather than left dangling: an
+    // in-flight signIn keeps a message listener and a close-poll alive, and
+    // those leak into whichever test runs next.
+    const flow = signIn(config, discovery, pkce)
+
+    expect(open).toHaveBeenCalledTimes(1)
+    // ...and the challenge it carries is the prepared one, not a fresh derive.
+    const url = new URL((open.mock.calls[0]?.[0] as string) ?? '')
+    expect(url.searchParams.get('code_challenge')).toBe('ch')
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+    expect(url.searchParams.get('state')).toBe('st')
+
+    popup.closed = true
+    await expect(flow).rejects.toThrow(/closed before completing/)
+  })
+
+  it('derives a real S256 challenge, distinct from the verifier', async () => {
+    const a = await preparePkce()
+    const b = await preparePkce()
+    expect(a.challenge).not.toBe(a.verifier)
+    expect(a.verifier).not.toBe(b.verifier)
+    expect(a.state).not.toBe(b.state)
+    // base64url: no +, /, or = padding.
+    expect(a.challenge).toMatch(/^[A-Za-z0-9_-]+$/)
+  })
+
 })
 
 describe('the token never reaches browser storage (N12)', () => {
@@ -195,7 +240,7 @@ describe('the token never reaches browser storage (N12)', () => {
     fakePopup((state) => ({ source: 'stratium-oidc-callback', code: 'the-code', state }))
 
     const setLocal = vi.spyOn(Storage.prototype, 'setItem')
-    await signIn(config, discovery)
+    await signIn(config, discovery, await preparePkce())
 
     expect(isAuthenticated()).toBe(true)
     expect(setLocal).not.toHaveBeenCalled()

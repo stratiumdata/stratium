@@ -11,11 +11,13 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { describeError, fetchUIConfig } from './api'
 import {
   discover,
+  preparePkce,
   isAuthenticated,
   signIn,
   signOut,
   subscribeAuthChange,
   type Discovery,
+  type Pkce,
   type UIConfig,
 } from './auth'
 import {
@@ -43,6 +45,7 @@ const SCREENS = [
 export default function App() {
   const [config, setConfig] = useState<UIConfig | null>(null)
   const [discovery, setDiscovery] = useState<Discovery | null>(null)
+  const [pkce, setPkce] = useState<Pkce | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Subscribed, not a one-time useState(isAuthenticated()): that function
   // reads a module variable in auth.ts, and a snapshot taken once goes stale
@@ -67,22 +70,30 @@ export default function App() {
       },
       (err: unknown) => setError(describeError(err)),
     )
+    // Same reasoning as discovery, and for the same window.open: deriving the
+    // S256 challenge is asynchronous, so it happens here rather than in the
+    // click handler.
+    preparePkce().then(setPkce, (err: unknown) => setError(describeError(err)))
   }, [])
 
   const onSignIn = async () => {
-    if (!config || !discovery) return
+    if (!config || !discovery || !pkce) return
     setError(null)
     setBusy(true)
     try {
       // Called straight from the click handler: the popup this opens needs a
-      // user gesture. config and discovery are both already resolved (mount
-      // effect, above), so nothing here awaits anything before signIn's own
-      // window.open.
-      await signIn(config, discovery)
+      // user gesture. config, discovery and pkce are all already resolved
+      // (mount effect, above), so nothing here awaits anything before
+      // signIn's own window.open.
+      await signIn(config, discovery, pkce)
     } catch (err) {
       setError(describeError(err))
     } finally {
       setBusy(false)
+      // A verifier is spent by the exchange it authorises, so the next attempt
+      // needs a fresh one. Awaiting here is safe: the popup is long since
+      // opened, and this resolves before any later click can use it.
+      preparePkce().then(setPkce, (err: unknown) => setError(describeError(err)))
     }
   }
 
