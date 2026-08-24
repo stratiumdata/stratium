@@ -185,6 +185,47 @@ describe('AgentsScreen', () => {
     await waitFor(() => expect(put).toHaveBeenLastCalledWith(agent().id, { nato: 'SECRET' }, true))
   })
 
+  // The clobber guard re-fetches and compares the whole object against the
+  // snapshot taken when the panel opened. classification_caps is written
+  // through its own route (CapsSection/putAgentCaps), not through this PUT,
+  // so a cap changing between snapshot and save is not a colleague's
+  // concurrent edit of the agent -- it must not trip the guard.
+  it('saves the agent even when classification_caps changed underneath it', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+    vi.spyOn(api, 'agent')
+      .mockResolvedValueOnce(agent()) // edit()'s snapshot GET
+      .mockResolvedValueOnce(agent({ classification_caps: { nato: 'SECRET' } })) // save()'s clobber-check GET
+    vi.spyOn(api, 'agentCaps').mockResolvedValue(capsView({ classification_caps: { nato: 'CONFIDENTIAL' } }))
+    const update = vi.spyOn(api, 'updateAgent').mockResolvedValue(agent())
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'renamed' } })
+    screen.getByRole('button', { name: 'Save' }).click()
+
+    await waitFor(() => expect(update).toHaveBeenCalled())
+    expect(screen.queryByText(/changed while you were editing/)).not.toBeInTheDocument()
+  })
+
+  // setOfferOverride(true) must fire only for the coverage refusal itself,
+  // not for any save failure -- an operator clicking through a 502 must not
+  // send ?allow_uncovered=true, which the server would read as acknowledging
+  // a coverage refusal that was never issued.
+  it('does not offer the override for an unrelated save failure', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+    vi.spyOn(api, 'agent').mockResolvedValue(agent())
+    vi.spyOn(api, 'agentCaps').mockResolvedValue(capsView())
+    vi.spyOn(api, 'putAgentCaps').mockRejectedValue(new APIError(502, 'bad gateway'))
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+    ;(await screen.findByRole('button', { name: 'Save caps' })).click()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('bad gateway')
+    expect(screen.queryByRole('button', { name: 'Apply anyway (uncovered)' })).not.toBeInTheDocument()
+  })
+
   it('says an empty cap set means no ceiling is enforced', async () => {
     vi.spyOn(api, 'agents').mockResolvedValue([agent()])
     vi.spyOn(api, 'agent').mockResolvedValue(agent())

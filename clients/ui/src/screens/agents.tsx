@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
-  api, describeError, type Agent, type AgentCapsView, type ClassificationCaps,
+  APIError, api, describeError, type Agent, type AgentCapsView, type ClassificationCaps,
 } from '../api'
 import { toolList, trustTier } from '../display'
 import { Loading, useEditor, useList } from '../crud'
@@ -22,6 +22,17 @@ import {
   Badge, Button, Checkbox, ConfirmRow, EmptyRow, ErrorBanner, Field, NumberInput, Panel,
   ScreenHeader, StringListInput, TCell, THead, TRow, Table, TextInput,
 } from '../ui'
+
+/** Agent minus classification_caps -- what UpdateAgent's PUT actually writes.
+ *  Shared by the editor's `update` and `compare` below so the two can never
+ *  drift apart: the clobber guard must compare exactly what gets sent, or a
+ *  cap changed through CapsSection's own route reads as a colleague's
+ *  concurrent edit of the agent. */
+function withoutCaps(a: Agent): Omit<Agent, 'classification_caps'> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- discarded on purpose, see above.
+  const { classification_caps: _ignored, ...body } = a as Agent & { classification_caps?: unknown }
+  return body
+}
 
 const BLANK: Agent = {
   id: '', name: '', provider: '', model_id: '', trust_tier: 0,
@@ -131,7 +142,15 @@ function CapsSection({ agentID, allowedTools }: { agentID: string; allowedTools:
       (saved) => {
         setView(saved); setCaps(saved.classification_caps); setOfferOverride(false); setBusy(false)
       },
-      (err: unknown) => { setSaveError(describeError(err)); setOfferOverride(true); setBusy(false) },
+      (err: unknown) => {
+        // Offer the override only for the coverage refusal itself, never for
+        // any other save failure (a 502, a 403, ...) -- the server's message
+        // names its own query parameter, so matching on it is how this repo
+        // tells the coverage refusal apart from any other rejection.
+        setSaveError(describeError(err))
+        setOfferOverride(err instanceof APIError && err.message.includes('allow_uncovered'))
+        setBusy(false)
+      },
     )
   }
 
@@ -215,15 +234,14 @@ export function AgentsScreen() {
   // classification_caps is returned by GET and IGNORED by PUT (store.UpdateAgent
   // passes eight parameters and caps is not among them). Sending it back would
   // put a field on the wire that silently does nothing; caps are written through
-  // their own route in CapsSection above.
+  // their own route in CapsSection above. The clobber guard's `compare` strips
+  // the same field for the same reason: it is never part of what this form
+  // writes, so a change to it alone is not a concurrent edit of the agent.
   const res = useMemo(() => ({
     get: api.agent,
     create: api.createAgent,
-    update: (id: string, a: Agent) => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- discarded on purpose, see above.
-      const { classification_caps: _ignored, ...body } = a as Agent & { classification_caps?: unknown }
-      return api.updateAgent(id, body)
-    },
+    update: (id: string, a: Agent) => api.updateAgent(id, withoutCaps(a)),
+    compare: withoutCaps,
     onSaved: reload,
   }), [reload])
   const editor = useEditor<Agent>(res)
@@ -305,6 +323,11 @@ export function AgentsScreen() {
       </ScreenHeader>
       {error ? <ErrorBanner>{error}</ErrorBanner> : null}
       {actionError ? <ErrorBanner>{actionError}</ErrorBanner> : null}
+      {/* useEditor's edit() can reject before the panel that would normally
+         show editor.error ever opens -- draft stays null on a failed GET (a
+         colleague deleted the row, a 500, a network blip), so this is the
+         one place editor.error is rendered outside the panel. */}
+      {editor.error ? <ErrorBanner>{editor.error}</ErrorBanner> : null}
       {confirming ? (
         <div className="mb-4">
           <ConfirmRow

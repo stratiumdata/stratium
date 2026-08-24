@@ -90,6 +90,13 @@ export function useEditor<T>(res: {
   create: (value: T) => Promise<T>
   update: (id: string, value: T) => Promise<T>
   onSaved: () => void
+  /** What the clobber guard compares. Defaults to the whole object. A screen
+   *  that deliberately does not write some field must exclude it here --
+   *  agents strips classification_caps from its PUT because UpdateAgent
+   *  ignores it, and that column is written through its own route, so
+   *  including it would make a caps edit read as a concurrent edit by
+   *  somebody else. */
+  compare?: (value: T) => unknown
 }): Editor<T> {
   const [draft, setDraft] = useState<T | null>(null)
   const [snapshot, setSnapshot] = useState<T | null>(null)
@@ -133,7 +140,8 @@ export function useEditor<T>(res: {
         await res.create(draft)
       } else {
         const fresh = await res.get(editingID)
-        if (JSON.stringify(fresh) !== JSON.stringify(snapshot)) {
+        const project = res.compare ?? ((v: T) => v)
+        if (JSON.stringify(project(fresh)) !== JSON.stringify(project(snapshot as T))) {
           setError('this changed while you were editing — close and reopen to see the current version')
           return
         }

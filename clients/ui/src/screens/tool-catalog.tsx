@@ -105,6 +105,11 @@ export function ToolCatalogScreen() {
         destructive command.
       </ScreenHeader>
       {error ? <ErrorBanner>{error}</ErrorBanner> : null}
+      {/* useEditor's edit() can reject before the panel that would normally
+         show editor.error ever opens -- draft stays null on a failed GET (a
+         colleague deleted the row, a 500, a network blip), so this is the
+         one place editor.error is rendered outside the panel. */}
+      {editor.error ? <ErrorBanner>{editor.error}</ErrorBanner> : null}
 
       <div className="mb-3">
         <Button onClick={() => editor.create(BLANK)}>New entry</Button>

@@ -63,6 +63,20 @@ describe('LabelRulesScreen', () => {
     expect(await screen.findByText(/unlabelled resources will deny/i)).toBeInTheDocument()
   })
 
+  // useEditor's edit() rejection sets error but leaves draft null, so the
+  // panel that normally shows editor.error never opens. A failed GET here --
+  // the row deleted by a colleague, a 500, a network blip -- must still say
+  // something, not silently do nothing.
+  it('shows the GET failure when Edit fails to load a row', async () => {
+    vi.spyOn(api, 'resourceLabelRules').mockResolvedValue([rule()])
+    vi.spyOn(api, 'resourceLabelRule').mockRejectedValue(new APIError(500, 'boom'))
+
+    render(<LabelRulesScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('boom')
+  })
+
   // N14: the button is not conditioned on a role, and the refusal is shown.
   it('offers delete to every operator and surfaces the server refusal', async () => {
     vi.spyOn(api, 'resourceLabelRules').mockResolvedValue([rule()])
