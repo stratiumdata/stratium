@@ -2778,19 +2778,38 @@ Plan-added, not from the spec. `docs/quickstart.md` walks a user from nothing to
 
 - [ ] **Step 1: Add a quickstart section**
 
-After the step that brings the stack up, add a short section naming the PAP's URL, the sign-in, and what the console can now do — including that label rules and caps, which the quickstart currently installs with `curl`, are editable there.
+Verified facts to write against — do not restate them from memory:
+
+- **The PAP's port is ephemeral.** `docs/user-guide.md:127` derives it as
+  `export PAP="localhost:$(dc port stratium-pap 8080 | sed -E 's/.*://')"`.
+  Never write a literal `8080` as the host port.
+- **`deploy/stratium` already prints it.** Both `up` and `status` emit a
+  `pap=<host:port>` line (`deploy/stratium:1071` and `:1266`). The quickstart
+  should point the reader at that line rather than teaching a second way to
+  find it. `deploy/stratium:766` refuses to persist `pap_addr` at all — this
+  project's standing rule is persist identity, never addresses.
+- **`docs/quickstart.md` mentions the UI zero times today** (verified by grep).
+  This is a new section, not an edit.
+
+Add it after the step that brings the stack up. It should say: open the
+`pap=` address `up` printed, sign in with the same Keycloak operator, and note
+that the label rules and classification caps the quickstart installs with
+`curl` are editable there. Keep it short — the quickstart's job is to get
+someone running, and the console is one paragraph of that, not a tour.
 
 - [ ] **Step 2: Update `docs/user-guide.md`**
 
-It already mentions the UI. Correct any statement that it is read-only, and list the screens.
+It already mentions the UI at lines 96, 138, 159-170 and 373-389. Line 138
+("Open `http://$PAP/` in a browser for the admin UI") is correct and stays.
+Add the screen list and what each can now do. Correct any statement, anywhere
+in the file, that describes the UI as read-only or as a viewer.
 
-- [ ] **Step 3: Verify the URL by reading it from the compose file**
+- [ ] **Step 3: Verify every claim you wrote**
 
-```bash
-grep -n "STRATIUM_PAP_LISTEN_ADDR" -B12 deploy/docker/docker-compose.yml | grep -E "ports:|8080|stratium-pap:"
-```
-
-Quote the mapped host port that file actually publishes — do not assume 8080.
+For each screen you list, confirm it exists in `clients/ui/src/screens/` and is
+exported from `screens/index.ts`. For each capability you claim, confirm the
+`api.ts` method exists. A docs task that describes a console slightly
+differently from the one that shipped is worse than no docs.
 
 - [ ] **Step 4: Commit**
 
