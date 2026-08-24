@@ -755,20 +755,49 @@ func TestServer_ConcurrentRequests_NoCrossContamination(t *testing.T) {
 // A 403 that says only "forbidden" is useless to the admin console, which
 // renders every action for every operator (N14) and relies on the refusal to
 // explain itself. Both role paths must name what happened.
+// Table, not a single case: one pair (min=admin, role=viewer) does not
+// distinguish a correctly-parameterised message from a hardcoded string or
+// from min and role swapped in the Sprintf. These two cases vary both
+// values, so either mistake fails at least one of them, and each assertion
+// is the full expected sentence, not a substring the other case would also
+// satisfy.
 func TestForbidden_NamesTheRequiredRoleAndTheOperatorsOwn(t *testing.T) {
-	f := newTestServerFixture(t)
-	tok := f.tokenWithClaims(t, "org-viewers", map[string]any{"email": "v@example.com", "email_verified": true})
+	cases := []struct {
+		name   string
+		group  string
+		method string
+		path   string
+		want   string
+	}{
+		{
+			name:   "viewer refused at editor floor",
+			group:  "org-viewers",
+			method: http.MethodPost,
+			path:   "/v1/policies",
+			want:   "this action requires role editor; your token carries viewer",
+		},
+		{
+			name:   "editor refused at admin floor",
+			group:  "org-editors",
+			method: http.MethodDelete,
+			path:   "/v1/policies/" + uuid.New().String(),
+			want:   "this action requires role admin; your token carries editor",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTestServerFixture(t)
+			tok := f.tokenWithClaims(t, tc.group, map[string]any{"email": "v@example.com", "email_verified": true})
 
-	rec := doRequest(t, f.server, http.MethodDelete, "/v1/policies/"+uuid.New().String(), tok)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
-	}
-	body := strings.TrimSpace(rec.Body.String())
-	if !strings.Contains(body, "requires role admin") {
-		t.Errorf("body = %q, want it to name the required role", body)
-	}
-	if !strings.Contains(body, "viewer") {
-		t.Errorf("body = %q, want it to name the operator's own role", body)
+			rec := doRequest(t, f.server, tc.method, tc.path, tok)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+			}
+			body := strings.TrimSpace(rec.Body.String())
+			if body != tc.want {
+				t.Errorf("body = %q, want %q", body, tc.want)
+			}
+		})
 	}
 }
 

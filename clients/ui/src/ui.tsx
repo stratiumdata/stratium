@@ -122,11 +122,14 @@ export function EmptyRow({ colSpan, children }: { colSpan: number; children: Rea
   )
 }
 
-/** An error banner. Always shows the server's own words: a 403 from the PAP
- *  names the role floor that refused the request and the role the operator's
- *  own token carries (services/cmd/stratium-pap/server.go), and paraphrasing
- *  it would lose the one detail the operator needs (N14 — the server decides,
- *  this screen reports). */
+/** An error banner. Always shows the server's own words.
+ *
+ *  The PAP has two 403s and they say different things: a role floor names the
+ *  role required and the role this token carries, while an unrecognised role
+ *  claim names neither and says so (services/cmd/stratium-pap/server.go).
+ *  Paraphrasing either would lose the one detail that tells an operator which
+ *  of the two they are looking at, and they have different fixes — a claim
+ *  mapping, or a higher role. N14: the server decides, this screen reports. */
 export function ErrorBanner({ children }: { children: ReactNode }) {
   return (
     <div
