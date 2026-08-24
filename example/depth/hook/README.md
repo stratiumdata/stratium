@@ -20,6 +20,36 @@ model feels like calling `Grep` twice.
 `Read` at depth 1 is probed too, alongside claim 2's `Grep`, to show the child isn't simply broken —
 it still works for what it does hold.
 
+## The extra output: tokens, chain summary, decision path
+
+Alongside the four probes above, this program also prints (see `narrate.go`):
+
+- **Yellow — the built chain.** For each link (parent depth 0, child depth 1): the delegation id, the
+  granted tools, the max action tier, the depth, and the expiry (decoded from the token's own `exp`
+  claim — `GrantedScope` itself carries no expiry field). A line calls out that the child's TTL is
+  deliberately shorter than the parent's: `ScopeNarrows` checks expiry too, and expiry is absolute, so
+  requesting an identical TTL for both would still fail, because the child is minted moments after the
+  parent (`agent.BuildChain`'s own `childTTLMargin`).
+- **Yellow — the delegation tokens, decoded.** Both links' JWTs, base64url-decoded and re-indented as
+  JSON — header and claims, never the signature, and the signature is never verified: this is display,
+  not authentication. The raw compact token string says nothing on its own; `sub` (the delegation id)
+  differing between the two decoded claim sets is what makes "depth 0" and "depth 1" concrete facts
+  instead of just two labels. A token that fails to decode prints the decode error and falls back to
+  the raw string rather than aborting the run — diagnostic output must never be why this example fails.
+- **Magenta — the shape of the PDP's `Decide` call**, printed once before the three hook probes, per
+  `docs/architecture.md`'s "4. The decision path". **This is a description of what the code does on
+  every call, not a trace of what happened on this run's own calls** — `Decide` executes inside
+  `pdp-pap`, a separate process this program never instruments, and the block prints identically
+  whether the probes below pass or fail. It marks `matchProof` and `spendProof` as skipped on this
+  surface: `hook` presents a plain bearer token straight from the session file, and only `proxy` and
+  `extauthz` use sender-constrained (DPoP) tokens on their calls — listing those two steps unqualified
+  would wrongly suggest `hook` does DPoP too.
+
+Colour is ANSI (yellow `\033[33m`, magenta `\033[35m`), and only appears when it should: never when
+`NO_COLOR` is set to anything non-empty, and never when stdout isn't a terminal (`agent.ColourEnabled`,
+`example/agent/colour.go`) — this output gets pasted into READMEs and captured into files, and escape
+codes there are noise, not colour.
+
 ## Running it
 
 ```bash

@@ -24,6 +24,15 @@ type ChainLink struct {
 	resp *pdpgrpc.CreateDelegationResponse
 }
 
+// Token returns the signed JWT naming this delegation -- the same
+// credential WriteSessionFile embeds in the session file, exposed here so a
+// caller that wants to decode and display it (e.g. example/depth/hook's own
+// narration of the chain it just built) does not have to re-read the
+// session file back off disk to get it.
+func (l ChainLink) Token() string {
+	return l.resp.GetToken()
+}
+
 // WriteSessionFile writes path in the exact shape stratium-pep's own
 // session-start does (services/cmd/stratium-pep/session_file.go's
 // writeSessionFile): l's raw CreateDelegationResponse as indented JSON plus

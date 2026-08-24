@@ -174,8 +174,9 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "stratium-example: building the delegation chain:", err)
 		return 1
 	}
-	fmt.Printf("  parent (depth 0): delegation %s, granted %v\n", chain.Parent.DelegationID, chain.Parent.GrantedScope.GetTools())
-	fmt.Printf("  child  (depth 1): delegation %s, granted %v\n", chain.Child.DelegationID, chain.Child.GrantedScope.GetTools())
+	paint := painter(agent.ColourEnabled(os.Stdout))
+	printChainSummary(os.Stdout, paint, chain)
+	printDelegationTokens(os.Stdout, paint, chain)
 
 	if err := chain.Parent.WriteSessionFile(parentSessionFile); err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example:", err)
@@ -218,6 +219,7 @@ func run() int {
 	rep.Record(agent.ToolCall{Name: "create_delegation", Args: widenArgs}, widenResult)
 
 	fmt.Println("\nstratium-example: probing the hook surface directly (no live model -- deterministic)...")
+	printDecisionPath(os.Stdout, paint)
 
 	parentEnv := hookEnv(pdpAddr, orchestratorID, parentSessionFile)
 	childEnv := hookEnv(pdpAddr, workerID, childSessionFile)

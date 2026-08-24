@@ -87,6 +87,9 @@ func TestBuildChain_NarrowingChildSucceeds(t *testing.T) {
 	if got := chain.Child.GrantedScope.GetTools(); len(got) != 1 || got[0] != "Read" {
 		t.Errorf("child granted tools = %v, want [Read]", got)
 	}
+	if chain.Parent.Token() != "parent-token" || chain.Child.Token() != "child-token" {
+		t.Errorf("Token() = %q/%q, want parent-token/child-token", chain.Parent.Token(), chain.Child.Token())
+	}
 }
 
 // A child that widens its parent must come back as an error naming the
