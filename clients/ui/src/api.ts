@@ -37,6 +37,12 @@ export interface Agent {
   allowed_tools: string[]
   created_at: string
   updated_at: string
+  /** Returned by GET and IGNORED by PUT: store.UpdateAgent passes eight
+   *  parameters and this is not one of them -- it is read back via RETURNING
+   *  and never written. Modelled here because the server really does send it,
+   *  which is what makes stripping it before an update a real operation
+   *  rather than a no-op. Write caps through putAgentCaps. */
+  classification_caps?: ClassificationCaps
 }
 
 /** models.TierOverride */

@@ -6,6 +6,12 @@ import { AgentsScreen } from './agents'
 
 afterEach(() => { vi.restoreAllMocks() })
 
+// classification_caps defaults to a real value, the way GET /v1/agents/{id}
+// actually responds (services/internal/store/agent.go's UpdateAgent doc:
+// "read back from the row via RETURNING"). A fixture that always omitted it
+// would make the strip-before-update test pass whether or not the strip
+// exists -- see agents.test.tsx's "does not send classification_caps in the
+// agent body" below.
 function agent(over: Partial<Agent> = {}): Agent {
   return {
     id: '99999999-9999-9999-9999-999999999999',
@@ -18,6 +24,7 @@ function agent(over: Partial<Agent> = {}): Agent {
     allowed_tools: ['Read', 'Grep'],
     created_at: '2026-08-23T10:00:00Z',
     updated_at: '2026-08-23T10:00:00Z',
+    classification_caps: { nato: 'CONFIDENTIAL' },
     ...over,
   }
 }
@@ -59,12 +66,22 @@ describe('AgentsScreen', () => {
 
   it('does not send classification_caps in the agent body', async () => {
     vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+    // agent() now carries classification_caps -- the way a real GET
+    // responds -- so this is a real strip, not an assertion that a field
+    // absent from the mock stayed absent.
     vi.spyOn(api, 'agent').mockResolvedValue(agent())
-    vi.spyOn(api, 'agentCaps').mockResolvedValue(capsView())
+    vi.spyOn(api, 'agentCaps').mockResolvedValue(capsView({ classification_caps: { nato: 'CONFIDENTIAL' } }))
     const update = vi.spyOn(api, 'updateAgent').mockResolvedValue(agent())
 
     render(<AgentsScreen />)
     ;(await screen.findByRole('button', { name: 'Edit' })).click()
+
+    // The caps panel -- fed by the separate GET .../classification-caps
+    // route, not the agent body -- shows the stored value untouched, proof
+    // this test is exercising a live draft and a live panel, not a mock
+    // that happens to have nothing to strip.
+    expect(await screen.findByDisplayValue('CONFIDENTIAL')).toBeInTheDocument()
+
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'renamed' } })
     screen.getByRole('button', { name: 'Save' }).click()
 
@@ -72,6 +89,10 @@ describe('AgentsScreen', () => {
     const call = update.mock.calls[0]
     if (call === undefined) throw new Error('updateAgent was not called')
     const [, body] = call
+    // The seeded draft DOES carry caps, because GET returns them (agent()'s
+    // default)...
+    // ...and the PUT body must not, because UpdateAgent silently ignores the
+    // field: a value sent here would save without error and change nothing.
     expect(body).not.toHaveProperty('classification_caps')
     // ...and it is a full replace, so everything else IS there.
     expect(body).toMatchObject({
