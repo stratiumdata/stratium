@@ -81,7 +81,12 @@ export interface ResourceLabelRule {
  *  not "unset" and "set to nothing"; they are "off" and "on". */
 export type ClassificationCaps = Record<string, string>
 
-/** models.AgentCapsView, what GET/PUT .../classification-caps return. */
+/** models.AgentCapsView, what GET/PUT .../classification-caps return.
+ *
+ *  Every field beyond classification_caps is advisory: setting a cap has
+ *  consequences invisible in the stored value, and this type is where the
+ *  server states them. A panel that renders only classification_caps
+ *  discards the whole point of this type. */
 export interface AgentCapsView {
   agent_id: string
   classification_caps: ClassificationCaps
@@ -89,6 +94,20 @@ export interface AgentCapsView {
    *  null where no catch-all exists for it. Read-only context: it is what an
    *  unlabelled resource resolves to, which is what makes a cap bite. */
   catch_all: Record<string, string | null>
+  /** Tools that can never satisfy ANY cap, because they produce no resource
+   *  to classify -- not "denied by this cap", denied by every cap. NOT
+   *  exhaustive for an unrestricted agent (allowed_tools == []): there is no
+   *  finite list to scan, so an empty result there means only that every
+   *  CATALOGUED tool is satisfiable. */
+  unsatisfiable_tools: string[]
+  /** The agent's delegations that are neither revoked nor expired -- the
+   *  delegations this cap does NOT affect. A warning, not a confirmation:
+   *  caps are copied onto a delegation at issuance, so tightening a ceiling
+   *  changes nothing already in flight. */
+  live_delegations: number
+  /** Fixed human-readable string, always "at next issuance". Display only —
+   *  its own doc comment says clients must not branch on it. */
+  applies: string
 }
 
 /** One leg of POST /v1/policies/test's answer. */
@@ -236,8 +255,10 @@ export const api = {
   // classification_caps on input, so this is the ONLY way to write one.
   agentCaps: (id: string) =>
     request<AgentCapsView>('GET', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
-  putAgentCaps: (id: string, caps: ClassificationCaps) =>
-    request<AgentCapsView>('PUT', `/v1/agents/${encodeURIComponent(id)}/classification-caps`,
+  putAgentCaps: (id: string, caps: ClassificationCaps, allowUncovered = false) =>
+    request<AgentCapsView>('PUT',
+      `/v1/agents/${encodeURIComponent(id)}/classification-caps` +
+        (allowUncovered ? '?allow_uncovered=true' : ''),
       { classification_caps: caps }),
   deleteAgentCaps: (id: string) =>
     request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
