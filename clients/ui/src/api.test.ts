@@ -87,4 +87,23 @@ describe('request', () => {
     const [, init] = f.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(init.body as string)).toEqual({ classification_caps: { nato: 'SECRET' } })
   })
+
+  it('does not send the uncovered override unless asked', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockReturnValue(okJSON({}))
+    await api.putAgentCaps('a1', { nato: 'SECRET' })
+    // The flag is an acknowledgement gate on a security control. A default
+    // that carries it would defeat the gate for every write, and the screen
+    // tests -- which assert arguments, not the URL -- would stay green.
+    const call = f.mock.calls[0]
+    if (call === undefined) throw new Error('fetch was not called')
+    expect(call[0]).toBe('/v1/agents/a1/classification-caps')
+  })
+
+  it('sends the uncovered override only when explicitly asked', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockReturnValue(okJSON({}))
+    await api.putAgentCaps('a1', { nato: 'SECRET' }, true)
+    const call = f.mock.calls[0]
+    if (call === undefined) throw new Error('fetch was not called')
+    expect(call[0]).toBe('/v1/agents/a1/classification-caps?allow_uncovered=true')
+  })
 })
