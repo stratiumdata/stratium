@@ -1568,6 +1568,88 @@ open when someone needs it. Deleting that row warns accordingly."
 
 ---
 
+### Task 7b: Correct three wire shapes in `api.ts`
+
+Task 4's review cross-checked every client method's **path and verb** against
+`routeTable` and found all 35 correct. It did not check **body field names**,
+and three are wrong. All three are in merged code.
+
+| Method | Sends / expects | The server actually uses |
+|---|---|---|
+| `validatePolicy` | `{language, text}` | `validatePolicyRequest.Text` is tagged **`json:"policy_content"`** (validate.go:42) |
+| `putAgentCaps` | a bare map | `capsRequest` is **`{"classification_caps": {...}}`** (agent_caps.go:16) |
+| `agentCaps` | returns `Record<string,string>` | returns **`models.AgentCapsView`** — `{agent_id, classification_caps, catch_all}` |
+
+The second is the dangerous one. Sending a bare map leaves `capsRequest.ClassificationCaps` nil, so an operator setting a cap would **clear every cap on that agent** — a silent widening of a security ceiling, reported as success.
+
+**Files:** Modify `clients/ui/src/api.ts`, `clients/ui/src/api.test.ts`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+  it('sends the policy source as policy_content, the field the server reads', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockReturnValue(okJSON({ valid: true }))
+    await api.validatePolicy('cedar', 'permit(principal, action, resource);')
+    const body = JSON.parse((f.mock.calls[0]?.[1] as RequestInit).body as string)
+    // validatePolicyRequest.Text is tagged json:"policy_content". Sending
+    // "text" leaves it empty and validates an EMPTY policy instead.
+    expect(body).toEqual({ language: 'cedar', policy_content: 'permit(principal, action, resource);' })
+  })
+
+  it('wraps caps in the envelope the server decodes', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockReturnValue(okJSON({ agent_id: 'a', classification_caps: {}, catch_all: {} }))
+    await api.putAgentCaps('a1', { nato: 'SECRET' })
+    const body = JSON.parse((f.mock.calls[0]?.[1] as RequestInit).body as string)
+    // capsRequest is {"classification_caps": {...}}. A bare map decodes to nil
+    // and CLEARS every cap -- widening a ceiling while reporting success.
+    expect(body).toEqual({ classification_caps: { nato: 'SECRET' } })
+  })
+```
+
+- [ ] **Step 2: Run them, confirm both FAIL**
+
+- [ ] **Step 3: Fix the three methods**
+
+```ts
+export interface AgentCapsView {
+  agent_id: string
+  classification_caps: ClassificationCaps
+  /** Per hierarchy, the level the tenant's catch-all label rule assigns, or
+   *  null where no catch-all exists for it. Read-only context: it is what an
+   *  unlabelled resource resolves to, which is what makes a cap bite. */
+  catch_all: Record<string, string | null>
+}
+
+  validatePolicy: (language: string, policyContent: string) =>
+    request<void>('POST', '/v1/policies/validate', { language, policy_content: policyContent }),
+
+  agentCaps: (id: string) =>
+    request<AgentCapsView>('GET', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
+  putAgentCaps: (id: string, caps: ClassificationCaps) =>
+    request<AgentCapsView>('PUT', `/v1/agents/${encodeURIComponent(id)}/classification-caps`,
+      { classification_caps: caps }),
+```
+
+- [ ] **Step 4: Run the gate, commit**
+
+```bash
+cd clients/ui && npm run lint && npm run test && npm run build
+git commit -m "fix(ui): three client bodies the server never reads
+
+Task 4's review checked every method's path and verb against routeTable and
+found all 35 right. It did not check body FIELD NAMES.
+
+- validatePolicy sent {text}; validatePolicyRequest.Text is tagged
+  json:\"policy_content\", so the server validated an empty policy.
+- putAgentCaps sent a bare map; capsRequest is {\"classification_caps\": ...},
+  so a nil map decoded and an operator SETTING a cap would have CLEARED every
+  cap on that agent -- widening a security ceiling and reporting success.
+- agentCaps typed the response as a bare map; it is AgentCapsView, carrying
+  agent_id and catch_all alongside."
+```
+
+---
+
 ### Task 8: Approvals — approve and deny
 
 The escalation feature's premise is a human deciding, and `STRATIUM_PEP_APPROVAL_TIMEOUT` exists to hold a tool call open while they do. This screen lists pending approvals and offers no way to decide one, so that human reaches for `curl` while an agent blocks.
@@ -2261,6 +2343,8 @@ function CapsSection({ agentID }: { agentID: string }) {
 ```
 
 `NewCapRow` is a two-`TextInput` row (hierarchy, level) with an Add button, holding its own local state and calling `onAdd` then clearing itself.
+
+**`api.agentCaps` returns `AgentCapsView`, not a bare map** (see Task 7b), so read `view.classification_caps`. The view also carries `catch_all`: per hierarchy, the level the tenant's catch-all label rule assigns, or `null` where none exists. Show it beside each cap — it is what an unlabelled resource resolves to, and therefore what decides whether a cap bites. A hierarchy with a cap set and `catch_all: null` is the configuration that makes every unlabelled resource deny, so name that case explicitly.
 
 Render `<CapsSection agentID={editor.editingID} />` only when `editor.editingID !== null` — an agent that does not exist yet has no sub-resource.
 
