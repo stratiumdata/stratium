@@ -59,6 +59,36 @@ export interface ToolCatalogEntry {
   command_field?: string
 }
 
+/** models.ResourceLabelRule.
+ *
+ *  `prefix` may legitimately be the EMPTY STRING: "" is a prefix of every
+ *  resource id, which makes such a row the tenant's catch-all (R7) and the
+ *  answer to "a cap was enabled and now everything denies". Nothing in this
+ *  client may treat it as a missing required field — migrations/000019
+ *  deliberately omits the length(prefix) > 0 CHECK. */
+export interface ResourceLabelRule {
+  id: string
+  tenant_id: string
+  prefix: string
+  hierarchy: string
+  level: string
+}
+
+/** The classification-caps sub-resource: hierarchy -> level.
+ *
+ *  An EMPTY map is the off switch — CheckCap returns allow for len(caps) == 0.
+ *  Any entry at all makes an unlabelled resource DENY (R2). The two states are
+ *  not "unset" and "set to nothing"; they are "off" and "on". */
+export type ClassificationCaps = Record<string, string>
+
+/** One leg of POST /v1/policies/test's answer. */
+export interface PolicyTestVerdict {
+  effect: string
+  reason: string
+  source?: string
+  policy_id?: string
+}
+
 /** models.Approval. input_digest is hex; see that type's MarshalJSON. */
 export interface Approval {
   id: string
@@ -116,11 +146,22 @@ export function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-async function request<T>(method: string, path: string): Promise<T> {
+/** The PAP client's single request path. `body` is omitted, not null, on a
+ *  read: sending `Content-Type: application/json` with no body invites a 400
+ *  from a strict decoder, and several routes here are POSTs that genuinely
+ *  carry nothing (approve, deny, revoke). */
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const header = authHeader()
   if (!header) throw new APIError(401, 'not signed in')
 
-  const res = await fetch(path, { method, headers: { ...header, Accept: 'application/json' } })
+  const headers: Record<string, string> = { ...header, Accept: 'application/json' }
+  const init: RequestInit = { method, headers }
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    init.body = JSON.stringify(body)
+  }
+
+  const res = await fetch(path, init)
   if (res.status === 401) {
     // The token is dead. Drop it rather than retry with it.
     onUnauthorized()
@@ -157,4 +198,67 @@ export const api = {
   // (N14). A refusal comes back as APIError(403) and is shown as such.
   revokeDelegation: (id: string) =>
     request<Delegation>('POST', `/v1/delegations/${encodeURIComponent(id)}/revoke`),
+
+  policyLanguages: () =>
+    request<{ languages: string[] }>('GET', '/v1/policy-languages').then((r) => r.languages),
+
+  policy: (id: string) => request<Policy>('GET', `/v1/policies/${encodeURIComponent(id)}`),
+  createPolicy: (p: Policy) => request<Policy>('POST', '/v1/policies', p),
+  updatePolicy: (id: string, p: Policy) =>
+    request<Policy>('PUT', `/v1/policies/${encodeURIComponent(id)}`, p),
+  deletePolicy: (id: string) => request<void>('DELETE', `/v1/policies/${encodeURIComponent(id)}`),
+
+  // validate answers 200 {valid:true} or a 400 carrying the engine's own
+  // message. The 400 is the useful case, and APIError already carries its
+  // body, so this returns void and lets the rejection speak.
+  validatePolicy: (language: string, text: string) =>
+    request<void>('POST', '/v1/policies/validate', { language, text }),
+  testPolicy: (req: unknown) => request<PolicyTestVerdict>('POST', '/v1/policies/test', req),
+
+  agent: (id: string) => request<Agent>('GET', `/v1/agents/${encodeURIComponent(id)}`),
+  createAgent: (a: Agent) => request<Agent>('POST', '/v1/agents', a),
+  updateAgent: (id: string, a: Agent) =>
+    request<Agent>('PUT', `/v1/agents/${encodeURIComponent(id)}`, a),
+  deleteAgent: (id: string) => request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}`),
+
+  // The caps sub-resource is a separate route at a separate role floor
+  // (RoleAdmin, where the agent body is RoleEditor). store.UpdateAgent ignores
+  // classification_caps on input, so this is the ONLY way to write one.
+  agentCaps: (id: string) =>
+    request<ClassificationCaps>('GET', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
+  putAgentCaps: (id: string, caps: ClassificationCaps) =>
+    request<ClassificationCaps>('PUT', `/v1/agents/${encodeURIComponent(id)}/classification-caps`, caps),
+  deleteAgentCaps: (id: string) =>
+    request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
+
+  tierOverride: (id: string) =>
+    request<TierOverride>('GET', `/v1/tier-overrides/${encodeURIComponent(id)}`),
+  createTierOverride: (t: TierOverride) => request<TierOverride>('POST', '/v1/tier-overrides', t),
+  updateTierOverride: (id: string, t: TierOverride) =>
+    request<TierOverride>('PUT', `/v1/tier-overrides/${encodeURIComponent(id)}`, t),
+  deleteTierOverride: (id: string) =>
+    request<void>('DELETE', `/v1/tier-overrides/${encodeURIComponent(id)}`),
+
+  toolCatalogEntry: (id: string) =>
+    request<ToolCatalogEntry>('GET', `/v1/tool-catalog/${encodeURIComponent(id)}`),
+  createToolCatalogEntry: (e: ToolCatalogEntry) =>
+    request<ToolCatalogEntry>('POST', '/v1/tool-catalog', e),
+  updateToolCatalogEntry: (id: string, e: ToolCatalogEntry) =>
+    request<ToolCatalogEntry>('PUT', `/v1/tool-catalog/${encodeURIComponent(id)}`, e),
+  // No delete: the PAP exposes no DELETE /v1/tool-catalog/{id}.
+
+  resourceLabelRules: () => request<ResourceLabelRule[]>('GET', '/v1/resource-label-rules'),
+  resourceLabelRule: (id: string) =>
+    request<ResourceLabelRule>('GET', `/v1/resource-label-rules/${encodeURIComponent(id)}`),
+  createResourceLabelRule: (r: ResourceLabelRule) =>
+    request<ResourceLabelRule>('POST', '/v1/resource-label-rules', r),
+  updateResourceLabelRule: (id: string, r: ResourceLabelRule) =>
+    request<ResourceLabelRule>('PUT', `/v1/resource-label-rules/${encodeURIComponent(id)}`, r),
+  deleteResourceLabelRule: (id: string) =>
+    request<void>('DELETE', `/v1/resource-label-rules/${encodeURIComponent(id)}`),
+
+  approveApproval: (id: string) =>
+    request<Approval>('POST', `/v1/approvals/${encodeURIComponent(id)}/approve`),
+  denyApproval: (id: string) =>
+    request<Approval>('POST', `/v1/approvals/${encodeURIComponent(id)}/deny`),
 }
