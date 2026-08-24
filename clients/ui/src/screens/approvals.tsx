@@ -21,13 +21,18 @@ export function ApprovalsScreen() {
   const { rows, error, reload } = useList<Approval>(api.approvals)
   const [showAll, setShowAll] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  // { id, how } of the decision in flight, mirroring delegations.tsx's
+  // `revoking`: disables the row's buttons and relabels the one clicked for
+  // the round trip, so a double-click cannot fire the decision twice.
+  const [deciding, setDeciding] = useState<{ id: string; how: 'approve' | 'deny' } | null>(null)
   const visible = rows === null ? null : showAll ? rows : rows.filter((a) => a.status === 'pending')
 
   const decide = useCallback((id: string, how: 'approve' | 'deny') => {
+    setDeciding({ id, how })
     const call = how === 'approve' ? api.approveApproval : api.denyApproval
     call(id).then(
-      () => { setActionError(null); reload() },
-      (err: unknown) => setActionError(describeError(err)),
+      () => { setActionError(null); setDeciding(null); reload() },
+      (err: unknown) => { setActionError(describeError(err)); setDeciding(null) },
     )
   }, [reload])
 
@@ -82,8 +87,20 @@ export function ApprovalsScreen() {
                 <TCell className="text-right">
                   {decidable(a) ? (
                     <>
-                      <Button variant="ghost" size="sm" onClick={() => decide(a.id, 'approve')}>Approve</Button>
-                      <Button variant="ghost" size="sm" onClick={() => decide(a.id, 'deny')}>Deny</Button>
+                      <Button
+                        variant="ghost" size="sm"
+                        disabled={deciding?.id === a.id}
+                        onClick={() => decide(a.id, 'approve')}
+                      >
+                        {deciding?.id === a.id && deciding.how === 'approve' ? 'Approving…' : 'Approve'}
+                      </Button>
+                      <Button
+                        variant="ghost" size="sm"
+                        disabled={deciding?.id === a.id}
+                        onClick={() => decide(a.id, 'deny')}
+                      >
+                        {deciding?.id === a.id && deciding.how === 'deny' ? 'Denying…' : 'Deny'}
+                      </Button>
                     </>
                   ) : null}
                 </TCell>

@@ -25,6 +25,7 @@ export function TierOverridesScreen() {
   const { rows, error, reload } = useList<TierOverride>(api.tierOverrides)
   const [confirming, setConfirming] = useState<TierOverride | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
 
   const res = useMemo(() => ({
     get: api.tierOverride,
@@ -35,9 +36,10 @@ export function TierOverridesScreen() {
   const editor = useEditor<TierOverride>(res)
 
   const remove = useCallback((o: TierOverride) => {
+    setRemoving(o.id)
     api.deleteTierOverride(o.id).then(
-      () => { setConfirming(null); setActionError(null); reload() },
-      (err: unknown) => { setConfirming(null); setActionError(describeError(err)) },
+      () => { setConfirming(null); setActionError(null); setRemoving(null); reload() },
+      (err: unknown) => { setConfirming(null); setActionError(describeError(err)); setRemoving(null) },
     )
   }, [reload])
 
@@ -90,6 +92,8 @@ export function TierOverridesScreen() {
           <ConfirmRow
             prompt={`Delete the override for ${confirming.tool_or_verb}?`}
             confirmLabel="Delete override"
+            busyLabel="Deleting…"
+            busy={removing === confirming.id}
             onConfirm={() => remove(confirming)}
             onCancel={() => setConfirming(null)}
           />

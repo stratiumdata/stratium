@@ -117,6 +117,7 @@ function CapsSection({ agentID, allowedTools }: { agentID: string; allowedTools:
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [offerOverride, setOfferOverride] = useState(false)
+  const [confirmingClear, setConfirmingClear] = useState(false)
   const [busy, setBusy] = useState(false)
 
   // Resets on every agentID change because the caller keys CapsSection by
@@ -162,9 +163,10 @@ function CapsSection({ agentID, allowedTools }: { agentID: string; allowedTools:
         setCaps({})
         setView((v) => (v === null ? v : { ...v, classification_caps: {}, catch_all: {} }))
         setOfferOverride(false)
+        setConfirmingClear(false)
         setBusy(false)
       },
-      (err: unknown) => { setSaveError(describeError(err)); setBusy(false) },
+      (err: unknown) => { setSaveError(describeError(err)); setConfirmingClear(false); setBusy(false) },
     )
   }
 
@@ -188,8 +190,24 @@ function CapsSection({ agentID, allowedTools }: { agentID: string; allowedTools:
         {unsatisfiableToolsMessage(view.unsatisfiable_tools, allowedTools)}
       </p>
 
-      {loadError ? <ErrorBanner>{loadError}</ErrorBanner> : null}
       {saveError ? <ErrorBanner>{saveError}</ErrorBanner> : null}
+
+      {/* Clearing is the loosening direction: it removes the whole ceiling in
+         one click, unlike a single Remove above which only narrows what is
+         capped. Every other destructive action on this branch is gated
+         behind ConfirmRow -- this is the one that was not. */}
+      {confirmingClear ? (
+        <div className="mb-3">
+          <ConfirmRow
+            prompt="Clear all caps? With no caps set, no classification ceiling is enforced for this agent."
+            confirmLabel="Yes, clear all caps"
+            busyLabel="Clearing…"
+            busy={busy}
+            onConfirm={clear}
+            onCancel={() => setConfirmingClear(false)}
+          />
+        </div>
+      ) : null}
 
       {entries.length === 0
         ? <p className="mb-3 text-sm text-muted-foreground">None — no classification ceiling is enforced for this agent.</p>
@@ -215,7 +233,9 @@ function CapsSection({ agentID, allowedTools }: { agentID: string; allowedTools:
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Button onClick={() => save(false)} disabled={busy}>Save caps</Button>
-        <Button variant="destructive" onClick={clear} disabled={busy}>Clear all caps</Button>
+        <Button variant="destructive" onClick={() => setConfirmingClear(true)} disabled={busy}>
+          Clear all caps
+        </Button>
         {offerOverride ? (
           <Button variant="outline" onClick={() => save(true)} disabled={busy}>
             Apply anyway (uncovered)
@@ -230,6 +250,7 @@ export function AgentsScreen() {
   const { rows, error, reload } = useList<Agent>(api.agents)
   const [confirming, setConfirming] = useState<Agent | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
 
   // classification_caps is returned by GET and IGNORED by PUT (store.UpdateAgent
   // passes eight parameters and caps is not among them). Sending it back would
@@ -247,9 +268,10 @@ export function AgentsScreen() {
   const editor = useEditor<Agent>(res)
 
   const remove = useCallback((a: Agent) => {
+    setRemoving(a.id)
     api.deleteAgent(a.id).then(
-      () => { setConfirming(null); setActionError(null); reload() },
-      (err: unknown) => { setConfirming(null); setActionError(describeError(err)) },
+      () => { setConfirming(null); setActionError(null); setRemoving(null); reload() },
+      (err: unknown) => { setConfirming(null); setActionError(describeError(err)); setRemoving(null) },
     )
   }, [reload])
 
@@ -333,6 +355,8 @@ export function AgentsScreen() {
           <ConfirmRow
             prompt={`Delete agent ${confirming.name}?`}
             confirmLabel="Delete agent"
+            busyLabel="Deleting…"
+            busy={removing === confirming.id}
             onConfirm={() => remove(confirming)}
             onCancel={() => setConfirming(null)}
           />

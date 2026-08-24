@@ -255,6 +255,7 @@ export function PoliciesScreen() {
   const { rows, error, reload } = useList<Policy>(api.policies)
   const [confirming, setConfirming] = useState<Policy | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
 
   const [languages, setLanguages] = useState<string[]>([])
   const [languagesLoaded, setLanguagesLoaded] = useState(false)
@@ -277,9 +278,10 @@ export function PoliciesScreen() {
   const editor = useEditor<Policy>(res)
 
   const remove = useCallback((p: Policy) => {
+    setRemoving(p.id)
     api.deletePolicy(p.id).then(
-      () => { setConfirming(null); setActionError(null); reload() },
-      (err: unknown) => { setConfirming(null); setActionError(describeError(err)) },
+      () => { setConfirming(null); setActionError(null); setRemoving(null); reload() },
+      (err: unknown) => { setConfirming(null); setActionError(describeError(err)); setRemoving(null) },
     )
   }, [reload])
 
@@ -312,6 +314,8 @@ export function PoliciesScreen() {
           <ConfirmRow
             prompt={`Delete policy ${confirming.name}?`}
             confirmLabel="Delete policy"
+            busyLabel="Deleting…"
+            busy={removing === confirming.id}
             onConfirm={() => remove(confirming)}
             onCancel={() => setConfirming(null)}
           />

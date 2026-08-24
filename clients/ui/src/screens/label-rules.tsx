@@ -29,6 +29,7 @@ export function LabelRulesScreen() {
   const { rows, error, reload } = useList<ResourceLabelRule>(api.resourceLabelRules)
   const [confirming, setConfirming] = useState<ResourceLabelRule | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
 
   const res = useMemo(() => ({
     get: api.resourceLabelRule,
@@ -39,9 +40,10 @@ export function LabelRulesScreen() {
   const editor = useEditor<ResourceLabelRule>(res)
 
   const remove = useCallback((r: ResourceLabelRule) => {
+    setRemoving(r.id)
     api.deleteResourceLabelRule(r.id).then(
-      () => { setConfirming(null); setActionError(null); reload() },
-      (err: unknown) => { setConfirming(null); setActionError(describeError(err)) },
+      () => { setConfirming(null); setActionError(null); setRemoving(null); reload() },
+      (err: unknown) => { setConfirming(null); setActionError(describeError(err)); setRemoving(null) },
     )
   }, [reload])
 
@@ -102,6 +104,8 @@ export function LabelRulesScreen() {
               ? 'Delete the catch-all? With no rule matching everything, unlabelled resources will deny under any configured cap.'
               : `Delete the rule for ${confirming.prefix}?`}
             confirmLabel="Delete rule"
+            busyLabel="Deleting…"
+            busy={removing === confirming.id}
             onConfirm={() => remove(confirming)}
             onCancel={() => setConfirming(null)}
           />

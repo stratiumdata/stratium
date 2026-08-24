@@ -227,16 +227,25 @@ export function StringListInput({ value, onChange, placeholder }: {
 
 /** An inline destructive confirmation. Never window.confirm: it blocks the
  *  event loop, it cannot be styled, and it cannot carry the resource-specific
- *  warning some deletions need (removing the catch-all label rule, for one). */
-export function ConfirmRow({ prompt, confirmLabel, onConfirm, onCancel }: {
-  prompt: ReactNode; confirmLabel: string; onConfirm: () => void; onCancel: () => void
+ *  warning some deletions need (removing the catch-all label rule, for one).
+ *
+ *  `busy` disables both controls and swaps the confirm label to `busyLabel`
+ *  for the round trip -- delegations.tsx's Revoke button does the same thing
+ *  without ConfirmRow (it has no separate confirm step); this is that same
+ *  guard against a double-click firing two requests, for every screen that
+ *  does have one. */
+export function ConfirmRow({ prompt, confirmLabel, busyLabel, busy, onConfirm, onCancel }: {
+  prompt: ReactNode; confirmLabel: string; busyLabel?: string; busy?: boolean
+  onConfirm: () => void; onCancel: () => void
 }) {
   return (
     <div role="alertdialog" className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm">
       <span className="text-destructive">{prompt}</span>
       <span className="ml-auto flex gap-2">
-        <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-        <Button variant="destructive" size="sm" onClick={onConfirm}>{confirmLabel}</Button>
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>
+        <Button variant="destructive" size="sm" onClick={onConfirm} disabled={busy}>
+          {busy && busyLabel ? busyLabel : confirmLabel}
+        </Button>
       </span>
     </div>
   )

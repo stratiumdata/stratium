@@ -43,4 +43,26 @@ describe('ConfirmRow', () => {
     screen.getByRole('button', { name: 'Delete' }).click()
     expect(onConfirm).toHaveBeenCalledTimes(1)
   })
+
+  // delegations.tsx's Revoke button disables and relabels itself for the
+  // round trip so a double-click cannot fire the request twice; `busy` is
+  // that same guard for every screen that confirms through ConfirmRow.
+  it('disables both controls and shows the busy label while busy', () => {
+    const onConfirm = vi.fn()
+    render(
+      <ConfirmRow
+        prompt="Delete this rule?"
+        confirmLabel="Delete"
+        busyLabel="Deleting…"
+        busy
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    const confirmButton = screen.getByRole('button', { name: 'Deleting…' })
+    expect(confirmButton).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+  })
 })

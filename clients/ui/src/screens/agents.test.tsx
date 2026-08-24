@@ -226,6 +226,27 @@ describe('AgentsScreen', () => {
     expect(screen.queryByRole('button', { name: 'Apply anyway (uncovered)' })).not.toBeInTheDocument()
   })
 
+  // Clearing removes the whole classification ceiling in one click -- the
+  // loosening direction, the one destructive action on this branch that had
+  // no confirmation at all.
+  it('confirms before clearing all caps, and explains what clearing means', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+    vi.spyOn(api, 'agent').mockResolvedValue(agent())
+    vi.spyOn(api, 'agentCaps').mockResolvedValue(capsView({ classification_caps: { nato: 'SECRET' } }))
+    const del = vi.spyOn(api, 'deleteAgentCaps').mockResolvedValue(undefined)
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+    ;(await screen.findByRole('button', { name: 'Clear all caps' })).click()
+
+    expect(del).not.toHaveBeenCalled()
+    const confirmRow = await screen.findByRole('alertdialog')
+    expect(confirmRow).toHaveTextContent(/no classification ceiling is enforced/i)
+
+    screen.getByRole('button', { name: 'Yes, clear all caps' }).click()
+    await waitFor(() => expect(del).toHaveBeenCalledWith(agent().id))
+  })
+
   it('says an empty cap set means no ceiling is enforced', async () => {
     vi.spyOn(api, 'agents').mockResolvedValue([agent()])
     vi.spyOn(api, 'agent').mockResolvedValue(agent())
