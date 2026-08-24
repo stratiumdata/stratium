@@ -748,7 +748,14 @@ services:
     volumes:
       - ./keycloak/stratium-realm.json:/opt/keycloak/data/import/stratium-realm.json:ro
     ports:
-      - "8080"
+      # Fixed, not ephemeral, and matching the realm's frontendUrl port.
+      # The realm advertises issuer http://keycloak:8080/realms/stratium (see
+      # the frontendUrl note above), so a BROWSER on the host must reach
+      # Keycloak at that exact host:port or OIDC discovery fails before any
+      # login form renders -- which is what the embedded admin UI does. That
+      # also needs `127.0.0.1 keycloak` in the host's /etc/hosts; the two go
+      # together, and neither alone is enough.
+      - "8080:8080"
     healthcheck:
       test:
         - CMD-SHELL
