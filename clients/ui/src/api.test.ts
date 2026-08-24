@@ -61,4 +61,30 @@ describe('request', () => {
     const [, init] = f.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(init.body as string).prefix).toBe('')
   })
+
+  it('sends the policy source as policy_content, the field the server reads', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockReturnValue(okJSON({ valid: true }))
+
+    await api.validatePolicy('cedar', 'permit(principal, action, resource);')
+
+    // validatePolicyRequest.Text is tagged json:"policy_content" (validate.go).
+    // Sending "text" leaves it empty and validates an EMPTY policy instead.
+    const [, init] = f.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      language: 'cedar', policy_content: 'permit(principal, action, resource);',
+    })
+  })
+
+  it('wraps caps in the envelope the server decodes', async () => {
+    const f = vi.spyOn(globalThis, 'fetch')
+      .mockReturnValue(okJSON({ agent_id: 'a', classification_caps: {}, catch_all: {} }))
+
+    await api.putAgentCaps('a1', { nato: 'SECRET' })
+
+    // capsRequest is {"classification_caps": {...}} (agent_caps.go). A bare
+    // map decodes to nil and CLEARS every cap -- widening a ceiling while
+    // reporting success.
+    const [, init] = f.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ classification_caps: { nato: 'SECRET' } })
+  })
 })

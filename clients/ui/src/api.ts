@@ -81,6 +81,16 @@ export interface ResourceLabelRule {
  *  not "unset" and "set to nothing"; they are "off" and "on". */
 export type ClassificationCaps = Record<string, string>
 
+/** models.AgentCapsView, what GET/PUT .../classification-caps return. */
+export interface AgentCapsView {
+  agent_id: string
+  classification_caps: ClassificationCaps
+  /** Per hierarchy, the level the tenant's catch-all label rule assigns, or
+   *  null where no catch-all exists for it. Read-only context: it is what an
+   *  unlabelled resource resolves to, which is what makes a cap bite. */
+  catch_all: Record<string, string | null>
+}
+
 /** One leg of POST /v1/policies/test's answer. */
 export interface PolicyTestVerdict {
   effect: string
@@ -211,8 +221,8 @@ export const api = {
   // validate answers 200 {valid:true} or a 400 carrying the engine's own
   // message. The 400 is the useful case, and APIError already carries its
   // body, so this returns void and lets the rejection speak.
-  validatePolicy: (language: string, text: string) =>
-    request<void>('POST', '/v1/policies/validate', { language, text }),
+  validatePolicy: (language: string, policyContent: string) =>
+    request<void>('POST', '/v1/policies/validate', { language, policy_content: policyContent }),
   testPolicy: (req: unknown) => request<PolicyTestVerdict>('POST', '/v1/policies/test', req),
 
   agent: (id: string) => request<Agent>('GET', `/v1/agents/${encodeURIComponent(id)}`),
@@ -225,9 +235,10 @@ export const api = {
   // (RoleAdmin, where the agent body is RoleEditor). store.UpdateAgent ignores
   // classification_caps on input, so this is the ONLY way to write one.
   agentCaps: (id: string) =>
-    request<ClassificationCaps>('GET', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
+    request<AgentCapsView>('GET', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
   putAgentCaps: (id: string, caps: ClassificationCaps) =>
-    request<ClassificationCaps>('PUT', `/v1/agents/${encodeURIComponent(id)}/classification-caps`, caps),
+    request<AgentCapsView>('PUT', `/v1/agents/${encodeURIComponent(id)}/classification-caps`,
+      { classification_caps: caps }),
   deleteAgentCaps: (id: string) =>
     request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
 
