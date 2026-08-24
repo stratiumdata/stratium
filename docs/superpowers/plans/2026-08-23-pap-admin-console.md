@@ -1872,6 +1872,29 @@ describe('ToolCatalogScreen', () => {
     ))
   })
 
+  // "" is not "unset" for these two: they are *string with omitempty in Go, so
+  // "" arrives as a non-nil pointer to the empty string and satisfies both the
+  // store's `ActionTier == nil && CommandField == nil` guard and the database's
+  // tool_catalog_tier_or_command_field CHECK. The row stored then means "derive
+  // the tier from the field named empty-string" -- an invalid entry that both
+  // guards were written to prevent.
+  it('omits an empty command_field rather than sending an empty string', async () => {
+    vi.spyOn(api, 'toolCatalog').mockResolvedValue([])
+    const create = vi.spyOn(api, 'createToolCatalogEntry').mockResolvedValue(entry())
+
+    render(<ToolCatalogScreen />)
+    await screen.findByText('No tool catalog entries.')
+    screen.getByRole('button', { name: 'New entry' }).click()
+
+    fireEvent.change(await screen.findByLabelText('Tool name'), { target: { value: 'Glob' } })
+    screen.getByRole('button', { name: 'Save' }).click()
+
+    await waitFor(() => expect(create).toHaveBeenCalled())
+    const sent = create.mock.calls[0]?.[0] as Record<string, unknown>
+    expect('command_field' in sent && sent.command_field === '').toBe(false)
+    expect('resource_field' in sent && sent.resource_field === '').toBe(false)
+  })
+
   it('sends a number once the tier is set explicitly', async () => {
     vi.spyOn(api, 'toolCatalog').mockResolvedValue([])
     const create = vi.spyOn(api, 'createToolCatalogEntry').mockResolvedValue(entry())
@@ -1937,9 +1960,19 @@ The list gains a `Builtin` column rendered with the existing `actionTier()` form
 In `tool-catalog.tsx`:
 
 ```tsx
-const BLANK: ToolCatalogEntry = {
-  id: '', tool_name: '', action_tier: null, verb: '', resource_field: '', command_field: '',
-}
+// resource_field and command_field are *string with omitempty in Go. Sending
+// "" is NOT the same as omitting them: it produces a non-nil pointer to the
+// empty string, which defeats BOTH guards on this table --
+// store.CreateToolCatalogEntry refuses only `ActionTier == nil &&
+// CommandField == nil` (internal/store/catalog.go), and the database's
+// tool_catalog_tier_or_command_field CHECK tests `IS NOT NULL`. An empty
+// string passes each, and the row it stores means "derive the tier from the
+// field named empty-string". They stay absent until an operator types one.
+const BLANK: ToolCatalogEntry = { id: '', tool_name: '', action_tier: null, verb: '' }
+
+/** '' means "not set" for the two optional field names, and must be omitted
+ *  from the payload rather than sent. See BLANK. */
+const orUndefined = (v: string) => (v === '' ? undefined : v)
 ```
 
 The tier control is a checkbox plus a conditional input, because `null` and `0` are different values with different meanings:
@@ -1958,7 +1991,19 @@ The tier control is a checkbox plus a conditional input, because `null` and `0` 
 ) : null}
 ```
 
-Plus `tool_name`, `verb`, `resource_field` and `command_field` as `TextInput`s. **No delete button and no `ConfirmRow`** — the API has no such route.
+`tool_name` and `verb` are plain `TextInput`s. `resource_field` and `command_field` are `TextInput`s whose `onChange` passes through `orUndefined`, so clearing one omits it instead of sending `""`:
+
+```tsx
+<Field label="Command field" htmlFor="command_field"
+  hint="Required when the tier is derived: it names the argument holding the command to classify.">
+  <TextInput id="command_field" value={editor.draft.command_field ?? ''}
+    onChange={(e) => editor.patch({ command_field: orUndefined(e.target.value) })} />
+</Field>
+```
+
+The form does not itself refuse "derive the tier" with no command field. Once `""` is omitted rather than sent, the store's own guard catches it and answers with its own message, which the panel shows — the server stays the authority. The hint above says so up front so the operator is not surprised by it.
+
+**No delete button and no `ConfirmRow`** — the API has no such route.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
