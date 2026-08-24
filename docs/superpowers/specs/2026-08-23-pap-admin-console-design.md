@@ -129,9 +129,17 @@ every resource, so each form holds every editable field and sends all of them.
 
 ### Policies — `Editor` to write, `Admin` to delete
 
-Editable: `name`, `description`, `language` (`rego` | `cedar`), `effect`
-(`allow` | `deny`), `enabled`, `policy_content`.
+Editable: `name`, `description`, `language`, `effect` (`allow` | `deny`),
+`enabled`, `policy_content`.
 Server-owned: `id`, `version`, `created_at`, `updated_at`.
+
+**Four languages are registered, not two** — `newPolicyRegistry()` returns
+`cedar`, `json`, `rego`, `xacml`. The selector does not hardcode them: it reads
+`GET /v1/policy-languages` (new, `RoleViewer`), which returns the registry's own
+keys. Hardcoding would be "a second thing to keep in step" — the exact failure
+`uiConfig.IdPEndpoints` is deliberately not served in order to avoid — and its
+symptom would be silent: register a fifth engine and the console simply cannot
+author it, with nothing failing to say so.
 
 Two extra actions, both `Editor`:
 
@@ -228,7 +236,7 @@ refuses it or does not. No button is hidden, greyed, or pre-flighted against a
 role. `TestViewer_CanListButCannotDecide` and `_CannotRevoke` prove those
 refusals hold with this client bypassed entirely.
 
-**2. The 403 must earn N14 — a server change.** `ui.tsx`'s `ErrorBanner`
+**2. The 403 must earn N14 — the first of two server changes.** `ui.tsx`'s `ErrorBanner`
 comment claims "a 403 from the PAP says which role floor refused the request."
 It does not. `server.go:357` and `:361` both write the bare word `forbidden`.
 Under N14 a Viewer sees a Delete button and learns nothing from pressing it.
@@ -244,6 +252,11 @@ Both paths gain a real message:
 The role floors are already published in the route table and
 `docs/user-guide.md`, so naming one discloses nothing. The false `ui.tsx`
 comment is corrected in the same change.
+
+**2b. `GET /v1/policy-languages` — the second server change.** `RoleViewer`,
+returning `newPolicyRegistry()`'s keys sorted. It is the only way the browser
+can know which languages this build actually supports, and deriving it from the
+registry makes the selector incapable of drifting from the engines.
 
 **3. Edit opens with a GET of the single object,** not the list row. `PUT` is a
 full replace; the form must hold every field, freshly fetched.
@@ -275,6 +288,8 @@ catch is a field the form dropped or coerced.
 | Agent caps control | Hits `/classification-caps`; the agent form never offers the field |
 | `updated_at` moved | The clobber guard blocks and explains |
 | Go: both 403 paths | The new messages name the floor and the missing claim |
+| Go: `/v1/policy-languages` | Returns the registry's keys; adding an engine changes the response with no second edit |
+| The language selector | Renders options from the endpoint, not from a constant |
 
 ## Out of scope
 
