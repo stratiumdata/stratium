@@ -117,7 +117,15 @@ export function useEditor<T>(res: {
     setDraft((d) => (d === null ? d : { ...d, ...fields }))
   }, [])
 
-  const save = useCallback(async () => {
+  // Split deliberately: runSave is async, `save` is not.
+  //
+  // Editor<T>.save is declared `() => void` and must genuinely be one. Seven
+  // screens call it straight from an onClick, and a handler that returns a
+  // Promise trips @typescript-eslint/no-misused-promises at every one of those
+  // call sites -- seven suppressions instead of this one wrapper. There is
+  // also nothing to await: every branch below reports through `error` and this
+  // never rejects.
+  const runSave = useCallback(async () => {
     if (draft === null) return
     setBusy(true); setError(null)
     try {
@@ -140,14 +148,9 @@ export function useEditor<T>(res: {
     }
   }, [draft, editingID, res, snapshot])
 
-  return {
-    draft, editingID, error, busy, create, edit, patch, close,
-    // save resolves once its awaits settle -- a caller that wants to know
-    // when a save finishes may await it, same as `edit` above resolves on
-    // its own schedule. It never rejects: every branch is inside
-    // try/catch/finally and reports through `error`, so there is nothing
-    // for a fire-and-forget JSX handler to swallow.
-    // eslint-disable-next-line @typescript-eslint/no-misused-promises
-    save,
-  }
+  const save = useCallback(() => {
+    void runSave()
+  }, [runSave])
+
+  return { draft, editingID, error, busy, create, edit, patch, save, close }
 }
