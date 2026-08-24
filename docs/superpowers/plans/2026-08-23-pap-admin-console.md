@@ -2561,6 +2561,35 @@ describe('PoliciesScreen editor', () => {
 
   // For rego and xacml the store refuses any effect except "deny"
   // (ErrEffectNotDeclarable). A selector there would offer a guaranteed 4xx.
+  // BLANK holds language: '' and languages arrive asynchronously. A draft that
+  // reaches the panel with '' renders "A  policy can define rules of both
+  // effects" -- declaresEffect('') is false and the name interpolates empty.
+  it('never opens an editor on the empty language', async () => {
+    vi.spyOn(api, 'policies').mockResolvedValue([])
+    vi.spyOn(api, 'policyLanguages').mockResolvedValue(['cedar', 'rego'])
+
+    render(<PoliciesScreen />)
+    await screen.findByText('No policies.')
+    ;(await screen.findByRole('button', { name: 'New policy' })).click()
+
+    const select = await screen.findByLabelText('Language')
+    expect((select as HTMLSelectElement).value).toBe('cedar')
+    expect(screen.queryByText(/^A\s+policy can define/)).not.toBeInTheDocument()
+  })
+
+  // An empty list means either "not loaded" or "this build registers no
+  // engines". Neither permits authoring, and a form with an empty selector
+  // invites a save that cannot succeed.
+  it('offers no New policy button when the build registers no engines', async () => {
+    vi.spyOn(api, 'policies').mockResolvedValue([])
+    vi.spyOn(api, 'policyLanguages').mockResolvedValue([])
+
+    render(<PoliciesScreen />)
+    await screen.findByText('No policies.')
+    expect(await screen.findByText(/no policy engines registered/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'New policy' })).not.toBeInTheDocument()
+  })
+
   it('offers no effect choice for a language that cannot declare one', async () => {
     vi.spyOn(api, 'policies').mockResolvedValue([])
     vi.spyOn(api, 'policyLanguages').mockResolvedValue(['cedar', 'rego'])
@@ -2649,7 +2678,26 @@ const BLANK: Policy = {
 }
 ```
 
-Load the languages once and default the draft's language to the first:
+Load the languages once. **The draft must never hold `language: ''`** — the
+effect control branches on `declaresEffect(draft.language)`, and for `''` that
+is false, so an unloaded language renders the "cannot declare an effect"
+message with a blank language name in it. Two rules:
+
+- `create()` seeds from the first loaded language, not from `BLANK`'s `''`:
+  `editor.create({ ...BLANK, language: languages[0] })`.
+- **While `languages` is empty, offer no New policy button at all.** An empty
+  list has two causes and both make authoring impossible: the request has not
+  resolved yet, or this build registers no engines (the server returns `[]`,
+  never `null` — there is a Go test pinning exactly that). Render `Loading` in
+  the first case; if the fetch resolved to an empty array, say so plainly —
+  *this build has no policy engines registered, so policies cannot be
+  authored here* — rather than presenting a form whose language selector has
+  nothing in it.
+
+Editing an existing policy is unaffected: its language comes from the stored
+row, which the database's own CHECK constrains to the four valid values.
+
+Load them once:
 
 ```tsx
 const [languages, setLanguages] = useState<string[]>([])
