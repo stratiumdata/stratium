@@ -67,9 +67,14 @@ describe('PoliciesScreen', () => {
 })
 
 describe('PoliciesScreen editor', () => {
+  // The mock deliberately does NOT return this build's real four languages in
+  // their real order. A test that mocks ['cedar','json','rego','xacml'] cannot
+  // tell "reads the server's list" from "hardcodes the same four values" --
+  // both render identically. A subset in a different order can only come from
+  // the response.
   it('offers the languages the server reports, not a hardcoded list', async () => {
     vi.spyOn(api, 'policies').mockResolvedValue([])
-    vi.spyOn(api, 'policyLanguages').mockResolvedValue(['cedar', 'json', 'rego', 'xacml'])
+    vi.spyOn(api, 'policyLanguages').mockResolvedValue(['rego', 'cedar'])
 
     render(<PoliciesScreen />)
     await screen.findByText('No policies.')
@@ -77,7 +82,7 @@ describe('PoliciesScreen editor', () => {
 
     const select = await screen.findByLabelText('Language')
     expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value))
-      .toEqual(['cedar', 'json', 'rego', 'xacml'])
+      .toEqual(['rego', 'cedar'])
   })
 
   // For rego and xacml the store refuses any effect except "deny"
