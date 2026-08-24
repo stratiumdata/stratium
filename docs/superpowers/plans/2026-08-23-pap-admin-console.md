@@ -25,6 +25,7 @@
 - **Tests assert payloads, not call counts.** `expect(spy).toHaveBeenCalledWith(id, {every: 'field'})`, never a bare `toHaveBeenCalled()`.
 - **Drive inputs with `fireEvent.change`, never `el.value = x` plus `dispatchEvent`.** React installs its own value setter and its tracker sees no change, so the raw form silently does not fire `onChange` on a controlled input.
 - **Every existing test must still pass.** `make test` runs `ui`, `ui-test`, then the Go suite with `-race`.
+- **A UI task is not green until `npm run build` passes.** `npm run test` is `vitest run` and does NOT typecheck; only `build` (`tsc -b && vite build`) does, and CI reaches it through `make ui`. `tsconfig.app.json` sets `noUncheckedIndexedAccess: true`, so indexing a mock's `calls[0]` yields `T | undefined` and must be narrowed. The full gate for every UI task is `npm run lint && npm run test && npm run build`. Building is safe: `dist/` is gitignored and never dirties the tree.
 
 ---
 
