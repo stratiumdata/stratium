@@ -174,6 +174,12 @@ hierarchy → level rows. The screen states the rule that governs the whole
 feature: **an empty map is the off switch; any cap set makes unlabelled
 resources deny.**
 
+> **Verified live, 2026-08-24.** An empty map cannot be written: the store
+> refuses it with `ErrClassificationCapsRequired` (`400 … classification_caps
+> must be a non-empty map; DELETE …/classification-caps to turn enforcement
+> off instead`). Turning enforcement off is a `DELETE`, not a `PUT {}`. The
+> "off switch" is therefore reachable one way only, deliberately.
+
 ### Tier overrides — `Editor` to write, `Admin` to delete
 
 Editable: `tool_or_verb`, `action_tier`. **Nothing else.** `store` ignores

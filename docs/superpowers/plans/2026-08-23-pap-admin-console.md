@@ -1580,7 +1580,25 @@ and three are wrong. All three are in merged code.
 | `putAgentCaps` | a bare map | `capsRequest` is **`{"classification_caps": {...}}`** (agent_caps.go:16) |
 | `agentCaps` | returns `Record<string,string>` | returns **`models.AgentCapsView`** — `{agent_id, classification_caps, catch_all}` |
 
-The second is the dangerous one. Sending a bare map leaves `capsRequest.ClassificationCaps` nil, so an operator setting a cap would **clear every cap on that agent** — a silent widening of a security ceiling, reported as success.
+The second is the one that breaks the feature. Sending a bare map leaves
+`capsRequest.ClassificationCaps` nil, so no cap could be set through the
+console at all.
+
+**Verified live against the running PAP, 2026-08-24** — and the observed
+behaviour is *less* severe than this plan first claimed. A nil map does not
+silently clear the agent's caps: `SetAgentClassificationCaps` refuses it with
+`ErrClassificationCapsRequired`, rendered as
+
+```
+400  store: invalid request: classification_caps must be a non-empty map;
+     DELETE /v1/agents/{id}/classification-caps to turn enforcement off instead
+```
+
+So the bug was a loud, visible failure — every cap write rejected with a
+message pointing at the wrong remedy — not a silent widening of a security
+ceiling. The store guards the empty-map case exactly as an off switch that
+must be requested explicitly should be guarded. The earlier wording in this
+plan and in its commit message overstated it.
 
 **Files:** Modify `clients/ui/src/api.ts`, `clients/ui/src/api.test.ts`.
 
