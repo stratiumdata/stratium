@@ -11,7 +11,10 @@
 // conventions already match what it generates.
 
 import { cva, type VariantProps } from 'class-variance-authority'
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, TdHTMLAttributes } from 'react'
+import type {
+  ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode,
+  SelectHTMLAttributes, TdHTMLAttributes, TextareaHTMLAttributes,
+} from 'react'
 
 import { cn } from './lib'
 
@@ -137,6 +140,104 @@ export function ErrorBanner({ children }: { children: ReactNode }) {
       className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
     >
       {children}
+    </div>
+  )
+}
+
+/** The editor shell. Replaces the table in place rather than floating over it:
+ *  a dialog would mean adding Radix, and this file's own header explains why
+ *  that dependency has not been earned. */
+export function Panel({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  return (
+    <Card className="p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <h3 className="text-base font-semibold">{title}</h3>
+        <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
+      </div>
+      {children}
+    </Card>
+  )
+}
+
+/** A labelled control with optional explanatory text. The hint is not
+ *  decoration: several fields here mean something an operator cannot guess
+ *  from the label — an empty prefix, a null action tier — and the alternative
+ *  to saying so is a support ticket. */
+export function Field({ label, hint, htmlFor, children }: {
+  label: string; hint?: ReactNode; htmlFor?: string; children: ReactNode
+}) {
+  return (
+    <div className="mb-3">
+      <label htmlFor={htmlFor} className="mb-1 block text-sm font-medium">{label}</label>
+      {children}
+      {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
+    </div>
+  )
+}
+
+const inputClass =
+  'w-full rounded-md border border-border bg-background px-3 py-2 text-sm ' +
+  'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
+
+export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  return <input type="text" className={cn(inputClass, className)} {...props} />
+}
+
+export function NumberInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  return <input type="number" className={cn(inputClass, className)} {...props} />
+}
+
+export function Textarea({ className, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea className={cn(inputClass, 'font-mono min-h-40', className)} {...props} />
+}
+
+export function Checkbox({ label, ...props }: { label: string } & InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <label className="mb-3 flex items-center gap-2 text-sm">
+      <input type="checkbox" className="size-4 rounded border-border" {...props} />
+      {label}
+    </label>
+  )
+}
+
+export function Select({ options, className, ...props }: { options: string[] } & SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select className={cn(inputClass, className)} {...props}>
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    </select>
+  )
+}
+
+/** A []string as one line per entry. Newline-separated rather than chips
+ *  because the values are tool names an operator pastes from a catalog, and
+ *  because an empty textarea is an unambiguous empty list — which for
+ *  allowed_tools means UNRESTRICTED, not "none". */
+export function StringListInput({ value, onChange, placeholder }: {
+  value: string[]; onChange: (next: string[]) => void; placeholder?: string
+}) {
+  return (
+    <textarea
+      className={cn(inputClass, 'font-mono min-h-24')}
+      placeholder={placeholder}
+      value={value.join('\n')}
+      onChange={(e) => onChange(e.target.value.split('\n').map((s) => s.trim()).filter(Boolean))}
+    />
+  )
+}
+
+/** An inline destructive confirmation. Never window.confirm: it blocks the
+ *  event loop, it cannot be styled, and it cannot carry the resource-specific
+ *  warning some deletions need (removing the catch-all label rule, for one). */
+export function ConfirmRow({ prompt, confirmLabel, onConfirm, onCancel }: {
+  prompt: ReactNode; confirmLabel: string; onConfirm: () => void; onCancel: () => void
+}) {
+  return (
+    <div role="alertdialog" className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm">
+      <span className="text-destructive">{prompt}</span>
+      <span className="ml-auto flex gap-2">
+        <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
+        <Button variant="destructive" size="sm" onClick={onConfirm}>{confirmLabel}</Button>
+      </span>
     </div>
   )
 }
