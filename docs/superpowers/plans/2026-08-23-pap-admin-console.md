@@ -23,6 +23,7 @@
 - **Policy `effect` is operator-choosable only for `cedar` and `json`.** For `rego` and `xacml` the store refuses any value other than `"deny"` (`multiValuedLanguageEffect`, `ErrEffectNotDeclarable`).
 - **Files stay under 800 lines**, per the project's coding-style rules; 200-400 is typical.
 - **Tests assert payloads, not call counts.** `expect(spy).toHaveBeenCalledWith(id, {every: 'field'})`, never a bare `toHaveBeenCalled()`.
+- **Drive inputs with `fireEvent.change`, never `el.value = x` plus `dispatchEvent`.** React installs its own value setter and its tracker sees no change, so the raw form silently does not fire `onChange` on a controlled input.
 - **Every existing test must still pass.** `make test` runs `ui`, `ui-test`, then the Go suite with `-race`.
 
 ---
@@ -409,12 +410,11 @@ export { PoliciesScreen } from './policies'
 export { AgentsScreen } from './agents'
 export { TierOverridesScreen } from './tier-overrides'
 export { ToolCatalogScreen } from './tool-catalog'
-export { LabelRulesScreen } from './label-rules'
 export { ApprovalsScreen } from './approvals'
 export { DelegationsScreen } from './delegations'
 ```
 
-`LabelRulesScreen` does not exist until Task 7. Add its export line in Task 7, not here.
+Six exports, not seven: `LabelRulesScreen` is created in Task 7 and adds its own line there. Exporting it here would not compile.
 
 - [ ] **Step 3: Split the tests to match**
 
@@ -507,10 +507,16 @@ There is deliberately no `deleteToolCatalogEntry`: the PAP exposes no such route
 Create `clients/ui/src/api.test.ts`. This is the one test in the suite that spies on `fetch` rather than on `api` — it exists to prove the body reaches the wire at all, which no `api`-level spy can show.
 
 ```ts
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from './api'
-import * as auth from './auth'
+
+// vi.mock, not vi.spyOn: api.ts binds authHeader at import time, so replacing
+// the property on the module namespace afterwards does not affect the caller.
+vi.mock('./auth', () => ({
+  authHeader: () => ({ Authorization: 'Bearer t' }),
+  onUnauthorized: () => {},
+}))
 
 function okJSON(value: unknown) {
   return Promise.resolve(new Response(JSON.stringify(value), {
@@ -518,9 +524,6 @@ function okJSON(value: unknown) {
   }))
 }
 
-beforeEach(() => {
-  vi.spyOn(auth, 'authHeader').mockReturnValue({ Authorization: 'Bearer t' })
-})
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -767,7 +770,7 @@ nothing."
 Create `clients/ui/src/ui.test.tsx`:
 
 ```tsx
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ConfirmRow, StringListInput } from './ui'
@@ -780,9 +783,7 @@ describe('StringListInput', () => {
     const onChange = vi.fn()
     render(<StringListInput value={['Read']} onChange={onChange} />)
 
-    const input = screen.getByDisplayValue('Read')
-    ;(input as HTMLTextAreaElement).value = ''
-    input.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(screen.getByDisplayValue('Read'), { target: { value: '' } })
 
     expect(onChange).toHaveBeenCalledWith([])
   })
@@ -791,9 +792,7 @@ describe('StringListInput', () => {
     const onChange = vi.fn()
     render(<StringListInput value={[]} onChange={onChange} />)
 
-    const input = screen.getByRole('textbox')
-    ;(input as HTMLTextAreaElement).value = 'Read\n  Grep  \n\nGlob'
-    input.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Read\n  Grep  \n\nGlob' } })
 
     expect(onChange).toHaveBeenCalledWith(['Read', 'Grep', 'Glob'])
   })
@@ -1240,7 +1239,7 @@ A new screen for a resource with no UI at all today, and the first full vertical
 Create `clients/ui/src/screens/label-rules.test.tsx`:
 
 ```tsx
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { APIError, api, type ResourceLabelRule } from '../api'
@@ -1286,12 +1285,8 @@ describe('LabelRulesScreen', () => {
     await screen.findByText('No resource label rules.')
     screen.getByRole('button', { name: 'New rule' }).click()
 
-    const hierarchy = await screen.findByLabelText('Hierarchy')
-    ;(hierarchy as HTMLInputElement).value = 'nato'
-    hierarchy.dispatchEvent(new Event('input', { bubbles: true }))
-    const level = screen.getByLabelText('Level')
-    ;(level as HTMLInputElement).value = 'PUBLIC'
-    level.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(await screen.findByLabelText('Hierarchy'), { target: { value: 'nato' } })
+    fireEvent.change(screen.getByLabelText('Level'), { target: { value: 'PUBLIC' } })
 
     screen.getByRole('button', { name: 'Save' }).click()
 
@@ -1544,7 +1539,7 @@ The escalation feature's premise is a human deciding, and `STRATIUM_PEP_APPROVAL
 Create `clients/ui/src/screens/approvals.test.tsx`:
 
 ```tsx
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { APIError, api, type Approval } from '../api'
@@ -1698,7 +1693,7 @@ Two small screens of the same shape, done together. Both are `Editor` to write; 
 `clients/ui/src/screens/tier-overrides.test.tsx`:
 
 ```tsx
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { api, type TierOverride } from '../api'
@@ -1751,9 +1746,7 @@ describe('TierOverridesScreen', () => {
     await screen.findByText('No tier overrides.')
     screen.getByRole('button', { name: 'New override' }).click()
 
-    const tool = await screen.findByLabelText('Tool or verb')
-    ;(tool as HTMLInputElement).value = 'Write'
-    tool.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(await screen.findByLabelText('Tool or verb'), { target: { value: 'Write' } })
     screen.getByRole('button', { name: 'Save' }).click()
 
     await waitFor(() => expect(create).toHaveBeenCalledWith(
@@ -1766,7 +1759,7 @@ describe('TierOverridesScreen', () => {
 `clients/ui/src/screens/tool-catalog.test.tsx`:
 
 ```tsx
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { api, type ToolCatalogEntry } from '../api'
@@ -1805,9 +1798,7 @@ describe('ToolCatalogScreen', () => {
     await screen.findByText('No tool catalog entries.')
     screen.getByRole('button', { name: 'New entry' }).click()
 
-    const name = await screen.findByLabelText('Tool name')
-    ;(name as HTMLInputElement).value = 'Glob'
-    name.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(await screen.findByLabelText('Tool name'), { target: { value: 'Glob' } })
     // "Derive the tier" is checked by default.
     screen.getByRole('button', { name: 'Save' }).click()
 
@@ -1825,9 +1816,7 @@ describe('ToolCatalogScreen', () => {
     screen.getByRole('button', { name: 'New entry' }).click()
 
     ;(await screen.findByLabelText('Derive the tier from the command')).click()
-    const tier = screen.getByLabelText('Action tier')
-    ;(tier as HTMLInputElement).value = '3'
-    tier.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(screen.getByLabelText('Action tier'), { target: { value: '3' } })
     screen.getByRole('button', { name: 'Save' }).click()
 
     await waitFor(() => expect(create).toHaveBeenCalledWith(
@@ -1953,7 +1942,7 @@ The agent form is ordinary. The caps control is not: it writes a different route
 Create `clients/ui/src/screens/agents.test.tsx`:
 
 ```tsx
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { api, type Agent } from '../api'
@@ -2003,9 +1992,7 @@ describe('AgentsScreen', () => {
 
     render(<AgentsScreen />)
     ;(await screen.findByRole('button', { name: 'Edit' })).click()
-    const name = await screen.findByLabelText('Name')
-    ;(name as HTMLInputElement).value = 'renamed'
-    name.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'renamed' } })
     screen.getByRole('button', { name: 'Save' }).click()
 
     await waitFor(() => expect(update).toHaveBeenCalled())
@@ -2027,9 +2014,7 @@ describe('AgentsScreen', () => {
     render(<AgentsScreen />)
     ;(await screen.findByRole('button', { name: 'Edit' })).click()
 
-    const level = await screen.findByDisplayValue('CONFIDENTIAL')
-    ;(level as HTMLInputElement).value = 'SECRET'
-    level.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(await screen.findByDisplayValue('CONFIDENTIAL'), { target: { value: 'SECRET' } })
     screen.getByRole('button', { name: 'Save caps' }).click()
 
     await waitFor(() => expect(putCaps).toHaveBeenCalledWith(
@@ -2248,8 +2233,7 @@ describe('PoliciesScreen editor', () => {
     const select = await screen.findByLabelText('Language')
     expect(screen.getByLabelText('Effect')).toBeInTheDocument()
 
-    ;(select as HTMLSelectElement).value = 'rego'
-    select.dispatchEvent(new Event('change', { bubbles: true }))
+    fireEvent.change(select, { target: { value: 'rego' } })
 
     await waitFor(() => expect(screen.queryByLabelText('Effect')).not.toBeInTheDocument())
     expect(screen.getByText(/resolved only when a request is evaluated/i)).toBeInTheDocument()
@@ -2264,9 +2248,7 @@ describe('PoliciesScreen editor', () => {
     await screen.findByText('No policies.')
     screen.getByRole('button', { name: 'New policy' }).click()
 
-    const name = await screen.findByLabelText('Name')
-    ;(name as HTMLInputElement).value = 'p'
-    name.dispatchEvent(new Event('input', { bubbles: true }))
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'p' } })
     screen.getByRole('button', { name: 'Save' }).click()
 
     await waitFor(() => expect(create).toHaveBeenCalledWith(
