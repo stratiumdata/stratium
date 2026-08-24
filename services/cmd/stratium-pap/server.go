@@ -215,6 +215,7 @@ var routeTable = []routeSpec{
 	{Pattern: "DELETE /v1/policies/{id}", MinRole: RoleAdmin, Handler: deletePolicy},
 	{Pattern: "POST /v1/policies/validate", MinRole: RoleEditor, Handler: validatePolicy},
 	{Pattern: "POST /v1/policies/test", MinRole: RoleEditor, Handler: testPolicyAgainstSampleInput},
+	{Pattern: "GET /v1/policy-languages", MinRole: RoleViewer, Handler: listPolicyLanguages},
 
 	{Pattern: "GET /v1/agents", MinRole: RoleViewer, Handler: listAgents},
 	{Pattern: "POST /v1/agents", MinRole: RoleEditor, Handler: createAgent},
