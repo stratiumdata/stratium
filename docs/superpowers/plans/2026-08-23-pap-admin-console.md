@@ -2642,6 +2642,31 @@ describe('PoliciesScreen editor', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('unexpected token at line 2')
   })
 
+  // The two legs answer different questions and can disagree: a policy correct
+  // in isolation may be overridden or made redundant by an existing one. That
+  // divergence is the most valuable thing this endpoint reports.
+  it('renders both legs and says so when they disagree', async () => {
+    vi.spyOn(api, 'policies').mockResolvedValue([])
+    vi.spyOn(api, 'policyLanguages').mockResolvedValue(['cedar'])
+    vi.spyOn(api, 'testPolicy').mockResolvedValue({
+      isolated: { effect: 'deny', reason: 'classification SECRET exceeds cap' },
+      with_existing_policies: { effect: 'allow', reason: 'permitted by policy 3f2a', policy_id: '3f2a' },
+      tier: { value: 1, source: 'declared' },
+      legs_evaluated: { principal: true, agent: true, delegation: true },
+    })
+
+    render(<PoliciesScreen />)
+    await screen.findByText('No policies.')
+    ;(await screen.findByRole('button', { name: 'New policy' })).click()
+    ;(await screen.findByRole('button', { name: 'Test' })).click()
+    ;(await screen.findByRole('button', { name: 'Run test' })).click()
+
+    expect(await screen.findByText(/classification SECRET exceeds cap/)).toBeInTheDocument()
+    expect(screen.getByText(/permitted by policy 3f2a/)).toBeInTheDocument()
+    // The divergence must be called out, not left for the reader to spot.
+    expect(screen.getByText(/differ/i)).toBeInTheDocument()
+  })
+
   it('renders the test verdict, effect and reason together', async () => {
     vi.spyOn(api, 'policies').mockResolvedValue([])
     vi.spyOn(api, 'policyLanguages').mockResolvedValue(['cedar'])
@@ -2777,7 +2802,69 @@ function blankTestRequest(language: string, text: string): string {
 }
 ```
 
-A `Test` button reveals a `Textarea` seeded with that plus a `Run test` button calling `api.testPolicy(JSON.parse(body))`. Render the verdict as a card showing `effect`, `reason`, and `source`/`policy_id` when present; render a `JSON.parse` failure as an `ErrorBanner` saying the request is not valid JSON, so a typo is not mistaken for a policy verdict.
+A `Test` button reveals a `Textarea` seeded with that plus a `Run test` button
+calling `api.testPolicy(...)`. Render a `JSON.parse` failure as an
+`ErrorBanner` saying the request is not valid JSON, so a typo is never
+mistaken for a policy verdict.
+
+#### The response is TWO verdicts, and the difference between them is the point
+
+`PolicyTestVerdict` as declared in `api.ts` is **one nested leg**, not the
+envelope. The server returns (`test_input.go:185`):
+
+```ts
+export interface PolicyTestLeg {
+  effect: string
+  reason: string
+  source?: string
+  policy_id?: string
+}
+
+export interface PolicyTestResult {
+  /** The candidate evaluated ALONE. singlePolicySource makes the fold see
+   *  nothing but this policy, so this answers "did I write this rule
+   *  correctly" with nothing else able to interfere. */
+  isolated: PolicyTestLeg
+  /** The candidate folded in with everything the tenant already has. This is
+   *  what would actually happen. */
+  with_existing_policies: PolicyTestLeg
+  /** The tier, and which of the two paths produced it. */
+  tier: { value: number; source: string }
+  /** Which legs the evaluation actually ran. */
+  legs_evaluated: { principal: boolean; agent: boolean; delegation: boolean }
+}
+```
+
+Fix `api.ts` to return `PolicyTestResult` — nothing consumes `testPolicy` yet,
+so this breaks no caller (confirm with a grep). Keep `PolicyTestLeg` exported;
+the panel renders two of them.
+
+**Render both, side by side, and say plainly when they disagree.** A policy can
+be correct in isolation and still not change the outcome — overridden by an
+existing policy, or redundant with one. That divergence is the single most
+valuable thing this endpoint reports, and a UI showing one verdict hides it:
+
+```
+isolated                  deny   resource classification SECRET exceeds …
+with existing policies    allow  permitted by policy 3f2a… (allow-ops-reads)
+
+⚠ These differ. Your policy denies on its own, but folded in with this
+  tenant's existing policies the request is allowed.
+```
+
+Also render `tier` (value plus whether it was derived or declared) and
+`legs_evaluated` — a leg that did not run is a leg your test input did not
+exercise, which is the usual reason a test "passes" without proving anything.
+
+**Give the request a named type too.** The audit that found this also found
+`testPolicy(req: unknown)` accepts anything: `decodeJSON` does not reject
+unknown or missing fields, so a misnamed nested key (`rawInput` for
+`raw_input`) yields a 200 carrying a silently different evaluation. Declare
+`PolicyTestRequest` mirroring `policyTestRequest`'s json tags — `language`,
+`policy_content`, `principal{subject,attributes}`, `action{tool,raw_input}`,
+`resource`, `agent{trust_tier,enabled,suspended,allowed_tools}`,
+`delegation{depth,max_action_tier,classification_caps,purpose}` — and have the
+panel parse the textarea into it.
 
 - [ ] **Step 6: Add delete, and run everything**
 
