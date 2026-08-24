@@ -197,6 +197,19 @@ export interface Delegation {
   revoked_at?: string
   root_delegation_id: string
   depth: number
+
+  /** The chain, ordered ROOT FIRST with this delegation's own agent last —
+   *  pdpgrpc/delegation.go seeds a root with [agentID] and a child with
+   *  append(parent.ChainAgentIDs, agentID). Rendering it in any other order
+   *  would invert who delegated to whom. */
+  chain_agent_ids: string[]
+  /** Absent on a root delegation. */
+  parent_delegation_id?: string
+
+  /** Copied onto the delegation when it was issued, not read live: changing
+   *  the agent's caps now does not change these. */
+  classification_caps: Record<string, string>
+  resource_constraints: Record<string, string>
 }
 
 /** An HTTP error carrying the status so a screen can say WHY it failed —
