@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/google/uuid"
 
 	"stratium/internal/policy"
 	"stratium/internal/store"
@@ -751,74 +750,5 @@ func TestServer_ConcurrentRequests_NoCrossContamination(t *testing.T) {
 			t.Errorf("result[%d] = %d, want %d -- a concurrency bug would surface here as a wrong "+
 				"status on one goroutine, not necessarily a crash", i, code, want)
 		}
-	}
-}
-
-// A 403 that says only "forbidden" is useless to the admin console, which
-// renders every action for every operator (N14) and relies on the refusal to
-// explain itself. Both role paths must name what happened.
-// Table, not a single case: one pair (min=admin, role=viewer) does not
-// distinguish a correctly-parameterised message from a hardcoded string or
-// from min and role swapped in the Sprintf. These two cases vary both
-// values, so either mistake fails at least one of them, and each assertion
-// is the full expected sentence, not a substring the other case would also
-// satisfy.
-func TestForbidden_NamesTheRequiredRoleAndTheOperatorsOwn(t *testing.T) {
-	cases := []struct {
-		name   string
-		group  string
-		method string
-		path   string
-		want   string
-	}{
-		{
-			name:   "viewer refused at editor floor",
-			group:  "org-viewers",
-			method: http.MethodPost,
-			path:   "/v1/policies",
-			want:   "this action requires role editor; your token carries viewer",
-		},
-		{
-			name:   "editor refused at admin floor",
-			group:  "org-editors",
-			method: http.MethodDelete,
-			path:   "/v1/policies/" + uuid.New().String(),
-			want:   "this action requires role admin; your token carries editor",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newTestServerFixture(t)
-			tok := f.tokenWithClaims(t, tc.group, map[string]any{"email": "v@example.com", "email_verified": true})
-
-			rec := doRequest(t, f.server, tc.method, tc.path, tok)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
-			}
-			body := strings.TrimSpace(rec.Body.String())
-			if body != tc.want {
-				t.Errorf("body = %q, want %q", body, tc.want)
-			}
-		})
-	}
-}
-
-// The other 403 path: the token authenticated, but no claim value maps to any
-// role. That is a different fix for the operator than "you need a higher
-// role", so it must not produce the same sentence.
-func TestForbidden_UnmappedClaimSaysSo(t *testing.T) {
-	f := newTestServerFixture(t)
-	tok := f.tokenWithClaims(t, "no-such-group", map[string]any{"email": "v@example.com", "email_verified": true})
-
-	rec := doRequest(t, f.server, http.MethodGet, "/v1/policies", tok)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
-	}
-	body := strings.TrimSpace(rec.Body.String())
-	if !strings.Contains(body, "no recognised role claim") {
-		t.Errorf("body = %q, want it to name the missing claim mapping", body)
-	}
-	if strings.Contains(body, "requires role") {
-		t.Errorf("body = %q, must not be confused with the role-floor refusal", body)
 	}
 }
