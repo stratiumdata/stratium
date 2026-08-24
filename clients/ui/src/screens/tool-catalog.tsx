@@ -40,14 +40,18 @@ export function ToolCatalogScreen() {
       <Panel title={editor.editingID === null ? 'New tool catalog entry' : 'Edit tool catalog entry'} onClose={editor.close}>
         {editor.error ? <ErrorBanner>{editor.error}</ErrorBanner> : null}
 
-        <Field label="Tool name" htmlFor="tool_name">
+        <Field label="Tool name" htmlFor="tool_name"
+          hint={"Must match the name the agent actually calls, e.g. Read. An uncatalogued tool is not a hole — a delegation must already hold it before this row matters."}
+        >
           <TextInput
             id="tool_name"
             value={editor.draft.tool_name}
             onChange={(e) => editor.patch({ tool_name: e.target.value })}
           />
         </Field>
-        <Field label="Verb" htmlFor="verb">
+        <Field label="Verb" htmlFor="verb"
+          hint={"Recorded, but not yet read by any decision: tier lookups use the verb on the incoming call, not this column."}
+        >
           <TextInput
             id="verb"
             value={editor.draft.verb}
@@ -61,7 +65,9 @@ export function ToolCatalogScreen() {
           onChange={(e) => editor.patch({ action_tier: e.target.checked ? null : 0 })}
         />
         {editor.draft.action_tier !== null ? (
-          <Field label="Action tier" htmlFor="action_tier">
+          <Field label="Action tier" htmlFor="action_tier"
+            hint={"A fixed tier for every call to this tool. Leave it derived unless the tool always carries the same risk."}
+          >
             <Select
               id="action_tier"
               options={actionTierOptions(editor.draft.action_tier)}

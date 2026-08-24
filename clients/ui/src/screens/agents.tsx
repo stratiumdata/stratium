@@ -67,10 +67,14 @@ function NewCapRow({ onAdd }: { onAdd: (hierarchy: string, level: string) => voi
   const [level, setLevel] = useState('')
   return (
     <div className="mb-3 flex flex-wrap items-end gap-2">
-      <Field label="Hierarchy" htmlFor="new-cap-hierarchy">
+      <Field label="Hierarchy" htmlFor="new-cap-hierarchy"
+        hint={"A classification namespace, e.g. nato. Stored exactly as typed — never case-folded."}
+      >
         <TextInput id="new-cap-hierarchy" value={hierarchy} onChange={(e) => setHierarchy(e.target.value)} />
       </Field>
-      <Field label="Level" htmlFor="new-cap-level">
+      <Field label="Level" htmlFor="new-cap-level"
+        hint={"The ceiling within that hierarchy, e.g. SECRET. Stored exactly as typed."}
+      >
         <TextInput id="new-cap-level" value={level} onChange={(e) => setLevel(e.target.value)} />
       </Field>
       <Button
@@ -280,24 +284,32 @@ export function AgentsScreen() {
       <Panel title={editor.editingID === null ? 'New agent' : 'Edit agent'} onClose={editor.close}>
         {editor.error ? <ErrorBanner>{editor.error}</ErrorBanner> : null}
 
-        <Field label="Name" htmlFor="name">
+        <Field label="Name" htmlFor="name"
+          hint={"Required, and unique within this tenant."}
+        >
           <TextInput id="name" value={editor.draft.name} onChange={(e) => editor.patch({ name: e.target.value })} />
         </Field>
-        <Field label="Provider" htmlFor="provider">
+        <Field label="Provider" htmlFor="provider"
+          hint={"Required — the vendor serving the model, e.g. anthropic."}
+        >
           <TextInput
             id="provider"
             value={editor.draft.provider}
             onChange={(e) => editor.patch({ provider: e.target.value })}
           />
         </Field>
-        <Field label="Model ID" htmlFor="model_id">
+        <Field label="Model ID" htmlFor="model_id"
+          hint={"Optional. Recorded for identification; not validated."}
+        >
           <TextInput
             id="model_id"
             value={editor.draft.model_id}
             onChange={(e) => editor.patch({ model_id: e.target.value })}
           />
         </Field>
-        <Field label="Trust tier" htmlFor="trust_tier">
+        <Field label="Trust tier" htmlFor="trust_tier"
+          hint={"The floor the PDP enforces per action tier: REGISTERED for INTERNAL_MODIFY, CERTIFIED for EXTERNAL_COMMS, PLATFORM_TRUSTED for DESTRUCTIVE. UNVERIFIED reaches only REASONING and READ_ONLY."}
+        >
           {/* The option's index IS the tier, so the name shown and the number
               sent cannot drift apart. An out-of-range stored value appears as
               itself: a select whose value matches no option renders the FIRST

@@ -48,7 +48,9 @@ export function TierOverridesScreen() {
       <Panel title={editor.editingID === null ? 'New tier override' : 'Edit tier override'} onClose={editor.close}>
         {editor.error ? <ErrorBanner>{editor.error}</ErrorBanner> : null}
 
-        <Field label="Tool or verb" htmlFor="tool_or_verb">
+        <Field label="Tool or verb" htmlFor="tool_or_verb"
+          hint={"The tool name or verb whose tier you are overriding, e.g. Bash."}
+        >
           <TextInput
             id="tool_or_verb"
             value={editor.draft.tool_or_verb}

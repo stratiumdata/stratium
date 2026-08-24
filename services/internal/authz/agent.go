@@ -22,6 +22,14 @@ type TrustTable struct {
 }
 
 // DefaultTrustTable is the shipped mapping.
+//
+// The admin console states these floors in prose, on the agent form's Trust
+// tier field (clients/ui/src/screens/agents.tsx): "REGISTERED for
+// INTERNAL_MODIFY, CERTIFIED for EXTERNAL_COMMS, PLATFORM_TRUSTED for
+// DESTRUCTIVE. UNVERIFIED reaches only REASONING and READ_ONLY." Change a row
+// here and that sentence starts misinforming an operator about a security
+// floor, with nothing to catch it -- prose is not compilable. Update it in the
+// same commit.
 func DefaultTrustTable() TrustTable {
 	return TrustTable{Required: map[models.ActionTier]models.AgentTrustTier{
 		models.ActionTierReasoning:      models.TrustTierUnverified,

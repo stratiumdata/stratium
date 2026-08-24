@@ -145,7 +145,9 @@ function TestPanel({ language, policyContent }: { language: string; policyConten
         A complete policy.test request. Edit any dimension to probe how this candidate would
         evaluate against it.
       </p>
-      <Field label="Request" htmlFor="test-request">
+      <Field label="Request" htmlFor="test-request"
+        hint={"A simulated authorization request. Nothing is stored and no policy changes — edit any field and run it again."}
+      >
         <Textarea id="test-request" value={reqText} onChange={(e) => setReqText(e.target.value)} />
       </Field>
       <div className="flex gap-2">
@@ -169,17 +171,23 @@ function PolicyForm({ editor, languages }: { editor: Editor<Policy>; languages: 
 
   return (
     <>
-      <Field label="Name" htmlFor="name">
+      <Field label="Name" htmlFor="name"
+        hint={"Required, and unique within this tenant."}
+      >
         <TextInput id="name" value={draft.name} onChange={(e) => editor.patch({ name: e.target.value })} />
       </Field>
-      <Field label="Description" htmlFor="description">
+      <Field label="Description" htmlFor="description"
+        hint={"Free text for other operators. The PDP never reads it."}
+      >
         <TextInput
           id="description"
           value={draft.description}
           onChange={(e) => editor.patch({ description: e.target.value })}
         />
       </Field>
-      <Field label="Language" htmlFor="language">
+      <Field label="Language" htmlFor="language"
+        hint={"The engine that evaluates this policy. This list is what this build actually registers."}
+      >
         <Select
           id="language"
           options={languages}
@@ -216,7 +224,9 @@ function PolicyForm({ editor, languages }: { editor: Editor<Policy>; languages: 
         onChange={(e) => editor.patch({ enabled: e.target.checked })}
       />
 
-      <Field label="Policy content" htmlFor="policy_content">
+      <Field label="Policy content" htmlFor="policy_content"
+        hint={"The policy source. Validate runs it through the real engine before you save, and a save the engine rejects is refused."}
+      >
         <Textarea
           id="policy_content"
           value={draft.policy_content}
