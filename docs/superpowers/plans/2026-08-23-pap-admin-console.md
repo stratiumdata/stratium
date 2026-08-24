@@ -217,7 +217,14 @@ The policy editor needs the languages this build can actually evaluate. Hardcodi
 
 - [ ] **Step 1: Write the failing test**
 
-Create `services/cmd/stratium-pap/languages_test.go`:
+Create `services/cmd/stratium-pap/languages_test.go`.
+
+**`newTestServerFixture` wires an empty `policy.Registry{}` on purpose**
+(`server_test.go:55`), so a fixture-based test cannot assert the four real
+languages — it would see none. Sorting is therefore tested by calling the
+handler directly against a `Server` built with a known registry. `Registry` is
+`map[string]PolicyEngine` and this handler reads only its keys, so `nil` values
+are sufficient and no fake engine is needed.
 
 ```go
 package main
@@ -225,48 +232,70 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"stratium/internal/policy"
 )
 
-// The response IS the registry, sorted. A build that registers a different set
-// of engines reports a different set here with no second edit -- which is the
-// whole reason this route exists rather than a constant in the TypeScript.
+// Sorting is the property under test, so the handler is called directly with a
+// registry this test controls. nil engines are fine: listPolicyLanguages reads
+// keys and never calls one.
 func TestPolicyLanguages_ReturnsTheRegistrysKeysSorted(t *testing.T) {
-	f := newTestServerFixture(t)
-	tok := f.tokenWithClaims(t, "org-viewers", map[string]any{"email": "v@example.com", "email_verified": true})
+	s := &Server{registry: policy.Registry{"xacml": nil, "cedar": nil, "rego": nil, "json": nil}}
+	rec := httptest.NewRecorder()
 
-	rec := doRequest(t, f.server, http.MethodGet, "/v1/policy-languages", tok)
+	listPolicyLanguages(s, rec, httptest.NewRequest(http.MethodGet, "/v1/policy-languages", nil), Operator{})
+
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-
 	var got struct {
 		Languages []string `json:"languages"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-
 	want := []string{"cedar", "json", "rego", "xacml"}
 	if len(got.Languages) != len(want) {
 		t.Fatalf("languages = %v, want %v", got.Languages, want)
 	}
 	for i, w := range want {
 		if got.Languages[i] != w {
-			t.Errorf("languages[%d] = %q, want %q (sorted)", i, got.Languages[i], w)
+			t.Errorf("languages[%d] = %q, want %q -- output must be sorted, because Go randomises map iteration and a selector that reorders itself per request is a bug", i, got.Languages[i], w)
 		}
 	}
 }
 
-// RoleViewer, like every other read on this table.
+// An empty registry must serialise as [] and never as null. `var xs []string`
+// marshals to null, which would make the console's languages.map(...) throw
+// rather than render an empty selector -- a build with no engines registered
+// should produce an empty list, not a broken screen.
+func TestPolicyLanguages_EmptyRegistryIsAnEmptyArrayNotNull(t *testing.T) {
+	s := &Server{registry: policy.Registry{}}
+	rec := httptest.NewRecorder()
+
+	listPolicyLanguages(s, rec, httptest.NewRequest(http.MethodGet, "/v1/policy-languages", nil), Operator{})
+
+	if body := rec.Body.String(); !strings.Contains(body, `"languages":[]`) {
+		t.Errorf("body = %s, want an empty ARRAY -- null would break the caller", body)
+	}
+}
+
+// The route is wired at RoleViewer, like every other read on this table. The
+// fixture's registry is empty by design, so this asserts reachability and the
+// role floor, not the contents.
 func TestPolicyLanguages_ViewerMayRead(t *testing.T) {
 	f := newTestServerFixture(t)
 	tok := f.tokenWithClaims(t, "org-viewers", map[string]any{"email": "v@example.com", "email_verified": true})
 	if rec := doRequest(t, f.server, http.MethodGet, "/v1/policy-languages", tok); rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+		t.Errorf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 ```
+
+Add `"strings"` to the import block. Confirm the module path prefix on the
+`policy` import matches what other files in this package use.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -274,7 +303,7 @@ func TestPolicyLanguages_ViewerMayRead(t *testing.T) {
 cd services && go test ./cmd/stratium-pap/ -run 'TestPolicyLanguages_' -v
 ```
 
-Expected: FAIL — 404, the route does not exist.
+Expected: FAIL — `listPolicyLanguages` is undefined, so the package does not compile.
 
 - [ ] **Step 3: Implement the handler**
 
