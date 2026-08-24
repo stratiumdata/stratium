@@ -22,6 +22,7 @@ import {
   AgentsScreen,
   ApprovalsScreen,
   DelegationsScreen,
+  LabelRulesScreen,
   PoliciesScreen,
   TierOverridesScreen,
   ToolCatalogScreen,
@@ -34,6 +35,7 @@ const SCREENS = [
   { id: 'agents', label: 'Agents', Screen: AgentsScreen },
   { id: 'tier-overrides', label: 'Tier overrides', Screen: TierOverridesScreen },
   { id: 'tool-catalog', label: 'Tool catalog', Screen: ToolCatalogScreen },
+  { id: 'label-rules', label: 'Label rules', Screen: LabelRulesScreen },
   { id: 'approvals', label: 'Approvals', Screen: ApprovalsScreen },
   { id: 'delegations', label: 'Delegations', Screen: DelegationsScreen },
 ] as const
