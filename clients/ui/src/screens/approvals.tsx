@@ -1,16 +1,36 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 
-import { api, type Approval } from '../api'
+import { api, describeError, type Approval } from '../api'
 import { actionTier, shortDigest, timestamp } from '../display'
 import { Badge, Button, EmptyRow, ErrorBanner, ScreenHeader, TCell, THead, TRow, Table } from '../ui'
 import { Loading, useList } from '../crud'
 
 // --- Approvals ----------------------------------------------------------
 
+// An approval is decidable only while it is pending AND unexpired. Expiry is
+// not a status: the schema's CHECK holds only pending/approved/denied, so an
+// expired request still reads 'pending'. models.Approval.Verify refuses it at
+// consumption ("approval %s expired at %s"), which means DecideApproval would
+// return 200 on one while the agent's call stays refused -- the operator
+// believing they unblocked something that never moved.
+function decidable(a: Approval): boolean {
+  return a.status === 'pending' && new Date(a.expires_at).getTime() > Date.now()
+}
+
 export function ApprovalsScreen() {
-  const { rows, error } = useList<Approval>(api.approvals)
+  const { rows, error, reload } = useList<Approval>(api.approvals)
   const [showAll, setShowAll] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   const visible = rows === null ? null : showAll ? rows : rows.filter((a) => a.status === 'pending')
+
+  const decide = useCallback((id: string, how: 'approve' | 'deny') => {
+    const call = how === 'approve' ? api.approveApproval : api.denyApproval
+    call(id).then(
+      () => { setActionError(null); reload() },
+      (err: unknown) => setActionError(describeError(err)),
+    )
+  }, [reload])
+
   return (
     <section>
       <ScreenHeader title="Pending approvals">
@@ -20,6 +40,7 @@ export function ApprovalsScreen() {
         decided ones are one toggle away.
       </ScreenHeader>
       {error ? <ErrorBanner>{error}</ErrorBanner> : null}
+      {actionError ? <ErrorBanner>{actionError}</ErrorBanner> : null}
       <div className="mb-3">
         <Button variant="outline" size="sm" onClick={() => setShowAll((v) => !v)}>
           {showAll ? 'Show pending only' : 'Show all statuses'}
@@ -30,18 +51,24 @@ export function ApprovalsScreen() {
       ) : (
         <Table>
           <THead
-            columns={['Status', 'Tool', 'Action', 'Tier', 'Root principal', 'Input digest', 'Requested', 'Expires']}
+            columns={[
+              'Status', 'Tool', 'Action', 'Tier', 'Root principal', 'Input digest', 'Requested', 'Expires', '',
+            ]}
           />
           <tbody>
             {visible.length === 0 ? (
-              <EmptyRow colSpan={8}>{showAll ? 'No approvals.' : 'No pending approvals.'}</EmptyRow>
+              <EmptyRow colSpan={9}>{showAll ? 'No approvals.' : 'No pending approvals.'}</EmptyRow>
             ) : null}
             {visible.map((a) => (
               <TRow key={a.id}>
                 <TCell>
-                  <Badge tone={a.status === 'approved' ? 'good' : a.status === 'denied' ? 'warn' : 'neutral'}>
-                    {a.status}
-                  </Badge>
+                  {a.status === 'pending' && !decidable(a) ? (
+                    <Badge tone="warn">expired</Badge>
+                  ) : (
+                    <Badge tone={a.status === 'approved' ? 'good' : a.status === 'denied' ? 'warn' : 'neutral'}>
+                      {a.status}
+                    </Badge>
+                  )}
                 </TCell>
                 <TCell className="font-medium">{a.tool_name}</TCell>
                 <TCell>{a.action}</TCell>
@@ -52,6 +79,14 @@ export function ApprovalsScreen() {
                 </TCell>
                 <TCell>{timestamp(a.requested_at)}</TCell>
                 <TCell>{timestamp(a.expires_at)}</TCell>
+                <TCell className="text-right">
+                  {decidable(a) ? (
+                    <>
+                      <Button variant="ghost" size="sm" onClick={() => decide(a.id, 'approve')}>Approve</Button>
+                      <Button variant="ghost" size="sm" onClick={() => decide(a.id, 'deny')}>Deny</Button>
+                    </>
+                  ) : null}
+                </TCell>
               </TRow>
             ))}
           </tbody>
