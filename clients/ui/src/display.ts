@@ -76,7 +76,7 @@ export function actionTier(tier: number | null | undefined): string {
 }
 
 /** models.AgentTrustTier. Same out-of-range discipline as actionTier. */
-export const TRUST_TIERS = ['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED']
+export const TRUST_TIERS = ['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PLATFORM_TRUSTED']
 
 export function trustTier(tier: number): string {
   return TRUST_TIERS[tier] ?? `INVALID_TRUST_TIER(${tier})`

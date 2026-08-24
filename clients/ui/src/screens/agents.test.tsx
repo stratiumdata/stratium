@@ -267,7 +267,7 @@ describe('AgentsScreen', () => {
 
     const select = await screen.findByLabelText('Trust tier')
     expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value))
-      .toEqual(['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED'])
+      .toEqual(['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PLATFORM_TRUSTED'])
 
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'a' } })
     fireEvent.change(select, { target: { value: 'CERTIFIED' } })

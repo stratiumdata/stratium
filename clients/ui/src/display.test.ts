@@ -65,7 +65,7 @@ describe('actionTier', () => {
 
 describe('trustTier', () => {
   it('names the four trust tiers and flags anything else', () => {
-    expect([0, 1, 2, 3].map(trustTier)).toEqual(['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PRIVILEGED'])
+    expect([0, 1, 2, 3].map(trustTier)).toEqual(['UNVERIFIED', 'REGISTERED', 'CERTIFIED', 'PLATFORM_TRUSTED'])
     expect(trustTier(7)).toBe('INVALID_TRUST_TIER(7)')
   })
 })
