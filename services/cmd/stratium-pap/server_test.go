@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/google/uuid"
 
 	"stratium/internal/policy"
 	"stratium/internal/store"
@@ -748,5 +749,45 @@ func TestServer_ConcurrentRequests_NoCrossContamination(t *testing.T) {
 			t.Errorf("result[%d] = %d, want %d -- a concurrency bug would surface here as a wrong "+
 				"status on one goroutine, not necessarily a crash", i, code, want)
 		}
+	}
+}
+
+// A 403 that says only "forbidden" is useless to the admin console, which
+// renders every action for every operator (N14) and relies on the refusal to
+// explain itself. Both role paths must name what happened.
+func TestForbidden_NamesTheRequiredRoleAndTheOperatorsOwn(t *testing.T) {
+	f := newTestServerFixture(t)
+	tok := f.tokenWithClaims(t, "org-viewers", map[string]any{"email": "v@example.com", "email_verified": true})
+
+	rec := doRequest(t, f.server, http.MethodDelete, "/v1/policies/"+uuid.New().String(), tok)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if !strings.Contains(body, "requires role admin") {
+		t.Errorf("body = %q, want it to name the required role", body)
+	}
+	if !strings.Contains(body, "viewer") {
+		t.Errorf("body = %q, want it to name the operator's own role", body)
+	}
+}
+
+// The other 403 path: the token authenticated, but no claim value maps to any
+// role. That is a different fix for the operator than "you need a higher
+// role", so it must not produce the same sentence.
+func TestForbidden_UnmappedClaimSaysSo(t *testing.T) {
+	f := newTestServerFixture(t)
+	tok := f.tokenWithClaims(t, "no-such-group", map[string]any{"email": "v@example.com", "email_verified": true})
+
+	rec := doRequest(t, f.server, http.MethodGet, "/v1/policies", tok)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if !strings.Contains(body, "no recognised role claim") {
+		t.Errorf("body = %q, want it to name the missing claim mapping", body)
+	}
+	if strings.Contains(body, "requires role") {
+		t.Errorf("body = %q, must not be confused with the role-floor refusal", body)
 	}
 }

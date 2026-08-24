@@ -43,6 +43,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -354,11 +355,19 @@ func (s *Server) authorize(min Role, next routeHandler) http.HandlerFunc {
 		}
 		role, err := resolveRole(claims, s.roleClaim, s.roles)
 		if err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			// Distinct from the role-floor refusal below: the operator's fix
+			// is a claim mapping, not a higher role. The admin console shows
+			// this text verbatim (N14), so it has to name the actual problem.
+			http.Error(w, "your token carries no recognised role claim", http.StatusForbidden)
 			return
 		}
 		if !role.meets(min) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			// Naming the floor discloses nothing -- routeTable's MinRole is
+			// published in docs/user-guide.md -- and without it a console that
+			// renders every action for every operator (N14) refuses without
+			// explaining.
+			http.Error(w, fmt.Sprintf("this action requires role %s; your token carries %s", min, role),
+				http.StatusForbidden)
 			return
 		}
 		// resolveApproverIdentity is a pure, local computation over claims

@@ -123,9 +123,10 @@ export function EmptyRow({ colSpan, children }: { colSpan: number; children: Rea
 }
 
 /** An error banner. Always shows the server's own words: a 403 from the PAP
- *  says which role floor refused the request, and paraphrasing it would lose
- *  the one detail the operator needs (N14 — the server decides, this screen
- *  reports). */
+ *  names the role floor that refused the request and the role the operator's
+ *  own token carries (services/cmd/stratium-pap/server.go), and paraphrasing
+ *  it would lose the one detail the operator needs (N14 — the server decides,
+ *  this screen reports). */
 export function ErrorBanner({ children }: { children: ReactNode }) {
   return (
     <div
