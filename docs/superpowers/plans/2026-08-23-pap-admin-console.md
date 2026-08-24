@@ -1609,6 +1609,22 @@ describe('ApprovalsScreen', () => {
     await waitFor(() => expect(approve).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444'))
   })
 
+  // An expired approval keeps status 'pending' -- the schema's CHECK has only
+  // pending/approved/denied -- but models.Approval.Verify refuses it at
+  // CONSUMPTION ("approval %s expired at %s"). So DecideApproval would happily
+  // return 200 while the agent's call stays refused: the operator believes
+  // they unblocked something and nothing happened.
+  it('offers neither on an approval that has expired, and says why', async () => {
+    vi.spyOn(api, 'approvals').mockResolvedValue([
+      approval({ status: 'pending', expires_at: '2020-01-01T00:00:00Z' }),
+    ])
+    render(<ApprovalsScreen />)
+
+    expect(await screen.findByText(/expired/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+
   it('offers neither on an approval that is already decided', async () => {
     vi.spyOn(api, 'approvals').mockResolvedValue([approval({ status: 'approved', approved_by: 'op@example.com' })])
     render(<ApprovalsScreen />)
@@ -1679,7 +1695,23 @@ and in the row, offered unconditionally to every signed-in operator (N14) but on
 
 Render `actionError` through `ErrorBanner` above the table. Add `''` to the `THead` columns array for the new column.
 
-The `status === 'pending'` test is not an authorization decision — it is "there is nothing here to decide", the same reasoning `DelegationsScreen` already uses to withhold Revoke from an already-revoked delegation.
+Decidability is `status === 'pending' && new Date(a.expires_at) > new Date()`. Put it in one named helper so the row's badge and the buttons cannot disagree:
+
+```tsx
+// An approval is decidable only while it is pending AND unexpired. Expiry is
+// not a status: the schema's CHECK holds only pending/approved/denied, so an
+// expired request still reads 'pending'. models.Approval.Verify refuses it at
+// consumption ("approval %s expired at %s"), which means DecideApproval would
+// return 200 on one while the agent's call stays refused -- the operator
+// believing they unblocked something that never moved.
+function decidable(a: Approval): boolean {
+  return a.status === 'pending' && new Date(a.expires_at).getTime() > Date.now()
+}
+```
+
+Render an expired-but-pending row with a `Badge tone="warn"` reading `expired`, so the absent buttons have a visible reason.
+
+Neither test is an authorization decision — both are "there is nothing here to decide", the same reasoning `DelegationsScreen` already uses to withhold Revoke from an already-revoked delegation. N14 governs whether the UI second-guesses a *role*; it does not oblige a screen to offer an action that cannot take effect.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
