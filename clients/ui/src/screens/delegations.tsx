@@ -27,8 +27,42 @@ function chainPath(names: Map<string, string>, chain: string[] | undefined): str
   return (chain ?? []).map((id) => agentName(names, id)).join('  →  ')
 }
 
-function DelegationDetail({ d, names, onClose }: {
+/** A delegation has no name, so one is composed: its agent, plus its purpose
+ *  when it has one (purpose is free text and some rows leave it empty).
+ *
+ *  Returns null when the id names a delegation not in the list. Every parent
+ *  and root resolves today -- GET /v1/delegations neither filters nor
+ *  paginates -- but inventing a label for a delegation we cannot see would be
+ *  worse than showing the caller only the id it already has. */
+function delegationLabel(
+  byId: Map<string, Delegation>,
+  names: Map<string, string>,
+  id: string,
+): string | null {
+  const d = byId.get(id)
+  if (!d) return null
+  const agent = agentName(names, d.agent_id)
+  return d.purpose ? `${agent} · “${d.purpose}”` : agent
+}
+
+/** A delegation reference: its composed label, with the id kept beneath.
+ *
+ *  The id stays visible rather than moving to a tooltip because this modal is
+ *  the only place it is shown, and it is what an operator pastes into a revoke
+ *  call or greps an audit log for. A hover-only id cannot be read from a
+ *  screenshot or on a touch device. */
+function DelegationRef({ id, label }: { id: string; label: string | null }) {
+  return (
+    <>
+      {label ? <div>{label}</div> : null}
+      <div className="font-mono text-xs text-muted-foreground">{id}</div>
+    </>
+  )
+}
+
+function DelegationDetail({ d, byId, names, onClose }: {
   d: Delegation | null
+  byId: Map<string, Delegation>
   names: Map<string, string>
   onClose: () => void
 }) {
@@ -41,17 +75,23 @@ function DelegationDetail({ d, names, onClose }: {
             <span className="ml-2 text-muted-foreground">(depth {d.depth})</span>
           </DetailRow>
           <DetailRow label="Delegation id">
-            <span className="font-mono text-xs">{d.id}</span>
+            <DelegationRef id={d.id} label={delegationLabel(byId, names, d.id)} />
           </DetailRow>
           <DetailRow label="Parent">
             {d.parent_delegation_id ? (
-              <span className="font-mono text-xs">{d.parent_delegation_id}</span>
+              <DelegationRef
+                id={d.parent_delegation_id}
+                label={delegationLabel(byId, names, d.parent_delegation_id)}
+              />
             ) : (
               <span className="text-muted-foreground">none — this is a root delegation</span>
             )}
           </DetailRow>
           <DetailRow label="Root">
-            <span className="font-mono text-xs">{d.root_delegation_id}</span>
+            <DelegationRef
+              id={d.root_delegation_id}
+              label={delegationLabel(byId, names, d.root_delegation_id)}
+            />
           </DetailRow>
 
           <DetailRow label="Principal">{d.user_id}</DetailRow>
@@ -115,6 +155,12 @@ export function DelegationsScreen() {
   const names = useMemo(
     () => new Map((agents ?? []).map((a) => [a.id, a.name])),
     [agents],
+  )
+  // Parent and root are references to other delegations in this same list --
+  // GET /v1/delegations neither filters nor paginates, so they resolve.
+  const byId = useMemo(
+    () => new Map((rows ?? []).map((d) => [d.id, d])),
+    [rows],
   )
 
   const revoke = async (id: string) => {
@@ -208,7 +254,7 @@ export function DelegationsScreen() {
         </Table>
       )}
 
-      <DelegationDetail d={detail} names={names} onClose={() => setDetail(null)} />
+      <DelegationDetail d={detail} byId={byId} names={names} onClose={() => setDetail(null)} />
     </section>
   )
 }

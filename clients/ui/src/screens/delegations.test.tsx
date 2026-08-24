@@ -167,4 +167,74 @@ describe('DelegationsScreen', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByText('Delegation id')).not.toBeInTheDocument())
   })
+
+  // A delegation has no name, so parent and root were three rows of hex. They
+  // are references INTO this same list, so each resolves to its agent and
+  // purpose -- with the id kept, because this modal is the only place it is
+  // shown and it is what a revoke call or an audit grep needs.
+  it('labels parent and root by agent and purpose, keeping the id', async () => {
+    const root = delegation({
+      id: 'aaaaaaaa-0000-0000-0000-000000000001',
+      agent_id: ROOT_AGENT, purpose: 'depth-hook example', depth: 0,
+      root_delegation_id: 'aaaaaaaa-0000-0000-0000-000000000001',
+      chain_agent_ids: [ROOT_AGENT],
+    })
+    const child = delegation({
+      id: 'bbbbbbbb-0000-0000-0000-000000000002',
+      agent_id: LEAF_AGENT, purpose: 'depth-hook example', depth: 1,
+      parent_delegation_id: root.id, root_delegation_id: root.id,
+      chain_agent_ids: [ROOT_AGENT, LEAF_AGENT],
+    })
+    vi.spyOn(api, 'delegations').mockResolvedValue([root, child])
+    vi.spyOn(api, 'agents').mockResolvedValue([
+      agent({ id: ROOT_AGENT, name: 'orchestrator' }), agent(),
+    ])
+
+    render(<DelegationsScreen />)
+    fireEvent.click(await screen.findByRole('button', { name: /Delegation for worker/ }))
+
+    // Parent and root are the same delegation here, so the label appears twice
+    // -- once for each row -- plus once for the child's own id row.
+    expect(await screen.findAllByText(/orchestrator · “depth-hook example”/)).toHaveLength(2)
+    expect(screen.getByText(/worker · “depth-hook example”/)).toBeInTheDocument()
+    // ...and every id is still on screen.
+    expect(screen.getAllByText(root.id).length).toBeGreaterThan(0)
+    expect(screen.getByText(child.id)).toBeInTheDocument()
+  })
+
+  // purpose is free text and some rows leave it empty. The label degrades to
+  // the agent alone rather than rendering an empty pair of quotes.
+  it('omits the quoted purpose when a delegation has none', async () => {
+    vi.spyOn(api, 'delegations').mockResolvedValue([delegation({ purpose: '' })])
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+
+    render(<DelegationsScreen />)
+    fireEvent.click(await screen.findByRole('button', { name: /Delegation for worker/ }))
+    await screen.findByText('Delegation id')
+
+    // The agent alone, with no separator and -- the actual bug this guards --
+    // no empty pair of quotes where a purpose would have gone.
+    expect(screen.queryByText(/·/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/“\s*”/)).not.toBeInTheDocument()
+  })
+
+  // A reference we cannot resolve gets the id alone. Inventing a label for a
+  // delegation not in the list would be worse than the bare id the caller had.
+  it('shows the id alone when a reference cannot be resolved', async () => {
+    const orphan = 'cccccccc-0000-0000-0000-000000000003'
+    vi.spyOn(api, 'delegations').mockResolvedValue([
+      delegation({ depth: 1, parent_delegation_id: orphan }),
+    ])
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+
+    render(<DelegationsScreen />)
+    fireEvent.click(await screen.findByRole('button', { name: /Delegation for worker/ }))
+    expect(await screen.findByText(orphan)).toBeInTheDocument()
+
+    // Asserting the id is present is not enough: an invented label would sit
+    // BESIDE the id and still pass that. The Parent row must contain the id
+    // and nothing else.
+    const row = screen.getByText('Parent').parentElement
+    expect(row?.textContent?.replace('Parent', '').trim()).toBe(orphan)
+  })
 })
