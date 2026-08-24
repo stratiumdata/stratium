@@ -1,9 +1,3 @@
-// N14 — none of these screens decides anything. They render what the API
-// returned, and the one action offered (revoke) is offered unconditionally,
-// because whether this operator may perform it is the server's answer to
-// give, not this file's guess. A viewer sees the button and gets a 403 with
-// the server's own words.
-
 import { useState } from 'react'
 
 import { api, describeError, type Delegation } from '../api'
