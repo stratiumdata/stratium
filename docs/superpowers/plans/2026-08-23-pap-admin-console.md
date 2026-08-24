@@ -2230,6 +2230,68 @@ describe('AgentsScreen', () => {
   // An empty map is the off switch; any entry makes unlabelled resources deny.
   // "no caps" and "caps set to nothing" are the same wire value and must read
   // the same on screen.
+  // live_delegations is "the delegations this cap does NOT affect. A warning,
+  // not a confirmation." Caps are copied onto a delegation at issuance, so an
+  // operator lowering a ceiling during an incident must not believe they have
+  // stopped something that is still running under the old cap.
+  it('warns that live delegations keep the previous cap until reissued', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+    vi.spyOn(api, 'agent').mockResolvedValue(agent())
+    vi.spyOn(api, 'agentCaps').mockResolvedValue({
+      agent_id: agent().id, classification_caps: { nato: 'SECRET' }, catch_all: { nato: 'PUBLIC' },
+      unsatisfiable_tools: [], live_delegations: 3, applies: 'at next issuance',
+    })
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+
+    expect(await screen.findByText(/3/)).toBeInTheDocument()
+    expect(screen.getByText(/at next issuance/i)).toBeInTheDocument()
+  })
+
+  // For an unrestricted agent the list covers CATALOGUED tools only -- there is
+  // no finite set to scan. An empty list must not read as "everything is fine".
+  it('does not claim an unrestricted agent has no unsatisfiable tools', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent({ allowed_tools: [] })])
+    vi.spyOn(api, 'agent').mockResolvedValue(agent({ allowed_tools: [] }))
+    vi.spyOn(api, 'agentCaps').mockResolvedValue({
+      agent_id: agent().id, classification_caps: { nato: 'SECRET' }, catch_all: { nato: 'PUBLIC' },
+      unsatisfiable_tools: [], live_delegations: 0, applies: 'at next issuance',
+    })
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+    expect(await screen.findByText(/uncatalogued tools cannot be listed/i)).toBeInTheDocument()
+  })
+
+  // The refusal is an acknowledgement gate. It must be shown in the server's
+  // own words, and overriding it must be a separate deliberate act.
+  it('offers an explicit override only after the server refuses an uncovered hierarchy', async () => {
+    vi.spyOn(api, 'agents').mockResolvedValue([agent()])
+    vi.spyOn(api, 'agent').mockResolvedValue(agent())
+    vi.spyOn(api, 'agentCaps').mockResolvedValue({
+      agent_id: agent().id, classification_caps: {}, catch_all: {},
+      unsatisfiable_tools: [], live_delegations: 0, applies: 'at next issuance',
+    })
+    const put = vi.spyOn(api, 'putAgentCaps').mockRejectedValue(
+      new APIError(400, 'hierarchy "nato" has no catch-all rule: POST /v1/resource-label-rules with prefix "" first, or pass ?allow_uncovered=true'),
+    )
+
+    render(<AgentsScreen />)
+    ;(await screen.findByRole('button', { name: 'Edit' })).click()
+    fireEvent.change(await screen.findByLabelText('Hierarchy'), { target: { value: 'nato' } })
+    fireEvent.change(screen.getByLabelText('Level'), { target: { value: 'SECRET' } })
+    screen.getByRole('button', { name: 'Add' }).click()
+    ;(await screen.findByRole('button', { name: 'Save caps' })).click()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('no catch-all rule')
+    // Not sent with the override on the first attempt.
+    expect(put).toHaveBeenCalledWith(agent().id, { nato: 'SECRET' }, false)
+
+    ;(await screen.findByRole('button', { name: 'Apply anyway (uncovered)' })).click()
+    await waitFor(() => expect(put).toHaveBeenLastCalledWith(agent().id, { nato: 'SECRET' }, true))
+  })
+
   it('says an empty cap set means no ceiling is enforced', async () => {
     vi.spyOn(api, 'agents').mockResolvedValue([agent()])
     vi.spyOn(api, 'agent').mockResolvedValue(agent())
@@ -2344,7 +2406,77 @@ function CapsSection({ agentID }: { agentID: string }) {
 
 `NewCapRow` is a two-`TextInput` row (hierarchy, level) with an Add button, holding its own local state and calling `onAdd` then clearing itself.
 
-**`api.agentCaps` returns `AgentCapsView`, not a bare map** (see Task 7b), so read `view.classification_caps`. The view also carries `catch_all`: per hierarchy, the level the tenant's catch-all label rule assigns, or `null` where none exists. Show it beside each cap — it is what an unlabelled resource resolves to, and therefore what decides whether a cap bites. A hierarchy with a cap set and `catch_all: null` is the configuration that makes every unlabelled resource deny, so name that case explicitly.
+#### The caps panel is mostly the server's advisories, not the map
+
+`AgentCapsView`'s own doc comment states the design: *"Every field beyond
+ClassificationCaps is advisory: setting a cap has consequences that are
+invisible in the stored value, and this type is where they are stated."* The
+server computes those consequences precisely so a console can show them. A
+panel that renders only `classification_caps` throws away the whole point.
+
+First extend the type in `api.ts` — Task 7b added three of its fields, these
+are the rest:
+
+```ts
+export interface AgentCapsView {
+  agent_id: string
+  classification_caps: ClassificationCaps
+  catch_all: Record<string, string | null>
+  unsatisfiable_tools: string[]
+  live_delegations: number
+  /** Fixed human-readable string, always "at next issuance". Display only —
+   *  its own doc comment says clients must not branch on it. */
+  applies: string
+}
+```
+
+Render all four advisories:
+
+**1. `live_delegations` — the one that matters most.** These are the agent's
+delegations that are neither revoked nor expired, and the field's doc calls
+them *"the delegations this cap does NOT affect. A warning, not a
+confirmation."* Caps are copied onto a delegation at issuance, so tightening a
+ceiling changes nothing already in flight. An operator lowering a cap during an
+incident would otherwise believe they had stopped something that is still
+running. Pair it with `applies`:
+
+> Saved. This takes effect **at next issuance** — N live delegations already
+> carry the previous cap and are unaffected. Revoke them on the Delegations
+> screen to apply this now.
+
+**2. `unsatisfiable_tools`, phrased carefully.** These are tools that can never
+satisfy *any* cap, because they produce no resource to classify — not "denied
+by this cap", denied by every cap. **The list is not exhaustive for an
+unrestricted agent.** Its doc is explicit: for `allowed_tools == []` there is no
+finite list to scan, so an empty result means only that every *catalogued* tool
+is satisfiable. Word it to match, or the empty state becomes a false assurance:
+
+- restricted agent: `These tools can never satisfy any cap: …`
+- unrestricted agent (`allowed_tools` empty): `Of the catalogued tools, these can never satisfy any cap: … Uncatalogued tools cannot be listed for an unrestricted agent.`
+
+**3. `catch_all`** — per capped hierarchy, the level the empty-prefix rule
+resolves to, or `null` where there is none. Show it beside each cap: it is what
+an unlabelled resource resolves to, and therefore what decides whether the cap
+bites.
+
+**4. The uncovered-hierarchy refusal, and its override.** Capping a hierarchy
+with no catch-all rule is **refused by default** (`internal/store/agent_caps.go`),
+with a message naming the two ways forward: create a `prefix: ""` label rule, or
+pass `?allow_uncovered=true`. So `putAgentCaps` needs the flag:
+
+```ts
+  putAgentCaps: (id: string, caps: ClassificationCaps, allowUncovered = false) =>
+    request<AgentCapsView>('PUT',
+      `/v1/agents/${encodeURIComponent(id)}/classification-caps` +
+        (allowUncovered ? '?allow_uncovered=true' : ''),
+      { classification_caps: caps }),
+```
+
+Do not send the flag by default and do not pre-empt the refusal client-side.
+Save normally; when the server refuses, show its message verbatim and offer one
+explicit control — `Apply anyway (uncovered)` — that retries with the flag.
+The refusal is an acknowledgement gate, and acknowledging it has to be a
+separate deliberate act, not a checkbox someone leaves ticked.
 
 Render `<CapsSection agentID={editor.editingID} />` only when `editor.editingID !== null` — an agent that does not exist yet has no sub-resource.
 
