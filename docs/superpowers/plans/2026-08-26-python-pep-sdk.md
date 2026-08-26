@@ -2109,26 +2109,36 @@ is a drift report, which is the entire reason they exist."
 ### Task 8: The Go conformance runner
 
 **Files:**
-- Create: `services/cmd/conformance/main.go`, `services/cmd/conformance/main_test.go`
+- Create: `services/cmd/stratium-pep/conformance_test.go`
 - Modify: `Makefile`
 
 **Interfaces:**
-- Consumes: `sdk/conformance/cases/*.json` from Task 7; the cache and escalation
-  logic in `services/cmd/stratium-pep`.
-- Produces: `make conformance`, running the same cases against Go.
+- Consumes: `sdk/conformance/cases/*.json` from Task 7, and `stratium-pep`'s own
+  `cacheEntryUsable`, `withinStalenessWindow` and `resolveApproval`.
+- Produces: `make conformance`.
 
-**Why this task exists:** without it the fixtures describe what Python does,
-and the "reference" is bound by nothing. Binding Go too is what makes a
-divergence a report about *which* implementation is wrong.
+**Why this task exists.** Without it the fixtures describe what the Python SDK
+does and the reference is bound by nothing. Binding Go too is what turns a
+divergence into a report about *which* implementation is wrong.
+
+**It is a test file inside `package main` of `stratium-pep`, not a separate
+binary.** `cacheEntryUsable`, `withinStalenessWindow` and `resolveApproval` are
+unexported in that package, and this placement lets the runner call them
+directly — which is the entire point. A separate `cmd/conformance` binary would
+have required either exporting them or lifting them into a shared package, and
+either move risks a runner that carries its *own* copy of the predicates. A
+copy would pass every case while the product drifted, which is the failure this
+suite exists to prevent.
 
 - [ ] **Step 1: Write the failing test**
 
-`services/cmd/conformance/main_test.go`:
+`services/cmd/stratium-pep/conformance_test.go`, in `package main`:
 
 ```go
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -2136,14 +2146,13 @@ import (
 
 // The cases live outside the Go module, so a moved directory must fail loudly
 // here rather than silently running zero cases.
-func TestEveryConformanceCaseRuns(t *testing.T) {
-	dir := filepath.Join("..", "..", "..", "sdk", "conformance", "cases")
-	entries, err := os.ReadDir(dir)
+const conformanceDir = "../../../sdk/conformance/cases"
+
+func TestConformanceCases(t *testing.T) {
+	entries, err := os.ReadDir(conformanceDir)
 	if err != nil {
-		t.Fatalf("read %s: %v -- if sdk/conformance moved, update this path", dir, err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("no conformance cases found")
+		t.Fatalf("read %s: %v -- if sdk/conformance moved, update conformanceDir",
+			conformanceDir, err)
 	}
 
 	ran := 0
@@ -2151,51 +2160,68 @@ func TestEveryConformanceCaseRuns(t *testing.T) {
 		if filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		c, err := loadCase(filepath.Join(dir, e.Name()))
+		raw, err := os.ReadFile(filepath.Join(conformanceDir, e.Name()))
 		if err != nil {
 			t.Fatalf("%s: %v", e.Name(), err)
 		}
-		if err := runCase(c); err != nil {
-			t.Errorf("%s: %v", c.Name, err)
+		var c conformanceCase
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatalf("%s: %v", e.Name(), err)
 		}
+		if got := c.Name + ".json"; got != e.Name() {
+			t.Errorf("%s: name field is %q", e.Name(), c.Name)
+		}
+
+		t.Run(c.Name, func(t *testing.T) { runConformanceCase(t, c) })
 		ran++
 	}
+
 	if ran == 0 {
-		t.Fatal("zero cases ran")
+		t.Fatal("zero conformance cases ran")
 	}
 	t.Logf("%d conformance cases ran against the Go reference", ran)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run it to verify it fails**
 
 ```bash
-cd services && go test ./cmd/conformance/
+cd services && go test ./cmd/stratium-pep/ -run TestConformanceCases
 ```
 
-Expected: FAIL — `undefined: loadCase`.
+Expected: FAIL — `undefined: conformanceCase`.
 
-- [ ] **Step 3: Implement the runner**
+- [ ] **Step 3: Implement the case types and the two runners**
 
-`services/cmd/conformance/main.go` defines `type Case`, `loadCase(path)
-(Case, error)`, and `runCase(Case) error`, mirroring the Python runner: a fake
-clock, the same `put`/`get`/`poll` steps, and the same hit/miss and
-effect/retried assertions. It exercises the same predicates
-`stratium-pep` uses — `cacheEntryUsable`'s five conditions and
-`resolveApproval`'s terminal outcomes — rather than a second copy of them.
-Where those are unexported in `package main` of `stratium-pep`, lift the
-predicate into a small internal package both binaries import; do **not**
-duplicate the logic into this runner, which would defeat the entire point of
-the task.
+Define `conformanceCase` mirroring the JSON the README documents: `Name`,
+`Subject`, `Config`, `Steps`, `Expect`. A step carries `At`, and one of `Put`,
+`Get`, `Poll` or `PollRaises`; `Expect` carries `Effect` (a `*string`, so
+`null` is distinguishable from absent), `Allowed` (`*bool`), `Retried`
+(`*bool`) and `ReasonContains`.
 
-`main()` runs every case and exits non-zero on the first failure, printing the
-case name and what differed.
+`runConformanceCase` dispatches on `Subject`:
+
+- **`"cache"`** — build a `cacheEntry` per `put`, and call `cacheEntryUsable`
+  directly with the fake time from `at`. Do NOT reimplement the five
+  conditions; call the function `stratium-pep` itself calls.
+- **`"escalation"`** — drive `resolveApproval` with a scripted poll, honouring
+  `poll_raises`. Assert `Retried`, plus whichever of `Effect` or `Allowed` the
+  case sets.
+
+**Fail loudly if a case asserts neither `effect` nor `allowed`**, so a future
+fixture cannot be added that checks nothing.
+
+Note the two intentional divergences the README records: a `GetApproval` RPC
+error is `EFFECT_DENY` in Go and `effect is None` in Python, and synthesised
+denial prefixes differ. Cases touching either assert only on `allowed`, so both
+implementations pass honestly. Do not special-case anything in the runner — if
+a case forces you to, that is a finding to report, not to paper over.
 
 - [ ] **Step 4: Add the Makefile target**
 
 ```make
 conformance: ## Run the SDK conformance cases against the Go reference
-	cd $(GO_DIR) && go test ./cmd/conformance/ -v
+	cd $(GO_DIR) && go test ./cmd/stratium-pep/ -run TestConformanceCases -v
 ```
 
 - [ ] **Step 5: Run it**
@@ -2204,32 +2230,33 @@ conformance: ## Run the SDK conformance cases against the Go reference
 make conformance
 ```
 
-Expected: every case passes, and the log line names how many ran.
+Expected: every case passes, and the log names how many ran.
 
-- [ ] **Step 6: Prove it binds Go**
+- [ ] **Step 6: Prove it binds Go, and prove it can find nothing**
 
-Temporarily widen `withinStalenessWindow` in
-`services/cmd/stratium-pep/cache.go` from `!now.After(...)` to
-`now.Before(...)`, run `make conformance`, and confirm
-`cache-serves-within-staleness-window` FAILS. Restore and re-run. Record both
-outputs — this is the proof that the reference is bound rather than trusted.
+Widen `withinStalenessWindow` in `services/cmd/stratium-pep/cache.go` from
+`!now.After(...)` to `now.Before(...)`, run `make conformance`, and confirm
+`cache-serves-within-staleness-window` FAILS. Restore and re-run. Then point
+`conformanceDir` at an empty directory and confirm the zero-cases guard fires.
+Record all three outputs — this is the proof that the reference is bound rather
+than trusted.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add services/cmd/conformance Makefile
-git commit -m "test: run the conformance cases against the Go reference
+git add services/cmd/stratium-pep/conformance_test.go Makefile
+git commit -m "test: bind the Go reference to the SDK conformance cases
 
 Without this the fixtures describe what the Python SDK does and the reference
 is bound by nothing. Binding Go too is what turns a divergence into a report
 about which implementation is wrong.
 
-The runner calls stratium-pep's own predicates rather than reimplementing
-them; a second copy of cacheEntryUsable inside the runner would pass its own
-cases while the product drifted."
+It lives in package main of stratium-pep rather than a separate binary so it
+can call cacheEntryUsable and resolveApproval directly. A cmd/conformance
+binary would have needed those exported or lifted, and either move risks a
+runner carrying its own copy of the predicates -- which would pass every case
+while the product drifted, the exact failure this suite exists to prevent."
 ```
-
----
 
 ### Task 9: The live proof
 
