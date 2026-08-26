@@ -84,6 +84,21 @@ class Decision:
         Without this, every Decision is truthy -- Python's default for any
         object -- and `if client.decide(...)` allows every call. Defining it
         makes the idiom people will reach for anyway the correct one.
+
+        THE COST, and it is sharp: a Decision is now FALSY unless it allows,
+        so `or` and `and` over one silently discard non-allow answers.
+
+            d = maybe_decision or fallback   # WRONG
+
+        A DENY or an ESCALATE is falsy, so that line throws away the real
+        answer and keeps the fallback -- turning a refusal into whatever
+        `fallback` says. This is not hypothetical: it hit a test helper in
+        this repository written as `decision or allow()`, which quietly
+        replaced every ESCALATE under test with an ALLOW.
+
+        Use an explicit None check when defaulting:
+
+            d = maybe_decision if maybe_decision is not None else fallback
         """
         return self.allowed
 
