@@ -238,11 +238,25 @@ def test_the_session_exposes_the_granted_scope(fake_pdp):
     assert s.grant.granted_scope.tools == ("Read",)
 
 
-# The cache compares `now` against ABSOLUTE unix expiries, so Session's own
-# default clock has to be time.time. time.monotonic reads seconds since boot
-# and would make every expiry comparison meaningless -- but every other test
-# here injects a fake clock, so nothing else would notice this regress.
-def test_the_default_clock_is_wall_time_not_monotonic():
-    import inspect
-    default = inspect.signature(Session.__init__).parameters["clock"].default
-    assert default is time.time
+# Behavioural, not introspective: this must fail for a Session whose default
+# clock reads a different epoch than the expiries it is compared against, no
+# matter HOW that default is expressed. Session passes its clock into the
+# cache, so a wrong default here overrides the cache's own correct one and
+# Task 4's test cannot see it.
+def test_the_default_clock_shares_an_epoch_with_token_expiry(fake_pdp):
+    # A token that expired an hour ago, in unix terms.
+    expired = _jwt(exp=time.time() - 3600)
+    fake_pdp.delegation_responses.append(grant_resp(token=expired))
+    fake_pdp.decide_responses.extend([allow(), allow()])
+
+    c = Client(fake_pdp.addr)
+    s = Session(c, subject="s", agent_id="a", tools=["Read"],
+                max_action_tier=1, purpose="test", ttl_seconds=3600)   # no clock=
+
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    # The token is expired, so no entry is ever usable and both checks must
+    # reach the PDP. Under a monotonic default the token never looks expired
+    # and the second is served from cache -- one call, not two.
+    assert len(fake_pdp.decide_calls) == 2
