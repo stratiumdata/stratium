@@ -1,7 +1,7 @@
 from stratium import Effect
 from stratium._escalation import resolve_escalation
 from stratium._pdp import pdp_pb2
-from stratium._types import decision_from_response
+from stratium._types import decision_from_error, decision_from_response
 
 
 def escalated(approval_id="ap-1"):
@@ -12,6 +12,11 @@ def escalated(approval_id="ap-1"):
 def allowed():
     return decision_from_response(
         pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW, reason="permitted"))
+
+
+def denied(reason="insufficient tier"):
+    return decision_from_response(
+        pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_DENY, reason=reason))
 
 
 class Clock:
@@ -81,6 +86,58 @@ def test_a_denied_approval_is_a_deny_and_does_not_retry():
     assert not retried, "a denied approval must not retry Decide"
     assert d.allowed is False
     assert d.effect is Effect.DENY
+
+
+# Anything but ALLOW from the retry collapses to DENY, matching
+# escalation.go: a leg the approval does not cover may have started refusing
+# between the escalation and the retry.
+def test_a_retry_that_denies_collapses_to_deny_naming_the_approval():
+    clock = Clock()
+    poll = polls("approved")
+    retried_decision = denied("insufficient tier")
+
+    d = resolve_escalation(
+        poll, lambda: retried_decision, approval_id="ap-1",
+        poll_interval=1.0, timeout=30.0,
+        clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
+    )
+    assert d.allowed is False
+    assert d.effect is Effect.DENY
+    assert "ap-1" in d.reason
+    # Not a bare passthrough: the SUT's own wrapping ran.
+    assert d.reason != retried_decision.reason
+    assert "insufficient tier" in d.reason
+
+
+# The critical collapse case: a retry that itself comes back ESCALATE must
+# NOT be handed to the caller as the question it already asked.
+def test_a_retry_that_escalates_again_collapses_to_deny_not_escalate():
+    clock = Clock()
+    poll = polls("approved")
+
+    d = resolve_escalation(
+        poll, lambda: escalated("ap-2"), approval_id="ap-1",
+        poll_interval=1.0, timeout=30.0,
+        clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
+    )
+    assert d.allowed is False
+    assert d.effect is Effect.DENY
+
+
+# A retry that fails at the transport layer is not a policy decision either.
+def test_a_retry_that_fails_at_transport_keeps_effect_none():
+    clock = Clock()
+    poll = polls("approved")
+    transport_failure = decision_from_error(RuntimeError("connection reset"))
+
+    d = resolve_escalation(
+        poll, lambda: transport_failure, approval_id="ap-1",
+        poll_interval=1.0, timeout=30.0,
+        clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
+    )
+    assert d.allowed is False
+    assert d.effect is None, "no policy decision was reached"
+    assert d.error is not None
 
 
 # A GetApproval that errors is a transport failure, not a decision.

@@ -29,6 +29,7 @@ class Client:
         self, *, agent_id: str, subject: str, tool: str,
         raw_input: str | Mapping, token: str,
         resource: Mapping[str, str] | None = None,
+        approval_id: str | None = None,
     ) -> Decision:
         req = pdp_pb2.DecideRequest(
             agent_id=agent_id, subject=subject, tool=tool,
@@ -36,6 +37,17 @@ class Client:
         )
         if resource:
             req.resource.update(resource)
+        if approval_id:
+            # Names a pending approval this call should CONSUME rather than
+            # create -- the retry after an EFFECT_ESCALATE. Without it the PDP
+            # treats the retry as a fresh ask: the approval is never consumed,
+            # a SECOND pending approval is created, and the answer is ESCALATE
+            # again, so an approved call never succeeds.
+            #
+            # Set only when non-empty. The field is `optional string`, and the
+            # proto is explicit that an explicitly-sent empty string is a
+            # caller bug earning InvalidArgument rather than "no approval".
+            req.approval_id = approval_id
         try:
             return decision_from_response(self._stub.Decide(req, timeout=self._timeout))
         except Exception as err:  # noqa: BLE001 -- deliberate; see the module docstring

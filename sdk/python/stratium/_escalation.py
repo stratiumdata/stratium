@@ -43,8 +43,22 @@ def resolve_escalation(
             return decision_from_error(err)
 
         if status == _TERMINAL_APPROVED:
-            # Permission to ask again, NOT permission to act.
-            return retry_decide()
+            # Permission to ask again, NOT permission to act. The retry must
+            # carry the approval id so the PDP consumes this approval instead
+            # of opening another one.
+            retried = retry_decide()
+            if retried.effect is Effect.ALLOW:
+                return retried
+            # Anything else collapses to DENY, matching escalation.go: a leg
+            # the approval does not cover may have started refusing between the
+            # escalation and the retry, and -- defensively -- a retry that
+            # comes back ESCALATE again must not be handed to a caller as the
+            # question it already asked.
+            if retried.effect is None:
+                return retried          # transport failure: not a decision
+            return _deny(
+                f"stratium: retry after approval {approval_id}: {retried.reason}"
+            )
         if status == _TERMINAL_DENIED:
             return _deny(f"stratium: approval {approval_id} was denied")
 

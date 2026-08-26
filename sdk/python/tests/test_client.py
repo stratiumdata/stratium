@@ -33,6 +33,29 @@ def test_decide_sends_the_fields_the_pdp_reads(fake_pdp):
     assert req.raw_input == '{"a":1,"b":2}'
 
 
+# approval_id names a pending approval to CONSUME (the retry after an
+# EFFECT_ESCALATE), not create. Sent only when given, and only via the
+# `optional string` presence mechanism -- an explicitly-sent "" is a
+# different (invalid) request than an omitted field, so only a presence
+# check tells "sent" from "not sent" apart.
+def test_decide_sends_approval_id_when_given(fake_pdp):
+    fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
+    with Client(fake_pdp.addr) as c:
+        c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}",
+                 token="t", approval_id="ap-1")
+    req = fake_pdp.decide_calls[0]
+    assert req.HasField("approval_id")
+    assert req.approval_id == "ap-1"
+
+
+def test_decide_leaves_approval_id_unset_by_default(fake_pdp):
+    fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
+    with Client(fake_pdp.addr) as c:
+        c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
+    req = fake_pdp.decide_calls[0]
+    assert not req.HasField("approval_id")
+
+
 # The single most important test in this file. A PDP that cannot be reached
 # must never produce an allow, and must not claim the policy denied.
 def test_unreachable_pdp_denies_without_raising():
