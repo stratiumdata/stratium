@@ -134,15 +134,23 @@ def test_get_approval_lowercases_the_status(fake_pdp):
     assert fake_pdp.approval_calls[0].approval_id == "ap-1"
 
 
-# Behavioural rather than introspective: after the context manager exits, the
-# channel is closed, so a further call cannot reach the PDP -- and, per
-# decide()'s contract, reports that as a refusal rather than raising.
+# TWO scripted responses on purpose. With one, the second call fails whether
+# or not close() worked -- the fixture is exhausted either way -- and the test
+# passes for a reason unrelated to what it claims. With two, an open channel
+# succeeds here, so a refusal can only mean the channel really closed.
 def test_leaving_the_context_manager_closes_the_channel(fake_pdp):
-    fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
+    fake_pdp.decide_responses.extend([
+        pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW),
+        pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW),
+    ])
     c = Client(fake_pdp.addr)
     with c:
         assert c.decide(agent_id="a", subject="s", tool="Read",
                         raw_input="{}", token="t")
+
     after = c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
     assert after.allowed is False
     assert after.effect is None
+    # One scripted response is left unused: proof the failure was the closed
+    # channel and not an exhausted fixture.
+    assert len(fake_pdp.decide_calls) == 1
