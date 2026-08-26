@@ -87,6 +87,33 @@ proto: ## Generate Go code from proto/ (requires protoc, protoc-gen-go, protoc-g
 		$(PROTO_DIR)/pdp/v1/pdp.proto \
 		$(PROTO_DIR)/target/v1/target.proto
 
+PYTHON_PDP_DIR := sdk/python/stratium/_pdp
+
+proto-python: ## Generate Python stubs into the SDK (requires grpcio-tools)
+	@python3 -c 'import grpc_tools' 2>/dev/null || { \
+		echo "grpcio-tools not found: pip install grpcio-tools"; exit 1; }
+	python3 -m grpc_tools.protoc \
+		--proto_path=$(PROTO_DIR) \
+		--python_out=$(PYTHON_PDP_DIR) \
+		--grpc_python_out=$(PYTHON_PDP_DIR) \
+		$(PROTO_DIR)/pdp/v1/pdp.proto
+	@# protoc nests output under pdp/v1/ (the proto's path relative to
+	@# --proto_path, not its package). Flatten so the stubs live directly in
+	@# _pdp/ and import as stratium._pdp.*, then remove the now-empty tree.
+	@if [ -d $(PYTHON_PDP_DIR)/pdp/v1 ]; then \
+		mv $(PYTHON_PDP_DIR)/pdp/v1/*.py $(PYTHON_PDP_DIR)/; \
+		rm -rf $(PYTHON_PDP_DIR)/pdp; \
+	fi
+	@# grpc_tools emits `from pdp.v1 import ...`, which only resolves if the
+	@# generated directory is on sys.path. Rewriting to a relative import keeps
+	@# the stubs importable as stratium._pdp.* without touching sys.path.
+	@python3 -c "import pathlib, re; p = pathlib.Path('$(PYTHON_PDP_DIR)'); [f.write_text(re.sub(r'^from pdp\.v1 import', 'from . import', f.read_text(), flags=re.M)) for f in p.glob('*_pb2*.py')]"
+
+proto-python-check: proto-python ## Fail if the committed stubs are stale
+	@git diff --quiet -- $(PYTHON_PDP_DIR) || { \
+		echo "generated Python stubs are stale; run 'make proto-python' and commit"; \
+		git diff --stat -- $(PYTHON_PDP_DIR); exit 1; }
+
 CONFORMANCE_PROPERTIES := 25
 
 conformance: ## Run the authorization conformance suite (spec §7)
@@ -172,4 +199,4 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	STRATIUM_IT_KEYCLOAK_ADDR="localhost:$$keycloak_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
-.PHONY: help build test vet fmt lint proto conformance integration ui ui-test ui-clean
+.PHONY: help build test vet fmt lint proto proto-python proto-python-check conformance integration ui ui-test ui-clean

@@ -1,0 +1,19 @@
+[project]
+name = "stratium-sdk"
+version = "0.1.0"
+description = "Build a Stratium policy enforcement point"
+requires-python = ">=3.12"
+dependencies = ["grpcio>=1.60"]
+
+[project.optional-dependencies]
+dev = ["grpcio-tools>=1.60", "pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["stratium*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
