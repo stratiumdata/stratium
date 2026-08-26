@@ -152,10 +152,19 @@ proto-python: ## Generate Python stubs into the SDK (requires grpcio-tools)
 	    f.write_text(re.sub(r'^from pdp\.v1 import', 'from . import', s, flags=re.M))
 	EOF
 
-# NOTE for anyone verifying this check: it regenerates BEFORE diffing, so a
-# hand-edit to a generated file is overwritten and the check reports success.
-# To prove it can fail, edit proto/pdp/v1/pdp.proto instead — that makes
-# regeneration produce genuinely different output.
+# NOTE for anyone verifying this check. Two obvious ways to test it both
+# report SUCCESS while proving nothing, and both were tried here first:
+#
+#   1. Hand-edit a generated file. This target regenerates BEFORE diffing, so
+#      the edit is overwritten and the check passes.
+#   2. Append a COMMENT to the .proto. protoc does not serialize comments into
+#      the descriptor without --include_source_info, so the stubs regenerate
+#      byte-identical and the check passes.
+#
+# Only a real schema change proves it — add a throwaway message or field, e.g.
+#   message DriftProbe { string x = 1; }
+# then `make proto-python-check` exits 2 with a stale-diff report. Revert with
+# `git checkout -- proto/`.
 proto-python-check: proto-python ## Fail if the committed stubs are stale
 	@git diff --quiet -- sdk/python/stratium/_pdp || { \
 		echo "generated Python stubs are stale; run 'make proto-python' and commit"; \
