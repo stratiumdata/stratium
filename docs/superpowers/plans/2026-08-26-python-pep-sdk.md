@@ -862,7 +862,7 @@ class CacheEntry:
     delegation_expires_at: float
 class DecisionCache:
     def __init__(self, staleness_window: float, *, max_entries: int = 512,
-                 clock: Callable[[], float] = time.monotonic) -> None
+                 clock: Callable[[], float] = time.time) -> None
     def key(self, *, agent_id: str, subject: str, tool: str, raw_input: str) -> str
     def get(self, key: str, *, last_known_epoch: int,
             token_expires_at: float) -> Decision | None
@@ -1039,8 +1039,16 @@ class CacheEntry:
 class DecisionCache:
     def __init__(
         self, staleness_window: float, *, max_entries: int = 512,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
     ) -> None:
+        # time.time, NOT time.monotonic. Two of the five conditions compare
+        # `now` against ABSOLUTE expiries -- the delegation's, and the token's
+        # own `exp` claim -- which are unix timestamps. A monotonic clock reads
+        # seconds since boot, so `now < token_expires_at` would be true for
+        # decades and neither expiry would ever reject. Go uses time.Now() for
+        # exactly this comparison. The staleness window is short enough that a
+        # wall-clock adjustment is the lesser risk, and it is the risk Go
+        # already accepts.
         self._window = staleness_window
         self._max = max_entries
         self._clock = clock
@@ -1165,6 +1173,14 @@ def resolve_escalation(
 `poll` takes an approval id and returns its lowercased status. Passing a
 callable rather than a stub keeps this module free of protobuf and makes every
 test below a plain function instead of a fake gRPC object.
+
+**The default clock here is `time.monotonic`, unlike the cache's `time.time`,
+and the difference is deliberate.** This module measures a DURATION — how long
+we have been waiting — for which monotonic is correct and immune to clock
+adjustments. The cache compares `now` against ABSOLUTE expiries (a delegation's,
+and a token's `exp` claim), which are unix timestamps, so it must read the same
+epoch they do. A `Session` passes its own wall clock into both; the defaults
+matter only when either is used directly.
 
 **The contract, from `services/cmd/stratium-pep/escalation.go`:** an approval
 being granted is **not** an allow. It means `Decide` may now be retried, and
@@ -1407,7 +1423,7 @@ class Session:
                  tools: Sequence[str], max_action_tier: int, purpose: str,
                  ttl_seconds: int, staleness_window: float = 30.0,
                  approval_poll_interval: float = 2.0, approval_timeout: float = 120.0,
-                 clock: Callable[[], float] = time.monotonic) -> None
+                 clock: Callable[[], float] = time.time) -> None
     def check(self, *, tool: str, raw_input: str | Mapping,
               resource: Mapping[str, str] | None = None) -> Decision
     @property
@@ -1545,7 +1561,7 @@ class Session:
         max_action_tier: int, purpose: str, ttl_seconds: int,
         staleness_window: float = 30.0, approval_poll_interval: float = 2.0,
         approval_timeout: float = 120.0,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._client = client
         self._subject = subject
@@ -1563,6 +1579,7 @@ class Session:
 
         self._grant: Grant = client.create_delegation(**self._mint)
         self._expires_at = clock() + ttl_seconds
+        self._token_expires_at = token_expiry(self._grant.token)
 
     @property
     def grant(self) -> Grant:
@@ -1580,7 +1597,7 @@ class Session:
 
         hit = self._cache.get(
             key, last_known_epoch=self._grant.epoch,
-            token=self._grant.token, token_expires_at=self._expires_at,
+            token_expires_at=self._token_expires_at,
         )
         if hit is not None:
             return hit
@@ -1590,7 +1607,8 @@ class Session:
         if decision.effect is Effect.ESCALATE and decision.approval_id:
             decision = resolve_escalation(
                 self._client.get_approval,
-                lambda: self._ask(tool=tool, raw_input=canonical, resource=resource),
+                lambda: self._ask(tool=tool, raw_input=canonical, resource=resource,
+                                  approval_id=decision.approval_id),
                 approval_id=decision.approval_id,
                 poll_interval=self._poll, timeout=self._approval_timeout,
                 clock=self._clock,
@@ -1598,14 +1616,16 @@ class Session:
 
         self._cache.put(
             key, decision, epoch=self._grant.epoch,
-            delegation_expires_at=self._expires_at, token=self._grant.token,
+            delegation_expires_at=self._expires_at,
         )
         return decision
 
-    def _ask(self, *, tool: str, raw_input: str, resource) -> Decision:
+    def _ask(self, *, tool: str, raw_input: str, resource,
+             approval_id: str | None = None) -> Decision:
         decision = self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,
+            approval_id=approval_id,
         )
         if not self._token_is_the_problem(decision):
             return decision
@@ -1621,10 +1641,12 @@ class Session:
             # an allow.
             return decision
         self._expires_at = self._clock() + self._ttl
+        self._token_expires_at = token_expiry(self._grant.token)
         self._cache = DecisionCache(self._window, clock=self._clock)
         return self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,
+            approval_id=approval_id,
         )
 
     def _token_is_the_problem(self, decision: Decision) -> bool:
