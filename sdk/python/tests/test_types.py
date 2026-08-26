@@ -83,3 +83,19 @@ def test_raw_input_is_canonical_and_order_independent():
 
 def test_raw_input_string_is_passed_through_untouched():
     assert canonical_raw_input('{"z":1,  "a":2}') == '{"z":1,  "a":2}'
+
+
+# A newer PDP may return an Effect this build has never heard of. It must not
+# reach a caller's `match d.effect:` as an unhandled value: allowed is False
+# either way, but a PEP branching on the enum would hit an arm it does not
+# have, turning an unknown answer into an exception in an enforcement path
+# rather than a refusal.
+def test_an_unknown_effect_is_read_as_deny():
+    from stratium._pdp import pdp_pb2
+    from stratium._types import decision_from_response
+
+    d = decision_from_response(pdp_pb2.DecideResponse(effect=99, reason="from a newer PDP"))
+
+    assert d.effect is Effect.DENY
+    assert isinstance(d.effect, Effect), "never a bare int"
+    assert d.allowed is False
