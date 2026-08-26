@@ -531,6 +531,7 @@ class Client:
     def decide(self, *, agent_id: str, subject: str, tool: str,
                raw_input: str | Mapping, token: str,
                resource: Mapping[str, str] | None = None) -> Decision
+    def get_approval(self, approval_id: str) -> str
     def close(self) -> None
     def __enter__(self) -> Client
     def __exit__(self, *exc) -> None
@@ -762,6 +763,21 @@ class Client:
             ),
             epoch=resp.epoch,
         )
+
+    def get_approval(self, approval_id: str) -> str:
+        """The approval's current status, lowercased.
+
+        Here rather than in _escalation so that nothing outside this class
+        touches the stub: a Session reaching into client._stub would couple
+        two modules through a private attribute, and every later SDK would
+        copy the shape.
+        """
+        from ._pdp import pdp_pb2
+
+        resp = self._stub.GetApproval(
+            pdp_pb2.GetApprovalRequest(approval_id=approval_id), timeout=self._timeout
+        )
+        return (resp.status or "").lower()
 
     def close(self) -> None:
         self._channel.close()
@@ -1103,12 +1119,16 @@ cached_at so that reading never extends the window."
 - Produces:
 ```python
 def resolve_escalation(
-    stub, decision: Decision, retry_decide: Callable[[], Decision], *,
+    poll: Callable[[str], str], retry_decide: Callable[[], Decision], *,
     approval_id: str, poll_interval: float, timeout: float,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Decision
 ```
+
+`poll` takes an approval id and returns its lowercased status. Passing a
+callable rather than a stub keeps this module free of protobuf and makes every
+test below a plain function instead of a fake gRPC object.
 
 **The contract, from `services/cmd/stratium-pep/escalation.go`:** an approval
 being granted is **not** an allow. It means `Decide` may now be retried, and
@@ -1140,20 +1160,21 @@ class Clock:
     def __call__(self): return self.t
 
 
-class StubApprovals:
-    """Returns scripted GetApproval statuses, in order."""
-    def __init__(self, statuses): self.statuses = list(statuses); self.calls = 0
-    def GetApproval(self, req, timeout=None):
-        self.calls += 1
-        s = self.statuses.pop(0) if self.statuses else "pending"
-        return pdp_pb2.GetApprovalResponse(status=s)
+def polls(*statuses):
+    """A poll callable returning scripted statuses, then 'pending' forever."""
+    remaining = list(statuses)
+
+    def poll(approval_id: str) -> str:
+        return remaining.pop(0) if remaining else "pending"
+
+    return poll
 
 
 # An approval is permission to ASK AGAIN, not permission to act. The retry's
 # answer is the decision -- policy may still deny for an unrelated reason.
 def test_an_approval_retries_decide_and_returns_that_answer():
     clock = Clock()
-    stub = StubApprovals(["pending", "approved"])
+    poll = polls("pending", "approved")
     retried = []
 
     def retry():
@@ -1161,7 +1182,7 @@ def test_an_approval_retries_decide_and_returns_that_answer():
         return allowed()
 
     d = resolve_escalation(
-        stub, escalated(), retry, approval_id="ap-1",
+        poll, retry, approval_id="ap-1",
         poll_interval=1.0, timeout=30.0,
         clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
     )
@@ -1175,10 +1196,10 @@ def test_an_approval_retries_decide_and_returns_that_answer():
 # ESCALATE gets False, but a caller matching on effect deserves the truth.
 def test_a_timeout_is_a_deny_naming_the_timeout():
     clock = Clock()
-    stub = StubApprovals([])  # never settles
+    poll = polls()  # never settles
 
     d = resolve_escalation(
-        stub, escalated(), lambda: allowed(), approval_id="ap-1",
+        poll, lambda: allowed(), approval_id="ap-1",
         poll_interval=1.0, timeout=3.0,
         clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
     )
@@ -1190,11 +1211,11 @@ def test_a_timeout_is_a_deny_naming_the_timeout():
 
 def test_a_denied_approval_is_a_deny_and_does_not_retry():
     clock = Clock()
-    stub = StubApprovals(["denied"])
+    poll = polls("denied")
     retried = []
 
     d = resolve_escalation(
-        stub, escalated(), lambda: (retried.append(True), allowed())[1],
+        poll, lambda: (retried.append(True), allowed())[1],
         approval_id="ap-1", poll_interval=1.0, timeout=30.0,
         clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
     )
@@ -1205,13 +1226,12 @@ def test_a_denied_approval_is_a_deny_and_does_not_retry():
 
 # A GetApproval that errors is a transport failure, not a decision.
 def test_a_polling_failure_denies_without_claiming_the_policy_denied():
-    class Broken:
-        def GetApproval(self, req, timeout=None):
-            raise RuntimeError("connection reset")
+    def broken(approval_id: str) -> str:
+        raise RuntimeError("connection reset")
 
     clock = Clock()
     d = resolve_escalation(
-        Broken(), escalated(), lambda: allowed(), approval_id="ap-1",
+        broken, lambda: allowed(), approval_id="ap-1",
         poll_interval=1.0, timeout=30.0,
         clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
     )
@@ -1261,26 +1281,20 @@ def _deny(reason: str) -> Decision:
 
 
 def resolve_escalation(
-    stub, decision: Decision, retry_decide: Callable[[], Decision], *,
+    poll: Callable[[str], str], retry_decide: Callable[[], Decision], *,
     approval_id: str, poll_interval: float, timeout: float,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Decision:
-    from ._pdp import pdp_pb2
-
     deadline = clock() + timeout
     while True:
         try:
-            resp = stub.GetApproval(
-                pdp_pb2.GetApprovalRequest(approval_id=approval_id),
-                timeout=poll_interval,
-            )
+            status = poll(approval_id)
         except Exception as err:  # noqa: BLE001
             # The PDP could not be asked. Not a policy decision -- effect
             # stays None so nothing records a denial that never happened.
             return decision_from_error(err)
 
-        status = (resp.status or "").lower()
         if status == _TERMINAL_APPROVED:
             # Permission to ask again, NOT permission to act.
             return retry_decide()
@@ -1494,6 +1508,7 @@ class Session:
         self._clock = clock
         self._poll = approval_poll_interval
         self._approval_timeout = approval_timeout
+        self._window = staleness_window
         self._cache = DecisionCache(staleness_window, clock=clock)
 
         self._grant: Grant = client.create_delegation(**self._mint)
@@ -1524,7 +1539,7 @@ class Session:
 
         if decision.effect is Effect.ESCALATE and decision.approval_id:
             decision = resolve_escalation(
-                self._client._stub, decision,
+                self._client.get_approval,
                 lambda: self._ask(tool=tool, raw_input=canonical, resource=resource),
                 approval_id=decision.approval_id,
                 poll_interval=self._poll, timeout=self._approval_timeout,
@@ -1556,9 +1571,7 @@ class Session:
             # an allow.
             return decision
         self._expires_at = self._clock() + self._ttl
-        self._cache = DecisionCache(
-            self._cache._window, clock=self._clock  # noqa: SLF001
-        )
+        self._cache = DecisionCache(self._window, clock=self._clock)
         return self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,
@@ -1876,11 +1889,10 @@ def _run_escalation(case, clock):
     calls = {"n": 0}
     retried = {"yes": False}
 
-    class Stub:
-        def GetApproval(self, req, timeout=None):
-            i = min(calls["n"], len(statuses) - 1)
-            calls["n"] += 1
-            return pdp_pb2.GetApprovalResponse(status=statuses[i])
+    def poll(approval_id: str) -> str:
+        i = min(calls["n"], len(statuses) - 1)
+        calls["n"] += 1
+        return statuses[i]
 
     def retry():
         retried["yes"] = True
@@ -1888,7 +1900,7 @@ def _run_escalation(case, clock):
 
     cfg = case["config"]
     d = resolve_escalation(
-        Stub(), _decision("ESCALATE"), retry, approval_id="ap-1",
+        poll, retry, approval_id="ap-1",
         poll_interval=cfg["poll_interval_seconds"],
         timeout=cfg["timeout_seconds"],
         clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
