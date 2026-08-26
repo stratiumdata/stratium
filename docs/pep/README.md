@@ -1,7 +1,10 @@
-# The five PEP surfaces
+# The six PEP surfaces
 
-`stratium-pep` is one binary with five subcommands. Each is a different place to
-stand between an agent and the thing it is about to do.
+Five of these are subcommands of one binary, `stratium-pep`. The sixth,
+the [Python SDK](../../sdk/python/README.md), is not a subcommand of
+anything — it is a library you import into your own process and drive
+yourself. Each is a different place to stand between an agent and the thing
+it is about to do.
 
 | Mode | Enforces | Vars | Session file | Blocks on approval |
 |---|---|---|---|---|
@@ -10,10 +13,13 @@ stand between an agent and the thing it is about to do.
 | [`mcp`](mcp.md) | MCP `tools/call` | 9 | reads it | yes |
 | [`proxy`](proxy.md) | gRPC method calls | 9 | no | no |
 | [`extauthz`](extauthz.md) | HTTP requests, via Envoy | 6 | no | no |
+| [Python SDK](../../sdk/python/README.md) | whatever you pass to `Session.check()` — no built-in catalog | — (constructor args, not env) | no | yes |
 
 Every variable count above was read off the binary, by running each mode with an
 empty environment and letting it name what it wanted. Each page quotes that
-output verbatim.
+output verbatim. The SDK has no such table to run: it takes its configuration
+as ordinary Python arguments to `Client` and `Session`, not environment
+variables, because there is no separate process to hand them to.
 
 ---
 
@@ -33,6 +39,11 @@ change beyond one address.
 
 **You are policing HTTP and already run Envoy.** [`extauthz`](extauthz.md).
 
+**You are writing your own Python process and want the PDP client in it,**
+not a subprocess or sidecar to configure and keep running. The
+[Python SDK](../../sdk/python/README.md) — it is the only surface here that
+is a library rather than a program.
+
 ---
 
 ## Two divisions worth understanding
@@ -49,6 +60,14 @@ approves an escalation — that is what `APPROVAL_POLL_INTERVAL` and
 budget is milliseconds, and a held-open gRPC stream is its own problem. Both
 degrade an escalation to a denial carrying the approval id, for the caller to
 retry.
+
+**The SDK doesn't fit either division cleanly.** Like `proxy` and `extauthz`,
+it has no session file — a `Session` object holds the delegation in memory,
+in your process, for as long as that process runs. But like `hook` and
+`mcp`, it blocks: `Session.check()` polls for approval and returns only once
+it settles, on the same budget-free footing as a coding-agent hook, because
+it is a library call in your own process rather than a millisecond-budgeted
+sidecar.
 
 ---
 
@@ -85,6 +104,9 @@ doctor` does this for the `hook` case.
   install, if you would rather not do it by hand.
 - [`../architecture.md`](../architecture.md) — how the PEP, PDP and PAP fit
   together.
-- [`../../example/`](../../example/) — all five surfaces as runnable programs
+- [`../../example/`](../../example/) — all five subcommands as runnable programs
   (or, for `hook`, a configuration plus a real captured transcript): a real
   local model, real enforcement, a passing or denied run you can reproduce.
+- [`../../sdk/python/README.md`](../../sdk/python/README.md) — the Python
+  SDK: install, the two calls, the four safety properties it exists to
+  provide, and what it deliberately does not do (DPoP).
