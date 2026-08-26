@@ -7,6 +7,7 @@
         ...
 """
 
+from ._client import Client
 from ._types import Decision, Effect, Grant, Leg, Legs, Scope
 
-__all__ = ["Decision", "Effect", "Grant", "Leg", "Legs", "Scope"]
+__all__ = ["Client", "Decision", "Effect", "Grant", "Leg", "Legs", "Scope"]
