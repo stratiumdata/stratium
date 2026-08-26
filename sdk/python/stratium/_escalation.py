@@ -33,6 +33,13 @@ def resolve_escalation(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Decision:
+    if not approval_id:
+        # DecideResponse.approval_id is guaranteed populated whenever effect
+        # is ESCALATE. A PDP that violates its own contract has given us
+        # nothing to poll for, and polling with an empty id would open a
+        # fresh approval instead. Deny rather than guess.
+        return _deny("stratium: escalation carried no approval id")
+
     deadline = clock() + timeout
     while True:
         try:
@@ -56,9 +63,11 @@ def resolve_escalation(
             # question it already asked.
             if retried.effect is None:
                 return retried          # transport failure: not a decision
-            return _deny(
-                f"stratium: retry after approval {approval_id}: {retried.reason}"
-            )
+            # The retry's OWN reason, unprefixed. This is the PDP's verdict
+            # text, not a diagnostic this SDK synthesised, and a human reading
+            # the denial must be able to tell the two apart -- the same rule
+            # escalation.go states for this exact branch.
+            return _deny(retried.reason)
         if status == _TERMINAL_DENIED:
             return _deny(f"stratium: approval {approval_id} was denied")
 

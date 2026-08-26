@@ -83,15 +83,18 @@ def test_a_denied_approval_is_a_deny_and_does_not_retry():
         approval_id="ap-1", poll_interval=1.0, timeout=30.0,
         clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
     )
-    assert not retried, "a denied approval must not retry Decide"
-    assert d.allowed is False
+    assert not retried
     assert d.effect is Effect.DENY
+    # Decisive: the timeout path would also produce DENY without retrying, so
+    # what distinguishes them is that this settled on the FIRST poll rather
+    # than after burning the whole 30s deadline.
+    assert clock.t == 0.0
 
 
 # Anything but ALLOW from the retry collapses to DENY, matching
 # escalation.go: a leg the approval does not cover may have started refusing
 # between the escalation and the retry.
-def test_a_retry_that_denies_collapses_to_deny_naming_the_approval():
+def test_a_retry_that_denies_collapses_to_deny_keeping_the_pdps_reason():
     clock = Clock()
     poll = polls("approved")
     retried_decision = denied("insufficient tier")
@@ -103,10 +106,9 @@ def test_a_retry_that_denies_collapses_to_deny_naming_the_approval():
     )
     assert d.allowed is False
     assert d.effect is Effect.DENY
-    assert "ap-1" in d.reason
-    # Not a bare passthrough: the SUT's own wrapping ran.
-    assert d.reason != retried_decision.reason
-    assert "insufficient tier" in d.reason
+    # Unprefixed: the PDP's own words survive the collapse, so a human reading
+    # the denial can tell a policy verdict from an SDK diagnostic.
+    assert d.reason == retried_decision.reason
 
 
 # The critical collapse case: a retry that itself comes back ESCALATE must
@@ -138,6 +140,30 @@ def test_a_retry_that_fails_at_transport_keeps_effect_none():
     assert d.allowed is False
     assert d.effect is None, "no policy decision was reached"
     assert d.error is not None
+
+
+# DecideResponse.approval_id is guaranteed populated whenever effect is
+# ESCALATE. A PDP violating that contract has given us nothing to poll for --
+# deny immediately rather than guess (and never call poll with an empty id,
+# which would open a fresh approval instead of finding the intended one).
+def test_an_empty_approval_id_denies_without_polling_or_retrying():
+    clock = Clock()
+    polled = []
+    retried = []
+
+    def poll(approval_id: str) -> str:
+        polled.append(approval_id)
+        return "pending"
+
+    d = resolve_escalation(
+        poll, lambda: (retried.append(True), allowed())[1],
+        approval_id="", poll_interval=1.0, timeout=30.0,
+        clock=clock, sleep=lambda s: setattr(clock, "t", clock.t + s),
+    )
+    assert d.allowed is False
+    assert d.effect is Effect.DENY
+    assert not polled, "must not poll with an empty approval id"
+    assert not retried, "must not retry Decide either"
 
 
 # A GetApproval that errors is a transport failure, not a decision.
