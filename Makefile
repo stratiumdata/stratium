@@ -146,6 +146,15 @@ conformance: ## Run the authorization conformance suite (spec §7)
 	fi; \
 	echo "$$ran/$(CONFORMANCE_PROPERTIES) conformance properties executed."
 
+# Named sdk-conformance, not conformance: that name is already the spec §7
+# property gate above. This runs a different suite -- sdk/conformance/cases,
+# shared with every Stratium SDK -- against cmd/stratium-pep's own
+# cacheEntryUsable and resolveApproval, so a divergence between an SDK and
+# the Go reference shows up here instead of only in whichever SDK's own test
+# suite happens to run it.
+sdk-conformance: ## Run the SDK conformance cases against the Go reference
+	cd $(GO_DIR) && go test ./cmd/stratium-pep/ -run TestConformanceCases -v
+
 integration: ui ## Run the end-to-end proof: fresh compose volumes -> integration tests -> torn down, always
 	@command -v docker >/dev/null 2>&1 || { \
 		echo "docker not found: https://docs.docker.com/get-docker/"; exit 1; }
@@ -199,4 +208,4 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	STRATIUM_IT_KEYCLOAK_ADDR="localhost:$$keycloak_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
-.PHONY: help build test vet fmt lint proto proto-python proto-python-check conformance integration ui ui-test ui-clean
+.PHONY: help build test vet fmt lint proto proto-python proto-python-check conformance sdk-conformance integration ui ui-test ui-clean
