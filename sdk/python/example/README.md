@@ -9,8 +9,11 @@ code asks the actual `pdp-pap` service, running the real policy evaluation
 in `services/internal/authz`.
 
 It mints one delegation scoped to `tools=["Read"], max_action_tier=1`, then
-checks a `Read` call it expects to be allowed and a `Bash` call it expects to
-be denied — asserting on the PDP's own `reason` string for each, not just on
+checks three calls: `Read`, expected ALLOW; `Grep`, expected DENY because the
+delegation doesn't hold it (`approved_tools`); and `Bash` running `rm -rf`,
+expected DENY too, but for a *different* reason — it never reaches the
+tool-name check at all, because its tier exceeds the delegation's ceiling
+first. Each check asserts on the PDP's own `reason` string, not just on
 `allowed`/`denied`, because a denial for the wrong cause is a failure, not a
 pass (see `Decision.__bool__`'s own docstring in `stratium/_types.py`, and
 `example/proxy/README.md` at the repo root, which holds the same standard for
@@ -41,14 +44,39 @@ matters.
 ## What actually happened
 
 Run on 2026-08-26, against a live stack that had been up for several days
-(`pdp-pap` "Up 3 days" in `docker compose ps`), with
-`PDP=localhost:56378` at the time (re-derive per the command above — it will
-not be 56378 by the time you read this). This is the exact, unedited stdout
-and exit code of a real run, captured to a file rather than retyped:
+(`pdp-pap` "Up 3 days" in `docker compose ps`), with `PDP=localhost:56378` at
+the time (re-derive per the command above — it will not be 56378 by the time
+you read this). This is the exact, unedited stdout and exit code of a real
+run, captured to a file rather than retyped:
 
 ```
 $ python3 example/custom_pep.py --pdp "$PDP" \
     --agent 3422a63e-4ce5-4339-bfac-d6887594651d --subject sdk-example@example.com
+delegation 8ac77236-e91f-4365-b5e5-b66fd009e06b
+  granted tools: ['Read']
+  granted tier:  1
+
+  ALLOW Read   
+  DENY  Grep   tool "Grep" not in delegation approved_tools at depth 0
+  DENY  Bash   action tier DESTRUCTIVE exceeds delegation max_action_tier READ_ONLY at depth 0
+
+enforcement: 3/3 as expected
+$ echo $?
+0
+```
+
+Reproducible: repeated immediately after against the same live stack (a
+second delegation, `b5d34f4d-cbaf-4dd9-8021-f81c97dac800`), identical shape —
+`ALLOW Read`, `DENY Grep` for `approved_tools`, `DENY Bash` for
+`max_action_tier`, `enforcement: 3/3`, exit `0`.
+
+### The first draft asked one denial to prove two different things, and got 1/2
+
+This example originally checked only `Read` and `Bash`, expecting `Bash` to
+be denied for `approved_tools` — the same reason `Grep` is denied above. Run
+for real, it came back `enforcement: 1/2`, exit `1`:
+
+```
 delegation d3b45ab8-157c-48a5-8527-8323970d8e23
   granted tools: ['Read']
   granted tier:  1
@@ -58,19 +86,18 @@ delegation d3b45ab8-157c-48a5-8527-8323970d8e23
     MISMATCH: expected the reason to mention 'approved_tools'
 
 enforcement: 1/2 as expected
-$ echo $?
-1
 ```
 
-**This is a failing run, reported as observed rather than tuned to pass.**
-`Read` was allowed with an empty reason string (the PDP does not populate
-`reason` on an ALLOW here). `Bash` was denied, correctly — but for
-`action tier DESTRUCTIVE exceeds delegation max_action_tier READ_ONLY at depth
-0`, not for `approved_tools`, so the script's own reason assertion catches the
-mismatch and the run exits `1`. The run is reproducible: repeating it against
-the same live stack (a second delegation, `60ab2f73-c073-472e-aba4-0d27e372d8f3`,
-minted five minutes earlier) produced the identical shape — `ALLOW Read`, then
-`DENY Bash` for the same tier-ceiling reason, `enforcement: 1/2`, exit `1`.
+`Bash` *was* denied, correctly — but for `action tier DESTRUCTIVE exceeds
+delegation max_action_tier READ_ONLY at depth 0`, not for `approved_tools`.
+The script's own reason assertion caught the mismatch and failed loudly
+rather than passing for the wrong reason, exactly as it's meant to. That
+result was reported as observed rather than tuned away by picking a
+different expected string — see "Why," directly below, for the actual
+mechanism, and the two-line fix was adding `Grep` as a *second* denial case
+so the example demonstrates `approved_tools` and `max_action_tier` as the two
+genuinely different gates they are, instead of asking one `Bash` call to
+stand in for both.
 
 ### Why: the tier ceiling is checked before `approved_tools`, and `rm -rf` is DESTRUCTIVE
 
@@ -115,16 +142,35 @@ order instead, and the real order disagrees with what every prior task
 assumed a `Read`-only delegation would say about an unheld, destructive
 `Bash` call.
 
-**This is a finding about the example's own choice of `Bash` command, not a
-bug in the PDP or the SDK.** The tier-before-tools order is intentional
-(the doc comment says so), and classifying `rm -rf` as `DESTRUCTIVE` is
-intentional too. A `Bash` command classified at or below `READ_ONLY` (e.g.
-`ls -la`) would clear the tier gate and reach the `approved_tools` check,
-producing the reason the brief for this task expected. `custom_pep.py` itself
-was written and committed exactly as specified — including the `rm -rf`
-input — rather than edited to make the assertion pass, per this task's own
-instruction: a run that fails against the live stack is a finding worth
-reporting, not a cue to adjust the expectation until it goes green.
+**This was a finding about the example's own choice of `Bash` command, not a
+bug in the PDP or the SDK.** The tier-before-tools order is intentional (the
+doc comment says so), and classifying `rm -rf` as `DESTRUCTIVE` is
+intentional too — a `Bash` command classified at or below `READ_ONLY` (e.g.
+`ls -la`) would have cleared the tier gate and reached `approved_tools`
+instead. Rather than swap `rm -rf` for a milder command (which would have
+hidden the tier-ceiling behavior entirely) or loosen the assertion to accept
+either reason (which would have let a `Bash` refused for the wrong cause pass
+silently), the fix keeps `rm -rf` and adds `Grep` as a distinct third case,
+so the example demonstrates both gates explicitly instead of conflating them.
+
+### What the `Bash` case teaches: a denial names the first gate, not every gate
+
+`Grep` and `Bash` are both denied above, and neither is in this delegation's
+`approved_tools`. Only `Grep`'s denial says so. `Bash`'s reason never mentions
+tools at all — `DelegationLeg` returned as soon as the tier check failed, so
+`HasTool` was never even called for it. **Evaluation order is observable, and
+a denial names the first gate that refused, not every gate that would have.**
+A PEP author reading only the reason string for `Bash` above would have no
+way to tell, from that string alone, whether `Bash` is also absent from
+`approved_tools` — it might be, or the delegation might hold it and it would
+still be denied, because the tier check runs first regardless. Anyone
+building alerting, dashboards, or a runbook on top of these reason strings
+should assume "denied for tier" says nothing about tool membership, and vice
+versa; the two checks are logically independent even though only one gets to
+speak when both would have refused the call. That is exactly the gap `Grep`
+closes here: it isolates `approved_tools` as a denial reason so the example
+can show it actually fires, rather than always being shadowed by a tier
+check that ran first.
 
 ## Confirming the delegation reached the tenant
 
@@ -148,19 +194,19 @@ curl -sS "http://$PAP/v1/delegations?agent_id=3422a63e-4ce5-4339-bfac-d688759465
 
 The agent row (`GET /v1/agents/3422a63e-4ce5-4339-bfac-d6887594651d`) names
 it `"name": "claude-code-trial"`. The delegation row for
-`d3b45ab8-157c-48a5-8527-8323970d8e23`, the one minted by the run captured
+`8ac77236-e91f-4365-b5e5-b66fd009e06b`, the one minted by the 3/3 run captured
 above, appears in that tenant's list exactly as granted:
 
 ```json
 {
-  "id": "d3b45ab8-157c-48a5-8527-8323970d8e23",
+  "id": "8ac77236-e91f-4365-b5e5-b66fd009e06b",
   "agent_id": "3422a63e-4ce5-4339-bfac-d6887594651d",
   "user_id": "sdk-example@example.com",
   "approved_tools": ["Read"],
   "max_action_tier": 1,
   "purpose": "stratium python sdk example",
   "depth": 0,
-  "root_delegation_id": "d3b45ab8-157c-48a5-8527-8323970d8e23",
+  "root_delegation_id": "8ac77236-e91f-4365-b5e5-b66fd009e06b",
   "revoked": false
 }
 ```

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """A custom PEP, in about sixty lines.
 
-Mints a delegation for Read only, then checks two calls: one it should be
-allowed to make and one it should not. Exits non-zero if either differs, and
-asserts on the PDP's own reason strings rather than on exit codes -- a denial
-for the wrong reason is a failure, not a pass.
+Mints a delegation for Read only, then checks three calls: one it should be
+allowed to make, and two it should not -- denied for two DIFFERENT reasons,
+because DelegationLeg checks the tier ceiling before the tool-name check, so
+a call over tier is refused before its tool is ever looked up. Exits
+non-zero if any differs, and asserts on the PDP's own reason strings rather
+than on exit codes -- a denial for the wrong reason is a failure, not a pass.
 
     python3 custom_pep.py --pdp localhost:56378 --agent <uuid> --subject you@example.com
 """
@@ -34,8 +36,18 @@ def main() -> int:
         print()
 
         expectations = [
+            # Granted, and within the tier ceiling.
             ("Read", {"file_path": "/tmp/notes.txt"}, True, None),
-            ("Bash", {"command": "rm -rf /tmp/x"}, False, "approved_tools"),
+
+            # Catalogued READ_ONLY, so the tier gate passes -- and the
+            # delegation simply does not hold this tool.
+            ("Grep", {"pattern": "TODO", "path": "/tmp"}, False, "approved_tools"),
+
+            # Refused EARLIER than the tool check: DelegationLeg tests the tier
+            # ceiling first, and Bash's tier is derived from its command, which
+            # makes `rm -rf` DESTRUCTIVE against a READ_ONLY ceiling. The tool
+            # name never gets examined.
+            ("Bash", {"command": "rm -rf /tmp/x"}, False, "max_action_tier"),
         ]
 
         failures = 0
