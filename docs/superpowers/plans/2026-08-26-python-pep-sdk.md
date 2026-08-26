@@ -1791,8 +1791,8 @@ is not running these cases.
 
 ## Cache steps
 
-- `{"at": 0, "put": {"effect": "ALLOW", "epoch": 1, "token": "tok", "delegation_expires_at": 1e9}}`
-- `{"at": 29, "get": {"epoch": 1, "token": "tok", "token_expires_at": 1e9}, "expect": "hit"}`
+- `{"at": 0, "put": {"effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1e9}}`
+- `{"at": 29, "get": {"epoch": 1, "token_expires_at": 1e9}, "expect": "hit"}`
 
 `expect` is `"hit"` or `"miss"`. A hit that fails any usability condition is a
 miss — there is no third outcome.
@@ -1805,6 +1805,19 @@ miss — there is no third outcome.
 `expect` carries `effect` (`"ALLOW"`, `"DENY"`, or `null` for a transport
 failure), `retried` (whether Decide was retried), and optionally
 `reason_contains`.
+
+## Known divergences between implementations
+
+Two differences are intentional, and a runner must not be written as though
+they are bugs. They are recorded here rather than special-cased silently:
+
+| Case | Go | Python | Why |
+|---|---|---|---|
+| A `GetApproval` RPC error | `EFFECT_DENY` | `effect` is `None` | Go's `(Effect, string)` return has no way to say "no decision was reached". Python's `Decision.effect` is `Effect \| None` and every transport failure in that SDK uses `None`. Both refuse the call. |
+| Reason text on synthesised denials | `stratium-pep: …` | `stratium: …` | Prefix only; the retry's own PDP reason is passed through unprefixed by both, which is the part that matters. |
+
+Cases covering these assert on **`allowed`**, never on the exact `effect` or
+reason string, so both implementations can pass the same fixture honestly.
 ```
 
 - [ ] **Step 2: Write the cases**
@@ -1817,9 +1830,9 @@ failure), `retried` (whether Decide was retried), and optionally
   "subject": "cache",
   "config": { "staleness_window_seconds": 30 },
   "steps": [
-    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "token": "tok", "delegation_expires_at": 1000000000 } },
-    { "at": 29, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "hit" },
-    { "at": 30, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "hit" }
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 29, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 30, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" }
   ],
   "expect": { "note": "the boundary instant is INSIDE the window: Go is !now.After(cachedAt+staleness)" }
 }
@@ -1833,8 +1846,8 @@ failure), `retried` (whether Decide was retried), and optionally
   "subject": "cache",
   "config": { "staleness_window_seconds": 30 },
   "steps": [
-    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "token": "tok", "delegation_expires_at": 1000000000 } },
-    { "at": 31, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "miss" }
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 31, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "miss" }
   ],
   "expect": {}
 }
@@ -1848,10 +1861,10 @@ failure), `retried` (whether Decide was retried), and optionally
   "subject": "cache",
   "config": { "staleness_window_seconds": 30 },
   "steps": [
-    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "token": "tok", "delegation_expires_at": 1000000000 } },
-    { "at": 10, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "hit" },
-    { "at": 25, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "hit" },
-    { "at": 31, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "miss" }
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 10, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 25, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 31, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "miss" }
   ],
   "expect": { "note": "the clock runs from the entry's own cached_at, never from last use" }
 }
@@ -1865,8 +1878,8 @@ failure), `retried` (whether Decide was retried), and optionally
   "subject": "cache",
   "config": { "staleness_window_seconds": 30 },
   "steps": [
-    { "at": 0, "put": { "effect": "ESCALATE", "epoch": 1, "token": "tok", "delegation_expires_at": 1000000000 } },
-    { "at": 1, "get": { "epoch": 1, "token": "tok", "token_expires_at": 1000000000 }, "expect": "miss" }
+    { "at": 0, "put": { "effect": "ESCALATE", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 1, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "miss" }
   ],
   "expect": { "note": "an approval covers THIS call; replaying it approves a call nobody saw" }
 }
@@ -1880,8 +1893,8 @@ failure), `retried` (whether Decide was retried), and optionally
   "subject": "cache",
   "config": { "staleness_window_seconds": 30 },
   "steps": [
-    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "token": "tok", "delegation_expires_at": 1000000000 } },
-    { "at": 1, "get": { "epoch": 2, "token": "tok", "token_expires_at": 1000000000 }, "expect": "miss" }
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 1, "get": { "epoch": 2, "token_expires_at": 1000000000 }, "expect": "miss" }
   ],
   "expect": { "note": "a revocation bumped the epoch; the cached ALLOW is dead" }
 }
@@ -1895,8 +1908,8 @@ failure), `retried` (whether Decide was retried), and optionally
   "subject": "cache",
   "config": { "staleness_window_seconds": 30 },
   "steps": [
-    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "token": "tok", "delegation_expires_at": 1000000000 } },
-    { "at": 5, "get": { "epoch": 1, "token": "tok", "token_expires_at": 2 }, "expect": "miss" }
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 5, "get": { "epoch": 1, "token_expires_at": 2 }, "expect": "miss" }
   ],
   "expect": {}
 }
@@ -1998,10 +2011,10 @@ def _run_cache(case, clock):
         if "put" in step:
             p = step["put"]
             cache.put(_KEY, _decision(p["effect"]), epoch=p["epoch"],
-                      delegation_expires_at=p["delegation_expires_at"], token=p["token"])
+                      delegation_expires_at=p["delegation_expires_at"])
         elif "get" in step:
             g = step["get"]
-            got = cache.get(_KEY, last_known_epoch=g["epoch"], token=g["token"],
+            got = cache.get(_KEY, last_known_epoch=g["epoch"],
                             token_expires_at=g["token_expires_at"])
             want = step["expect"]
             actual = "hit" if got is not None else "miss"
