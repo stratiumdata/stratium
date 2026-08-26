@@ -72,3 +72,77 @@ def test_a_pdp_error_status_is_also_not_a_policy_decision(fake_pdp):
     assert d.allowed is False
     assert d.effect is None
     assert isinstance(d.error, grpc.RpcError)
+
+
+def test_create_delegation_sends_every_field(fake_pdp):
+    fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+        delegation_id="d1", token="tok", epoch=1,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
+    with Client(fake_pdp.addr) as c:
+        c.create_delegation(subject="you@example.com", agent_id="a1",
+                            tools=["Read", "Grep"], max_action_tier=2,
+                            purpose="a custom PEP", ttl_seconds=900)
+    req = fake_pdp.delegation_calls[0]
+    assert req.subject == "you@example.com"
+    assert req.agent_id == "a1"
+    assert req.purpose == "a custom PEP"
+    assert req.ttl_seconds == 900
+    assert list(req.requested_scope.tools) == ["Read", "Grep"]
+    assert req.requested_scope.max_action_tier == 2
+
+
+# parent_delegation_id is what makes a delegation a CHILD. Unforwarded, every
+# chained delegation silently becomes a root -- full authority instead of
+# narrowed, with nothing reporting an error.
+def test_parent_delegation_id_is_forwarded_when_given(fake_pdp):
+    fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+        delegation_id="d2", token="tok", epoch=1,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
+    with Client(fake_pdp.addr) as c:
+        c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                            max_action_tier=1, purpose="p", ttl_seconds=60,
+                            parent_delegation_id="parent-1")
+    assert fake_pdp.delegation_calls[0].parent_delegation_id == "parent-1"
+
+
+def test_a_root_delegation_sends_no_parent(fake_pdp):
+    fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+        delegation_id="d3", token="tok", epoch=1,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
+    with Client(fake_pdp.addr) as c:
+        c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                            max_action_tier=1, purpose="p", ttl_seconds=60)
+    assert fake_pdp.delegation_calls[0].parent_delegation_id == ""
+
+
+# The deliberate asymmetry with decide(): there is no value meaning "you have
+# no authority" that a caller could mistake for permission, so this raises.
+def test_create_delegation_raises_rather_than_returning_an_empty_grant(fake_pdp):
+    with pytest.raises(grpc.RpcError):          # no scripted response -> abort
+        with Client(fake_pdp.addr) as c:
+            c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                                max_action_tier=1, purpose="p", ttl_seconds=60)
+
+
+# Task 5 compares this against "approved" and "denied". A PDP answering
+# "Approved" would fall through to the timeout branch, quietly turning an
+# approved escalation into a deny.
+def test_get_approval_lowercases_the_status(fake_pdp):
+    fake_pdp.approval_responses.append(pdp_pb2.GetApprovalResponse(status="APPROVED"))
+    with Client(fake_pdp.addr) as c:
+        assert c.get_approval("ap-1") == "approved"
+    assert fake_pdp.approval_calls[0].approval_id == "ap-1"
+
+
+# Behavioural rather than introspective: after the context manager exits, the
+# channel is closed, so a further call cannot reach the PDP -- and, per
+# decide()'s contract, reports that as a refusal rather than raising.
+def test_leaving_the_context_manager_closes_the_channel(fake_pdp):
+    fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
+    c = Client(fake_pdp.addr)
+    with c:
+        assert c.decide(agent_id="a", subject="s", tool="Read",
+                        raw_input="{}", token="t")
+    after = c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
+    assert after.allowed is False
+    assert after.effect is None
