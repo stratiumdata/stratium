@@ -19,25 +19,65 @@ supported path. They must read the proto and infer the semantics.
 This SDK gives them the calls, done well, so writing a PEP is a small amount
 of ordinary code.
 
-## What this is NOT
+## Turnkey, and what that includes
 
-**Not an embeddable PEP.** `stratium-pep` carries roughly 1,461 lines of
-surface-agnostic decision logic — `cache.go` (513), `local_cache.go` (319),
-`escalation.go` (302), `session_file.go` (136), `reissue.go` (133),
-`config.go` (58) — covering decision caching and its staleness window,
-approval polling, session files, and re-issuance. None of that is in scope.
+A developer writing a PEP should not have to reimplement the lifecycle around
+the two calls. This SDK owns it:
 
-An SDK that reimplemented it would be reimplementing it five times, once per
-language, each copy free to drift. This repository has already demonstrated
-that failure at trivial scale: `display.ts` mirrored four tier-name strings
-from Go's `String()`, carried a doc comment saying so, had a test pinning
-them — and still drifted, `PRIVILEGED` against `PLATFORM_TRUSTED`, undetected
-because the test asserted the wrong value. `cache.go` is 513 lines deciding
-when a cached ALLOW may still be served. A staleness bug in a Python port
-serves a decision the PDP has since revoked, and reports nothing.
+| Included | Why a PEP needs it |
+|---|---|
+| **Session lifecycle** | Mint a delegation, hold the token, re-issue before expiry. Without it every PEP author writes their own expiry race. |
+| **Escalation** | `EFFECT_ESCALATE` means a human must approve. The SDK polls `GetApproval` to a timeout and returns the settled outcome. |
+| **Decision cache** | A PDP round trip per tool call is the difference between usable and not, and the staleness window is where correctness lives. |
 
-A first SDK that says plainly it does not own those is better than one that
-pretends to.
+**DPoP is not included, and does not apply to this shape.**
+`CreateDelegation` mints a plain bearer token — `internal/pdpgrpc/delegation.go:235`,
+"jkt is empty: CreateDelegation mints a bearer token". Sender-constraining
+exists for tokens crossing a network boundary to a `proxy` or `extauthz` that
+must prove the presenter holds the key. An in-process PEP holding the token it
+minted has no such boundary. `Decide` denies a sender-constrained token
+presented without a proof (`errNoProof`), but this SDK never holds one.
+
+### The cost of turnkey, and the control on it
+
+Turnkey means reimplementing per language what `stratium-pep` already has in Go:
+roughly 1,461 lines across `cache.go` (513), `local_cache.go` (319),
+`escalation.go` (302), `session_file.go` (136), `reissue.go` (133) and
+`config.go` (58). Five languages, five copies, each free to drift.
+
+That risk is real and this repository has already demonstrated it at trivial
+scale: `display.ts` mirrored four tier-name strings from Go's `String()`,
+carried a doc comment saying so, and had a test pinning them — and still
+drifted, `PRIVILEGED` against `PLATFORM_TRUSTED`, undetected because the test
+asserted the wrong value. `cache.go`'s 513 lines decide when a cached ALLOW may
+still be served; the same failure there serves a decision the PDP has since
+revoked, and reports nothing.
+
+**So the design carries its own control: a language-agnostic conformance
+suite.** A directory of JSON fixtures — scripted PDP responses, a fake clock,
+and the decision each SDK must reach — that every implementation runs against.
+Go included, so the reference is bound by it too.
+
+```
+sdk/conformance/
+  cases/
+    cache-serves-within-staleness-window.json
+    cache-refuses-after-window.json
+    escalate-approved-within-timeout.json
+    escalate-times-out-is-not-an-allow.json
+    reissue-before-expiry.json
+    transport-failure-is-not-a-decision.json
+  README.md      what a runner must implement
+```
+
+This is the same rule the rest of this repository already follows, applied
+across languages rather than within one: **a duplicate is allowed only where
+something automatically fails on divergence.** Five hand-written caches with a
+shared suite is a defensible design. Five without one is five silent
+authorization bugs waiting to be found separately.
+
+The suite is built alongside the Python SDK and is a deliverable of this spec,
+not a later intention.
 
 ## What already exists, and is therefore not built here
 
@@ -154,11 +194,19 @@ sdk/
     pyproject.toml         runtime: grpcio.  build: grpcio-tools
     stratium/
       __init__.py          Client, Decision, Grant, Effect — the public surface
+      _session.py          mint, hold, re-issue before expiry
+      _escalation.py       poll GetApproval to a timeout
+      _cache.py            decision cache and its staleness window
       _pdp/                generated stubs, committed
-    tests/                 the four safety properties, no network
+    tests/                 safety properties + the conformance runner
     example/custom_pep.py  a real PEP, run against a live stack
     README.md
+sdk/conformance/           language-agnostic fixtures every SDK must pass
 ```
+
+Everything under a leading underscore is private. The public surface stays
+`Client`, `Decision`, `Grant`, `Effect` — a PEP author should not need to know
+a cache exists, and should not be able to reach into it.
 
 `sdk/` rather than `clients/`: `clients/ui` is an application, not a library,
 and four more SDKs follow.
@@ -196,11 +244,21 @@ protobuf serialisation, nothing leaving the process.
 | `bool(d)` tracks `allowed` | the footgun that would otherwise allow everything |
 | Unreachable PDP: `allowed=False`, `effect is None`, `error` set | dial a closed port |
 | dict `raw_input` is order-independent | same pairs, different insertion order, identical bytes |
+| A cached ALLOW is not served past the staleness window | fake clock, one PDP response, two calls straddling the boundary |
+| An escalation that times out is **not** an allow | scripted `GetApproval` that never settles |
+| An approved escalation allows exactly once | the approval is spent, not reusable |
+| A token is re-issued before expiry, not after | fake clock at the re-issue threshold |
 
 Each is mutation-verified: removing `__bool__` must fail the truthiness test;
 making transport errors raise must fail the unreachable test; dropping
-`sort_keys` must fail the determinism test. A test that still passes with its
+`sort_keys` must fail the determinism test; widening the staleness comparison
+from `<` to `<=` must fail the cache test. A test that still passes with its
 protection removed is not a test.
+
+**The conformance suite is a second, independent gate.** Its fixtures are data,
+not Python, so the same cases run against the Go reference and against every
+SDK that follows. A case that passes in Python and fails in Go is a drift
+report — which is the entire reason it exists.
 
 ## The live proof
 
@@ -226,10 +284,11 @@ fully independent path, verifiable by a human in a browser.
 
 ## Out of scope
 
-- **Decision caching, approval polling, session files, re-issuance, DPoP.**
-  `stratium-pep` owns these; see "What this is NOT".
-- **`IssueToken` and `GetApproval`.** Needed for escalation handling, which
-  arrives with it.
+- **DPoP.** Not applicable to a PEP holding its own bearer token; see
+  "Turnkey, and what that includes".
+- **`IssueToken`.** `CreateDelegation` already returns a token; a separate
+  issuance path is only needed for the sender-constrained flows this SDK does
+  not serve.
 - **The other four languages.** This design is the reference they follow, and
   none should start before this one has run against a live stack.
 - **A control-plane client for the PAP's 35 HTTP routes.** A separate program
