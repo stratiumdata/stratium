@@ -1,12 +1,32 @@
 {
   "name": "escalation-timeout-is-not-an-allow",
   "subject": "escalation",
-  "config": { "poll_interval_seconds": 1, "timeout_seconds": 3 },
+  "config": {
+    "poll_interval_seconds": 1,
+    "timeout_seconds": 3
+  },
   "steps": [
-    { "at": 0, "poll": "pending" },
-    { "at": 1, "poll": "pending" },
-    { "at": 2, "poll": "pending" },
-    { "at": 3, "poll": "pending" }
+    {
+      "at": 0,
+      "poll": "pending"
+    },
+    {
+      "at": 1,
+      "poll": "pending"
+    },
+    {
+      "at": 2,
+      "poll": "pending"
+    },
+    {
+      "at": 3,
+      "poll": "pending"
+    }
   ],
-  "expect": { "retried": false, "effect": "DENY", "reason_contains": "timed out" }
+  "expect": {
+    "retried": false,
+    "effect": "DENY",
+    "reason_contains": "ap-1",
+    "note": "reason_contains binds the APPROVAL ID, not the wording. Both implementations synthesise their own timeout text -- Go says 'approval ap-1 did not resolve within the escalation timeout', Python says 'timed out after Ns without a decision' -- and neither is more correct. What every implementation must do is name WHICH approval timed out, so an operator reading the denial can find it."
+  }
 }

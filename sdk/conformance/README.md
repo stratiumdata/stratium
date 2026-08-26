@@ -49,6 +49,7 @@ they are bugs. They are recorded here rather than special-cased silently:
 | Case | Go | Python | Why |
 |---|---|---|---|
 | A `GetApproval` RPC error | `EFFECT_DENY` | `effect` is `None` | Go's `(Effect, string)` return has no way to say "no decision was reached". Python's `Decision.effect` is `Effect \| None` and every transport failure in that SDK uses `None`. Both refuse the call. |
+| Synthesised timeout wording | `approval X did not resolve within the escalation timeout` | `timed out after Ns without a decision` | Each implementation writes its own diagnostic. Cases assert that the reason names the approval id, never the phrasing. |
 | Reason text on synthesised denials | `stratium-pep: …` | `stratium: …` | Prefix only; the retry's own PDP reason is passed through unprefixed by both, which is the part that matters. |
 
 Cases covering these assert on **`allowed`**, never on the exact `effect` or
