@@ -1439,6 +1439,8 @@ problem.
 `sdk/python/tests/test_session.py`:
 
 ```python
+import pytest
+
 from stratium import Client, Effect, Session
 from stratium._pdp import pdp_pb2
 
@@ -1461,6 +1463,12 @@ def deny(reason="not in delegation approved_tools"):
 class Clock:
     def __init__(self): self.t = 0.0
     def __call__(self): return self.t
+
+
+def _b64(payload: str) -> str:
+    """A JWT segment: base64url with padding stripped, as real tokens are."""
+    import base64
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
 
 
 def session(fake_pdp, clock, **kw):
@@ -1521,6 +1529,27 @@ def test_a_deny_is_returned_with_the_pdps_own_reason(fake_pdp):
 
 
 # The grant is what the PDP gave, not what was asked for.
+# A token whose exp cannot be read is ALREADY EXPIRED, never never-expiring.
+# The tempting default -- infinity for a missing claim -- reads as harmless
+# and means a cached ALLOW is serveable forever.
+@pytest.mark.parametrize("token", [
+    "",                                       # empty
+    "not-a-jwt",                              # no segments
+    "a.b",                                    # too few segments
+    "a.!!!not-base64!!!.c",                   # undecodable payload
+    "a." + _b64('{"sub":"x"}') + ".c",        # valid JSON, no exp
+    "a." + _b64('{"exp":"soon"}') + ".c",     # exp present but not a number
+])
+def test_an_unreadable_token_expiry_is_treated_as_expired(token):
+    from stratium._session import token_expiry
+    assert token_expiry(token) == 0.0
+
+
+def test_a_real_exp_claim_is_read():
+    from stratium._session import token_expiry
+    assert token_expiry("a." + _b64('{"exp":1787769876}') + ".c") == 1787769876.0
+
+
 def test_the_session_exposes_the_granted_scope(fake_pdp):
     clock = Clock()
     s = session(fake_pdp, clock)
@@ -1547,12 +1576,40 @@ problem. Everything it returns is a Decision, including every failure.
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 
 from ._cache import DecisionCache
 from ._escalation import resolve_escalation
 from ._types import Decision, Effect, Grant, canonical_raw_input
+
+
+def token_expiry(token: str) -> float:
+    """The unix time a delegation token expires, from its own `exp` claim.
+
+    Decoded, never verified -- the PDP signs and verifies these, and a PEP
+    reading an expiry to decide whether to bother asking is not
+    authenticating anything. Go does the same with jwt.ParseUnverified.
+
+    FAILS CLOSED. Malformed, no `exp`, or a non-numeric `exp` all return 0.0
+    -- already expired -- so the cache refuses the entry. Go's
+    tokenNotExpired returns false in exactly those cases. The tempting
+    alternative, defaulting a missing claim to infinity, reads as harmless and
+    means "this token never expires", which combined with a decision cache is
+    a permanently serveable ALLOW.
+
+    No new dependency: a JWT is three base64url segments and the middle one is
+    JSON, so grpcio remains the SDK's only runtime requirement.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)          # restore stripped padding
+        exp = json.loads(base64.urlsafe_b64decode(payload))["exp"]
+        return float(exp)
+    except Exception:  # noqa: BLE001 -- any failure to read exp means expired
+        return 0.0
 
 
 class Session:
