@@ -30,10 +30,16 @@ miss — there is no third outcome.
 
 - `{"at": 0, "poll": "pending"}` — the scripted GetApproval status at that instant
 - `{"at": 4, "poll": "approved"}`
+- `{"at": 0, "poll_raises": "connection reset"}` — GetApproval fails as a
+  transport call instead of returning a status. The message text is not
+  asserted on; a runner just needs to make the poll call raise.
 
-`expect` carries `effect` (`"ALLOW"`, `"DENY"`, or `null` for a transport
-failure), `retried` (whether Decide was retried), and optionally
-`reason_contains`.
+`expect` always carries `retried` (whether Decide was retried) and at least
+one of `effect` (`"ALLOW"`, `"DENY"`, or `null` for a transport failure) or
+`allowed` (`true`/`false`); `reason_contains` is optional. A case asserting
+neither `effect` nor `allowed` binds nothing and a runner must reject it. Use
+`allowed` instead of `effect` whenever the case touches one of the divergences
+below.
 
 ## Known divergences between implementations
 
@@ -47,3 +53,16 @@ they are bugs. They are recorded here rather than special-cased silently:
 
 Cases covering these assert on **`allowed`**, never on the exact `effect` or
 reason string, so both implementations can pass the same fixture honestly.
+`escalation-poll-failure-is-not-an-allow.json` is what binds the first row —
+it scripts a `poll_raises` step and asserts only `allowed: false`.
+
+## `cache-never-serves-an-escalation` binds behaviour, not structure
+
+The reference implementation refuses to serve a cached ESCALATE from two
+places: `put` refuses to store one, and `_usable` refuses to serve one even
+if it were stored. Both are optional on their own — an implementation with
+only one of the two guards is conformant, because the case asserts the
+observable outcome ("was an ESCALATE ever served"), not which internal guard
+produced it. Do not read this case tolerating a single guard as a defect in
+the suite and go add a second assertion to force both; there is nothing to
+fix here.

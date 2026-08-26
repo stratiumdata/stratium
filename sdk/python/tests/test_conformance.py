@@ -55,14 +55,27 @@ _KEY = "conformance-key"
 
 
 def _run_escalation(case, clock):
-    statuses = [s["poll"] for s in case["steps"]]
+    # Each step scripts either a returned status ("poll") or a raised
+    # error ("poll_raises"), so a case can exercise the GetApproval
+    # transport-failure path without a real transport.
+    actions = []
+    for s in case["steps"]:
+        if "poll_raises" in s:
+            actions.append(("raise", s["poll_raises"]))
+        elif "poll" in s:
+            actions.append(("status", s["poll"]))
+        else:
+            pytest.fail(f'{case["name"]}: step has neither poll nor poll_raises')
     calls = {"n": 0}
     retried = {"yes": False}
 
     def poll(approval_id: str) -> str:
-        i = min(calls["n"], len(statuses) - 1)
+        i = min(calls["n"], len(actions) - 1)
         calls["n"] += 1
-        return statuses[i]
+        kind, value = actions[i]
+        if kind == "raise":
+            raise RuntimeError(value)
+        return value
 
     def retry():
         retried["yes"] = True
@@ -78,12 +91,23 @@ def _run_escalation(case, clock):
 
     want = case["expect"]
     assert retried["yes"] == want["retried"], f'{case["name"]}: retried mismatch'
-    if want.get("effect") is None and "effect" in want:
-        assert d.effect is None
-    elif "effect" in want:
-        assert d.effect is Effect[want["effect"]], (
-            f'{case["name"]}: effect {d.effect}, want {want["effect"]}'
+    # A case must assert effect, allowed, or both -- never neither, or it
+    # binds nothing. allowed is the only assertion available to a case that
+    # touches a documented Go/Python divergence (see the README).
+    assert "effect" in want or "allowed" in want, (
+        f'{case["name"]}: expect asserts neither effect nor allowed -- binds nothing'
+    )
+    if "allowed" in want:
+        assert d.allowed == want["allowed"], (
+            f'{case["name"]}: allowed {d.allowed}, want {want["allowed"]}'
         )
+    if "effect" in want:
+        if want["effect"] is None:
+            assert d.effect is None
+        else:
+            assert d.effect is Effect[want["effect"]], (
+                f'{case["name"]}: effect {d.effect}, want {want["effect"]}'
+            )
     if "reason_contains" in want:
         assert want["reason_contains"] in d.reason
 

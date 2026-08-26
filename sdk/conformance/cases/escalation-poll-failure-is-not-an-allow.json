@@ -1,0 +1,13 @@
+{
+  "name": "escalation-poll-failure-is-not-an-allow",
+  "subject": "escalation",
+  "config": { "poll_interval_seconds": 1, "timeout_seconds": 30 },
+  "steps": [
+    { "at": 0, "poll_raises": "connection reset" }
+  ],
+  "expect": {
+    "allowed": false,
+    "retried": false,
+    "note": "asserts allowed only: Go reports DENY here and Python reports effect=None, because Go's (Effect, string) return cannot express 'no decision was reached'. Both refuse the call, which is the part every implementation must agree on."
+  }
+}

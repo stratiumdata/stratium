@@ -1,0 +1,11 @@
+{
+  "name": "cache-expired-delegation-is-a-miss",
+  "subject": "cache",
+  "config": { "staleness_window_seconds": 30 },
+  "steps": [
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 10 } },
+    { "at": 5,  "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 11, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "miss" }
+  ],
+  "expect": { "note": "the delegation outlives the staleness window here, so only its own expiry can explain the miss" }
+}
