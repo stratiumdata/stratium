@@ -23,7 +23,11 @@ class CacheEntry:
     cached_at: float
     epoch: int
     delegation_expires_at: float
-    token: str
+    # No token field, deliberately. Go's cacheEntry has none either -- its four
+    # fields are Decision, Epoch, DelegationExpiresAt and CachedAt. Storing the
+    # token and comparing it would discard the whole cache whenever a token is
+    # reissued, which cache.go's package doc names as the reason it keys on the
+    # delegation rather than the token.
 
 
 class DecisionCache:
@@ -47,7 +51,7 @@ class DecisionCache:
 
     def put(
         self, key: str, decision: Decision, *, epoch: int,
-        delegation_expires_at: float, token: str,
+        delegation_expires_at: float,
     ) -> None:
         # W4, write side. An ESCALATE means a human must approve THIS call;
         # replaying it would approve a call nobody ever saw. The read side
@@ -60,19 +64,19 @@ class DecisionCache:
 
         self._entries[key] = CacheEntry(
             decision=decision, cached_at=self._clock(), epoch=epoch,
-            delegation_expires_at=delegation_expires_at, token=token,
+            delegation_expires_at=delegation_expires_at,
         )
         self._entries.move_to_end(key)
         while len(self._entries) > self._max:
             self._entries.popitem(last=False)
 
     def get(
-        self, key: str, *, last_known_epoch: int, token: str, token_expires_at: float,
+        self, key: str, *, last_known_epoch: int, token_expires_at: float,
     ) -> Decision | None:
         entry = self._entries.get(key)
         if entry is None:
             return None
-        if not self._usable(entry, last_known_epoch, token, token_expires_at):
+        if not self._usable(entry, last_known_epoch, token_expires_at):
             # Deleted rather than left to rot: an unusable entry can never
             # become usable again, since none of the five conditions recovers.
             del self._entries[key]
@@ -80,8 +84,7 @@ class DecisionCache:
         return entry.decision
 
     def _usable(
-        self, entry: CacheEntry, last_known_epoch: int, token: str,
-        token_expires_at: float,
+        self, entry: CacheEntry, last_known_epoch: int, token_expires_at: float,
     ) -> bool:
         now = self._clock()
         return (
@@ -89,7 +92,6 @@ class DecisionCache:
             and entry.epoch == last_known_epoch
             and now < entry.delegation_expires_at
             and now < token_expires_at
-            and entry.token == token
             # INCLUSIVE at the boundary, matching Go's
             # !now.After(CachedAt.Add(staleness)). The clock runs from the
             # entry's own cached_at, so reading never extends the window.

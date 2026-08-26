@@ -28,17 +28,16 @@ def fresh(window: float = 30.0):
     return DecisionCache(window, clock=clock), clock
 
 
-def store(cache, key="k", decision=None, *, epoch=1, expires=1e9, token="tok"):
+def store(cache, key="k", decision=None, *, epoch=1, expires=1e9):
     # `decision or allow()` would be wrong here: Decision.__bool__ tracks
     # `allowed`, which is False for an ESCALATE decision, so the `or` would
     # silently swap a passed-in escalate() for allow(). Must check identity.
     cache.put(key, decision if decision is not None else allow(), epoch=epoch,
-              delegation_expires_at=expires, token=token)
+              delegation_expires_at=expires)
 
 
-def look(cache, key="k", *, epoch=1, token="tok", token_expires=1e9):
-    return cache.get(key, last_known_epoch=epoch, token=token,
-                     token_expires_at=token_expires)
+def look(cache, key="k", *, epoch=1, token_expires=1e9):
+    return cache.get(key, last_known_epoch=epoch, token_expires_at=token_expires)
 
 
 # The boundary is INCLUSIVE, matching Go's !now.After(CachedAt.Add(staleness)).
@@ -87,7 +86,7 @@ def test_an_escalation_already_in_the_store_is_still_refused_on_read():
     from stratium._cache import CacheEntry
     cache._entries["k"] = CacheEntry(
         decision=escalate(), cached_at=0.0, epoch=1,
-        delegation_expires_at=1e9, token="tok",
+        delegation_expires_at=1e9,
     )
     assert look(cache) is None
 
@@ -110,12 +109,6 @@ def test_an_expired_token_is_a_miss():
     store(cache)
     clock.t = 1.0
     assert look(cache, token_expires=0.5) is None
-
-
-def test_a_different_token_is_a_miss():
-    cache, _ = fresh(30.0)
-    store(cache, token="tok-a")
-    assert look(cache, token="tok-b") is None
 
 
 # Different arguments to the same tool are different decisions.
