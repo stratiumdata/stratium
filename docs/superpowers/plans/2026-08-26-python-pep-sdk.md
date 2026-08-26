@@ -845,15 +845,15 @@ and nothing leaves the process."
 @dataclass(frozen=True)
 class CacheEntry:
     decision: Decision; cached_at: float; epoch: int
-    delegation_expires_at: float; token: str
+    delegation_expires_at: float
 class DecisionCache:
     def __init__(self, staleness_window: float, *, max_entries: int = 512,
                  clock: Callable[[], float] = time.monotonic) -> None
     def key(self, *, agent_id: str, subject: str, tool: str, raw_input: str) -> str
-    def get(self, key: str, *, last_known_epoch: int, token: str,
+    def get(self, key: str, *, last_known_epoch: int,
             token_expires_at: float) -> Decision | None
     def put(self, key: str, decision: Decision, *, epoch: int,
-            delegation_expires_at: float, token: str) -> None
+            delegation_expires_at: float) -> None
 ```
 
 **This task reimplements `services/cmd/stratium-pep/cache.go`.** Read
@@ -1015,7 +1015,11 @@ class CacheEntry:
     cached_at: float
     epoch: int
     delegation_expires_at: float
-    token: str
+    # No token field, deliberately. Go's cacheEntry has none either: its four
+    # fields are Decision, Epoch, DelegationExpiresAt and CachedAt. Storing the
+    # token and comparing it would discard the whole cache whenever a token is
+    # reissued -- which cache.go's own package doc names as the reason it keys
+    # on the delegation rather than the token.
 
 
 class DecisionCache:
@@ -1081,7 +1085,6 @@ class DecisionCache:
             and entry.epoch == last_known_epoch
             and now < entry.delegation_expires_at
             and now < token_expires_at
-            and entry.token == token
             # INCLUSIVE at the boundary, matching Go's
             # !now.After(CachedAt.Add(staleness)). The clock runs from the
             # entry's own cached_at, so reading never extends the window.
