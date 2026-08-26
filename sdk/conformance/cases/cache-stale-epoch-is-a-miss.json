@@ -1,0 +1,10 @@
+{
+  "name": "cache-stale-epoch-is-a-miss",
+  "subject": "cache",
+  "config": { "staleness_window_seconds": 30 },
+  "steps": [
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 1, "get": { "epoch": 2, "token_expires_at": 1000000000 }, "expect": "miss" }
+  ],
+  "expect": { "note": "a revocation bumped the epoch; the cached ALLOW is dead" }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "escalation-approved-retries-decide",
+  "subject": "escalation",
+  "config": { "poll_interval_seconds": 1, "timeout_seconds": 30 },
+  "steps": [
+    { "at": 0, "poll": "pending" },
+    { "at": 1, "poll": "approved" }
+  ],
+  "expect": {
+    "retried": true,
+    "effect": "ALLOW",
+    "note": "an approval is permission to ask again, not permission to act"
+  }
+}

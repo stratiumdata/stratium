@@ -1,0 +1,10 @@
+{
+  "name": "cache-never-serves-an-escalation",
+  "subject": "cache",
+  "config": { "staleness_window_seconds": 30 },
+  "steps": [
+    { "at": 0, "put": { "effect": "ESCALATE", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 1, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "miss" }
+  ],
+  "expect": { "note": "an approval covers THIS call; replaying it approves a call nobody saw" }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "cache-serves-within-staleness-window",
+  "subject": "cache",
+  "config": { "staleness_window_seconds": 30 },
+  "steps": [
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 29, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 30, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" }
+  ],
+  "expect": { "note": "the boundary instant is INSIDE the window: Go is !now.After(cachedAt+staleness)" }
+}

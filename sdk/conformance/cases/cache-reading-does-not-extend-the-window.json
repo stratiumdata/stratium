@@ -1,0 +1,12 @@
+{
+  "name": "cache-reading-does-not-extend-the-window",
+  "subject": "cache",
+  "config": { "staleness_window_seconds": 30 },
+  "steps": [
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 10, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 25, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "hit" },
+    { "at": 31, "get": { "epoch": 1, "token_expires_at": 1000000000 }, "expect": "miss" }
+  ],
+  "expect": { "note": "the clock runs from the entry's own cached_at, never from last use" }
+}

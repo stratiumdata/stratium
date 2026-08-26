@@ -1,0 +1,9 @@
+{
+  "name": "escalation-denied-does-not-retry",
+  "subject": "escalation",
+  "config": { "poll_interval_seconds": 1, "timeout_seconds": 30 },
+  "steps": [
+    { "at": 0, "poll": "denied" }
+  ],
+  "expect": { "retried": false, "effect": "DENY" }
+}

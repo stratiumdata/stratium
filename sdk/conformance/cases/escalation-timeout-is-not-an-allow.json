@@ -1,0 +1,12 @@
+{
+  "name": "escalation-timeout-is-not-an-allow",
+  "subject": "escalation",
+  "config": { "poll_interval_seconds": 1, "timeout_seconds": 3 },
+  "steps": [
+    { "at": 0, "poll": "pending" },
+    { "at": 1, "poll": "pending" },
+    { "at": 2, "poll": "pending" },
+    { "at": 3, "poll": "pending" }
+  ],
+  "expect": { "retried": false, "effect": "DENY", "reason_contains": "timed out" }
+}

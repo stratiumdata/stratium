@@ -1,0 +1,10 @@
+{
+  "name": "cache-expired-token-is-a-miss",
+  "subject": "cache",
+  "config": { "staleness_window_seconds": 30 },
+  "steps": [
+    { "at": 0, "put": { "effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1000000000 } },
+    { "at": 5, "get": { "epoch": 1, "token_expires_at": 2 }, "expect": "miss" }
+  ],
+  "expect": {}
+}
