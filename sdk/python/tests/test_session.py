@@ -1,0 +1,248 @@
+import time
+
+import pytest
+
+from stratium import Client, Effect, Session
+from stratium._pdp import pdp_pb2
+
+
+def _b64(payload: str) -> str:
+    """A JWT segment: base64url with padding stripped, as real tokens are."""
+    import base64
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _jwt(exp=9_999_999_999):
+    """A token shaped enough for token_expiry to read a real, far-future exp.
+
+    Every grant_resp() below routes through this by default. A bare opaque
+    string like "tok" has no "." in it, so token_expiry("tok") fails closed to
+    0.0 -- already expired -- and the decision cache would then refuse every
+    entry regardless of what these tests are actually exercising. Only the
+    token_expiry-specific tests below want a deliberately-unreadable token.
+    """
+    return "a." + _b64(f'{{"exp":{exp}}}') + ".c"
+
+
+def grant_resp(token=None, epoch=1, tools=("Read",), tier=1, did="d1"):
+    return pdp_pb2.CreateDelegationResponse(
+        delegation_id=did, token=token or _jwt(), epoch=epoch,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=tier, tools=list(tools)),
+    )
+
+
+def allow(reason="permitted"):
+    return pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW, reason=reason, epoch=1)
+
+
+def deny(reason="not in delegation approved_tools"):
+    return pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_DENY, reason=reason, epoch=1)
+
+
+def escalate(reason="needs approval", approval_id="ap-1"):
+    return pdp_pb2.DecideResponse(
+        effect=pdp_pb2.EFFECT_ESCALATE, reason=reason, approval_id=approval_id, epoch=1)
+
+
+class Clock:
+    def __init__(self): self.t = 0.0
+    def __call__(self): return self.t
+
+
+def session(fake_pdp, clock, **kw):
+    fake_pdp.delegation_responses.append(grant_resp())
+    c = Client(fake_pdp.addr)
+    return Session(c, subject="s", agent_id="a", tools=["Read"],
+                   max_action_tier=1, purpose="test", ttl_seconds=3600,
+                   clock=clock, **kw)
+
+
+def test_check_allows_and_caches(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.append(allow())
+    s = session(fake_pdp, clock, staleness_window=30.0)
+
+    first = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    second = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert first and second
+    # One PDP round trip for two identical checks: the cache was used.
+    assert len(fake_pdp.decide_calls) == 1
+
+
+def test_the_cache_expires_and_the_pdp_is_asked_again(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([allow(), allow()])
+    s = session(fake_pdp, clock, staleness_window=30.0)
+
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    clock.t = 30.001
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert len(fake_pdp.decide_calls) == 2
+
+
+def test_different_arguments_are_different_decisions(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([allow(), deny()])
+    s = session(fake_pdp, clock)
+
+    a = s.check(tool="Read", raw_input={"file_path": "/tmp/a"})
+    b = s.check(tool="Read", raw_input={"file_path": "/tmp/b"})
+
+    assert a
+    assert not b
+    assert len(fake_pdp.decide_calls) == 2
+
+
+def test_a_deny_is_returned_with_the_pdps_own_reason(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.append(deny("tool \"Bash\" not in delegation approved_tools"))
+    s = session(fake_pdp, clock)
+
+    d = s.check(tool="Bash", raw_input={})
+    assert not d
+    assert d.effect is Effect.DENY
+    assert "not in delegation approved_tools" in d.reason
+
+
+# A denial that is NOT about the token must not trigger a re-mint: re-minting
+# would need the same delegation that already denied this call, and burns a
+# CreateDelegation round trip for nothing.
+def test_a_non_token_denial_does_not_reissue(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.append(deny("not in delegation approved_tools"))
+    s = session(fake_pdp, clock)
+
+    d = s.check(tool="Bash", raw_input={})
+    assert not d
+    assert len(fake_pdp.delegation_calls) == 1  # only the initial mint
+
+
+# The core of reissue.go's contract: a denial that names the token gets
+# exactly one re-mint and one retry, and if that retry allows, the caller
+# sees the allow -- not the stale denial.
+def test_a_token_denial_reissues_once_and_the_retry_can_allow(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([deny("token expired"), allow()])
+    s = session(fake_pdp, clock)
+    # Queued AFTER session() so the reissue -- not the initial mint -- consumes
+    # it: delegation_responses is a FIFO the constructor already drained once.
+    fake_pdp.delegation_responses.append(grant_resp(epoch=2, did="d2"))
+
+    d = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert d
+    assert len(fake_pdp.decide_calls) == 2         # the original ask, one retry
+    assert len(fake_pdp.delegation_calls) == 2      # the initial mint, one reissue
+    assert s.grant.delegation_id == "d2"
+
+
+# If the retry ALSO denies for the token, that is a real denial with a fresh
+# token, not a reason to mint a third time. reissue.go deliberately does not
+# loop.
+def test_a_token_denial_reissues_only_once_even_if_the_retry_denies_again(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([deny("token expired"), deny("token expired")])
+    s = session(fake_pdp, clock)
+    fake_pdp.delegation_responses.append(grant_resp(epoch=2, did="d2"))
+
+    d = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert not d
+    assert len(fake_pdp.decide_calls) == 2          # no third attempt
+    assert len(fake_pdp.delegation_calls) == 2       # exactly one reissue
+    assert "token expired" in d.reason
+
+
+# After a reissue, Session must still be usable: the decision cache it swaps
+# in must actually cache, not just avoid crashing.
+def test_after_a_reissue_the_new_cache_still_caches(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([deny("token expired"), allow()])
+    s = session(fake_pdp, clock)
+    fake_pdp.delegation_responses.append(grant_resp(epoch=2, did="d2"))
+
+    first = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    second = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert first and second
+    assert len(fake_pdp.decide_calls) == 2  # not 3: the second check was a cache hit
+
+
+# The reissue must store the NEW token's own expiry, not leave the old
+# grant's expiry in place. A large staleness_window and a distant delegation
+# expiry isolate this from the other two cache conditions -- the only thing
+# that can turn the second, later check into a miss here is a stale
+# token_expires_at surviving the reissue.
+def test_after_a_reissue_the_cache_uses_the_new_tokens_own_expiry(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([deny("token expired"), allow(), allow()])
+    s = session(fake_pdp, clock, staleness_window=1000.0)
+    fake_pdp.delegation_responses.append(
+        grant_resp(token=_jwt(exp=100), epoch=2, did="d2"))
+
+    first = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    clock.t = 100.001  # past the REISSUED token's exp, nowhere near the original's
+    second = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert first and second
+    # A stale token_expires_at (left over from the pre-reissue grant, whose
+    # default expiry is years away) would still say "not expired" here and
+    # serve a cache hit -- exactly the permanently-serveable-ALLOW risk the
+    # fail-closed design exists to prevent.
+    assert len(fake_pdp.decide_calls) == 3
+
+
+# An escalation's retry must consume the SAME approval, not open a new one --
+# the exact bug this SDK exists to avoid: without approval_id on the retry,
+# an approved escalation would ask again from scratch and get ESCALATE again.
+def test_an_escalation_retries_with_the_approval_id_and_can_allow(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([escalate(approval_id="ap-9"), allow()])
+    fake_pdp.approval_responses.append(pdp_pb2.GetApprovalResponse(status="approved"))
+    s = session(fake_pdp, clock, approval_poll_interval=0.01, approval_timeout=5.0)
+
+    d = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert d
+    assert len(fake_pdp.decide_calls) == 2
+    assert fake_pdp.decide_calls[1].approval_id == "ap-9"
+
+
+# The grant is what the PDP gave, not what was asked for.
+# A token whose exp cannot be read is ALREADY EXPIRED, never never-expiring.
+# The tempting default -- infinity for a missing claim -- reads as harmless
+# and means a cached ALLOW is serveable forever.
+@pytest.mark.parametrize("token", [
+    "",                                       # empty
+    "not-a-jwt",                              # no segments
+    "a.b",                                    # too few segments
+    "a.!!!not-base64!!!.c",                   # undecodable payload
+    "a." + _b64('{"sub":"x"}') + ".c",        # valid JSON, no exp
+    "a." + _b64('{"exp":"soon"}') + ".c",     # exp present but not a number
+])
+def test_an_unreadable_token_expiry_is_treated_as_expired(token):
+    from stratium._session import token_expiry
+    assert token_expiry(token) == 0.0
+
+
+def test_a_real_exp_claim_is_read():
+    from stratium._session import token_expiry
+    assert token_expiry("a." + _b64('{"exp":1787769876}') + ".c") == 1787769876.0
+
+
+def test_the_session_exposes_the_granted_scope(fake_pdp):
+    clock = Clock()
+    s = session(fake_pdp, clock)
+    assert s.grant.granted_scope.tools == ("Read",)
+
+
+# The cache compares `now` against ABSOLUTE unix expiries, so Session's own
+# default clock has to be time.time. time.monotonic reads seconds since boot
+# and would make every expiry comparison meaningless -- but every other test
+# here injects a fake clock, so nothing else would notice this regress.
+def test_the_default_clock_is_wall_time_not_monotonic():
+    import inspect
+    default = inspect.signature(Session.__init__).parameters["clock"].default
+    assert default is time.time
