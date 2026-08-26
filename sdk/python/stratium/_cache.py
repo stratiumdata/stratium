@@ -33,8 +33,16 @@ class CacheEntry:
 class DecisionCache:
     def __init__(
         self, staleness_window: float, *, max_entries: int = 512,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
     ) -> None:
+        # time.time, NOT time.monotonic. Two of the five conditions compare
+        # `now` against ABSOLUTE expiries -- the delegation's, and the token's
+        # own `exp` claim -- which are unix timestamps. A monotonic clock reads
+        # seconds since boot, so `now < token_expires_at` would be true for
+        # decades and neither expiry would ever reject. Go uses time.Now() for
+        # exactly this comparison. The staleness window is short enough that a
+        # wall-clock adjustment is the lesser risk, and it is the risk Go
+        # already accepts.
         self._window = staleness_window
         self._max = max_entries
         self._clock = clock

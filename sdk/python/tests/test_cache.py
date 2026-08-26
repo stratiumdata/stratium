@@ -111,6 +111,22 @@ def test_an_expired_token_is_a_miss():
     assert look(cache, token_expires=0.5) is None
 
 
+# The default clock must read the same epoch as the expiries it is compared
+# against. With time.monotonic (seconds since boot) this passes trivially for
+# decades, so a cache built with defaults would serve a decision whose token
+# expired long ago. Injected-clock tests cannot see this: they invent both
+# sides of the comparison in the same units.
+def test_the_default_clock_shares_an_epoch_with_absolute_expiries():
+    import time as _time
+
+    cache = DecisionCache(30.0)            # no clock injected -- the default
+    cache.put("k", allow(), epoch=1, delegation_expires_at=_time.time() + 300)
+
+    # A token that expired an hour ago, in unix terms.
+    assert cache.get("k", last_known_epoch=1,
+                     token_expires_at=_time.time() - 3600) is None
+
+
 # Different arguments to the same tool are different decisions.
 def test_the_key_separates_arguments():
     cache, _ = fresh(30.0)
