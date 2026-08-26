@@ -1099,9 +1099,15 @@ cd sdk/python && python3 -m pytest tests/ -q
 
 Change `now <= entry.cached_at + self._window` to `now < ...`, run the tests,
 and confirm `test_serves_within_the_window_including_its_last_instant` FAILS.
-Restore. Then remove the `ESCALATE` guard from `put` and confirm
-`test_an_escalation_is_never_cached_and_never_served` FAILS. Restore. Record
-both outputs in the commit body.
+Restore.
+
+Then the ESCALATE guard, which is deliberately in TWO places. Removing it from
+`put` alone fails nothing — the read-side guard in `_usable` still refuses the
+entry, which is defence in depth working as intended, not a gap. Removing it
+from `_usable` alone also fails nothing unless a test inserts a `CacheEntry`
+directly, bypassing `put`. Both halves need their own test: one that goes
+through `put`, and one that seeds the store directly and then reads. Record
+each mutation's real output.
 
 - [ ] **Step 6: Commit**
 
