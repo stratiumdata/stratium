@@ -77,7 +77,6 @@ class Session:
         self._sleep = sleep
         self._poll = approval_poll_interval
         self._approval_timeout = approval_timeout
-        self._window = staleness_window
         self._cache = DecisionCache(staleness_window, clock=clock)
 
         self._grant: Grant = client.create_delegation(**self._mint)
