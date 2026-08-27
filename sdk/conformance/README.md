@@ -26,6 +26,26 @@ is not running these cases.
 `expect` is `"hit"` or `"miss"`. A hit that fails any usability condition is a
 miss — there is no third outcome.
 
+Three rules a runner enforces, stated here the way the escalation section
+states its own:
+
+- Every step is a `put` or a `get`. A step that is neither is rejected rather
+  than skipped — a silently-skipped step is a case that reports green while
+  binding less than it reads as binding.
+- Every `get` carries `expect`. A `get` without one reads the cache and
+  asserts nothing.
+- Every case contains at least one `get`. A case that only writes never reads
+  the cache at all.
+
+The third rule is **Python-only today.** Go's `runCacheCase` enforces the
+first two (`conformance_test.go:252` and `:264`) but has no "case never gets"
+check, so a fixture with no `get` step passes Go and fails Python. Python
+being the stricter of the two is the safe direction — the case it rejects
+binds nothing in either language — but an undocumented asymmetry inside a
+suite whose stated purpose is that "a case that passes here and fails in Go is
+a drift report" would be rediscovered as a false drift report. It is written
+down instead. Do not close it by loosening Python.
+
 ## Escalation steps
 
 - `{"at": 0, "poll": "pending"}` — the scripted GetApproval status at that instant
