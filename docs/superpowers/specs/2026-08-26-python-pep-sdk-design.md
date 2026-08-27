@@ -327,6 +327,40 @@ fully independent path, verifiable by a human in a browser.
 - **A control-plane client for the PAP's 35 HTTP routes.** A separate program
   of work whose first task is an OpenAPI spec that does not exist.
 
+## Known gap: the suite cannot bind a composition
+
+`sdk/conformance/` has exactly two subjects, `cache` and `escalation`, and they
+never compose. The cache subject drives the decision cache directly against one
+implicit entry with no key concept at all; the escalation subject drives the
+escalation resolver with no cache in sight.
+
+That gap is not theoretical. It is how this SDK shipped its one security defect:
+`Session.check` cached the decision produced *after* a human approved an
+escalation, so one approval of `Bash(rm -rf /data)` authorized unlimited
+identical repeats for the whole staleness window. Every unit was correct on its
+own — `put()` refuses an `ESCALATE`, the resolver returns the settled verdict —
+and the suite passed 11/11 the entire time, because the defect existed only in
+the composition of two things it tests separately.
+
+Two rules an SDK must obey are therefore bound by nothing in the shared suite:
+
+- **Nothing derived from the escalation path is ever cached** — not the approved
+  ALLOW, not a timeout's synthetic DENY, not a denial. Only the decision that
+  settled before any wait began. It holds by POSITION, not by inspecting the
+  resolved effect: that response is an ordinary ALLOW or DENY and no check on it
+  could distinguish it from one the PDP reached unaided.
+- **The delegation id is part of the cache key**, so a re-issue misses
+  structurally rather than by convention.
+
+Both are currently bound by one Python test and one Go test — in the two
+implementations that already have them. A third language gets no signal from the
+artifact that is supposed to be the cross-language contract.
+
+Closing this needs a third conformance subject that drives a session-shaped
+object end to end, designed to be drivable in five languages. That is a design
+decision rather than a fixture, and it should be settled before the next SDK
+starts rather than after.
+
 ## Risks
 
 - **`grpcio` is a heavy runtime dependency** and a native wheel. Some Python
