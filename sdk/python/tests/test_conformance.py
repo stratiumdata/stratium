@@ -33,14 +33,24 @@ def _decision(effect_name: str):
 
 
 def _run_cache(case, clock):
+    # Every rejection below exists because a fixture that asserts nothing must
+    # not pass -- a silently-skipped step or an unread cache is a case that
+    # reports green while binding no behaviour at all, and these cases bind
+    # five languages. The Go runner refuses the same shapes
+    # (conformance_test.go:246,262).
     cache = DecisionCache(case["config"]["staleness_window_seconds"], clock=clock)
-    for step in case["steps"]:
+    gets = 0
+    for i, step in enumerate(case["steps"]):
         clock.t = float(step["at"])
         if "put" in step:
             p = step["put"]
             cache.put(_KEY, _decision(p["effect"]), epoch=p["epoch"],
                       delegation_expires_at=p["delegation_expires_at"])
         elif "get" in step:
+            gets += 1
+            assert "expect" in step, (
+                f'{case["name"]}: step {i}: get step asserts nothing (no "expect")'
+            )
             g = step["get"]
             got = cache.get(_KEY, last_known_epoch=g["epoch"],
                             token_expires_at=g["token_expires_at"])
@@ -49,6 +59,12 @@ def _run_cache(case, clock):
             assert actual == want, (
                 f'{case["name"]}: at t={step["at"]} expected {want}, got {actual}'
             )
+        else:
+            pytest.fail(f'{case["name"]}: step {i} has neither put nor get')
+    assert gets, (
+        f'{case["name"]}: no get step -- the case never reads the cache '
+        f'and binds nothing'
+    )
 
 
 _KEY = "conformance-key"
@@ -123,3 +139,31 @@ def test_conformance_case(path):
         _run_escalation(case, clock)
     else:
         pytest.fail(f'unknown subject {case["subject"]!r}')
+
+
+# F9. A fixture that asserts nothing must not pass. The escalation branch
+# already refuses a case that binds neither effect nor allowed; the cache
+# branch refused nothing -- it silently skipped a step that was neither a put
+# nor a get, took a get with no "expect" as a KeyError rather than a verdict on
+# the fixture, and passed a case that never read the cache at all. The Go
+# runner t.Fatalf's on the first two (conformance_test.go:246,262); the third
+# is the same defect one level up, and these cases bind five languages.
+_PUT = {"effect": "ALLOW", "epoch": 1, "delegation_expires_at": 1e9}
+_GET = {"epoch": 1, "token_expires_at": 1e9}
+
+
+@pytest.mark.parametrize("steps", [
+    # The malformed step is sandwiched between a put and a passing get, so the
+    # "no get at all" guard cannot cover for the missing one: with the step
+    # rejection removed, step 1 is silently skipped and the case goes green.
+    pytest.param([{"at": 0, "put": _PUT}, {"at": 1},
+                  {"at": 2, "get": _GET, "expect": "hit"}],
+                 id="step_is_neither_put_nor_get"),
+    pytest.param([{"at": 0, "put": _PUT}, {"at": 1, "get": _GET}], id="get_has_no_expect"),
+    pytest.param([{"at": 0, "put": _PUT}], id="case_never_gets"),
+])
+def test_the_cache_runner_rejects_a_case_that_binds_nothing(steps):
+    case = {"name": "synthetic", "subject": "cache",
+            "config": {"staleness_window_seconds": 30.0}, "steps": steps}
+    with pytest.raises((AssertionError, pytest.fail.Exception)):
+        _run_cache(case, FakeClock())
