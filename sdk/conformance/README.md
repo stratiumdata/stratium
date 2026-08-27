@@ -43,12 +43,12 @@ below.
 
 ## Known divergences between implementations
 
-Two differences are intentional, and a runner must not be written as though
+Three differences are intentional, and a runner must not be written as though
 they are bugs. They are recorded here rather than special-cased silently:
 
 | Case | Go | Python | Why |
 |---|---|---|---|
-| A `GetApproval` RPC error | `EFFECT_DENY` | `effect` is `None` | Go's `(Effect, string)` return has no way to say "no decision was reached". Python's `Decision.effect` is `Effect \| None` and every transport failure in that SDK uses `None`. Both refuse the call. |
+| An RPC error anywhere in the escalation path — the `GetApproval` poll, or the retry `Decide` after an approval | `EFFECT_DENY` | `effect` is `None` | Go's `(Effect, string)` return has no way to say "no decision was reached". Python's `Decision.effect` is `Effect \| None` and every transport failure in that SDK uses `None`. Both refuse the call. |
 | Synthesised timeout wording | `approval X did not resolve within the escalation timeout` | `timed out after Ns without a decision` | Each implementation writes its own diagnostic. Cases assert that the reason names the approval id, never the phrasing. |
 | Reason text on synthesised denials | `stratium-pep: …` | `stratium: …` | Prefix only; the retry's own PDP reason is passed through unprefixed by both, which is the part that matters. |
 
@@ -56,6 +56,15 @@ Cases covering these assert on **`allowed`**, never on the exact `effect` or
 reason string, so both implementations can pass the same fixture honestly.
 `escalation-poll-failure-is-not-an-allow.json` is what binds the first row —
 it scripts a `poll_raises` step and asserts only `allowed: false`.
+
+The first row deliberately names two call sites, because they are two
+instances of ONE divergence rather than two divergences. A failing retry
+`Decide` after an approval has the identical shape: Go returns `EFFECT_DENY`
+(`escalation.go:204`), Python returns the retry's own decision with
+`effect is None` (`_escalation.py:64`). Only the poll instance has a fixture
+today; a case added for the retry instance is covered by this same row and
+must assert `allowed` for the same reason. Do not record it as a new
+divergence.
 
 ## `cache-never-serves-an-escalation` binds behaviour, not structure
 

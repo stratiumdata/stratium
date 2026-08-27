@@ -2426,6 +2426,11 @@ in Task 10's README.
    than reimplementing them in the runner. A runner with its own copy of
    `cacheEntryUsable` would pass its own cases while the product drifted —
    exactly the failure the suite exists to prevent.
+   **Superseded during execution:** the runner stayed in `package main`
+   alongside `cacheEntryUsable` and `resolveApproval`, which calls them
+   directly. That satisfies the ruling's actual requirement — one copy of each
+   predicate, the product's own — without the extra package the ruling assumed
+   was needed to get there.
 
 **Known gaps, deliberate:**
 

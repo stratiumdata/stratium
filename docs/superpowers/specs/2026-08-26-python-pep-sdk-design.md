@@ -26,7 +26,7 @@ the two calls. This SDK owns it:
 
 | Included | Why a PEP needs it |
 |---|---|
-| **Session lifecycle** | Mint a delegation, hold the token, re-issue before expiry. Without it every PEP author writes their own expiry race. |
+| **Session lifecycle** | Mint a delegation, hold the token, re-issue it once when a denial names the token as the problem. Without it every PEP author writes their own expiry race. |
 | **Escalation** | `EFFECT_ESCALATE` means a human must approve. The SDK polls `GetApproval` to a timeout and returns the settled outcome. |
 | **Decision cache** | A PDP round trip per tool call is the difference between usable and not, and the staleness window is where correctness lives. |
 
@@ -65,10 +65,14 @@ sdk/conformance/
     cache-refuses-after-window.json
     escalate-approved-within-timeout.json
     escalate-times-out-is-not-an-allow.json
-    reissue-before-expiry.json
     transport-failure-is-not-a-decision.json
   README.md      what a runner must implement
 ```
+
+Case names above are illustrative; the set that shipped is whatever
+`sdk/conformance/cases/` currently holds. There is no re-issue case: re-issue
+turned out to be reactive (below), so it has no fixed clock threshold a
+language-agnostic fixture could script.
 
 This is the same rule the rest of this repository already follows, applied
 across languages rather than within one: **a duplicate is allowed only where
@@ -193,8 +197,10 @@ sdk/
   python/
     pyproject.toml         runtime: grpcio.  build: grpcio-tools
     stratium/
-      __init__.py          Client, Decision, Grant, Effect — the public surface
-      _session.py          mint, hold, re-issue before expiry
+      __init__.py          the public surface: Client, Session, Decision,
+                           Effect, Grant, Scope, Leg, Legs
+      _session.py          mint, hold, cache, escalate, re-issue once on a
+                           denial that names the token
       _escalation.py       poll GetApproval to a timeout
       _cache.py            decision cache and its staleness window
       _pdp/                generated stubs, committed
@@ -204,9 +210,14 @@ sdk/
 sdk/conformance/           language-agnostic fixtures every SDK must pass
 ```
 
-Everything under a leading underscore is private. The public surface stays
-`Client`, `Decision`, `Grant`, `Effect` — a PEP author should not need to know
-a cache exists, and should not be able to reach into it.
+Everything under a leading underscore is private. The public surface is
+whatever `stratium.__all__` lists, which shipped as eight names: `Client`,
+`Session`, `Decision`, `Effect`, `Grant`, `Scope`, `Leg`, `Legs`. The four
+beyond the original list are the value types a caller unavoidably receives —
+`Session` is the turnkey entry point itself, and `Scope`, `Leg` and `Legs` are
+reachable from a `Grant` or a `Decision`, so exporting them is what lets a
+caller name and annotate what it was already handed. A PEP author still should
+not need to know a cache exists, and still cannot reach into it.
 
 `sdk/` rather than `clients/`: `clients/ui` is an application, not a library,
 and four more SDKs follow.
@@ -247,7 +258,7 @@ protobuf serialisation, nothing leaving the process.
 | A cached ALLOW is not served past the staleness window | fake clock, one PDP response, two calls straddling the boundary |
 | An escalation that times out is **not** an allow | scripted `GetApproval` that never settles |
 | An approved escalation allows exactly once | the approval is spent, not reusable |
-| A token is re-issued before expiry, not after | fake clock at the re-issue threshold |
+| A denial naming the token re-issues exactly once, and the retry's answer is final | scripted DENY whose reason names the token, then a fresh grant |
 
 Each is mutation-verified: removing `__bool__` must fail the truthiness test;
 making transport errors raise must fail the unreachable test; dropping
