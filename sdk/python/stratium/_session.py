@@ -50,7 +50,19 @@ class Session:
         staleness_window: float = 30.0, approval_poll_interval: float = 2.0,
         approval_timeout: float = 120.0,
         clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        """Mint a delegation and hold it.
+
+        `clock` and `sleep` are ONE decision, not two, which is why they sit
+        together here and are always passed together into resolve_escalation.
+        The escalation wait measures its deadline with `clock` and spends the
+        interval with `sleep`; fake only the first and the deadline is on a
+        clock nothing ever advances, so `clock() >= deadline` is never true and
+        check() polls GetApproval forever on an escalation. A caller who fakes
+        one MUST fake the other -- typically a `sleep` that advances the same
+        fake `clock` by the seconds it was handed.
+        """
         self._client = client
         self._subject = subject
         self._agent_id = agent_id
@@ -60,6 +72,7 @@ class Session:
         )
         self._ttl = ttl_seconds
         self._clock = clock
+        self._sleep = sleep
         self._poll = approval_poll_interval
         self._approval_timeout = approval_timeout
         self._window = staleness_window
@@ -121,7 +134,10 @@ class Session:
                                   approval_id=decision.approval_id),
                 approval_id=decision.approval_id,
                 poll_interval=self._poll, timeout=self._approval_timeout,
-                clock=self._clock,
+                # Both, always. See __init__: the deadline is measured on clock
+                # and the interval is spent in sleep, so passing one without the
+                # other makes the wait unbounded.
+                clock=self._clock, sleep=self._sleep,
             )
 
         self._cache.put(

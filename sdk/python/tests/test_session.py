@@ -316,3 +316,37 @@ def test_an_escalation_that_times_out_is_not_cached(fake_pdp):
     assert first.effect is Effect.DENY
     # Two Decide calls: the DENY the first wait synthesised was not cached.
     assert len(fake_pdp.decide_calls) == 2
+
+
+# F2. clock and sleep are ONE decision, not two. Session took only clock, so
+# the escalation deadline was measured on the injected clock while the wait
+# used the real time.sleep -- with any clock that does not track real time,
+# clock() >= deadline is never true and check() polls GetApproval forever.
+#
+# The poll script is finite and the interval is tiny, so this test cannot hang
+# the suite: without the sleep pass-through the real sleep advances nothing,
+# the fake clock stays at 0, and the loop runs the script out and reports a
+# transport failure (effect None) instead of the timeout DENY asserted here.
+def test_an_escalation_times_out_on_the_injected_clock(fake_pdp):
+    clock = Clock()
+    slept = []
+
+    def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.t += seconds        # the only thing that advances this clock
+
+    fake_pdp.decide_responses.append(escalate(approval_id="ap-1"))
+    fake_pdp.approval_responses.extend(
+        [pdp_pb2.GetApprovalResponse(status="pending")] * 10)
+    s = session(fake_pdp, clock, sleep=fake_sleep,
+                approval_poll_interval=0.01, approval_timeout=0.05)
+
+    d = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert not d
+    assert d.effect is Effect.DENY          # settled, not still pending
+    assert "ap-1" in d.reason               # names WHICH approval timed out
+    # Bounded by the deadline on the injected clock, not by exhausting the
+    # scripted poll responses: timeout/interval is 5, so 6 polls at most.
+    assert len(fake_pdp.approval_calls) <= 8
+    assert slept and all(s == 0.01 for s in slept)
