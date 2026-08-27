@@ -5,5 +5,10 @@
   "steps": [
     { "at": 0, "poll": "denied" }
   ],
-  "expect": { "retried": false, "effect": "DENY" }
+  "expect": {
+    "retried": false,
+    "effect": "DENY",
+    "reason_contains": "ap-1",
+    "note": "reason_contains binds the APPROVAL ID, not the wording. Both implementations synthesise their own denial text and differ at least by prefix -- Go 'stratium-pep: ...', Python 'stratium: ...', the third documented divergence -- and neither is more correct. What every implementation must do is name WHICH approval was denied, so an operator reading the denial can find it. Same lesson as escalation-timeout-is-not-an-allow, which learned it first."
+  }
 }
