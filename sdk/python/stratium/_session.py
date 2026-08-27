@@ -58,10 +58,13 @@ class Session:
         together here and are always passed together into resolve_escalation.
         The escalation wait measures its deadline with `clock` and spends the
         interval with `sleep`; fake only the first and the deadline is on a
-        clock nothing ever advances, so `clock() >= deadline` is never true and
-        check() polls GetApproval forever on an escalation. A caller who fakes
-        one MUST fake the other -- typically a `sleep` that advances the same
-        fake `clock` by the seconds it was handed.
+        clock nothing ever advances, so `clock() >= deadline` is never true.
+        A caller who fakes one SHOULD fake the other -- typically a `sleep`
+        that advances the same fake `clock` by the seconds it was handed --
+        or the wait runs out resolve_escalation's poll-COUNT bound instead,
+        spending approval_timeout in real seconds to get there. That bound is
+        what keeps the unpaired shape merely slow rather than unbounded; it is
+        a backstop, not a licence to leave the pair unpaired.
         """
         self._client = client
         self._subject = subject
@@ -138,8 +141,9 @@ class Session:
                 approval_id=decision.approval_id,
                 poll_interval=self._poll, timeout=self._approval_timeout,
                 # Both, always. See __init__: the deadline is measured on clock
-                # and the interval is spent in sleep, so passing one without the
-                # other makes the wait unbounded.
+                # and the interval is spent in sleep, so passing one without
+                # the other leaves the wait to resolve_escalation's poll-count
+                # backstop and spends the whole timeout in real seconds.
                 clock=self._clock, sleep=self._sleep,
             )
 

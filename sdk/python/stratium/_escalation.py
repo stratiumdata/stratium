@@ -39,9 +39,30 @@ def resolve_escalation(
         # nothing to poll for, and polling with an empty id would open a
         # fresh approval instead. Deny rather than guess.
         return _deny("stratium: escalation carried no approval id")
+    if poll_interval <= 0:
+        # The poll bound below divides by this: 0 raises ZeroDivisionError and
+        # a negative yields a negative bound. Refused here, and refused as a
+        # Decision rather than an exception -- Session.check's contract is that
+        # every failure comes back as one -- so a caller mistake can never
+        # become either a crash or an unbounded wait.
+        return _deny(
+            f"stratium: poll_interval must be positive, got {poll_interval}"
+        )
 
     deadline = clock() + timeout
-    while True:
+    timed_out = _deny(
+        f"stratium: approval {approval_id} timed out after {timeout}s "
+        f"without a decision"
+    )
+    # Bounded by a poll COUNT as well as by the deadline. The deadline is only
+    # as good as the clock it is measured on, and `clock` and `sleep` are
+    # independent keyword arguments with independent defaults: fake the first
+    # without the second and nothing ever advances it, so `clock() >= deadline`
+    # is never true and this loop polls GetApproval forever. The count holds
+    # regardless of what any caller injects, including this function's own
+    # default pair. Both exits produce the SAME timeout deny -- one timeout
+    # behaviour, not two.
+    for _ in range(int(timeout / poll_interval) + 2):
         try:
             status = poll(approval_id)
         except Exception as err:  # noqa: BLE001
@@ -72,10 +93,8 @@ def resolve_escalation(
             return _deny(f"stratium: approval {approval_id} was denied")
 
         if clock() >= deadline:
-            # Never an allow, and never the original ESCALATE: a caller
-            # matching on effect deserves to know this settled as a refusal.
-            return _deny(
-                f"stratium: approval {approval_id} timed out after {timeout}s "
-                f"without a decision"
-            )
+            break
         sleep(poll_interval)
+    # Never an allow, and never the original ESCALATE: a caller matching on
+    # effect deserves to know this settled as a refusal.
+    return timed_out

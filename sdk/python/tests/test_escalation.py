@@ -60,7 +60,11 @@ def test_an_approval_retries_decide_and_returns_that_answer():
 # ESCALATE gets False, but a caller matching on effect deserves the truth.
 def test_a_timeout_is_a_deny_naming_the_timeout():
     clock = Clock()
-    poll = polls()  # never settles
+    polled = []
+
+    def poll(approval_id: str) -> str:
+        polled.append(approval_id)
+        return "pending"  # never settles
 
     d = resolve_escalation(
         poll, lambda: allowed(), approval_id="ap-1",
@@ -71,6 +75,13 @@ def test_a_timeout_is_a_deny_naming_the_timeout():
     assert d.effect is Effect.DENY
     assert "timed out" in d.reason
     assert "ap-1" in d.reason
+    # Paired clock and sleep, so the DEADLINE is what ends this wait -- polls
+    # at t=0,1,2,3 and stops the instant it is reached. The count bound (5
+    # here) is the backstop for an unpaired caller and must never be the
+    # tighter of the two: a bound that fired first would cut a real wait short
+    # of the timeout its caller asked for.
+    assert clock.t == 3.0
+    assert len(polled) == 4
 
 
 def test_a_denied_approval_is_a_deny_and_does_not_retry():
@@ -180,3 +191,69 @@ def test_a_polling_failure_denies_without_claiming_the_policy_denied():
     assert d.allowed is False
     assert d.effect is None, "no policy decision was reached"
     assert d.error is not None
+
+
+def tripwire(limit: int, status: str = "pending"):
+    """A poll callable that RAISES once past `limit` calls.
+
+    The tripwire is what keeps a regression in the two G1 tests below a
+    failure rather than a hang. resolve_escalation catches whatever poll
+    raises and returns a transport failure (effect None), so an unbounded
+    loop fails the DENY assertions in milliseconds. Asserting on wall-clock
+    waiting instead would hang the suite on exactly the regression the test
+    exists to catch.
+    """
+    calls: list[str] = []
+
+    def poll(approval_id: str) -> str:
+        calls.append(approval_id)
+        if len(calls) > limit:
+            raise AssertionError(f"polled {len(calls)} times, bound is {limit}")
+        return status
+
+    return poll, calls
+
+
+# G1. The wait is bounded by a poll COUNT as well as by the deadline. The
+# deadline is only as good as the clock it is measured on: a caller who fakes
+# `clock` without also faking `sleep` never advances it, so `clock() >=
+# deadline` is never true and the deadline bounds nothing. That pairing is
+# constructible through the documented public API -- both are keyword
+# arguments with independent defaults -- and resolve_escalation's OWN default
+# sleep is the real time.sleep, which is that shape whenever the caller's
+# clock is fake.
+def test_a_clock_that_never_advances_still_terminates():
+    clock = Clock()                     # frozen at 0.0: nothing moves it
+    limit = 12                          # int(0.01 / 0.001) + 2
+    poll, calls = tripwire(limit)
+
+    d = resolve_escalation(
+        poll, lambda: allowed(), approval_id="ap-1",
+        poll_interval=0.001, timeout=0.01,
+        clock=clock,                    # and deliberately NO sleep=
+    )
+
+    # The same timeout DENY the deadline produces -- one timeout behaviour,
+    # not two.
+    assert d.effect is Effect.DENY
+    assert "timed out" in d.reason
+    assert "ap-1" in d.reason
+    assert len(calls) == limit
+    assert clock.t == 0.0, "the deadline never fired here; the count did"
+
+
+# A non-positive interval is a caller mistake that the count bound would
+# divide by: 0 raises ZeroDivisionError and a negative yields a negative
+# bound. Refused up front, and refused as a Decision rather than an exception
+# -- Session.check's contract is that every failure comes back as one.
+def test_a_non_positive_poll_interval_denies_without_polling():
+    for interval in (0.0, -1.0):
+        poll, calls = tripwire(5)
+        d = resolve_escalation(
+            poll, lambda: allowed(), approval_id="ap-1",
+            poll_interval=interval, timeout=30.0,
+            clock=Clock(), sleep=lambda s: None,
+        )
+        assert d.effect is Effect.DENY, interval
+        assert "poll_interval" in d.reason, interval
+        assert not calls, interval
