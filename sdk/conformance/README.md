@@ -81,10 +81,13 @@ The first row deliberately names two call sites, because they are two
 instances of ONE divergence rather than two divergences. A failing retry
 `Decide` after an approval has the identical shape: Go returns `EFFECT_DENY`
 (`escalation.go:204`), Python returns the retry's own decision with
-`effect is None` (`_escalation.py:64`). Only the poll instance has a fixture
+`effect is None` (`_escalation.py:86`). Only the poll instance has a fixture
 today; a case added for the retry instance is covered by this same row and
 must assert `allowed` for the same reason. Do not record it as a new
-divergence.
+divergence. Adding that case is a format change, not a fixture-authoring job:
+no step key scripts the retry's `Decide` — both runners hardcode their
+`retry()` to ALLOW — so binding the retry instance means designing a new step
+key and changing every runner that reads these cases.
 
 ## `cache-never-serves-an-escalation` binds behaviour, not structure
 

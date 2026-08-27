@@ -299,7 +299,29 @@ fully independent path, verifiable by a human in a browser.
   "Turnkey, and what that includes".
 - **`IssueToken`.** `CreateDelegation` already returns a token; a separate
   issuance path is only needed for the sender-constrained flows this SDK does
-  not serve.
+  not serve. **The consequence, unstated until now:** where the reference
+  re-issues a TOKEN for the delegation it already holds
+  (`IssueToken{DelegationId: …}`), `Session._ask` calls `create_delegation`
+  and re-mints a WHOLE delegation. Every refresh therefore produces a new
+  delegation id and a new epoch, and since the delegation id is in the cache
+  key, every entry the session holds becomes unreachable — the decision cache
+  is discarded on every token refresh. An SDK written from this one should
+  prefer `IssueToken` as soon as `stratium.Client` exposes it; `pdp.proto`
+  already defines `PDPService.IssueToken`, so this is a missing SDK method,
+  not a protocol limit.
+
+  Second-order, and the part a future SDK author needs: because a re-mint
+  changes the delegation id, `Session`'s two expiry conditions can never
+  disagree. `_expires_at` is `token_expiry` of the same grant
+  `_token_expires_at` is read from, and an entry written under an older
+  delegation is unreachable rather than merely stale — so Python's
+  `tokenNotExpired` condition can never be the deciding one. Go has no such
+  redundancy: `hook.go:298` writes the reissued token's expiry under the
+  UNCHANGED delegation id, while `consultCache` reads with the session file's
+  original token, which `reissue.go` deliberately never writes back. Fixing
+  the re-mint dissolves the redundancy and that condition starts carrying
+  weight. Do **not** resolve the redundancy the other way by deleting a cache
+  condition: it is redundant only for as long as this gap is open.
 - **The other four languages.** This design is the reference they follow, and
   none should start before this one has run against a live stack.
 - **A control-plane client for the PAP's 35 HTTP routes.** A separate program
