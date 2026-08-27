@@ -189,9 +189,16 @@ def test_an_entry_cached_under_the_old_delegation_is_not_served_under_the_new(fa
 # Requested TTL 10s, but the re-minted token is good until t=1000, and the
 # read happens at t=500. clock()+ttl_seconds would have expired the
 # delegation at t=10.
+#
+# G2. The ORIGINAL token deliberately expires at t=50, long before the read.
+# That is what makes "the NEW token" in the name mean something: _expires_at
+# and _token_expires_at are both read from the post-_ask state, and a write
+# or a read that used either PRE-_ask value would be looking at a credential
+# that died at t=50 and would miss here. With a far-future original token
+# both stale values still said "usable" and neither was bound by anything.
 def test_after_a_reissue_the_delegation_expiry_comes_from_the_new_token(fake_pdp):
     clock = Clock()
-    fake_pdp.delegation_responses.append(grant_resp(did="d1"))
+    fake_pdp.delegation_responses.append(grant_resp(token=_jwt(exp=50), did="d1"))
     fake_pdp.decide_responses.extend([deny("token expired"), allow(), allow()])
 
     c = Client(fake_pdp.addr)
@@ -205,6 +212,28 @@ def test_after_a_reissue_the_delegation_expiry_comes_from_the_new_token(fake_pdp
     s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
 
     assert len(fake_pdp.decide_calls) == 2      # not 3: the second check was a cache hit
+
+
+# G2, the third half of the same claim: the entry's EPOCH is read from the
+# post-_ask state too. A re-mint that bumps the epoch writes the new one, and
+# the read that follows compares against that same post-_ask grant -- write
+# the pre-_ask epoch instead and every entry produced by a re-issuing check is
+# unusable the instant it is written, which is a silent, permanent extra round
+# trip rather than a visible failure. The huge staleness window and the
+# far-future token expiries keep the other conditions out of the way, so the
+# epoch is the only thing that can decide this.
+def test_after_a_reissue_the_cache_entry_carries_the_new_epoch(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([deny("token expired"), allow(), allow()])
+    s = session(fake_pdp, clock, staleness_window=1e6)
+    fake_pdp.delegation_responses.append(grant_resp(epoch=2, did="d2"))
+
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert s.grant.epoch == 2                   # the re-issue really bumped it
+    # Two, not three: the deny and its post-re-mint retry, then a cache hit.
+    assert len(fake_pdp.decide_calls) == 2
 
 
 # The reissue must store the NEW token's own expiry, not leave the old
