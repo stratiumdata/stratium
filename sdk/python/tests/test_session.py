@@ -260,3 +260,59 @@ def test_the_default_clock_shares_an_epoch_with_token_expiry(fake_pdp):
     # reach the PDP. Under a monotonic default the token never looks expired
     # and the second is served from cache -- one call, not two.
     assert len(fake_pdp.decide_calls) == 2
+
+
+# F1, SECURITY. Nothing derived from the escalation path may be cached. A
+# human approving ONE pending action is not the PDP producing a replayable
+# verdict about every future identical call -- caching the post-approval
+# ALLOW would let the next identical call skip the human step this one
+# required. local_cache.go:110-140 states this and prevents it structurally,
+# by placing its one storeCacheResult call before the escalation wait begins
+# and never after it.
+def test_an_approved_escalation_is_not_cached(fake_pdp):
+    clock = Clock()
+    fake_pdp.decide_responses.extend([
+        escalate(approval_id="ap-9"), allow(),   # ask, human approves, retry allows
+        escalate(approval_id="ap-9"), allow(),   # the identical call must ask AGAIN
+    ])
+    fake_pdp.approval_responses.extend([
+        pdp_pb2.GetApprovalResponse(status="approved"),
+        pdp_pb2.GetApprovalResponse(status="approved"),
+    ])
+    s = session(fake_pdp, clock, approval_poll_interval=0.01, approval_timeout=5.0)
+
+    first = s.check(tool="Bash", raw_input={"command": "rm -rf /data"})
+    second = s.check(tool="Bash", raw_input={"command": "rm -rf /data"})
+
+    assert first and second
+    # Four Decide calls, not two: the second check reached the PDP rather than
+    # replaying the approved ALLOW out of the cache.
+    assert len(fake_pdp.decide_calls) == 4
+    # And it needed its own human. One approval authorizing unlimited repeats
+    # for the whole staleness window is the failure this test exists for.
+    assert len(fake_pdp.approval_calls) == 2
+
+
+# The same rule for the other escalation outcome: a timeout's synthesised DENY
+# is a diagnostic about ONE wait, not a verdict to replay. Real clock and real
+# sleep deliberately -- a fake clock without a fake sleep is F2, and this test
+# must not depend on that fix. The timeout is short and the poll script is
+# generously long so this can never hang.
+def test_an_escalation_that_times_out_is_not_cached(fake_pdp):
+    fake_pdp.delegation_responses.append(grant_resp())
+    fake_pdp.decide_responses.extend([escalate(), escalate()])
+    fake_pdp.approval_responses.extend(
+        [pdp_pb2.GetApprovalResponse(status="pending")] * 40)
+
+    c = Client(fake_pdp.addr)
+    s = Session(c, subject="s", agent_id="a", tools=["Read"], max_action_tier=1,
+                purpose="test", ttl_seconds=3600,
+                approval_poll_interval=0.005, approval_timeout=0.02)
+
+    first = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    second = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert not first and not second
+    assert first.effect is Effect.DENY
+    # Two Decide calls: the DENY the first wait synthesised was not cached.
+    assert len(fake_pdp.decide_calls) == 2

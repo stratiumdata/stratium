@@ -55,7 +55,18 @@ one exercised against a live PDP so far).
   hasn't changed, the delegation itself hasn't expired, the token's own `exp`
   claim hasn't passed, and the entry is within `staleness_window` seconds of
   when it was written (default 30s) — all four in `stratium/_cache.py`'s
-  `_usable()`. An `ESCALATE` is never cached, on both the write and read side.
+  `_usable()`. **Nothing that comes out of the escalation path is cached** —
+  not the `ESCALATE` itself (refused on both the write and the read side), and
+  not the decision the wait eventually settles on: not the post-approval
+  `ALLOW`, not a timeout's synthesised `DENY`, not a denial. A human approving
+  one specific pending action is not the PDP producing a replayable verdict
+  about every future identical call, so caching that `ALLOW` would let the next
+  identical call skip the human step this one required — for the whole
+  staleness window, with no PDP round trip and no second human. `Session.check`
+  guarantees it by position rather than by inspecting the effect: the
+  escalation branch returns directly and the `put` is only reachable on the
+  path where no wait ever began, the same structure as `stratium-pep`'s
+  `local_cache.go`.
 - **Escalation** polls `GetApproval` every `approval_poll_interval` seconds
   (default 2.0) until it sees `approved`, `denied`, or `approval_timeout`
   seconds elapse (default 120.0) — `stratium/_escalation.py`'s

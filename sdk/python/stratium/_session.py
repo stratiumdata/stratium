@@ -93,7 +93,29 @@ class Session:
         decision = self._ask(tool=tool, raw_input=canonical, resource=resource)
 
         if decision.effect is Effect.ESCALATE and decision.approval_id:
-            decision = resolve_escalation(
+            # RETURNS, deliberately: NOTHING derived from the escalation path is
+            # ever cached -- not the approved ALLOW, not a timeout's synthetic
+            # DENY, not a denial. Only the decision that settled BEFORE any wait
+            # began reaches the put() below, and the only way to guarantee that
+            # is for this branch to have no path to it.
+            #
+            # A human approving one specific pending action is not the PDP
+            # producing a general, replayable verdict about every future
+            # identical call. Cache the post-approval ALLOW and one approval of
+            # Bash(rm -rf /data) silently authorizes unlimited identical repeats
+            # for the whole staleness window, with no PDP round trip and no
+            # second human -- the "serves an approval that was never granted"
+            # failure, reached one step later than the literal ESCALATE value.
+            #
+            # Same structure as local_cache.go:110-140, which names this failure
+            # and prevents it the same way: both its callers place their one
+            # storeCacheResult call ONLY on the response that settles before any
+            # escalation wait begins, never on resolveApproval's own
+            # post-approval retry response. Not enforced by inspecting the
+            # resolved effect -- that response is a perfectly ordinary ALLOW or
+            # DENY and no check on it could tell it apart from one the PDP
+            # reached unaided. It holds by position.
+            return resolve_escalation(
                 self._client.get_approval,
                 lambda: self._ask(tool=tool, raw_input=canonical, resource=resource,
                                   approval_id=decision.approval_id),
