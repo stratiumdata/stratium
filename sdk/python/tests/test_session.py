@@ -350,3 +350,33 @@ def test_an_escalation_times_out_on_the_injected_clock(fake_pdp):
     # scripted poll responses: timeout/interval is 5, so 6 polls at most.
     assert len(fake_pdp.approval_calls) <= 8
     assert slept and all(s == 0.01 for s in slept)
+
+
+# F3. The cached delegation expiry must come from the credential that actually
+# came back, never from the TTL that was asked for. _types.py states the rule
+# for granted_scope -- "what the PDP actually granted, which is not what was
+# requested: it narrows. A PEP that assumes otherwise is wrong about its own
+# authority" -- and the expiry is the same kind of claim about the same grant.
+# Go sources DelegationExpiresAt from tokenExpiry(token) for this reason
+# (local_cache.go:275).
+#
+# Read at t=500 with a 10s requested TTL and a token the PDP issued good until
+# t=1000. clock()+ttl_seconds says the delegation died at t=10 and the entry
+# misses; the token itself says otherwise, and the token is the credential.
+# The huge staleness window and the far-future epoch keep the other three
+# usability conditions out of the way, so the ONLY thing that can decide this
+# is where _expires_at came from.
+def test_the_delegation_expiry_comes_from_the_token_not_the_requested_ttl(fake_pdp):
+    clock = Clock()
+    fake_pdp.delegation_responses.append(grant_resp(token=_jwt(exp=1000)))
+    fake_pdp.decide_responses.extend([allow(), allow()])
+
+    c = Client(fake_pdp.addr)
+    s = Session(c, subject="s", agent_id="a", tools=["Read"], max_action_tier=1,
+                purpose="test", ttl_seconds=10, staleness_window=1e6, clock=clock)
+
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    clock.t = 500.0
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert len(fake_pdp.decide_calls) == 1

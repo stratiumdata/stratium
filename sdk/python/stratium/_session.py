@@ -70,7 +70,6 @@ class Session:
             subject=subject, agent_id=agent_id, tools=list(tools),
             max_action_tier=max_action_tier, purpose=purpose, ttl_seconds=ttl_seconds,
         )
-        self._ttl = ttl_seconds
         self._clock = clock
         self._sleep = sleep
         self._poll = approval_poll_interval
@@ -79,8 +78,16 @@ class Session:
         self._cache = DecisionCache(staleness_window, clock=clock)
 
         self._grant: Grant = client.create_delegation(**self._mint)
-        self._expires_at = clock() + ttl_seconds
         self._token_expires_at = token_expiry(self._grant.token)
+        # The DELEGATION's expiry, from the token that actually came back --
+        # never clock() + the ttl_seconds that was asked for. The PDP's grant
+        # narrows: _types.Grant.granted_scope states the rule for the scope
+        # ("what the PDP actually granted, which is not what was requested"),
+        # and the expiry is the same kind of claim about the same grant. Go
+        # sources DelegationExpiresAt from tokenExpiry(token) for exactly this
+        # reason (local_cache.go:275); recording the requested TTL instead
+        # records an expiry for authority this PEP may never have held.
+        self._expires_at = self._token_expires_at
 
     @property
     def grant(self) -> Grant:
@@ -166,8 +173,8 @@ class Session:
             # Could not re-mint. The original decision stands, and it was not
             # an allow.
             return decision
-        self._expires_at = self._clock() + self._ttl
         self._token_expires_at = token_expiry(self._grant.token)
+        self._expires_at = self._token_expires_at   # the NEW token's, see __init__
         self._cache = DecisionCache(self._window, clock=self._clock)
         return self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
