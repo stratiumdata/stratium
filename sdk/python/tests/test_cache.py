@@ -130,6 +130,18 @@ def test_the_default_clock_shares_an_epoch_with_absolute_expiries():
 # Different arguments to the same tool are different decisions.
 def test_the_key_separates_arguments():
     cache, _ = fresh(30.0)
-    k1 = cache.key(agent_id="a", subject="s", tool="Read", raw_input='{"p":"/a"}')
-    k2 = cache.key(agent_id="a", subject="s", tool="Read", raw_input='{"p":"/b"}')
+    k1 = cache.key(delegation_id="d1", agent_id="a", subject="s", tool="Read",
+                   raw_input='{"p":"/a"}')
+    k2 = cache.key(delegation_id="d1", agent_id="a", subject="s", tool="Read",
+                   raw_input='{"p":"/b"}')
     assert k1 != k2
+
+
+# The delegation is part of the key, as it is in Go's (DelegationID, Tool,
+# InputDigest) tuple (cache.go:186). Everything else identical: a decision
+# reached under one delegation must be structurally unreachable under
+# another, rather than relying on someone remembering to discard the cache.
+def test_the_key_separates_delegations():
+    cache, _ = fresh(30.0)
+    args = dict(agent_id="a", subject="s", tool="Read", raw_input='{"p":"/a"}')
+    assert cache.key(delegation_id="d1", **args) != cache.key(delegation_id="d2", **args)

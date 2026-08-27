@@ -155,19 +155,56 @@ def test_a_token_denial_reissues_only_once_even_if_the_retry_denies_again(fake_p
     assert "token expired" in d.reason
 
 
-# After a reissue, Session must still be usable: the decision cache it swaps
-# in must actually cache, not just avoid crashing.
-def test_after_a_reissue_the_new_cache_still_caches(fake_pdp):
+# F4/F5. The property the deleted test CLAIMED to hold: a decision cached
+# under one delegation is never served under another. It used to rest on
+# _ask swapping in a whole new DecisionCache on re-issue -- untested
+# scaffolding, since deleting the swap failed nothing. Now it rests on the
+# cache key, which carries the delegation id the way Go's does
+# (cache.go:186, the (DelegationID, Tool, InputDigest) tuple), so a re-mint
+# is a guaranteed miss by construction and the swap is gone.
+#
+# The re-issued grant deliberately keeps epoch=1 and a far-future token, and
+# the clock never moves: epoch, both expiries and the staleness window all
+# still say "usable", so the delegation in the key is the ONLY thing that can
+# turn the third check into a miss.
+def test_an_entry_cached_under_the_old_delegation_is_not_served_under_the_new(fake_pdp):
     clock = Clock()
-    fake_pdp.decide_responses.extend([deny("token expired"), allow()])
+    fake_pdp.decide_responses.append(allow())                    # 1: Read, cached under d1
     s = session(fake_pdp, clock)
-    fake_pdp.delegation_responses.append(grant_resp(epoch=2, did="d2"))
+    fake_pdp.delegation_responses.append(grant_resp(epoch=1, did="d2"))
+    fake_pdp.decide_responses.extend([deny("token expired"),     # 2: Bash forces the re-mint
+                                      allow(),                   #    the post-re-mint retry
+                                      allow()])                  # 3: Read again, must be a miss
 
-    first = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
-    second = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    s.check(tool="Bash", raw_input={"command": "ls"})
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
 
-    assert first and second
-    assert len(fake_pdp.decide_calls) == 2  # not 3: the second check was a cache hit
+    assert s.grant.delegation_id == "d2"        # the re-issue really happened
+    assert len(fake_pdp.decide_calls) == 4      # not 3: check 3 re-asked the PDP
+
+
+# The re-issue's own delegation expiry, now that an entry written after one
+# survives to be read (see F3: this call site was previously unobservable).
+# Requested TTL 10s, but the re-minted token is good until t=1000, and the
+# read happens at t=500. clock()+ttl_seconds would have expired the
+# delegation at t=10.
+def test_after_a_reissue_the_delegation_expiry_comes_from_the_new_token(fake_pdp):
+    clock = Clock()
+    fake_pdp.delegation_responses.append(grant_resp(did="d1"))
+    fake_pdp.decide_responses.extend([deny("token expired"), allow(), allow()])
+
+    c = Client(fake_pdp.addr)
+    s = Session(c, subject="s", agent_id="a", tools=["Read"], max_action_tier=1,
+                purpose="test", ttl_seconds=10, staleness_window=1e6, clock=clock)
+    fake_pdp.delegation_responses.append(
+        grant_resp(token=_jwt(exp=1000), epoch=1, did="d2"))
+
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+    clock.t = 500.0
+    s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
+
+    assert len(fake_pdp.decide_calls) == 2      # not 3: the second check was a cache hit
 
 
 # The reissue must store the NEW token's own expiry, not leave the old

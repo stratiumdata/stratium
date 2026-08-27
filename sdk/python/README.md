@@ -55,7 +55,12 @@ one exercised against a live PDP so far).
   hasn't changed, the delegation itself hasn't expired, the token's own `exp`
   claim hasn't passed, and the entry is within `staleness_window` seconds of
   when it was written (default 30s) — all four in `stratium/_cache.py`'s
-  `_usable()`. **Nothing that comes out of the escalation path is cached** —
+  `_usable()`. Entries are keyed on
+  `(delegation_id, agent_id, subject, tool, raw_input)` — the delegation is
+  part of the key, as it is in `stratium-pep`'s `cacheKey`, so a re-mint is a
+  guaranteed miss by construction rather than something a caller has to
+  remember to invalidate. **Nothing that comes out of the escalation path is
+  cached** —
   not the `ESCALATE` itself (refused on both the write and the read side), and
   not the decision the wait eventually settles on: not the post-approval
   `ALLOW`, not a timeout's synthesised `DENY`, not a denial. A human approving

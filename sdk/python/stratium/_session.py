@@ -98,13 +98,9 @@ class Session:
         resource: Mapping[str, str] | None = None,
     ) -> Decision:
         canonical = canonical_raw_input(raw_input)
-        key = self._cache.key(
-            agent_id=self._agent_id, subject=self._subject,
-            tool=tool, raw_input=canonical,
-        )
 
         hit = self._cache.get(
-            key, last_known_epoch=self._grant.epoch,
+            self._key(tool, canonical), last_known_epoch=self._grant.epoch,
             token_expires_at=self._token_expires_at,
         )
         if hit is not None:
@@ -147,11 +143,29 @@ class Session:
                 clock=self._clock, sleep=self._sleep,
             )
 
+        # The key is recomputed, not reused from the lookup above: _ask may have
+        # re-minted, and this entry belongs to the delegation that ACTUALLY
+        # produced the decision, not the one the question was first asked
+        # under. Epoch and _expires_at are read from the same post-_ask state,
+        # so all three describe one grant. Go states the same rule for its own
+        # write -- storeCacheResult takes "the credential that ACTUALLY
+        # produced resp ... never sess.GetToken(), which stays the session
+        # file's original, possibly-stale value across a reissue"
+        # (local_cache.go:256-262). Go's delegation id survives its reissue
+        # unchanged (reissue.go mints a fresh TOKEN for the same delegation),
+        # so the same rule costs it nothing; here a re-mint is a whole new
+        # delegation and the key has to follow it.
         self._cache.put(
-            key, decision, epoch=self._grant.epoch,
+            self._key(tool, canonical), decision, epoch=self._grant.epoch,
             delegation_expires_at=self._expires_at,
         )
         return decision
+
+    def _key(self, tool: str, canonical: str) -> str:
+        return self._cache.key(
+            delegation_id=self._grant.delegation_id, agent_id=self._agent_id,
+            subject=self._subject, tool=tool, raw_input=canonical,
+        )
 
     def _ask(self, *, tool: str, raw_input: str, resource,
              approval_id: str | None = None) -> Decision:
@@ -175,7 +189,6 @@ class Session:
             return decision
         self._token_expires_at = token_expiry(self._grant.token)
         self._expires_at = self._token_expires_at   # the NEW token's, see __init__
-        self._cache = DecisionCache(self._window, clock=self._clock)
         return self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,

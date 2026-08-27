@@ -48,11 +48,23 @@ class DecisionCache:
         self._clock = clock
         self._entries: OrderedDict[str, CacheEntry] = OrderedDict()
 
-    def key(self, *, agent_id: str, subject: str, tool: str, raw_input: str) -> str:
+    def key(
+        self, *, delegation_id: str, agent_id: str, subject: str, tool: str,
+        raw_input: str,
+    ) -> str:
+        # delegation_id FIRST, and non-optional: it is what makes a decision
+        # reached under one delegation structurally unreachable under another.
+        # Go's cacheKey is the same tuple minus the two this cache can also
+        # afford to be explicit about -- (DelegationID, Tool, InputDigest),
+        # cache.go:186. Without it every delegation shares one key space and
+        # the only thing separating them is whoever remembers to discard the
+        # cache on a re-mint, which is a thing to remember rather than a thing
+        # that cannot go wrong.
+        #
         # raw_input is already canonical (see _types.canonical_raw_input), so
         # equal arguments hash equal regardless of how the caller spelled them.
         h = hashlib.sha256()
-        for part in (agent_id, subject, tool, raw_input):
+        for part in (delegation_id, agent_id, subject, tool, raw_input):
             h.update(part.encode())
             h.update(b"\x00")
         return h.hexdigest()
