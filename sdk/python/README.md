@@ -76,7 +76,10 @@ one exercised against a live PDP so far).
   (default 2.0) until it sees `approved`, `denied`, or `approval_timeout`
   seconds elapse (default 120.0) — `stratium/_escalation.py`'s
   `resolve_escalation()`, invoked from `Session.check` only when the PDP
-  answers `ESCALATE` and hands back an `approval_id`.
+  answers `ESCALATE` and hands back an `approval_id`. The wait is bounded by a
+  poll count as well as by the timeout, so no injected `clock` can make it
+  unbounded; a non-positive `approval_poll_interval` is refused as a `DENY`
+  rather than polled.
 - **Re-issue** happens at most once per `check()` call, only when the denial's
   reason mentions `"token"` or `"expired"` (`Session._token_is_the_problem`).
   A second denial after the re-mint is a real denial with a fresh token, not
