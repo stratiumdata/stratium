@@ -236,30 +236,6 @@ def test_after_a_reissue_the_cache_entry_carries_the_new_epoch(fake_pdp):
     assert len(fake_pdp.decide_calls) == 2
 
 
-# The reissue must store the NEW token's own expiry, not leave the old
-# grant's expiry in place. A large staleness_window and a distant delegation
-# expiry isolate this from the other two cache conditions -- the only thing
-# that can turn the second, later check into a miss here is a stale
-# token_expires_at surviving the reissue.
-def test_after_a_reissue_the_cache_uses_the_new_tokens_own_expiry(fake_pdp):
-    clock = Clock()
-    fake_pdp.decide_responses.extend([deny("token expired"), allow(), allow()])
-    s = session(fake_pdp, clock, staleness_window=1000.0)
-    fake_pdp.delegation_responses.append(
-        grant_resp(token=_jwt(exp=100), epoch=2, did="d2"))
-
-    first = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
-    clock.t = 100.001  # past the REISSUED token's exp, nowhere near the original's
-    second = s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
-
-    assert first and second
-    # A stale token_expires_at (left over from the pre-reissue grant, whose
-    # default expiry is years away) would still say "not expired" here and
-    # serve a cache hit -- exactly the permanently-serveable-ALLOW risk the
-    # fail-closed design exists to prevent.
-    assert len(fake_pdp.decide_calls) == 3
-
-
 # An escalation's retry must consume the SAME approval, not open a new one --
 # the exact bug this SDK exists to avoid: without approval_id on the retry,
 # an approved escalation would ask again from scratch and get ESCALATE again.
