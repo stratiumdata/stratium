@@ -74,6 +74,19 @@ func (d *Delegation) HasTool(tool string) bool {
 	return false
 }
 
+// ResourceIDPrefixKey is the one resource-constraint key with PREFIX
+// semantics: its value is matched against every resource identity a call
+// resolved to, and every one of them must be under it. Every other key keeps
+// exact-match semantics (internal/authz's checkResourceConstraints), for the
+// reason that function's own comment gives — an opaque caller-defined string
+// has no ordering to narrow along, so interpreting one is a place a widening
+// can hide.
+//
+// It lives here rather than in internal/authz because ScopeNarrows below
+// needs it too, and pkg/models cannot import internal/authz — the dependency
+// runs the other way.
+const ResourceIDPrefixKey = "id_prefix"
+
 // ScopeNarrows reports whether a child delegation is a valid subset of its
 // parent. It returns an empty string when the child is valid, or a description
 // of the first widening found.
