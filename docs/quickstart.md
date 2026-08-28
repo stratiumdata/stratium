@@ -241,11 +241,13 @@ labels it `UNCLASSIFIED`, which is under the cap.
 > explicitly, give the file content, or skip the model entirely and use `verify`
 > (§5).
 >
-> Note also that `Bash(cat /secret-demo/plans.txt)` is **not** equivalent. `Bash`
-> is catalogued with a command field and no resource field, so its tier is derived
-> from the command text and no resource label is ever resolved. Classification
-> caps constrain tools that declare a resource; reading the same bytes through a
-> shell is a different check.
+> Note that `Bash(cat /secret-demo/plans.txt)` is a *different* check, not an
+> absent one. `Bash` is catalogued with a command field and no resource field, so
+> its tier is derived from the command text — and, since 2026-08-28, its resource
+> identity is too: every path the command names is extracted and the **strictest**
+> label of the set decides. So the shell route denies here as well, and a benign
+> path prepended to the secret one does not help. A command naming no path at all
+> still has nothing to label, and still denies under any cap.
 
 ---
 

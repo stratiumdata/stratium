@@ -715,9 +715,11 @@ Things that will cost you an afternoon if you meet them cold.
 - **A denial writes two audit rows** and makes two `Decide` calls — the reissue
   retry in §9.
 - **Fieldless tools cannot be labelled.** `Glob`, `Grep`, `WebFetch`,
-  `WebSearch`, `TodoWrite` have no `resource_field`, so they produce no resource
-  id, no rule matches — not even the empty-prefix catch-all — and under a
-  classification cap they deny outright.
+  `WebSearch`, `TodoWrite` have no `resource_field` *and* no `command_field`, so
+  they produce no resource id, no rule matches — not even the empty-prefix
+  catch-all — and under a classification cap they deny outright. `Bash` is
+  **not** in this list: a `command_field` tool derives its identity from the
+  paths its command names (§8).
 - **A `Decide` load failure denies rather than degrading.** If a tenant's catalog
   or label rules are unreadable, everything denies with a reason that says so.
 - **`"effect": "deny"` for Rego policies.** §15.

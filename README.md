@@ -53,6 +53,13 @@ Building `stratium-pap` means cloning this repository and running `make`.
 the embed test (`services/cmd/stratium-pap/ui_test.go`) pass forever whether or
 not anyone rebuilt the UI, which is the only thing that test exists to detect.
 
+New here? [`docs/concepts.md`](docs/concepts.md) explains what the system
+decides and why it holds, in concepts rather than code.
+[`docs/validation-journeys.md`](docs/validation-journeys.md) is the pre-launch
+validation list and an honest account of where the model is too tight.
+[`docs/default-posture.md`](docs/default-posture.md) answers "what should I
+actually set?" for a first real agent.
+
 Design of record: `docs/superpowers/specs/2026-08-08-agent-authorization-redesign-design.md`
 
 ## Installing the enforcement surfaces
