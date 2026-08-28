@@ -38,6 +38,24 @@ func putAgentConstraints(s *Server, w http.ResponseWriter, r *http.Request, op O
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// req.ResourceConstraints is nil both when the field is entirely absent
+	// and when it is present but JSON null -- encoding/json leaves a map nil
+	// in both cases, distinct from an explicit "resource_constraints": {},
+	// which decodes to a non-nil, zero-length map (the same nil-vs-present-
+	// empty distinction ErrAllowedToolsRequired enforces, internal/store/
+	// agent.go). Refusing only the nil case, not len==0, is what keeps an
+	// operator's deliberate "no constraints" {} accepted while catching the
+	// silent-wipe case this guards against: PUT {} or a body with a typo'd
+	// key would otherwise decode to nil, sail through
+	// validateResourceConstraints (zero iterations, nothing to reject), and
+	// clear the agent's scope -- indistinguishable, on the wire, from an
+	// operator who meant to do that. DELETE is the one place that means it.
+	if req.ResourceConstraints == nil {
+		http.Error(w, "resource_constraints is required (use DELETE to clear the scope, "+
+			`or "resource_constraints": {} to set it to unrestricted explicitly)`,
+			http.StatusBadRequest)
+		return
+	}
 	view, err := s.store.SetAgentResourceConstraints(
 		r.Context(), id, req.ResourceConstraints, op.Subject, time.Now())
 	if err != nil {
@@ -48,8 +66,10 @@ func putAgentConstraints(s *Server, w http.ResponseWriter, r *http.Request, op O
 }
 
 // deleteAgentConstraints turns scope enforcement OFF for delegations issued
-// from now on. A separate verb from PUT so that cannot happen by omitting a
-// field from a request body -- the same reasoning deleteAgentCaps documents.
+// from now on. A separate verb from PUT, and putAgentConstraints' own nil
+// check above is what keeps that a deliberate, distinct action rather than
+// something an operator could trigger by omitting a field from a PUT body --
+// the same reasoning deleteAgentCaps documents.
 func deleteAgentConstraints(s *Server, w http.ResponseWriter, r *http.Request, op Operator) {
 	id, ok := pathID(w, r)
 	if !ok {

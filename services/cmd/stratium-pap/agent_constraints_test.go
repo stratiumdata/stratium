@@ -90,6 +90,50 @@ func TestPutAgentConstraints_MissingTrailingSlashRejected(t *testing.T) {
 	assertExpectationsMet(t, f.mock) // never reached the store's write path
 }
 
+// TestPutAgentConstraints_MissingFieldRejected proves an absent
+// resource_constraints field is refused with a 400 rather than decoding to a
+// nil map and sailing through validateResourceConstraints (zero iterations,
+// nothing to reject) to wipe the agent's scope -- the defect this handler's
+// nil check (agent_constraints.go) closes. Zero mock expectations
+// registered: the request must never reach the store.
+func TestPutAgentConstraints_MissingFieldRejected(t *testing.T) {
+	f := newTestServerFixture(t)
+
+	rec := doJSONRequest(t, f.server, http.MethodPut,
+		"/v1/agents/"+uuid.New().String()+"/resource-constraints", f.token(t, "org-admins"),
+		map[string]any{})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock) // never reached the store's write path
+}
+
+// TestPutAgentConstraints_ExplicitEmptyMapAccepted proves an operator who
+// deliberately sends "resource_constraints": {} -- as opposed to omitting
+// the field -- still succeeds: that is a legitimate way to set the scope to
+// unrestricted, distinct from the omitted-field case above, the same
+// nil-vs-present-empty distinction ErrAllowedToolsRequired draws
+// (internal/store/agent.go).
+func TestPutAgentConstraints_ExplicitEmptyMapAccepted(t *testing.T) {
+	f := newTestServerFixture(t)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	expectWriteAndAudit(f.mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectAgentForCaps(f.mock, id, nil, nil)
+	expectCatalog(f.mock, nil)
+	expectLiveDelegations(f.mock, 0)
+
+	body := map[string]any{"resource_constraints": map[string]string{}}
+	rec := doJSONRequest(t, f.server, http.MethodPut,
+		"/v1/agents/"+id.String()+"/resource-constraints", f.token(t, "org-admins"), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock)
+}
+
 // TestGetAgentConstraints_ReturnsStoredValue follows GetAgentResourceConstraints'
 // real call order: GetAgent (expectAgentForConstraints, for the stored
 // scope), then agentConstraintsView's own second GetAgent (expectAgentForCaps,

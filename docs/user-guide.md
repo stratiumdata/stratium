@@ -1034,12 +1034,18 @@ The response is the same advisory shape classification caps return:
 ```
 
 `GET` on the same route returns the identical shape without writing anything.
-`DELETE` clears the scope for delegations issued from now on — unlike `PUT`,
-which refuses an empty map (`400`), `DELETE` is the deliberate way to turn
-enforcement off, the same split classification caps use.
+`DELETE` clears the scope for delegations issued from now on. `PUT` requires
+the `resource_constraints` key to be present — an OMITTED key (or an explicit
+JSON `null`) is refused with a `400` naming `DELETE` as the alternative, so a
+typo'd field name or a bare `{}`-less body can never silently wipe the
+agent's scope. An explicitly supplied `{}` is different from an omitted key
+and is accepted: that is an operator deliberately setting "no constraints,"
+the same nil-vs-present-empty distinction `allowed_tools` uses (§5.5 above).
+`DELETE` remains the deliberate way to turn enforcement off outright, the
+same split classification caps use.
 
 `id_prefix` is currently the only key with defined semantics: every resource
-identity a call resolves to must fall under the prefix. Four things to know
+identity a call resolves to must fall under the prefix. Five things to know
 before you use it:
 
 1. **It applies at the next issuance**, exactly like classification caps: a
@@ -1059,6 +1065,14 @@ before you use it:
    /workspace/a.txt; cat /etc/shadow` denies on the second path even though
    the first is in scope — a benign path cannot buy scope for a command that
    still reaches outside it.
+5. **The scope root itself is outside its own scope.** Under
+   `id_prefix=/workspace/`, `ls /workspace` (no trailing slash) denies: the
+   path this call resolves to is `/workspace`, which does not satisfy
+   `HasPrefix` against `/workspace/` — the same trailing-slash requirement
+   item 2 states, now working against the root directory itself. This is
+   fail-closed, not a bug, but it will surprise operators: naming the scope
+   root as a bare argument is denied, and only paths strictly under it
+   succeed.
 
 A child delegation may narrow `id_prefix` further (`/workspace/service-a/`
 under a parent's `/workspace/`) but may not widen it or drop it — see

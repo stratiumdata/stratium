@@ -229,7 +229,14 @@ second subtest asserts no write path exists. It must fail, which is its
   `resource_field` names something that is not a path makes `id_prefix`
   meaningless for it — not unsafe, but not the control an operator thinks they
   bought. `unsatisfiable_tools` does not catch this, because such a tool does
-  produce an id.
+  produce an id. A second, narrower mismatch is cardinality rather than type:
+  a fielded (non-shell) tool's `resource_field` yields exactly one id per
+  call (`resourceFromID`), so a tool that acts on a LIST of targets is
+  checked against only one of them. `satisfiesIDPrefix`'s "every identity
+  must satisfy the prefix" guarantee is over the identities the PDP
+  RESOLVED, not over every resource the call actually touches — the same gap
+  as the type mismatch above, one call short of what the operator assumes is
+  covered.
 - **Setting a constraint silently disables tools**, exactly as a cap does. The
   response's `unsatisfiable_tools` is the mitigation and it is advisory. This
   is the same footgun J1 documented for caps, and the same argument for turning
