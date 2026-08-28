@@ -490,7 +490,18 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// permanently. ShellResourceIDs interprets a value, so it lives beside the
 	// tier classifier in internal/authz and never in extract.go, which may look
 	// up which field holds a value and never what the value means.
-	resourceIDs := []string{extracted.ResourceID}
+	//
+	// extracted.ResourceID is included only when non-empty. labelResource's own
+	// fold already treats "" as "not an id" and skips it (label.go:130), but
+	// checkResourceConstraints' satisfiesIDPrefix (internal/authz/constraints.go)
+	// does not -- it reads a non-empty ids slice as "this call resolved to a
+	// checkable identity" and fails "" against any non-empty prefix. Appending
+	// the empty string unconditionally would deny every in-scope shell call
+	// under an id_prefix constraint, on an id nothing ever claimed.
+	var resourceIDs []string
+	if extracted.ResourceID != "" {
+		resourceIDs = append(resourceIDs, extracted.ResourceID)
+	}
 	if extracted.Command != "" {
 		resourceIDs = append(resourceIDs, authz.ShellResourceIDs(extracted.Command)...)
 	}
