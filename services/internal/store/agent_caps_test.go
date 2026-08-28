@@ -561,6 +561,28 @@ func TestUnsatisfiableTools_EmptyAllowedToolsMeansEveryTool(t *testing.T) {
 	}
 }
 
+// A command_field tool CAN satisfy a cap: its command's paths become resource
+// identities (internal/authz.ShellResourceIDs) and the strictest resulting
+// label decides. Before 2026-08-28 it could not, and this function tested
+// ResourceField alone -- so it reported Bash as unsatisfiable, which an
+// operator reads as guidance (docs/default-posture.md §4 sends them here).
+//
+// No existing case carried a command_field row, which is why that went
+// unnoticed. This one exists so it cannot again.
+func TestUnsatisfiableTools_ACommandFieldToolIsSatisfiable(t *testing.T) {
+	catalog := []models.ToolCatalogEntry{
+		{ToolName: "Read", ResourceField: strPtr("file_path")},
+		{ToolName: "Bash", CommandField: strPtr("command")},
+		{ToolName: "Grep"},
+	}
+	got := unsatisfiableTools([]string{}, catalog)
+	want := []string{"Grep"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("unsatisfiableTools([], catalog) = %v, want %v — a command_field tool derives "+
+			"identities from the paths its command names, so it is not unsatisfiable", got, want)
+	}
+}
+
 func TestUnsatisfiableTools_RestrictedAgentIntersects(t *testing.T) {
 	catalog := []models.ToolCatalogEntry{
 		{ToolName: "Read", ResourceField: strPtr("file_path")},

@@ -381,7 +381,14 @@ func unsatisfiableTools(allowedTools []string, catalog []models.ToolCatalogEntry
 	inCatalog := make(map[string]bool, len(catalog))
 	for _, e := range catalog {
 		inCatalog[e.ToolName] = true
-		if e.ResourceField != nil {
+		// A resource_field yields an id directly; a command_field yields one
+		// per path the command names (internal/authz.ShellResourceIDs, added
+		// 2026-08-28). Either shape can produce something to label, so
+		// neither is unsatisfiable. Before that change this tested
+		// ResourceField alone, which reported Bash as unable to satisfy any
+		// cap -- true then, false now, and read by operators as guidance
+		// (docs/default-posture.md §4).
+		if e.ResourceField != nil || e.CommandField != nil {
 			continue
 		}
 		if unrestricted || held[e.ToolName] {
