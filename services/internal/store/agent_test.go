@@ -19,7 +19,7 @@ import (
 
 func agentRowColumns() []string {
 	return []string{"id", "tenant_id", "name", "provider", "model_id",
-		"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "created_at", "updated_at"}
+		"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "created_at", "updated_at"}
 }
 
 // validAgent returns a models.Agent that passes validateAgentFields --
@@ -50,7 +50,7 @@ func TestStore_CreateAgent_Success(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "billing-bot", "anthropic", "claude-opus", int64(models.TrustTierCertified),
-			true, false, []byte(`["Read","Bash"]`), []byte(`{}`)).
+			true, false, []byte(`["Read","Bash"]`), []byte(`{}`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -119,7 +119,7 @@ func TestStore_CreateAgent_EmptyAllowedToolsIsAccepted(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "billing-bot", "anthropic", "claude-opus", int64(models.TrustTierCertified),
-			true, false, []byte(`[]`), []byte(`{}`)).
+			true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -194,7 +194,7 @@ func TestCreateAgent_IgnoresCallerSuppliedClassificationCaps(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "capped", "anthropic", "", int64(models.TrustTierCertified),
-			true, false, []byte(`[]`), []byte(`{}`)).
+			true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -228,7 +228,7 @@ func TestCreateAgent_NilCapsPersistsAsEmptyObject(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(insertAgentQuery)).
 		WithArgs(testTenant, "uncapped", "anthropic", "", int64(models.TrustTierCertified),
-			true, false, []byte(`[]`), []byte(`{}`)).
+			true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(id.String(), now, now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -262,7 +262,8 @@ func TestStore_GetAgent_Success(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, []byte(`["Read","Bash"]`), []byte(`{"nato":"SECRET"}`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`["Read","Bash"]`), []byte(`{"nato":"SECRET"}`),
+				[]byte(`{"id_prefix":"/workspace/"}`), now, now))
 	mock.ExpectCommit()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -274,6 +275,9 @@ func TestStore_GetAgent_Success(t *testing.T) {
 	}
 	if got.ClassificationCaps["nato"] != "SECRET" {
 		t.Errorf("ClassificationCaps = %v, want nato=SECRET", got.ClassificationCaps)
+	}
+	if got.ResourceConstraints[models.ResourceIDPrefixKey] != "/workspace/" {
+		t.Errorf("ResourceConstraints = %v, want id_prefix=/workspace/", got.ResourceConstraints)
 	}
 }
 
@@ -290,7 +294,7 @@ func TestStore_GetAgent_NullModelIDDecodesAsEmptyString(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", nil,
-				int64(models.TrustTierCertified), true, false, []byte(`[]`), []byte(`{}`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now))
 	mock.ExpectCommit()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -317,7 +321,7 @@ func TestStore_GetAgent_CorruptAllowedToolsFailsLoudly(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, []byte(`not-json`), []byte(`{}`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`not-json`), []byte(`{}`), []byte(`{}`), now, now))
 	mock.ExpectRollback()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -360,8 +364,8 @@ func TestStore_ListAgents_IncludesSuspended(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(listAgentsQuery)).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
-			AddRow(uuid.New().String(), testTenant, "active-bot", "anthropic", "", int64(1), true, false, []byte(`[]`), []byte(`{}`), now, now).
-			AddRow(uuid.New().String(), testTenant, "suspended-bot", "anthropic", "", int64(1), true, true, []byte(`[]`), []byte(`{}`), now, now))
+			AddRow(uuid.New().String(), testTenant, "active-bot", "anthropic", "", int64(1), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now).
+			AddRow(uuid.New().String(), testTenant, "suspended-bot", "anthropic", "", int64(1), true, true, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now))
 	mock.ExpectCommit()
 
 	got, err := s.ListAgents(context.Background())
@@ -409,8 +413,8 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
 			false, true, []byte(`["Bash"]`), id.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps"}).
-			AddRow(now, now, []byte(`{"nato":"SECRET"}`)))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
+			AddRow(now, now, []byte(`{"nato":"SECRET"}`), []byte(`{"id_prefix":"/workspace/"}`)))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -434,18 +438,23 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 	if got.ClassificationCaps["nato"] != "SECRET" {
 		t.Errorf("ClassificationCaps = %v, want the row's stored nato=SECRET (read back via RETURNING, not echoed from the request, which set none)", got.ClassificationCaps)
 	}
+	if got.ResourceConstraints[models.ResourceIDPrefixKey] != "/workspace/" {
+		t.Errorf("ResourceConstraints = %v, want the row's stored id_prefix=/workspace/ (read back via RETURNING, not echoed from the request, which set none)", got.ResourceConstraints)
+	}
 
 	assertExpectationsMet(t, mock)
 }
 
 // TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody proves
-// the CRITICAL fix directly: a request body that sets ClassificationCaps
-// does not reach the database at all -- updateAgentQuery's arg list has no
-// slot for it (see that query's own doc comment) -- and the row's existing
-// caps come back unchanged. Before this fix, PUT /v1/agents/{id} (RoleEditor)
-// could set an unknown hierarchy, zero every cap to {}, or set one with no
-// catch-all rule, all bypassing SetAgentClassificationCaps' validation and
-// its RoleAdmin gate.
+// the CRITICAL fix directly: a request body that sets ClassificationCaps (or
+// ResourceConstraints) does not reach the database at all --
+// updateAgentQuery's arg list has no slot for either (see that query's own
+// doc comment) -- and the row's existing values come back unchanged. Before
+// this fix, PUT /v1/agents/{id} (RoleEditor) could set an unknown hierarchy,
+// zero every cap to {}, or set one with no catch-all rule, all bypassing
+// SetAgentClassificationCaps' validation and its RoleAdmin gate;
+// resource_constraints is exposed to the identical hole by the same route and
+// is proven here too.
 func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testing.T) {
 	s, mock := newMockStore(t)
 	id := uuid.New()
@@ -456,8 +465,8 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
 			false, true, []byte(`["Bash"]`), id.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps"}).
-			AddRow(now, now, []byte(`{"nato":"SECRET"}`)))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
+			AddRow(now, now, []byte(`{"nato":"SECRET"}`), []byte(`{"id_prefix":"/workspace/"}`)))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -467,9 +476,11 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 		Name: "renamed-bot", Provider: "anthropic", ModelID: "claude-opus",
 		TrustTier: models.TrustTierPlatformTrusted, Enabled: false, Suspended: true,
 		AllowedTools: []string{"Bash"},
-		// An attacker (or a stale-form editor) trying to smuggle a caps
-		// change through the whole-object PUT. It must be ignored.
-		ClassificationCaps: map[string]string{"nato": "UNCLASSIFIED"},
+		// An attacker (or a stale-form editor) trying to smuggle a caps and a
+		// resource-constraints change through the whole-object PUT. Both must
+		// be ignored.
+		ClassificationCaps:  map[string]string{"nato": "UNCLASSIFIED"},
+		ResourceConstraints: map[string]string{models.ResourceIDPrefixKey: "/"},
 	}
 	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2")
 	if err != nil {
@@ -477,6 +488,9 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 	}
 	if got.ClassificationCaps["nato"] != "SECRET" {
 		t.Errorf("ClassificationCaps = %v, want the row's real nato=SECRET, not the request body's UNCLASSIFIED", got.ClassificationCaps)
+	}
+	if got.ResourceConstraints[models.ResourceIDPrefixKey] != "/workspace/" {
+		t.Errorf("ResourceConstraints = %v, want the row's real id_prefix=/workspace/, not the request body's /", got.ResourceConstraints)
 	}
 
 	assertExpectationsMet(t, mock)

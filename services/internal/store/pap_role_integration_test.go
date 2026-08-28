@@ -211,7 +211,7 @@ func TestIntegration_PAPRole_BumpsOnGovernedTableWrites(t *testing.T) {
 		withPAPTenantTx(t, tenant, func(tx *sql.Tx) {
 			if _, err := tx.ExecContext(t.Context(), insertAgentQuery,
 				agentID.String(), tenant, "pap-role-agent", "anthropic", "claude",
-				int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`),
+				int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`),
 			); err != nil {
 				t.Fatalf("INSERT agents as stratium_pap: %v", err)
 			}
@@ -349,7 +349,7 @@ func TestIntegration_PAPRole_BumpsOnGovernedTableWrites(t *testing.T) {
 		withPAPTenantTx(t, tenant, func(tx *sql.Tx) {
 			if _, err := tx.ExecContext(t.Context(), insertAgentQuery,
 				agentID.String(), tenant, "pap-role-delegations-agent", "anthropic", "claude",
-				int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`),
+				int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`),
 			); err != nil {
 				t.Fatalf("INSERT agents (prerequisite) as stratium_pap: %v", err)
 			}
@@ -692,7 +692,7 @@ func TestIntegration_PAPRole_WritesScopedByTenant(t *testing.T) {
 		defer func() { _ = tx.Rollback() }()
 		_, err := tx.ExecContext(t.Context(), insertAgentQuery,
 			uuid.New().String(), rowTenant, "pap-rls-mismatch-agent", "anthropic", "claude",
-			int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`),
+			int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`),
 		)
 		assertWriteDenied(t, "INSERT agents with tenant_id != app.tenant_id",
 			"RLS's WITH CHECK (tenant_id = current_tenant(), migrations/000002_rls) must reject a row naming a "+
@@ -759,7 +759,7 @@ func TestIntegration_PAPRole_MissingTenantEpochGrantFailsTheWriteClosed(t *testi
 	defer func() { _ = tx.Rollback() }()
 	_, insertErr := tx.ExecContext(t.Context(), insertAgentQuery,
 		agentID.String(), tenant, "pap-epoch-fail-closed-agent", "anthropic", "claude",
-		int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`),
+		int64(models.TrustTierUnverified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`),
 	)
 	if insertErr == nil {
 		t.Fatal("INSERT agents succeeded despite the trigger having no grant on tenant_epoch — " +

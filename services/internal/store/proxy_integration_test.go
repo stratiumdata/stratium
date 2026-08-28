@@ -71,9 +71,9 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"stratium/pkg/grpctarget"
 	"stratium/internal/pdpgrpc"
 	"stratium/internal/store"
+	"stratium/pkg/grpctarget"
 	"stratium/pkg/models"
 )
 
@@ -215,13 +215,15 @@ func ensureProxyAgent(t *testing.T) {
 	t.Helper()
 	withTenantTx(t, proxyTenant, func(tx *sql.Tx) {
 		if _, err := tx.ExecContext(t.Context(),
-			// classification_caps: NOT NULL, no default (migrations/
-			// 000020_agent_classification_caps) -- '{}' matches CreateAgent's
-			// own "every created agent starts capless" default.
-			`INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
+			// classification_caps and resource_constraints: both NOT NULL, no
+			// default (migrations/000020_agent_classification_caps,
+			// migrations/000021_agent_resource_constraints) -- '{}' matches
+			// CreateAgent's own "every created agent starts capless and
+			// unconstrained" defaults.
+			`INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO NOTHING`,
 			proxyAgentID.String(), proxyTenant, "proxy-integration-agent", "anthropic", "claude",
-			int64(models.TrustTierPlatformTrusted), true, false, []byte(`[]`), []byte(`{}`),
+			int64(models.TrustTierPlatformTrusted), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`),
 		); err != nil {
 			t.Fatalf("seed proxy agent: %v", err)
 		}

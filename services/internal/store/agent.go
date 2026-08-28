@@ -50,16 +50,22 @@ var ErrAllowedToolsRequired = errors.New("store: allowed_tools is required (use 
 // own doc comment (policy.go) for why: nothing here needs the id before
 // this statement returns, so the schema's own DEFAULT uuid_generate_v4()
 // generates it, read back via RETURNING.
-const insertAgentQuery = `INSERT INTO agents (tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps) ` +
-	`VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at, updated_at`
+// resource_constraints is in this column list for the same reason
+// classification_caps is: migrations/000021's DROP DEFAULT leaves it NOT
+// NULL with no default, so an INSERT that omitted it would fail outright,
+// not silently fall back to {} -- it has to be stated explicitly, hardcoded
+// to {} below, the same "every created agent starts with no cap" rule
+// CreateAgent's own doc comment already gives classification_caps.
+const insertAgentQuery = `INSERT INTO agents (tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints) ` +
+	`VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, created_at, updated_at`
 
-const getAgentQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, created_at, updated_at ` +
+const getAgentQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints, created_at, updated_at ` +
 	`FROM agents WHERE id = $1`
 
 // listAgentsQuery orders by name, the PAP admin screen's natural order — see
 // policy.go's listPoliciesQuery for the identical reasoning against
 // LoadAllPolicies/LoadAgent's own ORDER BY id.
-const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, created_at, updated_at ` +
+const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints, created_at, updated_at ` +
 	`FROM agents ORDER BY name`
 
 // updateAgentQuery leaves updated_at to Postgres (NOW()), returned via
@@ -80,9 +86,14 @@ const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_t
 // still read back, in RETURNING: UpdateAgent's response should report the
 // column's real, unchanged value, not silently omit it or echo back
 // whatever the caller's request body happened to contain.
+// resource_constraints is ABSENT from the SET list for the identical reason
+// classification_caps is (above): it is written ONLY by
+// SetAgentResourceConstraints/ClearAgentResourceConstraints
+// (agent_constraints.go), and is still read back via RETURNING so
+// UpdateAgent's response reports the column's real, unchanged value.
 const updateAgentQuery = `UPDATE agents SET name = $1, provider = $2, model_id = $3, trust_tier = $4, ` +
 	`enabled = $5, suspended = $6, allowed_tools = $7, updated_at = NOW() ` +
-	`WHERE id = $8 RETURNING created_at, updated_at, classification_caps`
+	`WHERE id = $8 RETURNING created_at, updated_at, classification_caps, resource_constraints`
 
 const deleteAgentQuery = `DELETE FROM agents WHERE id = $1 RETURNING name`
 
@@ -98,8 +109,9 @@ func scanFullAgent(row rowScanner) (models.Agent, error) {
 	var modelID sql.NullString
 	var allowedTools []byte
 	var classificationCaps []byte
+	var resourceConstraints []byte
 	err := row.Scan(&a.ID, &a.TenantID, &a.Name, &a.Provider, &modelID, &trustTier,
-		&a.Enabled, &a.Suspended, &allowedTools, &classificationCaps, &a.CreatedAt, &a.UpdatedAt)
+		&a.Enabled, &a.Suspended, &allowedTools, &classificationCaps, &resourceConstraints, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return models.Agent{}, err
 	}
@@ -115,6 +127,12 @@ func scanFullAgent(row rowScanner) (models.Agent, error) {
 	}
 	if a.ClassificationCaps == nil {
 		a.ClassificationCaps = map[string]string{}
+	}
+	if err := json.Unmarshal(resourceConstraints, &a.ResourceConstraints); err != nil {
+		return models.Agent{}, fmt.Errorf("store: unmarshal resource_constraints: %w", err)
+	}
+	if a.ResourceConstraints == nil {
+		a.ResourceConstraints = map[string]string{}
 	}
 	return a, nil
 }
@@ -145,8 +163,9 @@ func validateAgentFields(a models.Agent) error {
 // (N4). a.ID, a.TenantID, a.CreatedAt, and a.UpdatedAt are ignored on input
 // and set authoritatively here, matching CreatePolicy's identical treatment
 // of its own caller-supplied identity/timestamp fields. a.ClassificationCaps
-// is ALSO ignored on input, every created agent starts capless ({}) --
-// see the marshal call below for why.
+// and a.ResourceConstraints are ALSO ignored on input, every created agent
+// starts capless ({}) and unconstrained ({}) -- see the marshal calls below
+// for why.
 func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (models.Agent, error) {
 	if err := validateAgentFields(a); err != nil {
 		return models.Agent{}, err
@@ -182,16 +201,28 @@ func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (
 		return models.Agent{}, fmt.Errorf("store: marshal classification_caps: %w", err)
 	}
 
+	// resource_constraints gets the identical always-{} treatment, for the
+	// identical reason: it is now written ONLY by SetAgentResourceConstraints
+	// (agent_constraints.go), which validates the id_prefix trailing-slash
+	// rule before anything is persisted -- letting Create accept a
+	// caller-supplied value would recreate the same unvalidated, unaudited
+	// write path classification_caps' own comment above describes.
+	resourceConstraints, err := json.Marshal(map[string]string{})
+	if err != nil {
+		return models.Agent{}, fmt.Errorf("store: marshal resource_constraints: %w", err)
+	}
+
 	row := tx.QueryRowContext(ctx, insertAgentQuery,
 		s.tenantID, a.Name, a.Provider, a.ModelID, int64(a.TrustTier),
-		a.Enabled, a.Suspended, allowedTools, classificationCaps)
+		a.Enabled, a.Suspended, allowedTools, classificationCaps, resourceConstraints)
 	if err := row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if isUniqueViolation(err) {
 			return models.Agent{}, fmt.Errorf("%w: agent named %q", ErrAlreadyExists, a.Name)
 		}
 		return models.Agent{}, fmt.Errorf("store: insert agent %q: %w", a.Name, err)
 	}
-	a.ClassificationCaps = map[string]string{} // echo the stored (always empty) value
+	a.ClassificationCaps = map[string]string{}  // echo the stored (always empty) value
+	a.ResourceConstraints = map[string]string{} // echo the stored (always empty) value
 
 	// AgentID is the one audit.Entry field that fits an agent-row write
 	// literally, not by repurposing: it already exists to identify "which
@@ -281,13 +312,14 @@ func (s *Store) ListAgents(ctx context.Context) ([]models.Agent, error) {
 // a.UpdatedAt are ignored on input. ErrNotFound if no row with id exists for
 // this tenant.
 //
-// a.ClassificationCaps is ALSO ignored on input, unlike every other mutable
-// field this method replaces: classification_caps is not in updateAgentQuery's
-// SET list at all (see that query's own doc comment for why -- PUT is
-// RoleEditor, and a whole-object replace writing this column was a live
-// escalation around SetAgentClassificationCaps' validation and RoleAdmin
-// gate). The column is genuinely unchanged by this call; what a.ClassificationCaps
-// holds on return is read back from the row via RETURNING below, not echoed
+// a.ClassificationCaps and a.ResourceConstraints are ALSO ignored on input,
+// unlike every other mutable field this method replaces: neither column is
+// in updateAgentQuery's SET list at all (see that query's own doc comment
+// for why -- PUT is RoleEditor, and a whole-object replace writing either
+// column was/would be a live escalation around its own dedicated
+// Set*/Clear* validation and RoleAdmin gate). Both columns are genuinely
+// unchanged by this call; what a.ClassificationCaps and a.ResourceConstraints
+// hold on return are read back from the row via RETURNING below, not echoed
 // from the request body.
 func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, actor string) (models.Agent, error) {
 	if err := validateAgentFields(a); err != nil {
@@ -309,7 +341,8 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		a.Name, a.Provider, a.ModelID, int64(a.TrustTier), a.Enabled, a.Suspended,
 		allowedTools, id.String())
 	var classificationCaps []byte
-	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt, &classificationCaps); err != nil {
+	var resourceConstraints []byte
+	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt, &classificationCaps, &resourceConstraints); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.Agent{}, fmt.Errorf("%w: agent %s", ErrNotFound, id)
 		}
@@ -323,6 +356,12 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 	}
 	if a.ClassificationCaps == nil {
 		a.ClassificationCaps = map[string]string{}
+	}
+	if err := json.Unmarshal(resourceConstraints, &a.ResourceConstraints); err != nil {
+		return models.Agent{}, fmt.Errorf("store: unmarshal resource_constraints: %w", err)
+	}
+	if a.ResourceConstraints == nil {
+		a.ResourceConstraints = map[string]string{}
 	}
 	a.ID = id
 	a.TenantID = s.tenantID

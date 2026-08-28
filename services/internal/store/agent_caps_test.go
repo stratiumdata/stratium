@@ -102,7 +102,7 @@ func expectGetAgentRow(mock sqlmock.Sqlmock, id uuid.UUID, allowedTools []string
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "caps-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, allowedToolsJSON, capsJSON, now, now))
+				int64(models.TrustTierCertified), true, false, allowedToolsJSON, capsJSON, []byte(`{}`), now, now))
 	mock.ExpectCommit()
 }
 

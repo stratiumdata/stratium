@@ -29,6 +29,12 @@ type Agent struct {
 	// one, so changing it affects only delegations issued after the change.
 	ClassificationCaps map[string]string `json:"classification_caps" db:"classification_caps"`
 
+	// ResourceConstraints is the scope copied onto every ROOT delegation at
+	// issuance, the same way ClassificationCaps above is. It is NOT consulted
+	// at decision time -- the decision reads the delegation's own constraints
+	// -- so a change here never affects a delegation already issued.
+	ResourceConstraints map[string]string `json:"resource_constraints" db:"resource_constraints"`
+
 	// CreatedAt/UpdatedAt were absent from this type before internal/store's
 	// PAP CRUD (Task 3) added them: LoadAgent (internal/store/store.go), the
 	// only reader before that task, reduces to authz.AgentInfo and never
