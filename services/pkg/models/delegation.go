@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -181,14 +182,29 @@ func ScopeNarrows(parent, child *Delegation) string {
 	}
 
 	// Resource constraints may be neither dropped nor altered. Every constraint
-	// the parent sets must appear in the child with an identical value. Values
-	// are opaque caller-defined strings, so the comparison is exact — it does
-	// not try to reason about wildcards or ranges, because every such
-	// interpretation is a place a widening could hide.
+	// the parent sets must appear in the child. Values are opaque
+	// caller-defined strings, so the comparison is exact — it does not try to
+	// reason about wildcards or ranges, because every such interpretation is
+	// a place a widening could hide. ResourceIDPrefixKey is the one
+	// exception, handled below: it has prefix semantics, not caller-opaque
+	// ones, so it narrows by containment.
 	for key, parentVal := range parent.ResourceConstraints {
 		childVal, ok := child.ResourceConstraints[key]
 		if !ok {
 			return "child drops parent resource constraint " + key + "=" + parentVal
+		}
+		// ResourceIDPrefixKey narrows by containment, not equality: a child
+		// may go DEEPER into its parent's subtree, never shallower and never
+		// sideways. HasPrefix is the whole test, and it is sufficient only
+		// because a stored prefix always ends in "/" (validated at write
+		// time) — without that, parent "/workspace" would accept child
+		// "/workspace-evil/" as a narrowing.
+		if key == ResourceIDPrefixKey {
+			if !strings.HasPrefix(childVal, parentVal) {
+				return "child resource constraint " + key + "=" + childVal +
+					" is not within parent " + key + "=" + parentVal
+			}
+			continue
 		}
 		if childVal != parentVal {
 			return "child resource constraint " + key + "=" + childVal +

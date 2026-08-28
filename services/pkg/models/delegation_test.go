@@ -288,3 +288,64 @@ func TestDelegation_HasTool(t *testing.T) {
 		t.Error("an empty tool list means unrestricted")
 	}
 }
+
+func TestScopeNarrows_IDPrefix(t *testing.T) {
+	// Shared, not called per-delegation: two sequential time.Now() calls are
+	// not guaranteed equal, and Go evaluates the parent argument before the
+	// child argument in every ScopeNarrows(newDelegation(...), newDelegation(...))
+	// call below — so a per-call now() would give the child a strictly later
+	// (or equal) clock reading than the parent, tripping the unrelated
+	// ExpiresAt widening check and masking the id_prefix behavior under test.
+	now := time.Now()
+	newDelegation := func(prefix string) *Delegation {
+		d := &Delegation{
+			ApprovedTools: []string{"Read"}, MaxActionTier: ActionTierReadOnly,
+			ClassificationCaps:  map[string]string{},
+			ResourceConstraints: map[string]string{},
+			ExpiresAt:           now.Add(time.Hour),
+		}
+		if prefix != "" {
+			d.ResourceConstraints[ResourceIDPrefixKey] = prefix
+		}
+		return d
+	}
+
+	cases := []struct {
+		name          string
+		parent, child string
+		wantValid     bool
+	}{
+		{"deeper narrows", "/workspace/", "/workspace/src/", true},
+		{"equal is valid", "/workspace/", "/workspace/", true},
+		{"shallower widens", "/workspace/src/", "/workspace/", false},
+		{"root widens", "/workspace/", "/", false},
+		{"a sibling is not a subtree", "/workspace/", "/other/", false},
+		// The boundary trap, at narrowing time as well as matching time.
+		{"a longer sibling is not a subtree", "/workspace/", "/workspace-evil/", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := ScopeNarrows(newDelegation(tc.parent), newDelegation(tc.child))
+			if tc.wantValid && reason != "" {
+				t.Fatalf("ScopeNarrows(%q -> %q) = %q, want valid", tc.parent, tc.child, reason)
+			}
+			if !tc.wantValid && reason == "" {
+				t.Fatalf("ScopeNarrows(%q -> %q) accepted a widening", tc.parent, tc.child)
+			}
+		})
+	}
+
+	// §4.3.1 is unchanged: introduce and drop are both still refused.
+	t.Run("a child may not introduce a prefix its parent leaves open", func(t *testing.T) {
+		if ScopeNarrows(newDelegation(""), newDelegation("/workspace/")) == "" {
+			t.Fatal("accepted a child introducing a constraint its parent lacks")
+		}
+	})
+	t.Run("a child may not drop its parent's prefix", func(t *testing.T) {
+		if ScopeNarrows(newDelegation("/workspace/"), newDelegation("")) == "" {
+			t.Fatal("accepted a child dropping its parent's constraint — an absent constraint " +
+				"is unrestricted at decision time, so this would be a promotion")
+		}
+	})
+}
