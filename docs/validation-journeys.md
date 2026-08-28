@@ -46,7 +46,7 @@ Six of these journeys have executable coverage, in two files:
 | J6 — sub-delegation narrowing | `TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen` | — |
 | J10 — concurrent decisions | — | `TestIntegration_Journey10_ConcurrentDecideDoesNotDenyOnAnAuditCollision` |
 | §4.1 — tier coarseness | `TestJourney41_TheTierLadderCannotDistinguishRoutineFromCatastrophic`, `TestJourney41_PermittingTheRoutineCasePermitsTheCatastrophicOne` | — |
-| §4.2 / §4.3 — no downgrade, no write path | `TestJourney42_NoCatalogRowOrOverrideCanLowerAPositiveMatch` | `TestIntegration_Journey43_ResourceConstraintsAreEnforcedButUnreachable` |
+| §4.2 / §4.3 — no downgrade, scope is reachable and binds | `TestJourney42_NoCatalogRowOrOverrideCanLowerAPositiveMatch` | `TestIntegration_Journey43_ResourceConstraintsAreEnforcedAndReachable`, `TestIntegration_Journey43_AScopedDelegationConstrainsEveryPath` |
 
 **Most of these are characterization tests.** They assert behaviour this
 document argues is *wrong*, so that the day someone fixes it the test breaks
@@ -403,30 +403,59 @@ There is no third option, and `tier.go:94` already names the resulting dynamic i
 its own comment: operators get pressured into widening delegations to get work
 done, "which trades a loud annoyance for a quiet weakening."
 
-### 4.3 The dimension that would fix this is unreachable
+### 4.3 The dimension that would fix this is now reachable
 
-`resource_constraints` is enforced on every hop of every chain
-(`services/internal/authz/delegation.go:166`, `checkResourceConstraints`) — and has
-**no write path anywhere**. `CreateDelegation` hardcodes an empty map for every
-root (`services/internal/pdpgrpc/delegation.go:182`) and copies the parent's for
-every child, and the PAP exposes only `GET /v1/delegations` and
-`POST /v1/delegations/{id}/revoke` (`services/cmd/stratium-pap/server.go:250`).
-So for anything created through the API the field is permanently empty.
-**[traced]**
+**RESOLVED, 2026-08-28.** `resource_constraints` is enforced on every hop of
+every chain (`services/internal/authz/delegation.go:102`,
+`checkResourceConstraints`), and now has a write path:
+`PUT /v1/agents/{id}/resource-constraints` (RoleAdmin) sets the one key with
+real semantics, `id_prefix` — a prefix every resource identity the call
+resolves to must fall inside, enforced by `strings.HasPrefix` against
+write-time-validated values (`services/internal/store/agent_constraints.go`).
+`CreateDelegation` copies the agent's current scope onto every root
+delegation at issuance (`services/internal/pdpgrpc/delegation.go:187`), the
+same way it copies classification caps, and `GET /v1/delegations` reads it
+straight back.
+**[traced, live: `TestIntegration_Journey43_ResourceConstraintsAreEnforcedAndReachable`]**
 
-And even with a write path, `Bash` produces no resource identity to match
-against — J1's problem, arriving from the other direction.
+And it binds against a shell command's derived identities, not only a
+fielded tool's single id: `id_prefix` requires **every** identity a call
+resolves to be inside the prefix, the same strictest-member argument J1's
+shell fix makes for classification labels — a benign path prepended to an
+out-of-scope one cannot buy scope for the command as a whole, because the
+out-of-scope member still fails on its own.
+**[live: `TestIntegration_Journey43_AScopedDelegationConstrainsEveryPath`]**
+That test also surfaced and
+closed a defect in the shell-identity plumbing this task's own fix had
+introduced (2026-08-28): the PDP's resource-identity list carried an empty
+entry for every command-field-only call, which made `id_prefix` deny every
+shell call under a configured scope regardless of what paths the command
+actually named. `services/internal/pdpgrpc/server.go` now omits that entry
+when the field is empty, matching `labelResource`'s own treatment of it.
+
+Two things did not change, and are the honest edges of this fix:
+
+- **A command naming no path still denies**, for the identical reason a
+  fieldless call still denies under a classification cap — nothing to check,
+  and unevaluable must not read as satisfied.
+- **The five tools declaring no resource field at all** (`Glob`, `Grep`,
+  `WebFetch`, `WebSearch`, `TodoWrite`) still deny under any configured scope,
+  the same way they still deny under any configured cap (J1, §1).
 
 ### 4.4 The one-sentence version
 
 > Strictness is aimed at **how dangerous an action is**. Business workflows vary
-> by **what the action touches**. The dimension operators actually need is the
-> one the API cannot express.
+> by **what the action touches**. Since 2026-08-28 the API can express that
+> second dimension too.
 
-"This agent may do destructive things, but only under `/workspace`, and only to
-resources labelled `INTERNAL`" is the sentence every operator wants to write. The
-data model already supports it. The API cannot express it, and the most-used tool
-cannot satisfy it.
+"This agent may do destructive things, but only under `/workspace`" is now a
+sentence an operator can write and have enforced: `PUT
+/v1/agents/{id}/resource-constraints` sets it, it is copied onto every root
+delegation, and it binds against every identity a call — fielded or shell —
+resolves to. What it still cannot do is what §4.1 and §4.2 already named: say
+*how dangerous* the action within that scope may be any more precisely than
+the tier ladder allows, or rescue a tool (or a pathless command) that names no
+resource at all.
 
 ---
 
@@ -434,8 +463,8 @@ cannot satisfy it.
 
 | # | Change | Unlocks |
 |---|---|---|
-| 1 | ~~**Give `Bash` a resource identity**~~ — **done 2026-08-28.** Every path the command names is extracted; the strictest label decides | Caps for the tool that matters most. Resource constraints deliberately excluded — see §4.3 |
-| 2 | **Add a write path for `resource_constraints`** at delegation creation | Scope-conditional permissions — the §4.4 sentence becomes writable |
+| 1 | ~~**Give `Bash` a resource identity**~~ — **done 2026-08-28.** Every path the command names is extracted; the strictest label decides | Caps for the tool that matters most, and — now that #2 has landed too — resource-constraint scope for it as well (§4.3) |
+| 2 | ~~**Add a write path for `resource_constraints`**~~ — **done 2026-08-28.** `PUT /v1/agents/{id}/resource-constraints`, copied onto every root delegation at issuance | Scope-conditional permissions — the §4.4 sentence is now writable |
 | 3 | **Ship a documented default posture** — trust tier 3, `escalate_at: 4`, a real tool allowlist | A new tenant's first hour is not "everything denies" (J4) |
 
 A fourth, only if J10's measurement says the ceiling binds: batch audit appends
@@ -452,24 +481,26 @@ new logic server-side, where a hostile PEP cannot reach it.
 
 ---
 
-## 6. Honest scope statement, until #1 and #2 land
+## 6. Honest scope statement, now that #1 and #2 have landed
 
 Stronger and narrower than the current docs imply:
 
-> Stratium is strong for **tool-scoped and tier-scoped** authorization over
-> agents touching money, production infrastructure, or customer data — where
-> escalation friction is acceptable and the toolkit is catalogued and
-> file-shaped.
+> Stratium is strong for **tool-scoped, tier-scoped, and — since 2026-08-28 —
+> resource-scoped** authorization over agents touching money, production
+> infrastructure, or customer data — where escalation friction is acceptable.
 >
-> Since 2026-08-28 it also fits a general-purpose coding agent under
-> classification caps, with two limits worth stating up front: a shell command
-> naming no path (`npm test`) still denies under a cap, and five tools declaring
-> no resource field at all (`Glob`, `Grep`, `WebFetch`, `WebSearch`,
-> `TodoWrite`) still deny.
+> It fits a general-purpose coding agent under classification caps and under
+> an `id_prefix` scope alike, with the same two limits worth stating up front
+> for both: a shell command naming no path (`npm test`) still denies, and five
+> tools declaring no resource field at all (`Glob`, `Grep`, `WebFetch`,
+> `WebSearch`, `TodoWrite`) still deny. Neither mechanism can rescue a call
+> that names no resource to check.
 >
-> The remaining structural limit is §4.1: routine destructive operations cannot
-> be permitted without also permitting catastrophic ones, because the tier
-> ladder cannot express scope and `resource_constraints` has no write path.
+> The remaining structural limit is §4.1: routine destructive operations
+> cannot be permitted without also permitting catastrophic ones, because the
+> tier ladder itself has no notion of scope — a `DESTRUCTIVE` delegation is
+> `DESTRUCTIVE` everywhere the scope allows it, not just where the operator
+> meant.
 
 Both halves are true, and saying the second one first is what makes the first
 one credible.

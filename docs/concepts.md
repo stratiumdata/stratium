@@ -347,6 +347,21 @@ And one direction that reads backwards until you say it out loud: the
 escalation threshold narrows *downward*. A lower threshold escalates sooner, so
 lowering it narrows and raising it widens.
 
+**Resource constraints narrow by exact match, except the one key that has
+prefix semantics.** Most constraint values are opaque, caller-defined strings,
+so a child must carry every key its parent set with the identical value —
+same treatment as the omission and no-new-dimension rules above. `id_prefix`
+is the deliberate exception: since 2026-08-28 it is the scope
+`PUT /v1/agents/{id}/resource-constraints` writes and `CreateDelegation`
+copies onto a root at issuance, and a child may go *deeper* into its parent's
+prefix without matching it exactly — `/workspace/service-a/` narrows
+`/workspace/`, checked with a plain `strings.HasPrefix`. That containment
+check is safe only because write-time validation already guarantees every
+stored prefix ends in `/`; without it, a parent `/workspace` would accept a
+child `/workspace-evil/` as a "narrowing." Both rules — every other key by
+equality, `id_prefix` by containment — are enforced by the same function,
+`ScopeNarrows` (`pkg/models/delegation.go`).
+
 ### Well-formedness is checked before anything is decided
 
 Before any of that runs, the chain itself has to be a genuine lineage: the first

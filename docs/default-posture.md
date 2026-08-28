@@ -25,6 +25,7 @@ against data you would not mind an engineer reading:
 | Agent `allowed_tools` | `[]` | Unrestricted at the agent layer; let the delegation be the single tool gate while you are learning the system. Tighten in §2. |
 | Agent `enabled` / `suspended` | `true` / `false` | `suspended` is your kill switch — reversible, fleet-wide, effective on the next call. |
 | Classification caps | **none** | The single most consequential default here. §4. |
+| Resource constraints (`id_prefix`) | **none** | Scopes the agent to a path prefix. Same failure mode as caps: it denies any tool resolving no resource identity. §4a. |
 | Delegation `max_action_tier` | The lowest tier that lets the agent finish its work — start at `1` (`READ_ONLY`) and raise it when something denies | The ceiling no policy can raise. Raising it later costs one command; starting high costs you the habit. |
 | Delegation `approved_tools` | An explicit list. Never empty. | An empty list means **unrestricted**, everywhere in this system. |
 | Delegation `escalate_at` | unset at first; `4` once the agent needs `DESTRUCTIVE` | §5. |
@@ -131,6 +132,39 @@ change that would lift it.
 
 ---
 
+## 4a. Resource constraints: the same trap, one dimension over
+
+`PUT /v1/agents/{id}/resource-constraints` (RoleAdmin) sets `id_prefix`, a
+path prefix every resource identity an agent's calls resolve to must fall
+inside — "this agent may act, but only under `/workspace/`." It is copied
+onto every root delegation at issuance, the same way classification caps are,
+so the ordering rule is identical: **set it before creating the delegation**,
+and revoke-and-reissue to make a change bite an already-running agent.
+
+The trailing slash is required (`/workspace/`, not `/workspace`) — write-time
+validation rejects the bare form, because without it the prefix also matches
+a sibling like `/workspace-evil/`.
+
+**The same caveat classification caps carry, carries here too:** a tool that
+resolves no resource identity at all denies under a configured constraint,
+permanently, the same five tools (`Glob`, `Grep`, `WebFetch`, `WebSearch`,
+`TodoWrite`) and the same reason — nothing to check, and unevaluable must not
+read as satisfied. A shell command naming no path (`npm test`, `git status`)
+is in the same position for the identical reason.
+
+Where it differs from a cap: a shell command that *does* name paths is
+checked against **every** one of them, not just the first. `cat
+/workspace/a.txt; cat /etc/shadow` denies on the second path even though the
+first is in scope — a decoy cannot buy scope for a command that still reaches
+outside it. The API's own view of the constraint (the same `PUT`/`GET`
+response shape as classification caps) reports `unsatisfiable_tools` and
+`live_delegations` so you can see the consequence before committing to it.
+
+Related: [`validation-journeys.md`](validation-journeys.md) §4.3, which
+covers the mechanism and what proves it live.
+
+---
+
 ## 5. Escalation: the pressure valve, and when to fit it
 
 A misclassified command has exactly two remedies, because tier overrides may
@@ -169,9 +203,11 @@ Stated plainly, so it is not discovered later:
   classifier is a heuristic and says so in its own source. The controls that
   actually hold are the ceiling, the tool list, and escalation — not the
   classifier.
-- **Nothing here constrains *what* an action touches**, only how dangerous the
-  action is. Resource constraints exist and are enforced, but no supported API
-  can set them.
+- **The tier ladder itself still cannot constrain *what* an action touches**,
+  only how dangerous it is. `resource_constraints` (§4a) narrows *where* an
+  agent may act, but a `DESTRUCTIVE` delegation scoped to `/workspace/` is
+  still `DESTRUCTIVE` everywhere inside it — the routine-vs-catastrophic gap
+  in §4.1 of `validation-journeys.md` is unchanged.
 - **Raw tool inputs are never stored.** The audit chain proves which agent was
   allowed which tool at which tier, never what the command was.
 

@@ -268,32 +268,30 @@ func TestIntegration_Journey1_AClassificationCapDeniesEveryFieldlessToolCall(t *
 }
 
 // ---------------------------------------------------------------------------
-// §4.3 — the dimension that would fix §4.1 has no write path
+// §4.3 — the dimension that would fix §4.1 is reachable and binds
 // ---------------------------------------------------------------------------
 
-// TestIntegration_Journey43_ResourceConstraintsAreEnforcedButUnreachable is
-// the live proof of §4.3, in two halves that only mean something together:
+// TestIntegration_Journey43_ResourceConstraintsAreEnforcedAndReachable is the
+// live proof of §4.3, in two halves that only mean something together:
 //
 //   - Enforcement works. A delegation carrying a resource constraint denies a
 //     request whose resource does not satisfy it, with a reason naming the
-//     key. This half is seeded with SQL, because SQL is the only thing that
-//     can produce such a delegation.
-//   - Nothing can create one. A delegation issued through CreateDelegation --
-//     the only supported path, the one session-start and every delegating
-//     agent use -- comes back with resource_constraints EMPTY, always.
-//     CreateDelegation hardcodes an empty map for a root
-//     (internal/pdpgrpc/delegation.go:182) and copies the parent's for a
-//     child, and the PAP exposes only GET and revoke on /v1/delegations
-//     (cmd/stratium-pap/server.go:250).
+//     key. This half is seeded with SQL, exercising the generic exact-match
+//     key path directly rather than going through a live CreateDelegation
+//     call -- the next test, and the second half of this one, cover that.
+//   - A supported path can create one. `PUT /v1/agents/{id}/resource-
+//     constraints` (2026-08-28) sets the scope, CreateDelegation copies it
+//     onto the root delegation at issuance (internal/pdpgrpc/delegation.go),
+//     and GET /v1/delegations reads it straight back.
 //
-// Either half alone is unremarkable. Together they say the system already
-// contains the mechanism that would answer §4.1's "yes, but only there" --
-// fully implemented, fully enforced, and unreachable by any supported caller.
+// Either half alone is unremarkable. Together they say the mechanism §4.1
+// wanted -- "yes, but only there" -- is now fully implemented, fully
+// enforced, AND reachable through the API a real caller uses.
 //
-// WHEN THIS FAILS at the second half: a write path was added (fix #2 in §5).
+// WHEN THIS FAILS at the second half: the write path was removed or broken.
 // Update §4.3 and §4.4 -- the "the API cannot express it" sentence is the one
-// that changes.
-func TestIntegration_Journey43_ResourceConstraintsAreEnforcedButUnreachable(t *testing.T) {
+// that changes back.
+func TestIntegration_Journey43_ResourceConstraintsAreEnforcedAndReachable(t *testing.T) {
 	const tool = "journeyConstraintTool"
 	const principal = "journey43-proof@example.com"
 
@@ -344,7 +342,19 @@ func TestIntegration_Journey43_ResourceConstraintsAreEnforcedButUnreachable(t *t
 		t.Logf("a scope-limited delegation works exactly as §4.4 wants: %s", other.GetReason())
 	})
 
-	t.Run("but no supported path can create one", func(t *testing.T) {
+	t.Run("and a supported path can create one", func(t *testing.T) {
+		// The write has to land BEFORE CreateDelegation: a root delegation
+		// copies the agent's CURRENT resource_constraints at issuance
+		// (internal/pdpgrpc/delegation.go), never reads them live.
+		var view models.AgentConstraintsView
+		papJSON(t, papAddr, http.MethodPut, "/v1/agents/"+agent.ID.String()+"/resource-constraints", admin,
+			map[string]any{"resource_constraints": map[string]string{models.ResourceIDPrefixKey: "/workspace/"}},
+			&view)
+		if got := view.ResourceConstraints[models.ResourceIDPrefixKey]; got != "/workspace/" {
+			t.Fatalf("PUT resource-constraints returned %s=%q, want %q",
+				models.ResourceIDPrefixKey, got, "/workspace/")
+		}
+
 		created, err := papPdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
 			Subject: principal, AgentId: agent.ID.String(),
 			RequestedScope: &pdpgrpc.RequestedScope{
@@ -368,13 +378,146 @@ func TestIntegration_Journey43_ResourceConstraintsAreEnforcedButUnreachable(t *t
 		if got == nil {
 			t.Fatalf("GET /v1/delegations did not list %s", created.GetDelegationId())
 		}
-		if len(got.ResourceConstraints) != 0 {
-			t.Fatalf("resource_constraints = %v, want empty. A write path now exists -- fix #2 from "+
-				"docs/validation-journeys.md §5 has landed. Update §4.3 and §4.4",
-				got.ResourceConstraints)
+		if gotPrefix := got.ResourceConstraints[models.ResourceIDPrefixKey]; gotPrefix != "/workspace/" {
+			t.Fatalf("resource_constraints[%s] = %q, want %q. A delegation minted through the only "+
+				"supported path no longer carries the agent's scope -- fix #2 from "+
+				"docs/validation-journeys.md §5 has regressed. Update §4.3 and §4.4",
+				models.ResourceIDPrefixKey, gotPrefix, "/workspace/")
 		}
-		t.Log("a delegation from the only supported path carries no resource constraints, and the " +
-			"request type has no field that could carry one")
+		t.Log("a delegation from the supported path carries the scope PUT /v1/agents/{id}/" +
+			"resource-constraints set on the agent, copied at issuance")
+	})
+}
+
+// TestIntegration_Journey43_AScopedDelegationConstrainsEveryPath is the live
+// proof that an id_prefix scope, set through the route the previous test
+// proves reachable, actually binds -- for a catalogued fielded tool AND for a
+// shell command naming several paths at once. It follows
+// TestIntegration_Journey1_AShellCommandIsLabelledByEveryPathItNames's
+// structure exactly, for the identical reason: a shell call's resource
+// identity is a SET, and the decoy subtest is the one that proves the fold
+// takes every member rather than the first or the last.
+//
+// The scope is set on the agent BEFORE CreateDelegation runs, because a root
+// delegation copies resource_constraints at issuance and never reads them
+// live (internal/pdpgrpc/delegation.go) -- the same ordering requirement the
+// previous test's rewritten subtest documents.
+//
+// WHEN THIS FAILS on the decoy case: the fold stopped requiring every id to
+// satisfy the prefix. That is a security regression, not a documentation
+// update -- a benign path in a compound command would buy scope for a
+// command that also reads outside it.
+func TestIntegration_Journey43_AScopedDelegationConstrainsEveryPath(t *testing.T) {
+	const readTool = "journeyScopeReadTool"
+	const shellTool = "journeyScopeShellTool"
+	const principal = "journey43-scope@example.com"
+	const prefix = "/workspace/"
+
+	papBlanketPermit(t, "journey43-scope-blanket-permit")
+	admin := papAccessToken(t, papAdminUser, papAdminPass)
+
+	// A fielded tool: extraction produces a single id straight from the
+	// request, no fold involved.
+	papJSON(t, papAddr, http.MethodPost, "/v1/tool-catalog", admin, map[string]any{
+		"tool_name": readTool, "action_tier": int(models.ActionTierReadOnly),
+		"verb": "read", "resource_field": "path",
+	}, nil)
+
+	// Bash's exact catalog shape: a command_field, no fixed tier, no
+	// resource_field -- see TestIntegration_Journey1_AShellCommandIsLabelled
+	// ByEveryPathItNames's own comment on why this is the shape that matters.
+	papJSON(t, papAddr, http.MethodPost, "/v1/tool-catalog", admin, map[string]any{
+		"tool_name": shellTool, "verb": "execute", "command_field": "command",
+	}, nil)
+	// This row has a NULL action_tier, which the migration-boundary proof
+	// cannot tolerate anywhere in the table. See the helper's own comment.
+	journeyCleanupNullTierTool(t, papTenant, shellTool)
+
+	agent := journeyAgent(t, admin, "journey43-scope-agent")
+
+	// The scope has to land before CreateDelegation: a root delegation copies
+	// the agent's CURRENT resource_constraints at issuance, never reads them
+	// live.
+	var view models.AgentConstraintsView
+	papJSON(t, papAddr, http.MethodPut, "/v1/agents/"+agent.ID.String()+"/resource-constraints", admin,
+		map[string]any{"resource_constraints": map[string]string{models.ResourceIDPrefixKey: prefix}}, &view)
+	if got := view.ResourceConstraints[models.ResourceIDPrefixKey]; got != prefix {
+		t.Fatalf("PUT resource-constraints returned %s=%q, want %q", models.ResourceIDPrefixKey, got, prefix)
+	}
+
+	// INTERNAL_MODIFY, not READ_ONLY: the decoy case below is a compound
+	// command and rates tier 2 (reCompound in internal/authz/tier.go). A
+	// READ_ONLY delegation would deny it on the TIER and prove nothing about
+	// the constraint.
+	delegation := journeyDelegationAtTier(t, principal, agent.ID, "journey43 scoped",
+		models.ActionTierInternalModify, readTool, shellTool)
+
+	decide := func(tool, rawInput string) *pdpgrpc.DecideResponse {
+		return papDecide(t, &pdpgrpc.DecideRequest{
+			Token: delegation.GetToken(), AgentId: agent.ID.String(), Subject: principal,
+			Tool: tool, RawInput: rawInput,
+		})
+	}
+
+	t.Run("a fielded call inside the scope allows", func(t *testing.T) {
+		got := decide(readTool, `{"path":"/workspace/a.txt"}`)
+		if got.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Decide = %v (%s), want ALLOW", got.GetEffect(), got.GetReason())
+		}
+	})
+
+	t.Run("a fielded call outside the scope denies, naming the id", func(t *testing.T) {
+		got := decide(readTool, `{"path":"/etc/shadow"}`)
+		if got.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Decide = %v, want DENY -- /etc/shadow is outside %s", got.GetEffect(), prefix)
+		}
+		if !strings.Contains(got.GetReason(), "/etc/shadow") {
+			t.Errorf("Reason = %q, want it to name the id outside scope", got.GetReason())
+		}
+	})
+
+	t.Run("a shell command naming only an in-scope path allows", func(t *testing.T) {
+		got := decide(shellTool, `{"command":"cat /workspace/a.txt"}`)
+		if got.GetEffect() != pdpgrpc.Effect_EFFECT_ALLOW {
+			t.Fatalf("Decide = %v (%s), want ALLOW -- the single path this command names is inside %s",
+				got.GetEffect(), got.GetReason(), prefix)
+		}
+	})
+
+	t.Run("a decoy path cannot buy scope for the one that is out of it", func(t *testing.T) {
+		got := decide(shellTool, `{"command":"cat /workspace/a.txt; cat /etc/shadow"}`)
+		t.Logf("decoy command -> effect=%s reason=%q", got.GetEffect(), got.GetReason())
+		if got.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Decide = %v, want DENY. A benign in-scope path prepended to an out-of-scope one "+
+				"just bought scope for a command that still reads outside it -- this is the decoy case "+
+				"and it is a SECURITY REGRESSION", got.GetEffect())
+		}
+		if !strings.Contains(got.GetReason(), "/etc/shadow") {
+			t.Errorf("Reason = %q, want it to name the out-of-scope id -- every id must be checked, "+
+				"not just the first", got.GetReason())
+		}
+	})
+
+	t.Run("a traversal segment denies, naming the segment", func(t *testing.T) {
+		got := decide(shellTool, `{"command":"cat /workspace/../etc/shadow"}`)
+		if got.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Decide = %v, want DENY -- a \"..\" segment cannot be checked against a prefix "+
+				"without resolving it, and resolving it is not this function's job", got.GetEffect())
+		}
+		if !strings.Contains(got.GetReason(), "..") {
+			t.Errorf("Reason = %q, want it to name the %q segment", got.GetReason(), "..")
+		}
+	})
+
+	t.Run("a command naming no path denies as unevaluable", func(t *testing.T) {
+		got := decide(shellTool, `{"command":"npm test"}`)
+		if got.GetEffect() != pdpgrpc.Effect_EFFECT_DENY {
+			t.Fatalf("Decide = %v, want DENY -- a command naming no resource has nothing to check "+
+				"against a scope, and unevaluable must not read as satisfied", got.GetEffect())
+		}
+		if !strings.Contains(got.GetReason(), "cannot be evaluated") {
+			t.Errorf("Reason = %q, want the uncheckable-constraint wording", got.GetReason())
+		}
 	})
 }
 

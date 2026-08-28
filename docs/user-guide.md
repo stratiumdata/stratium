@@ -1013,6 +1013,57 @@ curl -X DELETE -H "Authorization: Bearer $ADMIN" "http://$PAP/v1/agents/$AGENT"
 > the very next tool call across your whole fleet, because the write bumps the
 > tenant epoch and invalidates every cached decision.
 
+**Resource constraints — scoping an agent to a path prefix.** Three routes,
+admin-only, on `/v1/agents/{id}/resource-constraints`:
+
+```bash
+curl -sS -X PUT "http://$PAP/v1/agents/$AGENT/resource-constraints" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"resource_constraints": {"id_prefix": "/workspace/"}}'
+```
+
+The response is the same advisory shape classification caps return:
+
+```json
+{
+  "agent_id": "...",
+  "resource_constraints": {"id_prefix": "/workspace/"},
+  "unsatisfiable_tools": ["Glob", "Grep", "TodoWrite", "WebFetch", "WebSearch"],
+  "live_delegations": 2
+}
+```
+
+`GET` on the same route returns the identical shape without writing anything.
+`DELETE` clears the scope for delegations issued from now on — unlike `PUT`,
+which refuses an empty map (`400`), `DELETE` is the deliberate way to turn
+enforcement off, the same split classification caps use.
+
+`id_prefix` is currently the only key with defined semantics: every resource
+identity a call resolves to must fall under the prefix. Four things to know
+before you use it:
+
+1. **It applies at the next issuance**, exactly like classification caps: a
+   root delegation copies the agent's scope when `CreateDelegation` mints it,
+   and never reads it live. To make a new scope bite immediately, revoke the
+   live delegation (§5.9) and let the agent re-issue.
+2. **The prefix must end in `/`.** `"/workspace"` is refused with a `400`
+   naming what it should be — without the trailing slash it would also match
+   a sibling directory such as `/workspace-evil/`.
+3. **A tool resolving no resource identity denies under any configured
+   scope, permanently** — the same trap classification caps set (§4a of
+   [`default-posture.md`](default-posture.md)), and the same five tools ship
+   that way: `Glob`, `Grep`, `WebFetch`, `WebSearch`, `TodoWrite`. A shell
+   command naming no path (`npm test`) is denied for the identical reason:
+   nothing to check, and unevaluable must not read as satisfied.
+4. **A shell command is checked on every path it names, not just one.** `cat
+   /workspace/a.txt; cat /etc/shadow` denies on the second path even though
+   the first is in scope — a benign path cannot buy scope for a command that
+   still reaches outside it.
+
+A child delegation may narrow `id_prefix` further (`/workspace/service-a/`
+under a parent's `/workspace/`) but may not widen it or drop it — see
+[`concepts.md`](concepts.md) §7.
+
 ### 5.6 CRUD: Tools (the tool catalog)
 
 The tool catalog tells the PDP **how to read a tool's arguments**: which JSON
