@@ -661,6 +661,60 @@ func TestDecide_CatalogedToolReplacesWireResourceForDelegationLeg(t *testing.T) 
 	}
 }
 
+// TestDecide_IDPrefixConstraintBindsAgainstShellDerivedPaths pins a defect
+// that shipped undetected: extracted.ResourceID is "" for any command_field-
+// only catalog row (Bash's exact shape -- no resource_field), and server.go
+// used to seed resourceIDs with that empty string unconditionally. labelResource
+// already treats "" as "not an id" and skips it in its own fold (label.go),
+// so no classification-cap test ever saw this -- but satisfiesIDPrefix
+// (internal/authz/constraints.go) has no such filter, and "" fails
+// strings.HasPrefix against any non-empty prefix. The result: an id_prefix
+// constraint denied EVERY shell call, regardless of whether the paths the
+// command actually named were in scope.
+//
+// WHEN THIS FAILS on the "allows" case: server.go started seeding resourceIDs
+// with an empty extracted.ResourceID again, and every in-scope shell call
+// under a configured scope is now a false DENY.
+func TestDecide_IDPrefixConstraintBindsAgainstShellDerivedPaths(t *testing.T) {
+	commandField := "command"
+	tests := []struct {
+		name       string
+		rawInput   string
+		wantEffect Effect
+	}{
+		{
+			name:       "a command naming only an in-scope path allows",
+			rawInput:   `{"command":"cat /workspace/a.txt"}`,
+			wantEffect: Effect_EFFECT_ALLOW,
+		},
+		{
+			// The negative, alongside the positive above, so this test cannot
+			// pass merely because the constraint turned out to be inert.
+			name:       "a command naming an out-of-scope path denies",
+			rawInput:   `{"command":"cat /etc/shadow"}`,
+			wantEffect: Effect_EFFECT_DENY,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, req := wellFormedFixture()
+			fs.catalog = []models.ToolCatalogEntry{{ToolName: "Bash", CommandField: &commandField}}
+			fs.chain[0].ResourceConstraints = map[string]string{models.ResourceIDPrefixKey: "/workspace/"}
+			req.RawInput = tt.rawInput
+			srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+			resp, err := srv.Decide(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Decide() error = %v", err)
+			}
+			if resp.GetDelegationEffect() != tt.wantEffect {
+				t.Fatalf("DelegationEffect = %v (%q), want %v",
+					resp.GetDelegationEffect(), resp.GetDelegationReason(), tt.wantEffect)
+			}
+		})
+	}
+}
+
 // TestDecide_CatalogedVerbReachesAudit is Task 3's own addition, proving the
 // verb decision that task made: DecideRequest no longer carries a verb field
 // at all (cmd/stratium-pep's toolVerbs table, which used to populate it, is
