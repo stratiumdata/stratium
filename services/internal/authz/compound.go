@@ -64,7 +64,7 @@ func Decide(req Request, cfg Config) Result {
 	res.Principal, res.Deciding = FoldVerdicts(req.PrincipalVerdicts)
 	res.Agent = AgentLeg(req.Agent, req.Action, derived, cfg.Trust)
 	delegationLeg, deniedDepth := DelegationLeg(
-		req.Chain, req.Action, derived, req.Resource, req.Now, cfg.MaxDepth)
+		req.Chain, req.Action, derived, req.Resource, req.ResourceIDs, req.Now, cfg.MaxDepth)
 	res.Delegation = delegationLeg
 
 	// Deny-overrides, in a fixed order so attribution is deterministic (C12, C13).

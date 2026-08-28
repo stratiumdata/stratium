@@ -149,6 +149,18 @@ type Request struct {
 	Action    Action
 	Resource  map[string]string
 
+	// ResourceIDs are every identity this call resolved to: the catalogued
+	// resource field's own id, plus one per path a command_field tool's
+	// command names (ShellResourceIDs). The delegation leg's id_prefix
+	// constraint is evaluated against every member — see
+	// satisfiesIDPrefix for why every, not any.
+	//
+	// Separate from Resource rather than a key inside it: Resource is a map
+	// of single-valued attributes the policy engines also read, and R1
+	// strips two of its keys unconditionally. A multi-valued identity does
+	// not fit that shape and must not be smuggled into it.
+	ResourceIDs []string
+
 	// Now is injected so decisions are deterministic and testable.
 	Now time.Time
 

@@ -41,6 +41,7 @@ func DelegationLeg(
 	a Action,
 	derived models.ActionTier,
 	resource map[string]string,
+	resourceIDs []string,
 	now time.Time,
 	maxDepth int,
 ) (LegResult, int) {
@@ -98,7 +99,7 @@ func DelegationLeg(
 		// gap (CheckCap denies on its own now), leaving only the specificity
 		// argument above -- recorded so a future reader does not wonder why
 		// this comment changed but the order did not.
-		if allowed, reason := checkResourceConstraints(d.ResourceConstraints, resource); !allowed {
+		if allowed, reason := checkResourceConstraints(d.ResourceConstraints, resource, resourceIDs); !allowed {
 			return LegResult{Effect: EffectDeny,
 				Reason: fmt.Sprintf("%s (depth %d)", reason, d.Depth)}, d.Depth
 		}
@@ -163,8 +164,18 @@ func DelegationLeg(
 //     propagates forward through a lineage, never backward) -- called out
 //     because a reader who knows §4.3.1 will otherwise expect the strict
 //     reading here too.
-func checkResourceConstraints(constraints, resource map[string]string) (bool, string) {
+func checkResourceConstraints(constraints, resource map[string]string, ids []string) (bool, string) {
 	for key, want := range constraints {
+		// The one key with prefix semantics. Checked against the resolved
+		// identities rather than resource[key], because a shell call has
+		// several identities and no "id" attribute at all — writing one
+		// would let a decoy satisfy this while another path did the work.
+		if key == models.ResourceIDPrefixKey {
+			if ok, reason := satisfiesIDPrefix(ids, want); !ok {
+				return false, reason
+			}
+			continue
+		}
 		got, ok := resource[key]
 		if !ok {
 			return false, fmt.Sprintf("resource constraint %q is required but absent from the request", key)

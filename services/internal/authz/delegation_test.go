@@ -43,7 +43,7 @@ func linkChain(tenantID string, actingAgent uuid.UUID, ds ...*models.Delegation)
 
 func TestDelegationLeg_AllowsWithinScope(t *testing.T) {
 	chain := []*models.Delegation{delegation(0, models.ActionTierInternalModify, []string{"Read"})}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("within scope must allow, got %v: %s", got.Effect, got.Reason)
 	}
@@ -57,7 +57,7 @@ func TestDelegationLeg_AllowsWithinScope(t *testing.T) {
 // denying every action at its delegation's authorized limit.
 func TestDelegationLeg_AllowsTierExactlyAtCeiling(t *testing.T) {
 	chain := []*models.Delegation{delegation(0, models.ActionTierExternalComms, nil)}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierExternalComms, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierExternalComms, nil, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("tier exactly at the ceiling must be allowed, got %v: %s", got.Effect, got.Reason)
 	}
@@ -68,7 +68,7 @@ func TestDelegationLeg_AllowsTierExactlyAtCeiling(t *testing.T) {
 
 func TestDelegationLeg_DeniesTierAboveCeiling(t *testing.T) {
 	chain := []*models.Delegation{delegation(0, models.ActionTierReadOnly, []string{"Bash"})}
-	got, _ := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierDestructive, nil, authzNow, 5)
+	got, _ := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierDestructive, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("tier above ceiling must deny, got %v", got.Effect)
 	}
@@ -76,7 +76,7 @@ func TestDelegationLeg_DeniesTierAboveCeiling(t *testing.T) {
 
 func TestDelegationLeg_DeniesToolNotApproved(t *testing.T) {
 	chain := []*models.Delegation{delegation(0, models.ActionTierDestructive, []string{"Read"})}
-	got, _ := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierReadOnly, nil, authzNow, 5)
+	got, _ := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("unapproved tool must deny, got %v", got.Effect)
 	}
@@ -89,7 +89,7 @@ func TestDelegationLeg_ReportsDenyingDepth(t *testing.T) {
 		delegation(1, models.ActionTierDestructive, []string{"Bash"}),
 		delegation(2, models.ActionTierReadOnly, []string{"Bash"}),
 	}
-	got, depth := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierExternalComms, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Bash"}, models.ActionTierExternalComms, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("must deny, got %v", got.Effect)
 	}
@@ -102,7 +102,7 @@ func TestDelegationLeg_DeniesExpiredHop(t *testing.T) {
 	expired := delegation(1, models.ActionTierDestructive, []string{"Read"})
 	expired.ExpiresAt = authzNow.Add(-time.Minute)
 	chain := []*models.Delegation{delegation(0, models.ActionTierDestructive, []string{"Read"}), expired}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny || depth != 1 {
 		t.Fatalf("expired hop must deny at depth 1, got %v at %d", got.Effect, depth)
 	}
@@ -113,7 +113,7 @@ func TestDelegationLeg_DeniesRevokedRoot(t *testing.T) {
 	root := delegation(0, models.ActionTierDestructive, []string{"Read"})
 	root.Revoked = true
 	chain := []*models.Delegation{root, delegation(1, models.ActionTierReadOnly, []string{"Read"})}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny || depth != 0 {
 		t.Fatalf("revoked root must deny at depth 0, got %v at %d", got.Effect, depth)
 	}
@@ -125,7 +125,7 @@ func TestDelegationLeg_DeniesOverMaxDepth(t *testing.T) {
 		delegation(1, models.ActionTierDestructive, nil),
 		delegation(2, models.ActionTierDestructive, nil),
 	}
-	got, _ := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, authzNow, 1)
+	got, _ := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, nil, authzNow, 1)
 	if got.Effect != EffectDeny {
 		t.Fatalf("chain over max depth must deny, got %v", got.Effect)
 	}
@@ -133,7 +133,7 @@ func TestDelegationLeg_DeniesOverMaxDepth(t *testing.T) {
 
 // No delegation means nothing authorizes the action.
 func TestDelegationLeg_DeniesEmptyChain(t *testing.T) {
-	got, _ := DelegationLeg(nil, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, authzNow, 5)
+	got, _ := DelegationLeg(nil, Action{Tool: "Read"}, models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("empty chain must deny, got %v", got.Effect)
 	}
@@ -144,7 +144,7 @@ func TestDelegationLeg_DeniesClassificationAboveCap(t *testing.T) {
 	d.ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
 	resource := map[string]string{"classification": "TOP-SECRET", "hierarchy": "nato"}
 	got, _ := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("resource above cap must deny, got %v", got.Effect)
 	}
@@ -163,7 +163,7 @@ func TestDelegationLeg_DeniesConfiguredCapWhenResourceHasNoClassification(t *tes
 	d.ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
 	resource := map[string]string{"id": "doc-9000"} // identity, but no classification at all
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("a configured cap against an unlabelled resource must deny, got %v", got.Effect)
 	}
@@ -182,7 +182,7 @@ func TestDelegationLeg_NoClassificationCapsUnaffectedByUnlabelledResource(t *tes
 	// d.ClassificationCaps left nil.
 	resource := map[string]string{"id": "doc-9000"} // no classification, no hierarchy
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("no configured caps must allow regardless of resource classification, got %v: %s", got.Effect, got.Reason)
 	}
@@ -223,7 +223,7 @@ func TestDelegationLeg_EscalationBandBoundaries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := delegation(0, ceiling, nil)
 			d.EscalateAt = tierPtr(threshold)
-			got, depth := DelegationLeg([]*models.Delegation{d}, Action{}, tt.tier, nil, authzNow, 5)
+			got, depth := DelegationLeg([]*models.Delegation{d}, Action{}, tt.tier, nil, nil, authzNow, 5)
 			if got.Effect != tt.want {
 				t.Fatalf("tier %s: effect = %v, want %v (%s)", tt.tier, got.Effect, tt.want, got.Reason)
 			}
@@ -241,7 +241,7 @@ func TestDelegationLeg_EscalationBandBoundaries(t *testing.T) {
 func TestDelegationLeg_DeniesTierOneAboveCeiling(t *testing.T) {
 	ceiling := models.ActionTierExternalComms // 3
 	d := delegation(0, ceiling, nil)
-	got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, models.ActionTierDestructive, nil, authzNow, 5)
+	got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, models.ActionTierDestructive, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("tier one above the ceiling must deny, got %v", got.Effect)
 	}
@@ -259,7 +259,7 @@ func TestDelegationLeg_DenyBeatsEscalateOnSameHop(t *testing.T) {
 	ceiling := models.ActionTierExternalComms // 3
 	d := delegation(0, ceiling, nil)
 	d.EscalateAt = tierPtr(models.ActionTierReadOnly) // 1: comfortably below the tier tested
-	got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, models.ActionTierDestructive, nil, authzNow, 5)
+	got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, models.ActionTierDestructive, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("deny must beat escalate even when both conditions are met on the same hop, got %v", got.Effect)
 	}
@@ -280,7 +280,7 @@ func TestDelegationLeg_DenyAtDeeperHopOverridesEarlierEscalate(t *testing.T) {
 	child.Revoked = true // denies for a reason with nothing to do with tier or threshold
 
 	chain := []*models.Delegation{root, child}
-	got, depth := DelegationLeg(chain, Action{}, models.ActionTierReadOnly, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{}, models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("a deny at a deeper hop must override an escalate recorded at an earlier hop, got %v", got.Effect)
 	}
@@ -301,7 +301,7 @@ func TestDelegationLeg_UnsetEscalateAtNeverEscalates(t *testing.T) {
 	} {
 		t.Run(tier.String(), func(t *testing.T) {
 			d := delegation(0, ceiling, nil) // EscalateAt left nil
-			got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, tier, nil, authzNow, 5)
+			got, _ := DelegationLeg([]*models.Delegation{d}, Action{}, tier, nil, nil, authzNow, 5)
 			if got.Effect == EffectEscalate {
 				t.Fatalf("an unset threshold must never escalate, got %v at tier %s", got.Effect, tier)
 			}
@@ -315,7 +315,7 @@ func TestDelegationLeg_NarrowestHopBinds(t *testing.T) {
 		delegation(0, models.ActionTierReadOnly, nil),
 		delegation(1, models.ActionTierDestructive, nil),
 	}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierInternalModify, nil, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierInternalModify, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny || depth != 0 {
 		t.Fatalf("the narrowest hop must bind, got %v at %d", got.Effect, depth)
 	}
@@ -342,7 +342,7 @@ func TestDelegationLeg_DeniesResourceConstraintAbsentFromRequest(t *testing.T) {
 	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
 	resource := map[string]string{"id": "doc-9000"} // carries identity, but never "project"
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("a constrained key absent from the request must deny, got %v", got.Effect)
 	}
@@ -361,7 +361,7 @@ func TestDelegationLeg_DeniesWhenRequestResourceMapIsEmpty(t *testing.T) {
 	d := delegation(0, models.ActionTierDestructive, []string{"Read"})
 	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, nil, authzNow, 5)
+		models.ActionTierReadOnly, nil, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("an empty request resource map under a constrained delegation must deny, got %v", got.Effect)
 	}
@@ -376,7 +376,7 @@ func TestDelegationLeg_DeniesResourceConstraintMismatch(t *testing.T) {
 	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
 	resource := map[string]string{"project": "zzz-other-team"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("a mismatched resource constraint must deny, got %v", got.Effect)
 	}
@@ -395,7 +395,7 @@ func TestDelegationLeg_ResourceConstraintComparisonIsExactNotPrefix(t *testing.T
 	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
 	resource := map[string]string{"project": "alpha-team-2"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("a request value that only shares a prefix with the required value must deny, got %v", got.Effect)
 	}
@@ -410,7 +410,7 @@ func TestDelegationLeg_AllowsResourceConstraintExactMatch(t *testing.T) {
 	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
 	resource := map[string]string{"project": "alpha-team"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("an exact-matching resource constraint must allow, got %v: %s", got.Effect, got.Reason)
 	}
@@ -428,7 +428,7 @@ func TestDelegationLeg_AllowsWhenAllResourceConstraintsSatisfied(t *testing.T) {
 	d.ResourceConstraints = map[string]string{"project": "alpha-team", "environment": "staging-east"}
 	resource := map[string]string{"project": "alpha-team", "environment": "staging-east"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("fully satisfied resource constraints must allow, got %v: %s", got.Effect, got.Reason)
 	}
@@ -446,7 +446,7 @@ func TestDelegationLeg_IgnoresUnconstrainedResourceAttributes(t *testing.T) {
 	d.ResourceConstraints = map[string]string{"project": "alpha-team"}
 	resource := map[string]string{"project": "alpha-team", "id": "doc-9000", "type": "file"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("unconstrained extra resource attributes must not affect the decision, got %v: %s",
 			got.Effect, got.Reason)
@@ -468,7 +468,7 @@ func TestDelegationLeg_EmptyResourceConstraintsUnaffected(t *testing.T) {
 	// d.ResourceConstraints left nil.
 	resource := map[string]string{"project": "whatever-the-agent-happens-to-send"}
 	got, depth := DelegationLeg([]*models.Delegation{d}, Action{Tool: "Read"},
-		models.ActionTierReadOnly, resource, authzNow, 5)
+		models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("an empty constraint map must be unrestricted, got %v: %s", got.Effect, got.Reason)
 	}
@@ -494,7 +494,7 @@ func TestDelegationLeg_AncestorResourceConstraintBindsEvenWhenActingHopIsUnconst
 
 	chain := []*models.Delegation{root, child}
 	resource := map[string]string{"project": "zzz-other-team"}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, resource, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectDeny {
 		t.Fatalf("an unsatisfied ancestor resource constraint must deny even at depth, got %v", got.Effect)
 	}
@@ -517,11 +517,74 @@ func TestDelegationLeg_AllowsMultiHopChainWithMatchingResourceConstraints(t *tes
 
 	chain := []*models.Delegation{root, child}
 	resource := map[string]string{"project": "alpha-team"}
-	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, resource, authzNow, 5)
+	got, depth := DelegationLeg(chain, Action{Tool: "Read"}, models.ActionTierReadOnly, resource, nil, authzNow, 5)
 	if got.Effect != EffectAllow {
 		t.Fatalf("a satisfied constraint identical at every hop must allow, got %v: %s", got.Effect, got.Reason)
 	}
 	if depth != -1 {
 		t.Fatalf("no denial expected, got depth %d", depth)
+	}
+}
+
+func TestCheckResourceConstraints_IDPrefix(t *testing.T) {
+	constraints := map[string]string{models.ResourceIDPrefixKey: "/workspace/"}
+
+	t.Run("every id inside satisfies", func(t *testing.T) {
+		ok, reason := checkResourceConstraints(constraints, map[string]string{},
+			[]string{"/workspace/a.txt", "/workspace/b.txt"})
+		if !ok {
+			t.Fatalf("denied (%s), want satisfied", reason)
+		}
+	})
+
+	t.Run("one id outside denies", func(t *testing.T) {
+		ok, _ := checkResourceConstraints(constraints, map[string]string{},
+			[]string{"/workspace/a.txt", "/etc/shadow"})
+		if ok {
+			t.Fatal("allowed a set containing an id outside the prefix")
+		}
+	})
+
+	t.Run("no ids denies", func(t *testing.T) {
+		ok, _ := checkResourceConstraints(constraints, map[string]string{}, nil)
+		if ok {
+			t.Fatal("allowed with no resource identified; unevaluable must deny")
+		}
+	})
+}
+
+// The existing exact-match behaviour must be bit-for-bit unchanged, including
+// its deny-if-absent rule. A prefix key is an addition, not a replacement.
+func TestCheckResourceConstraints_ExactKeysAreUnchanged(t *testing.T) {
+	constraints := map[string]string{"tenant": "acme"}
+
+	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "acme"}, nil); !ok {
+		t.Error("an exact key matching its value should satisfy")
+	}
+	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "other"}, nil); ok {
+		t.Error("an exact key with a different value must deny")
+	}
+	if ok, reason := checkResourceConstraints(constraints, map[string]string{}, nil); ok {
+		t.Errorf("an exact key absent from the request must deny, got satisfied (%s)", reason)
+	}
+}
+
+// Both key kinds in one constraint set: both must hold.
+func TestCheckResourceConstraints_PrefixAndExactTogether(t *testing.T) {
+	constraints := map[string]string{
+		models.ResourceIDPrefixKey: "/workspace/",
+		"tenant":                   "acme",
+	}
+	resource := map[string]string{"tenant": "acme"}
+
+	if ok, reason := checkResourceConstraints(constraints, resource, []string{"/workspace/a.txt"}); !ok {
+		t.Fatalf("denied (%s), want satisfied — both constraints hold", reason)
+	}
+	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "other"},
+		[]string{"/workspace/a.txt"}); ok {
+		t.Error("the exact key failed but the call was allowed")
+	}
+	if ok, _ := checkResourceConstraints(constraints, resource, []string{"/etc/shadow"}); ok {
+		t.Error("the prefix failed but the call was allowed")
 	}
 }

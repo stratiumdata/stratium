@@ -235,7 +235,7 @@ func TestIntegration_RevokeDelegation_CascadeHoldsWithoutNewCode(t *testing.T) {
 	}
 	action := authz.Action{Tool: "Bash", Verb: "execute"}
 	const maxDepth = 10
-	preLeg, preDeniedDepth := authz.DelegationLeg(before, action, models.ActionTierInternalModify, nil, time.Now(), maxDepth)
+	preLeg, preDeniedDepth := authz.DelegationLeg(before, action, models.ActionTierInternalModify, nil, nil, time.Now(), maxDepth)
 	if preLeg.Effect != authz.EffectAllow {
 		t.Fatalf("test setup: DelegationLeg() before revocation = %v (%q), want EffectAllow -- "+
 			"the chain must be unambiguously healthy before this test can attribute a later DENY to revocation specifically",
@@ -262,7 +262,7 @@ func TestIntegration_RevokeDelegation_CascadeHoldsWithoutNewCode(t *testing.T) {
 		t.Fatalf("reloaded root delegation Revoked = false, want true -- the write above did not persist")
 	}
 
-	postLeg, postDeniedDepth := authz.DelegationLeg(after, action, models.ActionTierInternalModify, nil, time.Now(), maxDepth)
+	postLeg, postDeniedDepth := authz.DelegationLeg(after, action, models.ActionTierInternalModify, nil, nil, time.Now(), maxDepth)
 	if postLeg.Effect != authz.EffectDeny {
 		t.Fatalf("DelegationLeg() after revoking the root = %v (%q), want EffectDeny -- "+
 			"the CHILD's own next action must be denied by the root's revocation, cascading through the chain "+
