@@ -64,7 +64,10 @@ Create `services/internal/authz/constraints_test.go`:
 ```go
 package authz
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHasDotDotSegment(t *testing.T) {
 	cases := map[string]bool{
@@ -100,7 +103,7 @@ func TestSatisfiesIDPrefix(t *testing.T) {
 		if ok {
 			t.Fatal("satisfiesIDPrefix allowed a set containing an id outside the prefix")
 		}
-		if !contains(reason, "/etc/shadow") {
+		if !strings.Contains(reason, "/etc/shadow") {
 			t.Errorf("reason = %q, want it to name the offending id", reason)
 		}
 	})
@@ -123,7 +126,7 @@ func TestSatisfiesIDPrefix(t *testing.T) {
 		if ok {
 			t.Fatal("satisfiesIDPrefix allowed a traversal escape; HasPrefix alone does not stop this")
 		}
-		if !contains(reason, "..") {
+		if !strings.Contains(reason, "..") {
 			t.Errorf("reason = %q, want it to name the traversal segment", reason)
 		}
 	})
@@ -133,27 +136,12 @@ func TestSatisfiesIDPrefix(t *testing.T) {
 		if ok {
 			t.Fatal("satisfiesIDPrefix allowed an empty id set; unevaluable must not read as satisfied")
 		}
-		if !contains(reason, "cannot be evaluated") {
+		if !strings.Contains(reason, "cannot be evaluated") {
 			t.Errorf("reason = %q, want the uncheckable wording, distinct from an outside-the-scope denial", reason)
 		}
 	})
 }
-
-func contains(haystack, needle string) bool {
-	return len(needle) == 0 || indexOf(haystack, needle) >= 0
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
-}
 ```
-
-If `contains`/`indexOf` already exist in package `authz`, delete them from this file and use the existing ones — a redeclaration is a compile error.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -1018,7 +1006,11 @@ func TestCreateDelegation_CopiesAgentResourceConstraintsOntoARoot(t *testing.T) 
 		t.Fatalf("CreateDelegation: %v", err)
 	}
 
-	created := // read the persisted delegation back through the file's own fixture
+	// Read the persisted delegation back through whatever accessor the
+	// surrounding file's fixture already provides -- the ClassificationCaps
+	// test you copied the fixture from does this on its own last lines.
+	created := readBackTheDelegation(t, resp.GetDelegationId())
+
 	if got := created.ResourceConstraints[models.ResourceIDPrefixKey]; got != "/workspace/" {
 		t.Fatalf("root delegation %s = %q, want %q -- the agent's scope did not reach the delegation",
 			models.ResourceIDPrefixKey, got, "/workspace/")
