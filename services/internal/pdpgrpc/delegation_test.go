@@ -766,6 +766,29 @@ func TestCreateDelegation_RootWithNoAgentCapsStaysUncapped(t *testing.T) {
 	}
 }
 
+// TestCreateDelegation_RootCopiesAgentResourceConstraints is
+// TestCreateDelegation_RootCopiesAgentCaps' counterpart for the sibling
+// field: the scope reaches a delegation ONLY through this copy. Without it
+// the agent column is settable and inert -- the state
+// docs/validation-journeys.md §4.3 describes, and the state this task ends.
+func TestCreateDelegation_RootCopiesAgentResourceConstraints(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	fs.agent.ResourceConstraints = map[string]string{models.ResourceIDPrefixKey: "/workspace/"}
+	srv := newDelegationServer(fs, permissiveGrantSet())
+
+	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v, want a response", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+
+	if got := fs.created[0].ResourceConstraints[models.ResourceIDPrefixKey]; got != "/workspace/" {
+		t.Fatalf("root delegation %s = %q, want %q -- the agent's scope did not reach the delegation",
+			models.ResourceIDPrefixKey, got, "/workspace/")
+	}
+}
+
 // A child still copies its PARENT, never the agent row -- the inherit-and-
 // narrow rule the chain argument depends on. The agent here carries a wider
 // cap (TOP-SECRET) than the parent (RESTRICTED); if CreateDelegation ever

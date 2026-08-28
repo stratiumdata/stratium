@@ -151,7 +151,7 @@ const maxChainWalk = 64
 // the same physical connection for a different tenant.
 const setTenantQuery = `SELECT set_config('app.tenant_id', $1, true)`
 
-const loadAgentQuery = `SELECT id, trust_tier, enabled, suspended, allowed_tools, classification_caps FROM agents WHERE id = $1`
+const loadAgentQuery = `SELECT id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints FROM agents WHERE id = $1`
 
 // escalate_at is appended at the end, after chain_agent_ids, rather than
 // grouped next to max_action_tier: every positional Scan in scanDelegation
@@ -207,9 +207,9 @@ func (s *Store) LoadAgent(ctx context.Context, id uuid.UUID) (authz.AgentInfo, e
 
 	var info authz.AgentInfo
 	var trustTier int64
-	var allowedTools, classificationCaps []byte
+	var allowedTools, classificationCaps, resourceConstraints []byte
 	err = tx.QueryRowContext(ctx, loadAgentQuery, id.String()).
-		Scan(&info.ID, &trustTier, &info.Enabled, &info.Suspended, &allowedTools, &classificationCaps)
+		Scan(&info.ID, &trustTier, &info.Enabled, &info.Suspended, &allowedTools, &classificationCaps, &resourceConstraints)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return authz.AgentInfo{}, fmt.Errorf("%w: agent %s", ErrNotFound, id)
@@ -231,6 +231,13 @@ func (s *Store) LoadAgent(ctx context.Context, id uuid.UUID) (authz.AgentInfo, e
 	}
 	if info.ClassificationCaps == nil {
 		info.ClassificationCaps = map[string]string{}
+	}
+
+	if err := json.Unmarshal(resourceConstraints, &info.ResourceConstraints); err != nil {
+		return authz.AgentInfo{}, fmt.Errorf("store: unmarshal resource_constraints: %w", err)
+	}
+	if info.ResourceConstraints == nil {
+		info.ResourceConstraints = map[string]string{}
 	}
 
 	if err := tx.Commit(); err != nil {

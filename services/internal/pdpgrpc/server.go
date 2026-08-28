@@ -559,12 +559,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		},
 	})
 	result := authz.Decide(authz.Request{
-		TenantID:          s.cfg.TenantID, // config only. Never req — see package doc.
-		Principal:         principal,
-		Agent:             agent,
-		Chain:             chain,
-		Action:            action,
-		Resource:          resource,
+		TenantID:  s.cfg.TenantID, // config only. Never req — see package doc.
+		Principal: principal,
+		Agent:     agent,
+		Chain:     chain,
+		Action:    action,
+		Resource:  resource,
+		// The same identities labelResource above already resolved for this
+		// call — not recomputed, so the label and the delegation leg's
+		// id_prefix check can never disagree about what this call touched.
+		ResourceIDs:       resourceIDs,
 		Now:               now,
 		PrincipalVerdicts: principalVerdicts,
 	}, authz.Config{

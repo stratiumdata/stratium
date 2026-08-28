@@ -56,8 +56,9 @@ func TestStore_LoadAgent_Success(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps"}).
-			AddRow(agentID.String(), int64(2), true, false, []byte(`["Bash","Read"]`), []byte(`{}`)))
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
+			AddRow(agentID.String(), int64(2), true, false, []byte(`["Bash","Read"]`), []byte(`{}`), []byte(`{}`)))
 	mock.ExpectCommit()
 
 	got, err := s.LoadAgent(context.Background(), agentID)
@@ -135,8 +136,9 @@ func TestStore_LoadAgent_DecodeFailure(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps"}).
-			AddRow(agentID.String(), int64(0), true, false, []byte(`not-json`), []byte(`{}`)))
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
+			AddRow(agentID.String(), int64(0), true, false, []byte(`not-json`), []byte(`{}`), []byte(`{}`)))
 	mock.ExpectRollback()
 
 	got, err := s.LoadAgent(context.Background(), agentID)
@@ -184,8 +186,8 @@ func TestStore_LoadAgent_CarriesClassificationCaps(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
 		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps"}).
-			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`)))
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
+			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`), []byte(`{}`)))
 	mock.ExpectCommit()
 
 	info, err := s.LoadAgent(context.Background(), agentID)
@@ -194,6 +196,34 @@ func TestStore_LoadAgent_CarriesClassificationCaps(t *testing.T) {
 	}
 	if info.ClassificationCaps["nato"] != "CONFIDENTIAL" {
 		t.Errorf("caps = %v, want nato=CONFIDENTIAL", info.ClassificationCaps)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_LoadAgent_CarriesResourceConstraints is CarriesClassificationCaps'
+// counterpart for the sibling column: the field CreateDelegation's root copy
+// (internal/pdpgrpc/delegation.go) depends on must actually come back from a
+// real LoadAgent call, not just exist on the struct.
+func TestStore_LoadAgent_CarriesResourceConstraints(t *testing.T) {
+	s, mock := newMockStore(t)
+	agentID := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
+		WithArgs(agentID.String()).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
+			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{}`), []byte(`{"id_prefix":"/workspace/"}`)))
+	mock.ExpectCommit()
+
+	info, err := s.LoadAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if info.ResourceConstraints["id_prefix"] != "/workspace/" {
+		t.Errorf("constraints = %v, want id_prefix=/workspace/", info.ResourceConstraints)
 	}
 
 	assertExpectationsMet(t, mock)

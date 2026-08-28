@@ -178,8 +178,13 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		// set a ceiling (PUT /v1/agents/{id}/classification-caps). A root has
 		// no parent to clamp against, so this is where the ceiling enters the
 		// chain; children below copy their parent and can only narrow.
-		ClassificationCaps:  copyStringMap(agent.ClassificationCaps),
-		ResourceConstraints: map[string]string{},
+		ClassificationCaps: copyStringMap(agent.ClassificationCaps),
+		// Copied from the agent row, the only place an operator can set a
+		// scope (PUT /v1/agents/{id}/resource-constraints). A root has no
+		// parent to clamp against, so this is where the scope enters the
+		// chain; children below copy their parent and can only narrow.
+		// Exactly the path ClassificationCaps above takes.
+		ResourceConstraints: copyStringMap(agent.ResourceConstraints),
 		Purpose:             req.GetPurpose(),
 		ExpiresAt:           now.Add(time.Duration(req.GetTtlSeconds()) * time.Second),
 		ParentDelegationID:  parentID,

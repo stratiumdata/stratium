@@ -137,6 +137,14 @@ type AgentInfo struct {
 	// reads the delegation's own caps (internal/authz/delegation.go) -- so a
 	// change here never affects a delegation already issued.
 	ClassificationCaps map[string]string
+
+	// ResourceConstraints is the template a ROOT delegation's constraints are
+	// copied from at issuance (internal/pdpgrpc/delegation.go), the same way
+	// ClassificationCaps above is. It is NOT consulted at decision time -- the
+	// decision reads the delegation's own constraints
+	// (checkResourceConstraints) -- so a change here never affects a
+	// delegation already issued.
+	ResourceConstraints map[string]string
 }
 
 // Request is a complete decision input. Chain is ordered root-first, with the
