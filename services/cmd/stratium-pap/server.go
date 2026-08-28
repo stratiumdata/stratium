@@ -232,6 +232,13 @@ var routeTable = []routeSpec{
 	{Pattern: "PUT /v1/agents/{id}/classification-caps", MinRole: RoleAdmin, Handler: putAgentCaps},
 	{Pattern: "DELETE /v1/agents/{id}/classification-caps", MinRole: RoleAdmin, Handler: deleteAgentCaps},
 
+	// resource-constraints is gated exactly as classification-caps is, and for
+	// the same reason: it is a security ceiling, so a writer must hold
+	// RoleAdmin rather than the blanket editor role the CRUD routes use.
+	{Pattern: "GET /v1/agents/{id}/resource-constraints", MinRole: RoleViewer, Handler: getAgentConstraints},
+	{Pattern: "PUT /v1/agents/{id}/resource-constraints", MinRole: RoleAdmin, Handler: putAgentConstraints},
+	{Pattern: "DELETE /v1/agents/{id}/resource-constraints", MinRole: RoleAdmin, Handler: deleteAgentConstraints},
+
 	{Pattern: "GET /v1/tier-overrides", MinRole: RoleViewer, Handler: listTierOverrides},
 	{Pattern: "POST /v1/tier-overrides", MinRole: RoleEditor, Handler: createTierOverride},
 	{Pattern: "GET /v1/tier-overrides/{id}", MinRole: RoleViewer, Handler: getTierOverride},
