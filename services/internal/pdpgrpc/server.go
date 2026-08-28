@@ -483,7 +483,18 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// through the tenant's own catalog row. See labelResource's own doc
 	// comment for why reading it back out of the map instead let a caller
 	// choose which rule labelled it.
-	resource = labelResource(labelRules, resource, extracted.ResourceID)
+	//
+	// A command-field tool (Bash) yields no single resource id, so its command
+	// text contributes every path it names and labelResource folds them to the
+	// strictest — closing J1, where any configured cap denied every shell call
+	// permanently. ShellResourceIDs interprets a value, so it lives beside the
+	// tier classifier in internal/authz and never in extract.go, which may look
+	// up which field holds a value and never what the value means.
+	resourceIDs := []string{extracted.ResourceID}
+	if extracted.Command != "" {
+		resourceIDs = append(resourceIDs, authz.ShellResourceIDs(extracted.Command)...)
+	}
+	resource = labelResource(labelRules, resource, resourceIDs)
 
 	// The catalog step of §4.4's resolution order (override, catalog,
 	// built-in): the tenant's own rows override DefaultCatalog() per tool,

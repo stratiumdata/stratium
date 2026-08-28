@@ -14,6 +14,7 @@ package pdpgrpc
 
 import (
 	"log/slog"
+	"strings"
 
 	"stratium/pkg/classification"
 )
@@ -32,8 +33,43 @@ import (
 // replace it with. That is also the ONLY direction this can fail safely in —
 // leaving the claim would let the cheapest possible bypass through.
 //
-// resourceID is the id internal/authz.ExtractFromCatalog read out of this
-// call's raw_input through the tenant's own catalog row — NOT resource["id"],
+// # The fold, when there is more than one id
+//
+// A tool catalogued with a command_field yields no single resource: a shell
+// command can name several, and internal/authz.ShellResourceIDs returns all of
+// them. The STRICTEST label wins, and every other outcome is a denial:
+//
+//   - no ids at all            -> unlabelled (the original single-id behaviour)
+//   - any id resolves to no rule -> unlabelled. The maximum of a set holding an
+//     unknown is unknowable, and an unknowable maximum must not read as the
+//     maximum of the rest — that is bypass-by-omission one level up from the
+//     attribute.
+//   - any rule this cannot rank -> that label wins outright. It always denies
+//     at CheckCap, so it is the strictest member of any set, and it denies
+//     naming the unknown hierarchy or level rather than as a bare "declares no
+//     classification" — which is the difference between an operator finding a
+//     typo and hunting for one.
+//   - ids spanning two hierarchies -> unlabelled. The map holds exactly one
+//     (classification, hierarchy) pair and widening it touches R1's stripping
+//     guarantee; deny until that is designed.
+//   - otherwise                -> the highest-ranked label of the set.
+//
+// Taking the strictest is what preserves R4 for a command. Extracting only the
+// first path would let `cat /tmp/ok.txt; cat /secret/x` be labelled from
+// /tmp/ok.txt while still reading the secret — lying would pay, and it would
+// pay by turning a loud denial into a silent allow. A decoy cannot lower the
+// maximum, and the real target cannot be dropped, because the command needs it
+// to run. See docs/superpowers/specs/2026-08-28-shell-resource-identity-design.md.
+//
+// Note what this does NOT write: an "id" key. resourceFromID (internal/authz)
+// is still the only thing that writes one, and it writes none for a
+// command-field tool — so checkResourceConstraints still sees no id for a
+// shell call and still denies a constrained delegation. Deliberate: writing
+// one of several paths there would let a decoy satisfy a constraint while
+// another path did the work, which is the same R4 failure one consumer over.
+//
+// resourceIDs are the ids internal/authz derived from this call's raw_input
+// through the tenant's own catalog row — NOT resource["id"],
 // which is where an earlier version of this function looked, and not any
 // other map key. The difference is the whole of R4's safety argument.
 //
@@ -73,7 +109,7 @@ import (
 // Returned fresh rather than mutated: for an uncataloged tool this map IS
 // req.Resource, and rewriting a caller's request in place would leave the
 // audit trail describing something other than what arrived.
-func labelResource(rules []classification.Rule, resource map[string]string, resourceID string) map[string]string {
+func labelResource(rules []classification.Rule, resource map[string]string, resourceIDs []string) map[string]string {
 	labelled := make(map[string]string, len(resource)+2)
 	for k, v := range resource {
 		if k == classification.AttrClassification || k == classification.AttrHierarchy {
@@ -82,16 +118,59 @@ func labelResource(rules []classification.Rule, resource map[string]string, reso
 		labelled[k] = v
 	}
 
-	if resourceID == "" {
+	var (
+		best     classification.Match
+		bestRank int
+		haveOne  bool
+	)
+	for _, resourceID := range resourceIDs {
+		// An empty id is not an id. A cataloged tool with no resource_field
+		// contributes "" here, which is the old single-id no-label case and
+		// must stay exactly that.
+		if resourceID == "" {
+			continue
+		}
+		match, ok := classification.Resolve(rules, resourceID)
+		if !ok {
+			return labelled
+		}
+		rank := classification.Index(match.Rule.Hierarchy, match.Rule.Level)
+		if rank < 0 {
+			// A rule the system cannot rank -- an unknown hierarchy or an
+			// unknown level. validateResourceLabelRule refuses these at write
+			// time, but a stale read or a direct SQL write hands them here
+			// anyway, which is why CheckCap re-checks rankability rather than
+			// trusting the store (R9).
+			//
+			// It WINS the fold outright rather than being skipped or erased.
+			// Two reasons, and they point the same way: an unrankable label
+			// always denies at CheckCap, so it is by definition the strictest
+			// member of any set; and it denies naming the unknown hierarchy or
+			// level, which is what lets an operator find a one-character typo.
+			// Dropping it would swallow that into a bare "declares no
+			// classification" -- see TestDecide_UnknownHierarchyInARuleDenies
+			// AndNamesIt, which exists to catch exactly that degradation.
+			best, haveOne = match, true
+			break
+		}
+		if !haveOne {
+			best, bestRank, haveOne = match, rank, true
+			continue
+		}
+		if !strings.EqualFold(match.Rule.Hierarchy, best.Rule.Hierarchy) {
+			return labelled
+		}
+		if rank > bestRank {
+			best, bestRank = match, rank
+		}
+	}
+	if !haveOne {
 		return labelled
 	}
-	match, ok := classification.Resolve(rules, resourceID)
-	if !ok {
-		return labelled
-	}
-	labelled[classification.AttrClassification] = match.Rule.Level
-	labelled[classification.AttrHierarchy] = match.Rule.Hierarchy
-	logCarveOut(match)
+
+	labelled[classification.AttrClassification] = best.Rule.Level
+	labelled[classification.AttrHierarchy] = best.Rule.Hierarchy
+	logCarveOut(best)
 	return labelled
 }
 
