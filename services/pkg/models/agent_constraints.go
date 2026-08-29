@@ -22,4 +22,14 @@ type AgentConstraintsView struct {
 	// nor expired -- the ones this write does NOT affect, because constraints
 	// are copied at issuance. A warning, not a confirmation.
 	LiveDelegations int `json:"live_delegations"`
+
+	// Applies is a fixed human-readable string, always "at next issuance".
+	// Display only: clients must not branch on it.
+	//
+	// It exists for the same reason AgentCapsView.Applies does -- setting a
+	// scope has consequences invisible in the stored value, and this type is
+	// where the SERVER states them. A client that phrased it itself would be
+	// a second copy of a semantic fact, in another language, free to drift
+	// from the Go that owns it.
+	Applies string `json:"applies"`
 }

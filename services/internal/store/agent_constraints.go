@@ -234,5 +234,6 @@ func (s *Store) agentConstraintsView(
 		ResourceConstraints: constraints,
 		UnsatisfiableTools:  unsatisfiableTools(agent.AllowedTools, catalog),
 		LiveDelegations:     liveDelegations,
+		Applies:             "at next issuance",
 	}, nil
 }

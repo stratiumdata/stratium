@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
-  APIError, api, describeError, type Agent, type AgentCapsView, type ClassificationCaps,
+  APIError, ID_PREFIX, api, describeError, type Agent, type AgentCapsView,
+  type AgentConstraintsView, type ClassificationCaps, type ResourceConstraints,
 } from '../api'
 import { TRUST_TIERS, toolList, trustTier, trustTierOptions } from '../display'
 import { Loading, useEditor, useList } from '../crud'
@@ -23,14 +24,25 @@ import {
   ScreenHeader, Select, StringListInput, TCell, THead, TRow, Table, TextInput,
 } from '../ui'
 
-/** Agent minus classification_caps -- what UpdateAgent's PUT actually writes.
- *  Shared by the editor's `update` and `compare` below so the two can never
- *  drift apart: the clobber guard must compare exactly what gets sent, or a
- *  cap changed through CapsSection's own route reads as a colleague's
- *  concurrent edit of the agent. */
-function withoutCaps(a: Agent): Omit<Agent, 'classification_caps'> {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- discarded on purpose, see above.
-  const { classification_caps: _ignored, ...body } = a as Agent & { classification_caps?: unknown }
+/** Agent minus its two sub-resources -- what UpdateAgent's PUT actually
+ *  writes. Shared by the editor's `update` and `compare` below so the two can
+ *  never drift apart: the clobber guard must compare exactly what gets sent,
+ *  or a cap changed through CapsSection's own route reads as a colleague's
+ *  concurrent edit of the agent.
+ *
+ *  resource_constraints joins classification_caps here for the same reason
+ *  and with the same consequence. Both are returned by GET and absent from
+ *  updateAgentQuery's SET clause, so sending either back is a write that
+ *  silently does nothing -- and leaving either in `compare` turns a scope
+ *  edited through its own panel into a phantom conflict. */
+function withoutSubresources(a: Agent): Omit<Agent, 'classification_caps' | 'resource_constraints'> {
+  const {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- discarded on purpose, see above.
+    classification_caps: _caps,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- discarded on purpose, see above.
+    resource_constraints: _constraints,
+    ...body
+  } = a as Agent & { classification_caps?: unknown; resource_constraints?: unknown }
   return body
 }
 
@@ -250,6 +262,161 @@ function CapsSection({ agentID, allowedTools }: { agentID: string; allowedTools:
   )
 }
 
+/** Rejects a scope prefix the server would reject, in the same order and for
+ *  the same reasons (internal/store's validateResourceConstraints). Returns
+ *  null when it is acceptable.
+ *
+ *  A courtesy, never the enforcement: the server stays authoritative and its
+ *  refusal is rendered verbatim if the two ever disagree. The trailing slash
+ *  is the one worth catching at the field, because its absence is silent
+ *  rather than loud -- "/workspace" also matches "/workspace-evil/secrets.txt",
+ *  and an operator is better told that while looking at what they typed. */
+function scopeProblem(prefix: string): string | null {
+  if (prefix === '') return 'A scope prefix must not be empty. Use Clear scope to remove the scope.'
+  if (prefix.includes('..')) return 'A scope prefix must not contain "..".'
+  if (!prefix.endsWith('/')) {
+    return `A scope prefix must end in "/" — did you mean "${prefix}/"? ` +
+      `Without it, "${prefix}" also matches siblings such as "${prefix}-other/secrets".`
+  }
+  return null
+}
+
+/** The resource-constraints panel: one scope, not a map editor.
+ *
+ *  models.Delegation.ResourceConstraints is a map, and the caps panel above
+ *  edits its map as a map. This one deliberately does not. Only `id_prefix`
+ *  means anything to a supported flow; every other key is an exact-match
+ *  constraint compared against a resource attribute the request carries, the
+ *  PDP only ever produces `id`, and never for a shell call -- so a key typed
+ *  here would deny every call for this agent, silently and permanently. A
+ *  generic editor would make that one typo away. See ResourceConstraints'
+ *  own doc comment in api.ts.
+ *
+ *  Advisory fields are shown unconditionally, for the reason AgentCapsView's
+ *  doc comment gives and AgentConstraintsView repeats: setting a scope has
+ *  consequences the stored value does not show, and the server is where they
+ *  are stated. `applies` is rendered rather than phrased here, so the
+ *  semantics live in one language, not two.
+ *
+ *  unsatisfiable_tools is deliberately NOT rendered here: it is the same
+ *  set the caps panel above already states unconditionally, and a second
+ *  copy would put one sentence on screen twice. What a scope reader needs
+ *  from it -- that a call naming no path is denied -- is said in scope's
+ *  own terms in the paragraphs below. */
+function ScopeSection({ agentID }: { agentID: string }) {
+  const [view, setView] = useState<AgentConstraintsView | null>(null)
+  const [prefix, setPrefix] = useState('')
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [confirmingClear, setConfirmingClear] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  // Keyed by agentID at the call site, so a remount resets everything -- the
+  // same reason CapsSection above resets nothing by hand.
+  useEffect(() => {
+    let live = true
+    api.agentConstraints(agentID).then(
+      (v) => { if (live) { setView(v); setPrefix(v.resource_constraints[ID_PREFIX] ?? '') } },
+      (err: unknown) => { if (live) setLoadError(describeError(err)) },
+    )
+    return () => { live = false }
+  }, [agentID])
+
+  if (view === null) return loadError ? <ErrorBanner>{loadError}</ErrorBanner> : <Loading />
+
+  const save = () => {
+    const problem = scopeProblem(prefix)
+    if (problem !== null) { setSaveError(problem); return }
+    setBusy(true)
+    setSaveError(null)
+    const constraints: ResourceConstraints = { [ID_PREFIX]: prefix }
+    api.putAgentConstraints(agentID, constraints).then(
+      (saved) => {
+        setView(saved); setPrefix(saved.resource_constraints[ID_PREFIX] ?? ''); setBusy(false)
+      },
+      (err: unknown) => { setSaveError(describeError(err)); setBusy(false) },
+    )
+  }
+
+  const clear = () => {
+    setBusy(true)
+    setSaveError(null)
+    api.deleteAgentConstraints(agentID).then(
+      () => {
+        setPrefix('')
+        setView((v) => (v === null ? v : { ...v, resource_constraints: {} }))
+        setConfirmingClear(false)
+        setBusy(false)
+      },
+      (err: unknown) => { setSaveError(describeError(err)); setConfirmingClear(false); setBusy(false) },
+    )
+  }
+
+  const stored = view.resource_constraints[ID_PREFIX]
+
+  return (
+    <section className="mt-6 border-t border-border pt-4">
+      <h4 className="mb-1 text-sm font-semibold">Scope</h4>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Limits this agent to one resource subtree, copied onto every root delegation. EVERY path a
+        call names must be inside it — a command naming one path outside is denied, so a benign
+        path cannot buy access for a dangerous one. A command naming no path at all is denied too.
+      </p>
+      <p className="mb-3 text-xs text-muted-foreground">
+        The prefix is matched literally, so the root is outside its own scope: under{' '}
+        <span className="font-mono">/workspace/</span>, a call naming{' '}
+        <span className="font-mono">/workspace</span> is denied. A path containing{' '}
+        <span className="font-mono">..</span> is denied outright rather than resolved.
+      </p>
+      <p className="mb-3 text-xs text-muted-foreground">
+        This takes effect {view.applies} — {view.live_delegations} live delegation
+        {view.live_delegations === 1 ? '' : 's'} already{' '}
+        {view.live_delegations === 1 ? 'carries' : 'carry'} the previous scope and{' '}
+        {view.live_delegations === 1 ? 'is' : 'are'} unaffected: a warning, not a confirmation.
+        Revoke {view.live_delegations === 1 ? 'it' : 'them'} on the Delegations screen to apply
+        this now.
+      </p>
+      {saveError ? <ErrorBanner>{saveError}</ErrorBanner> : null}
+
+      {/* Clearing removes the whole ceiling in one click -- the loosening
+         direction, gated exactly as clearing caps is. */}
+      {confirmingClear ? (
+        <div className="mb-3">
+          <ConfirmRow
+            prompt="Clear the scope? With none set, this agent is not limited to any subtree."
+            confirmLabel="Yes, clear the scope"
+            busyLabel="Clearing…"
+            busy={busy}
+            onConfirm={clear}
+            onCancel={() => setConfirmingClear(false)}
+          />
+        </div>
+      ) : null}
+
+      {stored === undefined
+        ? <p className="mb-3 text-sm text-muted-foreground">None — this agent is not scoped to any subtree.</p>
+        : null}
+
+      <div className="mb-2 flex items-center gap-2">
+        <label htmlFor="scope-prefix" className="w-32 text-sm">Scope prefix</label>
+        <TextInput
+          id="scope-prefix"
+          value={prefix}
+          placeholder="/workspace/"
+          onChange={(e) => setPrefix(e.target.value)}
+        />
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button onClick={save} disabled={busy}>Save scope</Button>
+        <Button variant="destructive" onClick={() => setConfirmingClear(true)} disabled={busy}>
+          Clear scope
+        </Button>
+      </div>
+    </section>
+  )
+}
+
 export function AgentsScreen() {
   const { rows, error, reload } = useList<Agent>(api.agents)
   const [confirming, setConfirming] = useState<Agent | null>(null)
@@ -265,8 +432,8 @@ export function AgentsScreen() {
   const res = useMemo(() => ({
     get: api.agent,
     create: api.createAgent,
-    update: (id: string, a: Agent) => api.updateAgent(id, withoutCaps(a)),
-    compare: withoutCaps,
+    update: (id: string, a: Agent) => api.updateAgent(id, withoutSubresources(a)),
+    compare: withoutSubresources,
     onSaved: reload,
   }), [reload])
   const editor = useEditor<Agent>(res)
@@ -351,7 +518,10 @@ export function AgentsScreen() {
         </div>
 
         {editor.editingID !== null ? (
-          <CapsSection key={editor.editingID} agentID={editor.editingID} allowedTools={editor.draft.allowed_tools} />
+          <>
+            <CapsSection key={editor.editingID} agentID={editor.editingID} allowedTools={editor.draft.allowed_tools} />
+            <ScopeSection key={`scope-${editor.editingID}`} agentID={editor.editingID} />
+          </>
         ) : null}
       </Panel>
     )

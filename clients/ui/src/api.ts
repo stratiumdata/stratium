@@ -43,6 +43,11 @@ export interface Agent {
    *  which is what makes stripping it before an update a real operation
    *  rather than a no-op. Write caps through putAgentCaps. */
   classification_caps?: ClassificationCaps
+  /** Returned by GET and IGNORED by PUT, exactly like classification_caps
+   *  above -- resource_constraints is absent from updateAgentQuery's SET
+   *  clause, so the editor's own PUT can never change a scope. Write it
+   *  through putAgentConstraints. */
+  resource_constraints?: ResourceConstraints
 }
 
 /** models.TierOverride */
@@ -113,6 +118,38 @@ export interface AgentCapsView {
   live_delegations: number
   /** Fixed human-readable string, always "at next issuance". Display only —
    *  its own doc comment says clients must not branch on it. */
+  applies: string
+}
+
+/** models.Delegation.ResourceConstraints, and an agent's template for it.
+ *
+ *  Only one key has meaning to any supported flow: `id_prefix`, which scopes
+ *  a delegation to a resource subtree. Every other key is an exact-match
+ *  constraint compared against a resource attribute the request carries --
+ *  and since the only attribute the PDP ever produces is `id`, and never for
+ *  a shell call, a stray key here denies every call for the agent. The UI
+ *  therefore offers id_prefix and nothing else. */
+export type ResourceConstraints = Record<string, string>
+
+/** The one constraint key the admin console writes. */
+export const ID_PREFIX = 'id_prefix'
+
+/** models.AgentConstraintsView, what GET/PUT .../resource-constraints return.
+ *
+ *  Same advisory shape as AgentCapsView: everything past
+ *  resource_constraints is a consequence the stored value does not show, and
+ *  this type is where the server states it. */
+export interface AgentConstraintsView {
+  agent_id: string
+  resource_constraints: ResourceConstraints
+  /** Tools that can satisfy NO constraint, because they resolve no resource
+   *  identity at all. Same computation and same non-exhaustiveness caveat as
+   *  AgentCapsView.unsatisfiable_tools. */
+  unsatisfiable_tools: string[]
+  /** Delegations this write does NOT affect -- constraints are copied at
+   *  issuance. A warning, not a confirmation. */
+  live_delegations: number
+  /** Fixed human-readable string, always "at next issuance". Display only. */
   applies: string
 }
 
@@ -322,6 +359,17 @@ export const api = {
       { classification_caps: caps }),
   deleteAgentCaps: (id: string) =>
     request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}/classification-caps`),
+
+  // The scope trio, mirroring the caps trio above. putAgentConstraints is the
+  // ONLY way to write a scope: the agent PUT ignores the column.
+  agentConstraints: (id: string) =>
+    request<AgentConstraintsView>('GET', `/v1/agents/${encodeURIComponent(id)}/resource-constraints`),
+  putAgentConstraints: (id: string, constraints: ResourceConstraints) =>
+    request<AgentConstraintsView>('PUT',
+      `/v1/agents/${encodeURIComponent(id)}/resource-constraints`,
+      { resource_constraints: constraints }),
+  deleteAgentConstraints: (id: string) =>
+    request<void>('DELETE', `/v1/agents/${encodeURIComponent(id)}/resource-constraints`),
 
   tierOverride: (id: string) =>
     request<TierOverride>('GET', `/v1/tier-overrides/${encodeURIComponent(id)}`),
