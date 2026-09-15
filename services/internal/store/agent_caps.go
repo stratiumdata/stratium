@@ -15,6 +15,7 @@ import (
 	"stratium/pkg/audit"
 	"stratium/pkg/classification"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // eventTypeAgentCapsSet and eventTypeAgentCapsCleared are audit_chain.event_type
@@ -249,6 +250,14 @@ func (s *Store) ClearAgentClassificationCaps(ctx context.Context, id uuid.UUID, 
 // since RETURNING already hands the authoritative value back.
 const updateAgentCapsQuery = `UPDATE agents SET classification_caps = $2, updated_at = NOW() WHERE id = $1 RETURNING updated_at`
 
+// loadAgentCapsForUpdateQuery reads the caps this write is about to replace,
+// and locks the row until the transaction ends. See its resource-constraints
+// twin, loadAgentConstraintsForUpdateQuery (agent_constraints.go), for the
+// full reasoning -- the lock is what keeps the containment verdict
+// (containment_audit.go) from being computed against a baseline some
+// concurrent writer has already replaced.
+const loadAgentCapsForUpdateQuery = `SELECT classification_caps FROM agents WHERE id = $1 FOR UPDATE`
+
 // writeAgentCaps is SetAgentClassificationCaps and ClearAgentClassificationCaps's
 // shared write path: replace classification_caps and audit the change in the
 // SAME transaction (N4 -- see CreateAgent's own doc comment, agent.go), inside
@@ -283,6 +292,27 @@ func (s *Store) writeAgentCaps(ctx context.Context, id uuid.UUID, caps map[strin
 		return fmt.Errorf("store: marshal classification_caps: %w", err)
 	}
 
+	// Captured INSIDE this transaction and BEFORE the UPDATE below, under the
+	// row lock, so the comparison cannot race another writer.
+	var beforeJSON []byte
+	if err := tx.QueryRowContext(ctx, loadAgentCapsForUpdateQuery, id.String()).Scan(&beforeJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: agent %s", ErrNotFound, id)
+		}
+		return fmt.Errorf("store: load agent %s classification caps: %w", id, err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(beforeJSON, &stored); err != nil {
+		return fmt.Errorf("store: unmarshal classification_caps: %w", err)
+	}
+	// Folded for the reason GetAgentClassificationCaps folds the same column:
+	// caps written by THIS API are already lowercase, but a row written some
+	// other way can carry any casing, and `caps` on the other side of the
+	// comparison is always normalized. Without the fold a hierarchy stored as
+	// "NATO" would look absent from the new caps, and every write to that row
+	// would be recorded as dropping it.
+	before := normalizeClassificationCaps(stored)
+
 	var updatedAt time.Time
 	row := tx.QueryRowContext(ctx, updateAgentCapsQuery, id.String(), capsJSON)
 	if err := row.Scan(&updatedAt); err != nil {
@@ -303,6 +333,12 @@ func (s *Store) writeAgentCaps(ctx context.Context, id uuid.UUID, caps map[strin
 		Reason:        renderCaps(caps) + allowUncoveredNote(allowUncovered),
 	}
 	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return err
+	}
+
+	if err := s.recordWideningTx(ctx, tx, id, actor, updatedAt,
+		permset.Set{ClassificationCaps: before},
+		permset.Set{ClassificationCaps: caps}); err != nil {
 		return err
 	}
 

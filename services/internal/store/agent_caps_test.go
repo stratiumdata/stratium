@@ -156,21 +156,41 @@ func expectLiveDelegations(mock sqlmock.Sqlmock, count int) {
 	mock.ExpectCommit()
 }
 
-// expectWriteAndAudit registers the ordered expectations common to
-// writeAgentCaps -- begin, set tenant, the write itself (matched against
+// expectCapsLoadAndWrite registers writeAgentCaps' statement sequence up to
+// and including its FIRST audit entry's chain-tail read: begin, set tenant,
+// the locking read of the caps this write is about to replace (beforeJSON,
+// the column's stored bytes), the write itself (matched against
 // queryPattern, a regexp fragment rather than the exact literal so one
 // helper covers both SetAgentClassificationCaps' and
 // ClearAgentClassificationCaps' calls, which differ only in the caps
-// argument bound to $2), the advisory lock, an empty audit tail, the audit
-// insert, and commit -- the same seven-step shape
-// TestStore_CreateAgent_Success (agent_test.go) already pins for
-// CreateAgent's own write+audit transaction.
-func expectWriteAndAudit(mock sqlmock.Sqlmock, queryPattern string, writeRows *sqlmock.Rows) {
+// argument bound to $2), the advisory lock, and an empty audit tail.
+//
+// It stops there rather than running through commit because a write that
+// WIDENS the grant appends a SECOND audit entry after the first (Task 7,
+// containment_audit.go), and containment_audit_test.go needs to expect what
+// comes between. expectWriteAndAudit (below) is this plus the single-entry
+// ending, which is every other caller's shape.
+func expectCapsLoadAndWrite(mock sqlmock.Sqlmock, beforeJSON, queryPattern string, writeRows *sqlmock.Rows) {
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentCapsForUpdateQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"classification_caps"}).AddRow([]byte(beforeJSON)))
 	mock.ExpectQuery(queryPattern).WillReturnRows(writeRows)
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+}
+
+// expectWriteAndAudit registers the ordered expectations common to
+// writeAgentCaps -- expectCapsLoadAndWrite's steps, then the audit insert
+// and commit -- the same shape TestStore_CreateAgent_Success (agent_test.go)
+// already pins for CreateAgent's own write+audit transaction.
+//
+// The agent's stored caps are {} for every caller of this helper, which is
+// what keeps the sequence at exactly ONE audit entry: a write that leaves an
+// unset cap unset, or sets one for the first time, narrows or changes
+// nothing, and containmentReason (containment_audit.go) is silent on both.
+func expectWriteAndAudit(mock sqlmock.Sqlmock, queryPattern string, writeRows *sqlmock.Rows) {
+	expectCapsLoadAndWrite(mock, `{}`, queryPattern, writeRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 }
@@ -249,11 +269,7 @@ func TestSetAgentClassificationCaps_AllowUncoveredOverrides(t *testing.T) {
 	expectLabelRules(mock, []models.ResourceLabelRule{
 		{Prefix: "/secret/", Hierarchy: "nato", Level: "SECRET"},
 	})
-	mock.ExpectBegin()
-	expectSetTenant(mock)
-	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
-	expectAdvisoryLock(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	expectCapsLoadAndWrite(mock, `{}`, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
 		WithArgs(auditArgsWithReason("allow_uncovered=true")...).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -292,11 +308,7 @@ func TestSetAgentClassificationCaps_AllowUncoveredIsAuditedVisibly(t *testing.T)
 		var reason string
 
 		expectLabelRules(mock, rules)
-		mock.ExpectBegin()
-		expectSetTenant(mock)
-		mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
-		expectAdvisoryLock(mock)
-		mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+		expectCapsLoadAndWrite(mock, `{}`, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 		mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
 			WithArgs(auditArgsCapturingReason(&reason)...).
 			WillReturnResult(sqlmock.NewResult(0, 1))
@@ -453,15 +465,22 @@ func TestStore_ClearAgentClassificationCaps_WritesEmptyCapsAndAudits(t *testing.
 }
 
 // TestStore_ClearAgentClassificationCaps_UnknownAgent pins writeAgentCaps'
-// stated no-rows behavior: an UPDATE that matches no row means ErrNotFound,
-// not a silent no-op success.
+// stated no-rows behavior: a row that does not exist means ErrNotFound, not
+// a silent no-op success.
+//
+// The refusal now comes from the LOAD rather than the UPDATE (Task 7: the
+// caps this write replaces are read first, under FOR UPDATE, so the
+// containment verdict has a baseline). Same sentinel, same rollback, one
+// statement earlier -- and the UPDATE's own sql.ErrNoRows branch stays where
+// it is, since nothing but this load's success now guarantees the row.
 func TestStore_ClearAgentClassificationCaps_UnknownAgent(t *testing.T) {
 	s, mock := newMockStore(t)
 	id, now := uuid.New(), time.Now().UTC()
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentCapsForUpdateQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"classification_caps"}))
 	mock.ExpectRollback()
 
 	err := s.ClearAgentClassificationCaps(context.Background(), id, "operator@example.com", now)

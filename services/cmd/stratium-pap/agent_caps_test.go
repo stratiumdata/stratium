@@ -118,7 +118,7 @@ func TestPutAgentCaps_Success(t *testing.T) {
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
 	expectLabelRules(f.mock, []models.ResourceLabelRule{{Prefix: "", Hierarchy: "nato", Level: "UNCLASSIFIED"}})
-	expectWriteAndAudit(f.mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectGrantWriteAndAudit(f.mock, "classification_caps", "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	expectAgentForCaps(f.mock, id, nil, nil)
 	expectCatalog(f.mock, nil)
 	expectLiveDelegations(f.mock, 0)
@@ -215,7 +215,7 @@ func TestPutAgentCaps_EmptyOrAbsentCapsRejected(t *testing.T) {
 func TestDeleteAgentCaps_ClearsAndReturns204(t *testing.T) {
 	f := newTestServerFixture(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	expectWriteAndAudit(f.mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectGrantWriteAndAudit(f.mock, "classification_caps", "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 
 	rec := doRequest(t, f.server, http.MethodDelete,
 		"/v1/agents/"+uuid.New().String()+"/classification-caps", f.token(t, "org-admins"))

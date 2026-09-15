@@ -54,7 +54,7 @@ func TestPutAgentConstraints_Success(t *testing.T) {
 	f := newTestServerFixture(t)
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	expectWriteAndAudit(f.mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectGrantWriteAndAudit(f.mock, "resource_constraints", "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	expectAgentForCaps(f.mock, id, nil, nil)
 	expectCatalog(f.mock, nil)
 	expectLiveDelegations(f.mock, 0)
@@ -119,7 +119,7 @@ func TestPutAgentConstraints_ExplicitEmptyMapAccepted(t *testing.T) {
 	f := newTestServerFixture(t)
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	expectWriteAndAudit(f.mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectGrantWriteAndAudit(f.mock, "resource_constraints", "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	expectAgentForCaps(f.mock, id, nil, nil)
 	expectCatalog(f.mock, nil)
 	expectLiveDelegations(f.mock, 0)
@@ -186,7 +186,7 @@ func TestGetAgentConstraints_UnknownAgentNotFound(t *testing.T) {
 func TestDeleteAgentConstraints_ClearsAndReturns204(t *testing.T) {
 	f := newTestServerFixture(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	expectWriteAndAudit(f.mock, "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
+	expectGrantWriteAndAudit(f.mock, "resource_constraints", "UPDATE agents", sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 
 	rec := doRequest(t, f.server, http.MethodDelete,
 		"/v1/agents/"+uuid.New().String()+"/resource-constraints", f.token(t, "org-admins"))
