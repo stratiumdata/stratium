@@ -277,7 +277,7 @@ func TestCreateDelegation_UnknownParentDelegation_NotFound(t *testing.T) {
 }
 
 // A child that would widen its parent is PermissionDenied. store.CreateDelegation
-// (Task 3) is what actually runs models.ScopeNarrows; this test proves pdpgrpc
+// (Task 3) is what actually runs permset.ScopeNarrows; this test proves pdpgrpc
 // maps store.ErrScopeWidens to the right status code, using the fake to stand
 // in for that enforcement — store's own package tests already cover
 // ScopeNarrows itself thoroughly.

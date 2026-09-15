@@ -38,7 +38,7 @@ const insertDelegationQuery = `INSERT INTO delegations (
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
 
 // ErrScopeWidens indicates a child delegation would not narrow its parent:
-// models.ScopeNarrows found at least one dimension that is equal-or-wider.
+// permset.ScopeNarrows found at least one dimension that is equal-or-wider.
 // The reason string ScopeNarrows returned is wrapped in below, not
 // discarded, so a caller can log or surface exactly which dimension failed.
 var ErrScopeWidens = errors.New("store: child delegation does not narrow its parent")

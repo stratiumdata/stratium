@@ -20,9 +20,10 @@ func baseSet() Set {
 }
 
 // TestContains_FrozenReasons pins Contains to the reason strings
-// models.ScopeNarrows produced on 2026-09-15, captured mechanically rather
-// than transcribed. These strings reach an operator through
-// store.CreateDelegation's wrapped error, so they are API.
+// models.ScopeNarrows -- the pre-move implementation this package replaced,
+// deleted when ScopeNarrows moved into permset -- produced on 2026-09-15,
+// captured mechanically rather than transcribed. These strings reach an
+// operator through store.CreateDelegation's wrapped error, so they are API.
 //
 // WHEN THIS FAILS: you changed a containment rule or a reason string. Both
 // are user-visible. Neither is a refactor.

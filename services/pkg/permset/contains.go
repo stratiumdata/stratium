@@ -9,9 +9,9 @@ import (
 
 // Contains reports whether inner is a valid subset of outer, returning the
 // empty string when it is and a reason naming the first violated dimension
-// when it is not. The empty-means-valid convention is models.ScopeNarrows's,
-// whose behaviour this reproduces exactly -- including the two rules that are
-// NOT lattice containment:
+// when it is not. The empty-means-valid convention is ScopeNarrows's, which
+// wraps Contains directly below -- including the two rules that are NOT
+// lattice containment:
 //
 //   - EscalateAt presence must MATCH. A child may neither introduce the field
 //     where the parent leaves it unset nor drop it where the parent sets it.
