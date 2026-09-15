@@ -396,6 +396,17 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 			}
 			continue
 		}
+		if rt.Pattern == "POST /v1/containment" {
+			// The mirror image of actionRoutes above: a POST whose body is
+			// two structured values rather than an identifier, not a
+			// consequential action. It reads and computes, persisting
+			// nothing, so it is gated at RoleViewer rather than the blanket
+			// POST -> editor rule below.
+			if rt.MinRole != RoleViewer {
+				t.Errorf("route %q: MinRole = %s, want %s (this route reads, it does not write)", rt.Pattern, rt.MinRole, RoleViewer)
+			}
+			continue
+		}
 		method, _, ok := strings.Cut(rt.Pattern, " ")
 		if !ok {
 			t.Fatalf("route pattern %q has no method prefix", rt.Pattern)
@@ -428,8 +439,8 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // delete -- migrations/000016_stratium_pap_role withholds that grant) and
 // actionRoutes' three (approve, deny, revoke) -- plus Task 5's own two
 // (validate, test), plus Task 6's own two list routes (GET /v1/approvals,
-// GET /v1/delegations), plus resource-label-rules' own five -- thirty-one
-// total.
+// GET /v1/delegations), plus resource-label-rules' own five, plus the
+// containment route -- thirty-two total.
 //
 // The two Task 6 routes are pinned here, in the same test that pins every
 // other route's existence, for the reason this test exists at all: without
@@ -444,12 +455,12 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // a wrong rule can only edit it -- and every rule that exists matches
 // something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1 + 1
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
 			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes + "+
 			"3 Task-7 classification-caps routes + 1 Task-2 configuration route + "+
-			"3 resource-constraints routes + 1 principals/effective route)",
+			"3 resource-constraints routes + 1 principals/effective route + 1 containment route)",
 			len(routeTable), wantTotal)
 	}
 
@@ -521,6 +532,11 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	// The union of a principal's live root delegations -- reports, does not
 	// enforce, so it is a plain read and needs no write-route sibling.
 	want["GET /v1/principals/{id}/effective"] = false
+	// Does this candidate permission set allow anything the baseline does
+	// not -- reports, does not enforce, so like principals/effective above
+	// it is a plain read (RoleViewer, POST only because the two sets travel
+	// in the body) and needs no write-route sibling.
+	want["POST /v1/containment"] = false
 
 	for _, rt := range routeTable {
 		if _, ok := want[rt.Pattern]; ok {
