@@ -396,17 +396,6 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 			}
 			continue
 		}
-		if rt.Pattern == "POST /v1/containment" {
-			// The mirror image of actionRoutes above: a POST whose body is
-			// two structured values rather than an identifier, not a
-			// consequential action. It reads and computes, persisting
-			// nothing, so it is gated at RoleViewer rather than the blanket
-			// POST -> editor rule below.
-			if rt.MinRole != RoleViewer {
-				t.Errorf("route %q: MinRole = %s, want %s (this route reads, it does not write)", rt.Pattern, rt.MinRole, RoleViewer)
-			}
-			continue
-		}
 		method, _, ok := strings.Cut(rt.Pattern, " ")
 		if !ok {
 			t.Fatalf("route pattern %q has no method prefix", rt.Pattern)
@@ -482,8 +471,11 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			writes++
 		}
 	}
-	const wantWrites = 19 + 2 + 2 // Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
-	// PUT and DELETE .../resource-constraints the same way; both GETs are not writes.
+	const wantWrites = 19 + 2 + 2 + 1 // Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
+	// PUT and DELETE .../resource-constraints the same way; both GETs are not writes. The containment route adds
+	// one more: POST /v1/containment is RoleEditor like every other POST here, so it counts as gated above
+	// RoleViewer even though its handler persists nothing -- see internal/store/pap_e2e_integration_test.go's
+	// papRouteTable, which this count's own Fatalf message below points at.
 	if writes != wantWrites {
 		t.Fatalf("routeTable has %d routes gated above RoleViewer, want %d -- if that is a deliberate new "+
 			"route, papRouteTable in internal/store/pap_e2e_integration_test.go must gain it too, or proofs "+
@@ -533,9 +525,10 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	// enforce, so it is a plain read and needs no write-route sibling.
 	want["GET /v1/principals/{id}/effective"] = false
 	// Does this candidate permission set allow anything the baseline does
-	// not -- reports, does not enforce, so like principals/effective above
-	// it is a plain read (RoleViewer, POST only because the two sets travel
-	// in the body) and needs no write-route sibling.
+	// not -- reports and does not enforce, but still gated RoleEditor like
+	// every other POST here (POST /v1/policies/test is its nearest
+	// analogue, also a non-persisting query gated RoleEditor), so it needs
+	// no write-route sibling but does need a Viewer to be refused.
 	want["POST /v1/containment"] = false
 
 	for _, rt := range routeTable {

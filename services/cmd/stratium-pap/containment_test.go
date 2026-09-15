@@ -32,13 +32,14 @@ func TestContainment_ReportsContainedAndNot(t *testing.T) {
 	}
 }
 
-func TestContainment_RouteIsRegisteredAtViewer(t *testing.T) {
+func TestContainment_RouteIsRegisteredAtEditor(t *testing.T) {
 	var found bool
 	for _, rt := range routeTable {
 		if rt.Pattern == "POST /v1/containment" {
 			found = true
-			if rt.MinRole != RoleViewer {
-				t.Errorf("MinRole = %v, want RoleViewer: this endpoint reads, it does not write", rt.MinRole)
+			if rt.MinRole != RoleEditor {
+				t.Errorf("MinRole = %v, want RoleEditor: every POST route here is gated RoleEditor, "+
+					"same as its nearest analogue POST /v1/policies/test, even though this handler writes nothing", rt.MinRole)
 			}
 		}
 	}

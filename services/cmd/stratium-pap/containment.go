@@ -7,7 +7,13 @@
 // and neither answers "what did this change widen?"
 //
 // POST, not GET, because the sets go in the body: they are structured values,
-// not identifiers. It writes nothing, which is why it is RoleViewer.
+// not identifiers. It writes nothing -- but it is RoleEditor anyway, not
+// RoleViewer: this codebase gates every POST route at RoleEditor regardless
+// of whether the handler persists anything, and POST /v1/policies/test --
+// the point-query counterpart to this universal one -- is gated the same
+// way for the same reason. A Viewer can read every dimension this endpoint
+// compares through the plain GET routes; what RoleEditor buys is the
+// structural property that a Viewer can never reach a POST route at all.
 package main
 
 import (
