@@ -297,6 +297,13 @@ func papRouteTable(id string) []papRoute {
 		{http.MethodPost, "/v1/policies/validate", true},
 		{http.MethodPost, "/v1/policies/test", true},
 
+		// Does this candidate permission set allow anything the baseline
+		// does not -- gated RoleEditor like every POST here, same as its
+		// nearest analogue immediately above (also a non-persisting query),
+		// so it belongs in this group and not among the GETs this table
+		// otherwise omits (policy-languages, principals/effective).
+		{http.MethodPost, "/v1/containment", true},
+
 		{http.MethodGet, "/v1/agents", false},
 		{http.MethodPost, "/v1/agents", true},
 		{http.MethodGet, "/v1/agents/" + id, false},
