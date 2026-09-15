@@ -54,7 +54,11 @@ func expectGrantWriteAndAudit(
 ) {
 	mock.ExpectBegin()
 	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("FOR UPDATE").
+	// The column is pinned in the MATCHER, not only in the returned row:
+	// beforeColumn is the one thing that distinguishes these three
+	// endpoints' sequences from each other, and matching a bare "FOR UPDATE"
+	// would accept a handler that read the wrong column entirely.
+	mock.ExpectQuery(`SELECT ` + beforeColumn + ` FROM agents WHERE id = \$1 FOR UPDATE`).
 		WillReturnRows(sqlmock.NewRows([]string{beforeColumn}).AddRow([]byte(beforeJSON)))
 	mock.ExpectQuery(writeQueryFragment).WillReturnRows(writeRows)
 	mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))

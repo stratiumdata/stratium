@@ -208,8 +208,14 @@ func TestClearAgentClassificationCaps_AuditsTheWidening(t *testing.T) {
 	if err := s.ClearAgentClassificationCaps(context.Background(), id, "operator@example.com", now); err != nil {
 		t.Fatalf("ClearAgentClassificationCaps() error = %v", err)
 	}
-	if want := "agent grant widened: "; len(reason) <= len(want) || reason[:len(want)] != want {
-		t.Errorf("containment Reason = %q, want it to start with %q and name the dimension", reason, want)
+	if !strings.HasPrefix(reason, "agent grant widened: ") {
+		t.Errorf("containment Reason = %q, want it to start with %q", reason, "agent grant widened: ")
+	}
+	// The dimension, not just the prefix: a reason produced for some other
+	// dimension would satisfy the prefix check alone and hide a verdict
+	// computed against the wrong column.
+	if !strings.Contains(reason, "nato") {
+		t.Errorf("containment Reason = %q, want it to name the hierarchy whose cap was dropped", reason)
 	}
 	assertExpectationsMet(t, mock)
 }
@@ -280,6 +286,17 @@ func TestSetAgentResourceConstraints_AuditsTheWidening(t *testing.T) {
 	}
 	if reason == "" {
 		t.Fatal("no containment Reason captured -- the widening row was not appended")
+	}
+	if !strings.HasPrefix(reason, "agent grant widened: ") {
+		t.Errorf("containment Reason = %q, want it to start with %q", reason, "agent grant widened: ")
+	}
+	// The dimension, not just the prefix: this write moves the resource
+	// scope, and a non-empty reason naming some other dimension would pass a
+	// bare emptiness check while proving the verdict was computed against
+	// the wrong column.
+	if !strings.Contains(reason, models.ResourceIDPrefixKey) {
+		t.Errorf("containment Reason = %q, want it to name %s, the constraint this write widened",
+			reason, models.ResourceIDPrefixKey)
 	}
 	assertExpectationsMet(t, mock)
 }
