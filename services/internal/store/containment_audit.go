@@ -18,14 +18,22 @@
 // label a resource resolves to), not a permission set, so containment does
 // not typecheck against them. See the design doc's consumer section.
 //
-// Of the three grant endpoints, two are wired here: the caps and
-// resource-constraints routes. PUT /v1/agents/{id} writes neither column
-// (updateAgentQuery's own doc comment, agent.go, records why both are absent
-// from its SET list) but it DOES write allowed_tools, which is a permission
-// dimension (permset.Set.Tools) and can be widened from a restricted
-// allowlist to the empty, unrestricted one. That write is not covered here,
-// because this task's brief names only these two files -- a real gap, named
-// rather than left to be discovered.
+// All three grant endpoints are wired, each comparing exactly the dimensions
+// its own write touches:
+//
+//	PUT /v1/agents/{id}/classification-caps  ClassificationCaps
+//	PUT /v1/agents/{id}/resource-constraints ResourceConstraints
+//	PUT /v1/agents/{id}                      Tools (allowed_tools)
+//
+// The third one is not an afterthought. It writes NEITHER of the first two
+// columns -- updateAgentQuery's own doc comment (agent.go) records why both
+// are absent from its SET list -- so there is nothing to compare on those
+// dimensions and comparing them would be comparing a value to itself. But it
+// does write allowed_tools, which IS a permission dimension
+// (permset.Set.Tools, registry.go), and it is the one of the three gated at
+// RoleEditor rather than RoleAdmin. An editor moving a restricted allowlist
+// to the empty (meaning UNRESTRICTED) one is the widest single widening any
+// of these endpoints can make.
 package store
 
 import (
@@ -47,31 +55,59 @@ const eventTypeContainment = "containment"
 // Argument order reads backwards on purpose: Contains(outer, inner) asks
 // whether inner fits inside outer, so the BEFORE value is the outer one. A
 // write is a widening exactly when the after value does not fit inside it.
-//
-// The before value is first given every caps/constraints KEY the after value
-// introduces, at the after value's own setting, and that is not a detail.
-// Contains is written for delegation attenuation, where a child that
-// introduces a key its parent does not hold is refused even though it
-// narrows -- contains.go's own doc comment calls both of those rules
-// deliberately stricter than the lattice, and tells you not to "fix" them.
-// Asked as a before/after question the same rule is simply backwards: an
-// agent with no caps enforces nothing, so the first PUT that sets one -- the
-// narrowest write an operator ever makes, and the most common one on this
-// path -- would be recorded as a widening. Pre-filling makes an introduced
-// key compare equal to itself, which leaves exactly the widenings: a key
-// DROPPED, a cap RAISED, a prefix WIDENED.
-//
-// ponytail: the same asymmetry exists on EscalateAt (introducing one where
-// the before value has none reports a widening) and is NOT handled, because
-// neither caller sets that field -- both compare one map dimension with
-// every other field at its zero value on both sides. A future caller that
-// passes a whole agent grant needs the EscalateAt case added here first.
 func containmentReason(before, after permset.Set) string {
-	// before is a copy (Set is a value), and both fills build new maps, so
-	// the caller's own maps -- one of which is the row this write is about to
-	// describe -- are never written through.
+	// DO NOT DELETE THESE TWO LINES AS A SIMPLIFICATION. They are the whole
+	// difference between this function and a bare call to permset.Contains,
+	// and removing them puts a FALSE "widened" verdict on the most common
+	// write this package makes. The reasoning, in full:
+	//
+	// WHAT CONTAINS DOES. Given a key the inner set holds and the outer set
+	// does not, Contains refuses it -- "child caps hierarchy X which parent
+	// does not cap", "child constrains resource key X which parent does not
+	// constrain". That is DELIBERATE where Contains was written, and
+	// contains.go's own doc comment says so and tells you not to "fix" it:
+	// those two rules are explicitly NOT lattice containment (spec 4.3.1).
+	// They exist so a child delegation's SHAPE is derivable from its
+	// parent's -- a child may not invent a dimension the parent never had.
+	//
+	// WHY THAT ANSWER IS INVERTED HERE. An agent grant before/after is a
+	// pure LATTICE question, not a delegation-shape one. An absent cap means
+	// UNRESTRICTED (classification.CheckCap ALLOWs when len(caps)==0) and an
+	// absent constraint key means unrestricted too, so introducing either
+	// one NARROWS the grant. Under a bare Contains, the first cap and the
+	// first id_prefix an agent ever gets -- the narrowest, most common write
+	// an operator makes -- would each be recorded as a widening. That is
+	// exactly the noise that teaches operators to ignore an event type, and
+	// this whole file is worthless once they do.
+	//
+	// WHAT THE PRE-FILL DOES, AND ONLY THAT. It gives the before value every
+	// key the after value introduces, at the after value's own setting, so
+	// an introduced key compares equal to itself and is silent. Nothing else
+	// moves: a key DROPPED, a cap RAISED and a prefix WIDENED all still
+	// report, which contains_test.go's siblings in containment_audit_test.go
+	// pin in both directions.
+	//
+	// WHERE THIS BELONGS LONG TERM. In pkg/permset, as a named second
+	// operation beside Contains and Union -- this is a general question
+	// ("did this grant widen?"), not a store concern, and an adapter in
+	// internal/store is the wrong home for it. The controller has ledgered
+	// that as a follow-up. Until it lands, this is the seam; do not close it
+	// by deleting it.
+	//
+	// before is a copy (Set is a value) and withIntroducedKeys allocates, so
+	// the caller's own maps -- one of which is the row this write is about
+	// to describe -- are never written through.
 	before.ClassificationCaps = withIntroducedKeys(before.ClassificationCaps, after.ClassificationCaps)
 	before.ResourceConstraints = withIntroducedKeys(before.ResourceConstraints, after.ResourceConstraints)
+
+	// ponytail: the same asymmetry exists on EscalateAt (introducing one
+	// where the before value has none reports a widening) and is NOT
+	// handled, because no caller sets that field -- each compares one
+	// dimension with the rest at their zero value on both sides. Tools needs
+	// no pre-fill at all: Contains' tools clause is already a pure lattice
+	// rule, skipping entirely when the outer list is the empty (meaning
+	// unrestricted) one. A future caller that passes a whole agent grant
+	// needs the EscalateAt case added here first.
 	return permset.Contains(before, after)
 }
 

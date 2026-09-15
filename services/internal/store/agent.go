@@ -12,6 +12,7 @@ import (
 
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // Package doc for this file: the PAP's CRUD surface over the agents table
@@ -94,6 +95,23 @@ const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_t
 const updateAgentQuery = `UPDATE agents SET name = $1, provider = $2, model_id = $3, trust_tier = $4, ` +
 	`enabled = $5, suspended = $6, allowed_tools = $7, updated_at = NOW() ` +
 	`WHERE id = $8 RETURNING created_at, updated_at, classification_caps, resource_constraints`
+
+// loadAgentToolsForUpdateQuery reads the allowlist this update is about to
+// replace, and locks the row until the transaction ends -- the same
+// FOR UPDATE discipline loadAgentConstraintsForUpdateQuery's own doc comment
+// (agent_constraints.go) lays out, for the same reason: the containment
+// verdict below (containment_audit.go) is only worth recording if its
+// baseline is the value this transaction's own UPDATE then replaces, and
+// without the row lock a concurrent writer can slip between the two.
+//
+// allowed_tools alone, not the whole row. It is the only permission
+// dimension updateAgentQuery writes -- classification_caps and
+// resource_constraints are absent from its SET list (see that query's own
+// doc comment), so they cannot change here and comparing them would be
+// comparing a value to itself.
+//
+// No WHERE tenant_id: RLS is the only tenant boundary in this package.
+const loadAgentToolsForUpdateQuery = `SELECT allowed_tools FROM agents WHERE id = $1 FOR UPDATE`
 
 const deleteAgentQuery = `DELETE FROM agents WHERE id = $1 RETURNING name`
 
@@ -337,6 +355,26 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		return models.Agent{}, fmt.Errorf("store: marshal allowed_tools: %w", err)
 	}
 
+	// Captured INSIDE this transaction and BEFORE the UPDATE below, under the
+	// row lock, so the containment comparison cannot race another writer.
+	//
+	// A decode failure is returned, never swallowed into the empty slice, for
+	// the reason scanFullAgent's own doc comment gives: [] means EVERY tool,
+	// so a corrupt column read as "unrestricted" would silently become the
+	// widest possible baseline -- and here it would also silence the verdict
+	// on any write at all.
+	var beforeToolsJSON []byte
+	if err := tx.QueryRowContext(ctx, loadAgentToolsForUpdateQuery, id.String()).Scan(&beforeToolsJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.Agent{}, fmt.Errorf("%w: agent %s", ErrNotFound, id)
+		}
+		return models.Agent{}, fmt.Errorf("store: load agent %s allowed tools: %w", id, err)
+	}
+	var beforeTools []string
+	if err := json.Unmarshal(beforeToolsJSON, &beforeTools); err != nil {
+		return models.Agent{}, fmt.Errorf("agent %s allowed_tools decode: %w", id, err)
+	}
+
 	row := tx.QueryRowContext(ctx, updateAgentQuery,
 		a.Name, a.Provider, a.ModelID, int64(a.TrustTier), a.Enabled, a.Suspended,
 		allowedTools, id.String())
@@ -377,6 +415,19 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		Reason:        a.Name,
 	}
 	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return models.Agent{}, err
+	}
+
+	// Tools is the only dimension this UPDATE can move (see
+	// loadAgentToolsForUpdateQuery). Contains' tools clause already encodes
+	// this codebase's empty-means-unrestricted convention in both
+	// directions -- a restricted allowlist replaced by [] reports "child has
+	// no tool restriction while parent restricts tools", and [] replaced by a
+	// restricted list reports nothing, because an unrestricted outer set
+	// contains everything -- so nothing here reimplements it.
+	if err := s.recordWideningTx(ctx, tx, id, actor, a.UpdatedAt,
+		permset.Set{Tools: beforeTools},
+		permset.Set{Tools: a.AllowedTools}); err != nil {
 		return models.Agent{}, err
 	}
 

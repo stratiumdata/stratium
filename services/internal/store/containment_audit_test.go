@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,38 @@ func TestContainmentReason_IntroducingARestrictionIsNotAWidening(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if reason := containmentReason(tc.before, tc.after); reason != "" {
 				t.Errorf("want no reason -- this write narrows; got %q", reason)
+			}
+		})
+	}
+}
+
+// TestContainmentReason_ToolsNeedNoPreFill pins the claim containmentReason's
+// own comment makes about the third dimension: Contains' tools clause is
+// already a pure lattice rule, so the pre-fill neither helps nor harms it.
+//
+// The empty list is UNRESTRICTED here (permset.Set.Tools' own doc comment,
+// models.Agent.HasTool), which is what makes the two middle cases the
+// interesting ones -- they are the pair a reader's first guess gets
+// backwards.
+func TestContainmentReason_ToolsNeedNoPreFill(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		before, after []string
+		wantReason    bool
+	}{
+		{"a tool added to a restricted allowlist", []string{"Read"}, []string{"Read", "Bash"}, true},
+		{"a tool removed from a restricted allowlist", []string{"Read", "Bash"}, []string{"Read"}, false},
+		{"a restricted allowlist emptied, which means UNRESTRICTED", []string{"Read"}, []string{}, true},
+		{"an unrestricted agent given a restricted allowlist", []string{}, []string{"Read"}, false},
+		{"unchanged", []string{"Read"}, []string{"Read"}, false},
+		{"unrestricted both sides", []string{}, []string{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := containmentReason(
+				permset.Set{Tools: tc.before}, permset.Set{Tools: tc.after})
+			if got := reason != ""; got != tc.wantReason {
+				t.Errorf("containmentReason(%v, %v) = %q; widening = %v, want %v",
+					tc.before, tc.after, reason, got, tc.wantReason)
 			}
 		})
 	}
@@ -247,6 +280,77 @@ func TestSetAgentResourceConstraints_AuditsTheWidening(t *testing.T) {
 	}
 	if reason == "" {
 		t.Fatal("no containment Reason captured -- the widening row was not appended")
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_UpdateAgent_AuditsAToolWidening is the third endpoint's proof,
+// and the one with the widest blast radius: PUT /v1/agents/{id} is gated at
+// RoleEditor, not RoleAdmin like the two sub-resources, and replacing a
+// restricted allowlist with [] means EVERY tool
+// (store.ErrAllowedToolsRequired says so verbatim). That write now leaves a
+// second, hash-chained row naming what it widened.
+func TestStore_UpdateAgent_AuditsAToolWidening(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, now := uuid.New(), time.Now().UTC().Truncate(time.Second)
+	var reason string
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentToolsForUpdateQuery)).
+		WithArgs(id.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"allowed_tools"}).AddRow([]byte(`["Read"]`)))
+	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
+			AddRow(now, now, []byte(`{}`), []byte(`{}`)))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(auditArgsWithEventType(eventTypeAgentUpdated)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(auditArgsCapturingReason(&reason)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	a := validAgent()
+	a.AllowedTools = []string{} // "every tool" -- the widening
+	if _, err := s.UpdateAgent(context.Background(), id, a, "operator-2"); err != nil {
+		t.Fatalf("UpdateAgent() error = %v", err)
+	}
+	if !strings.HasPrefix(reason, "agent grant widened: ") {
+		t.Errorf("containment Reason = %q, want it to start with %q", reason, "agent grant widened: ")
+	}
+	if !strings.Contains(reason, "tool restriction") {
+		t.Errorf("containment Reason = %q, want it to name the dropped tool restriction", reason)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_UpdateAgent_NarrowingToolsAuditsOneRow is the negative half:
+// removing a tool narrows, so the transaction appends exactly ONE audit row.
+// A second, unregistered append would fail the call outright.
+func TestStore_UpdateAgent_NarrowingToolsAuditsOneRow(t *testing.T) {
+	s, mock := newMockStore(t)
+	id, now := uuid.New(), time.Now().UTC().Truncate(time.Second)
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	expectAgentToolsBeforeRead(mock, `["Read","Bash","Write"]`)
+	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
+			AddRow(now, now, []byte(`{}`), []byte(`{}`)))
+	expectAdvisoryLock(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
+		WithArgs(auditArgsWithEventType(eventTypeAgentUpdated)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if _, err := s.UpdateAgent(context.Background(), id, validAgent(), "operator-2"); err != nil {
+		t.Fatalf("UpdateAgent() error = %v", err)
 	}
 	assertExpectationsMet(t, mock)
 }

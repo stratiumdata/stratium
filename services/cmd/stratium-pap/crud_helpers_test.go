@@ -35,26 +35,27 @@ func expectWriteAndAudit(mock sqlmock.Sqlmock, writeQueryFragment string, writeR
 	mock.ExpectCommit()
 }
 
-// expectGrantWriteAndAudit is expectWriteAndAudit for the two agent-grant
-// sub-resources -- classification-caps and resource-constraints -- whose
-// store methods read the column they are about to replace FIRST, with a
-// SELECT ... FOR UPDATE, so the containment verdict they may then record has
-// a baseline captured inside the same transaction
-// (internal/store/containment_audit.go).
+// expectGrantWriteAndAudit is expectWriteAndAudit for the three endpoints
+// that change an agent's GRANT -- classification-caps, resource-constraints,
+// and PUT /v1/agents/{id} itself -- whose store methods read the column they
+// are about to replace FIRST, with a SELECT ... FOR UPDATE, so the
+// containment verdict they may then record has a baseline captured inside
+// the same transaction (internal/store/containment_audit.go).
 //
-// beforeColumn is the column that read returns. Its stored value is always
-// {} here: every handler test in this package writes a grant onto an agent
-// that has none, which NARROWS, so no containment entry follows and the
-// sequence keeps expectWriteAndAudit's single audit insert. A widening
-// write's second entry is proven one package over, against the store method
-// that appends it, not through the HTTP layer that cannot see it.
+// beforeColumn and beforeJSON are that read's column and its stored bytes.
+// Every handler test in this package passes a value the write then NARROWS
+// or leaves alone ({} for the two map columns, an unchanged list for
+// allowed_tools), so no containment entry follows and the sequence keeps
+// expectWriteAndAudit's single audit insert. A widening write's second entry
+// is proven one package over, against the store method that appends it, not
+// through the HTTP layer that cannot see it.
 func expectGrantWriteAndAudit(
-	mock sqlmock.Sqlmock, beforeColumn, writeQueryFragment string, writeRows *sqlmock.Rows,
+	mock sqlmock.Sqlmock, beforeColumn, beforeJSON, writeQueryFragment string, writeRows *sqlmock.Rows,
 ) {
 	mock.ExpectBegin()
 	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("FOR UPDATE").
-		WillReturnRows(sqlmock.NewRows([]string{beforeColumn}).AddRow([]byte(`{}`)))
+		WillReturnRows(sqlmock.NewRows([]string{beforeColumn}).AddRow([]byte(beforeJSON)))
 	mock.ExpectQuery(writeQueryFragment).WillReturnRows(writeRows)
 	mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("FROM audit_chain").WillReturnError(sql.ErrNoRows)

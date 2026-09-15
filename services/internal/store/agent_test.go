@@ -403,6 +403,21 @@ func TestStore_ListAgents_EmptyIsNotAnError(t *testing.T) {
 
 // --- UpdateAgent ---
 
+// expectAgentToolsBeforeRead registers UpdateAgent's locking read of the
+// allowlist it is about to replace -- the first statement in that
+// transaction since Task 7, which needs a baseline captured inside the
+// transaction to judge the write against (containment_audit.go).
+// beforeJSON is the column's stored bytes.
+//
+// Every caller below passes the SAME tool list the update then writes, so
+// the write moves no permission dimension at all, no containment entry
+// follows, and these sequences keep their single audit row. A test that
+// wants the widening is TestStore_UpdateAgent_AuditsAToolWidening.
+func expectAgentToolsBeforeRead(mock sqlmock.Sqlmock, beforeJSON string) {
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentToolsForUpdateQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"allowed_tools"}).AddRow([]byte(beforeJSON)))
+}
+
 func TestStore_UpdateAgent_Success(t *testing.T) {
 	s, mock := newMockStore(t)
 	id := uuid.New()
@@ -410,6 +425,7 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAgentToolsBeforeRead(mock, `["Bash"]`)
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
 			false, true, []byte(`["Bash"]`), id.String()).
@@ -462,6 +478,7 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectAgentToolsBeforeRead(mock, `["Bash"]`)
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
 			false, true, []byte(`["Bash"]`), id.String()).
@@ -508,13 +525,21 @@ func TestStore_UpdateAgent_RevalidatesFields(t *testing.T) {
 	assertExpectationsMet(t, mock)
 }
 
+// TestStore_UpdateAgent_NotFound pins that an id matching no row is
+// ErrNotFound, not a silent no-op.
+//
+// The refusal now comes from the LOAD rather than the UPDATE (Task 7: the
+// allowlist this update replaces is read first, under FOR UPDATE, so the
+// containment verdict has a baseline). Same sentinel, same rollback, one
+// statement earlier -- and the UPDATE's own sql.ErrNoRows branch stays where
+// it is.
 func TestStore_UpdateAgent_NotFound(t *testing.T) {
 	s, mock := newMockStore(t)
 	id := uuid.New()
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentToolsForUpdateQuery)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 
