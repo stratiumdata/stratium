@@ -115,6 +115,47 @@ func TestUnion_AgreeingConstraintsSurvive(t *testing.T) {
 	}
 }
 
+// A resource constraint key only one member sets is unconstrained in the
+// union: the other member's holder has unrestricted access to it. Mirrors
+// TestUnion_HierarchyCappedByOnlyOneMemberBecomesUncapped, for
+// ResourceConstraints's own "set by some members and not others" branch,
+// which none of the other ResourceConstraints tests exercises (they all
+// have every member set the same key, either agreeing or disagreeing).
+func TestUnion_ResourceConstraintSetByOnlyOneMemberIsUnconstrained(t *testing.T) {
+	a := Set{ResourceConstraints: map[string]string{models.ResourceIDPrefixKey: "/workspace/"}}
+	b := Set{ResourceConstraints: map[string]string{}}
+
+	got, reasons := Union(a, b)
+	if _, constrained := got.ResourceConstraints[models.ResourceIDPrefixKey]; constrained {
+		t.Error("a resource constraint only one member sets must be unconstrained in the union")
+	}
+	var named bool
+	for _, r := range reasons {
+		if strings.Contains(r, models.ResourceIDPrefixKey) {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("dropping a constraint is a widening and must be named in reasons; got %v", reasons)
+	}
+}
+
+// An unrankable classification level -- one absent from classification.
+// Levels -- must never win the join over a real, rankable level, even when
+// it is the first member seen for that hierarchy. See
+// classificationIndexAtLeast's doc comment: classification.Index returns -1
+// uniformly for unrankable input, which always loses the ">" comparison to
+// any real rank.
+func TestUnion_UnrankableClassificationLevelDoesNotWin(t *testing.T) {
+	a := Set{ClassificationCaps: map[string]string{"nato": "BOGUS"}}
+	b := Set{ClassificationCaps: map[string]string{"nato": "SECRET"}}
+
+	got, _ := Union(a, b)
+	if got.ClassificationCaps["nato"] != "SECRET" {
+		t.Errorf("cap = %s, want SECRET (the real level must beat the unrankable one)", got.ClassificationCaps["nato"])
+	}
+}
+
 func TestUnion_NoSetsIsTheEmptyGrant(t *testing.T) {
 	got, reasons := Union()
 	if len(got.Tools) != 0 || got.MaxTier != models.ActionTierReasoning || len(reasons) != 0 {
