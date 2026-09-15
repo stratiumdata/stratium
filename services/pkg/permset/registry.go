@@ -30,14 +30,22 @@ var notDimensions = map[string]string{
 	"AgentID": "acting agent; bounded by AgentLeg, not by containment",
 
 	// Authorization-bearing, but enforced per hop at decision time.
-	// DelegationLeg walks every hop and checks each of these independently,
-	// so a containment rule here would be a second, divergent implementation
-	// of a check that already holds -- which is worse than none, because when
-	// two implementations disagree the wrong one can silently win.
-	"Revoked":       "enforced per hop: internal/authz/delegation.go",
-	"RevokedAt":     "enforced per hop: internal/authz/delegation.go",
-	"Depth":         "bounded per request by maxDepth: internal/authz/delegation.go",
-	"ChainAgentIDs": "enforced per hop: internal/authz/delegation.go",
+	// DelegationLeg walks every hop and checks Revoked directly.
+	"Revoked": "enforced per hop: internal/authz/delegation.go:65",
+
+	// Metadata about the revocation event; the Revoked field is what gates
+	// the denial.
+	"RevokedAt": "metadata; revocation enforced via Revoked field",
+
+	// Chain structure, validated at issuance as part of ValidateChain
+	// (not a grant boundary). Root must be depth 0, each hop must be
+	// predecessor + 1.
+	"Depth": "chain structure: internal/authz/chain.go:41,68",
+
+	// Derived chain provenance, written server-side at issuance
+	// (internal/pdpgrpc/delegation.go:191,209) and never read by any
+	// authorization decision.
+	"ChainAgentIDs": "derived chain provenance, not used in authorization decisions",
 
 	"ParentDelegationID": "chain structure, not a grant",
 	"RootDelegationID":   "chain structure, not a grant",
