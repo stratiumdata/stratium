@@ -262,7 +262,7 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // the server does not register fails here (it answers 404 where a 401/403 is
 // asserted), and proof 2's own `writes != 24` catches a write route deleted
 // from this copy. Neither catches a route ADDED to server.go: proof 2 would
-// still count 16 and pass, proof 3's "everywhere" sweep would never touch
+// still count 24 and pass, proof 3's "everywhere" sweep would never touch
 // the new route, and C5's machine-checked pointer would go on citing proof 3
 // as evidence that the tier-override write surface is unreachable without a
 // token. TestRouteTable_CoversEveryCRUDRouteForEveryResource
