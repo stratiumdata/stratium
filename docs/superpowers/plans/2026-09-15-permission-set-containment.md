@@ -1632,7 +1632,10 @@ import (
 // ValidateOverride BEFORE it lands, or it silently makes a security floor
 // lowerable by the tenant it constrains.
 func TestDefaultTrustTableIsTheOnlyConstructionSite(t *testing.T) {
-	const allowedFile = "agent.go" // DefaultTrustTable's own definition
+	// Path SUFFIX, not basename: pkg/models/agent.go also basenames to
+	// "agent.go", and matching on the basename would silently permit a second
+	// construction site there.
+	const allowedPath = "internal/authz/agent.go"
 
 	root := ".."
 	fset := token.NewFileSet()
@@ -1659,7 +1662,7 @@ func TestDefaultTrustTableIsTheOnlyConstructionSite(t *testing.T) {
 			case *ast.SelectorExpr:
 				name = t.Sel.Name
 			}
-			if name == "TrustTable" && filepath.Base(path) != allowedFile {
+			if name == "TrustTable" && !strings.HasSuffix(filepath.ToSlash(path), allowedPath) {
 				offenders = append(offenders, fset.Position(lit.Pos()).String())
 			}
 			return true
@@ -1673,7 +1676,7 @@ func TestDefaultTrustTableIsTheOnlyConstructionSite(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("TrustTable is constructed outside %s at:\n  %s\n\n"+
 			"Read this test's doc comment before adding an exception.",
-			allowedFile, strings.Join(offenders, "\n  "))
+			allowedPath, strings.Join(offenders, "\n  "))
 	}
 }
 ```
