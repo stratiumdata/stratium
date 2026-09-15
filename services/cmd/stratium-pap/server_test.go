@@ -444,12 +444,12 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // a wrong rule can only edit it -- and every rule that exists matches
 // something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
 			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes + "+
 			"3 Task-7 classification-caps routes + 1 Task-2 configuration route + "+
-			"3 resource-constraints routes)",
+			"3 resource-constraints routes + 1 principals/effective route)",
 			len(routeTable), wantTotal)
 	}
 
@@ -518,6 +518,9 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	}
 	// Task 2's configuration route: the languages this build can evaluate.
 	want["GET /v1/policy-languages"] = false
+	// The union of a principal's live root delegations -- reports, does not
+	// enforce, so it is a plain read and needs no write-route sibling.
+	want["GET /v1/principals/{id}/effective"] = false
 
 	for _, rt := range routeTable {
 		if _, ok := want[rt.Pattern]; ok {
