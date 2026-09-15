@@ -260,7 +260,7 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // Drift is caught in ONE direction here and in the other direction there,
 // and it took a review to notice the asymmetry. A route this table names but
 // the server does not register fails here (it answers 404 where a 401/403 is
-// asserted), and proof 2's own `writes != 23` catches a write route deleted
+// asserted), and proof 2's own `writes != 24` catches a write route deleted
 // from this copy. Neither catches a route ADDED to server.go: proof 2 would
 // still count 16 and pass, proof 3's "everywhere" sweep would never touch
 // the new route, and C5's machine-checked pointer would go on citing proof 3
@@ -269,10 +269,11 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // (cmd/stratium-pap/server_test.go) is where that direction is pinned -- it
 // asserts both the total route count and the number gated above RoleViewer,
 // so adding a route fails THERE and names this table as the other place to
-// update. The two counts must stay equal: 37 routes, 23 of them writes
+// update. The two counts must stay equal: 38 routes, 24 of them writes
 // (Task 7 added 3 routes, 2 of them writes, to what was 31/19; the
 // resource-constraints task added 3 more, 2 of them writes, to what was
-// 34/21).
+// 34/21; the containment route added 1 more, itself a write, to what was
+// 37/23).
 //
 // write records whether the route is gated above RoleViewer, which is the
 // only thing proof 2 needs to know about it.
@@ -524,8 +525,8 @@ func TestIntegration_PAPE2E_ViewerIsRefusedEveryWrite(t *testing.T) {
 	// server.go is caught by TestRouteTable_CoversEveryCRUDRouteForEveryResource
 	// instead -- see papRoute's own doc comment for why the two halves live
 	// in different packages and must agree.
-	if writes != 23 {
-		t.Errorf("swept %d write routes, want 23 -- papRouteTable has drifted from "+
+	if writes != 24 {
+		t.Errorf("swept %d write routes, want 24 -- papRouteTable has drifted from "+
 			"cmd/stratium-pap/server.go's routeTable", writes)
 	}
 
