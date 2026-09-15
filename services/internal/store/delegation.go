@@ -12,6 +12,7 @@ import (
 
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // insertDelegationQuery creates one delegations row. created_at, revoked,
@@ -64,7 +65,7 @@ var jsonMarshal = json.Marshal
 // tenant_id in this file, RLS is the only boundary.
 //
 // If d is a child (ParentDelegationID set), the parent is loaded inside this
-// same transaction and models.ScopeNarrows(parent, d) must return "" before
+// same transaction and permset.ScopeNarrows(parent, d) must return "" before
 // any INSERT is attempted. That call is the only place this scope check may
 // live — do not reimplement, inline, or partially duplicate any part of it
 // here; it is the most heavily mutation-tested function in this repository,
@@ -117,7 +118,7 @@ func (s *Store) CreateDelegation(ctx context.Context, d *models.Delegation) erro
 			}
 			return fmt.Errorf("store: load parent delegation %s: %w", *d.ParentDelegationID, loadErr)
 		}
-		if reason := models.ScopeNarrows(parent, d); reason != "" {
+		if reason := permset.ScopeNarrows(parent, d); reason != "" {
 			return fmt.Errorf("%w: %s", ErrScopeWidens, reason)
 		}
 		rootID, depth = parent.RootDelegationID, parent.Depth+1

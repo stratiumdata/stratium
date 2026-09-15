@@ -9,6 +9,7 @@ import (
 
 	"stratium/pkg/classification"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // journeys_test.go is the pure half of the validation harness for
@@ -428,7 +429,7 @@ func TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen(t *testing.T) {
 	parent := newDelegation(nil)
 
 	t.Run("an identical child is valid", func(t *testing.T) {
-		if reason := models.ScopeNarrows(parent, newDelegation(nil)); reason != "" {
+		if reason := permset.ScopeNarrows(parent, newDelegation(nil)); reason != "" {
 			t.Fatalf("ScopeNarrows() = %q, want valid — narrows means no wider, and equal is no wider", reason)
 		}
 	})
@@ -438,7 +439,7 @@ func TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen(t *testing.T) {
 			d.MaxActionTier = models.ActionTierReadOnly
 			d.ApprovedTools = []string{"Read"}
 		})
-		if reason := models.ScopeNarrows(parent, child); reason != "" {
+		if reason := permset.ScopeNarrows(parent, child); reason != "" {
 			t.Fatalf("ScopeNarrows() = %q, want valid", reason)
 		}
 	})
@@ -447,7 +448,7 @@ func TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen(t *testing.T) {
 		child := newDelegation(func(d *models.Delegation) {
 			d.ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
 		})
-		reason := models.ScopeNarrows(parent, child)
+		reason := permset.ScopeNarrows(parent, child)
 		if reason == "" {
 			t.Fatal("ScopeNarrows() accepted a child that adds a cap its parent lacks; " +
 				"the rule was relaxed — update docs/validation-journeys.md J6")
@@ -459,7 +460,7 @@ func TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen(t *testing.T) {
 		child := newDelegation(func(d *models.Delegation) {
 			d.ResourceConstraints = map[string]string{"id": "/workspace"}
 		})
-		reason := models.ScopeNarrows(parent, child)
+		reason := permset.ScopeNarrows(parent, child)
 		if reason == "" {
 			t.Fatal("ScopeNarrows() accepted a child that adds a resource constraint its parent " +
 				"lacks; update docs/validation-journeys.md J6")
@@ -472,7 +473,7 @@ func TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen(t *testing.T) {
 			d.ClassificationCaps = map[string]string{"nato": "CONFIDENTIAL"}
 		})
 		child := newDelegation(nil) // no caps at all
-		if reason := models.ScopeNarrows(capped, child); reason == "" {
+		if reason := permset.ScopeNarrows(capped, child); reason == "" {
 			t.Fatal("ScopeNarrows() accepted a child that dropped its parent's cap — at decision " +
 				"time an absent cap means NO restriction, so this would be a promotion. " +
 				"This is a security regression, not a documentation update")

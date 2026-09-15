@@ -126,3 +126,18 @@ func Contains(outer, inner Set) string {
 
 	return ""
 }
+
+// ScopeNarrows reports whether a child delegation is a valid subset of its
+// parent, returning the empty string when it is and the reason when it is
+// not. It is Contains over the two delegations' permission sets, and exists
+// under this name because store.CreateDelegation wraps its return into an
+// operator-facing error.
+//
+// It lives here rather than in pkg/models because permset imports models for
+// ActionTier, so models cannot import permset back. Giving permset bare int
+// tiers was the alternative and was rejected: the reason strings above name
+// tiers by symbol (EXTERNAL_COMMS, not 3), and preserving them verbatim is a
+// requirement of the design this package implements.
+func ScopeNarrows(parent, child *models.Delegation) string {
+	return Contains(FromDelegation(parent), FromDelegation(child))
+}

@@ -24,6 +24,7 @@ import (
 
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // conformanceRan records which C-numbered properties actually executed in
@@ -251,7 +252,7 @@ func TestC7_ChildCannotWidenParent(t *testing.T) {
 		t.Run(dim, func(t *testing.T) {
 			child := base()
 			widen(child)
-			if models.ScopeNarrows(base(), child) == "" {
+			if permset.ScopeNarrows(base(), child) == "" {
 				t.Fatalf("C7: widening %s must be rejected", dim)
 			}
 		})
