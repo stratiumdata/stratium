@@ -593,6 +593,13 @@ Two rules:
 fails the call: a delegation created without a record did not happen, and an
 ALLOW that was not recorded is not returned.
 
+`containment` is a fourth event type alongside `decision`, `delegation_created`
+and the CRUD events. It is written when a write to an **agent's grant** widens
+it (§19), and **only** then: a narrowing or an unchanged write appends nothing,
+because a verdict on every write would teach an operator to scroll past the
+type. Its reason is the same string a refused delegation would have shown, so
+the two read alike.
+
 ---
 
 ## 15. Policy engines
@@ -653,6 +660,11 @@ services/
   pkg/models/                 tiers, delegation, agent, catalog, approval
   pkg/classification/         hierarchies, CheckCap, longest-prefix Resolve
   pkg/audit/                  hash chain
+  pkg/permset/                permission-set containment (§19)
+    permset.go                Set — the six dimensions that bound a grant
+    registry.go               which Delegation fields are dimensions, and why
+    contains.go               Contains (exact) + ScopeNarrows
+    union.go                  Union (advisory, over-approximates upward)
 
   cmd/stratium-pdp/           PDP main: wiring only
   cmd/stratium-pap/           admin plane, OIDC, CRUD, embedded UI
@@ -732,7 +744,84 @@ Things that will cost you an afternoon if you meet them cold.
 
 ---
 
-## 19. Where the authority actually lives
+## 19. Permission-set containment
+
+`pkg/permset` answers one question — *is this set of permissions contained in
+that one?* — for the four places that needed it and previously had four
+different answers, or none.
+
+A `Set` is a grant reduced to the six dimensions that bound it: approved tools,
+max action tier, escalate-at, classification caps, resource constraints, and
+expiry. Agent **trust** tier is deliberately absent; it belongs to the agent
+leg, and folding it in would merge two conjuncts §5 keeps apart.
+
+### The asymmetry that makes the cheap parts legal
+
+```
+Contains   EXACT.  It blocks a write.
+Union      may over-approximate UPWARD. It only ever feeds an advisory report.
+```
+
+`Union`'s resource-constraint rule depends entirely on this. The union of
+`id_prefix=/workspace/` and `id_prefix=/tmp/` is not a prefix and `Set` holds
+one string, so it widens to *unconstrained* and names what disagreed.
+Over-approximating makes a report noisier, never blinder — and
+**under**-approximating would hide a real over-reach, which is the one outcome
+this design cannot tolerate. A new blocking caller of `Union` is a design
+change, not a refactor.
+
+### The registry, and the test that is the point of it
+
+`ScopeNarrows` used to be hand-written `if` blocks, one per dimension, living in
+`pkg/models`. Adding a field to `Delegation` left children unconstrained on it
+until someone remembered to write a loop — silently, because nothing failed.
+
+`registry.go` replaces remembering with asking: every `models.Delegation` field
+must appear in `dimensions` or in `notDimensions` **with a falsifiable reason**,
+and `TestEveryDelegationFieldIsClassified` fails the build on a field in
+neither. The reasons are load-bearing, not decoration — the first draft of this
+registry shipped three that were false when grepped, and correcting them was the
+first defect the test's own premise caught.
+
+`Contains` reproduces the old `ScopeNarrows` exactly, **including three rules
+that are not lattice containment**: `EscalateAt` presence must match, and
+neither a resource-constraint key nor a classification hierarchy may be
+introduced. All three are stricter than ordering requires and all three are
+deliberate (spec §4.3.1). A tidier version quietly permits what they forbid.
+
+### Three consumers
+
+| Consumer | Question | Posture |
+|---|---|---|
+| `permset.ScopeNarrows` | is this child delegation inside its parent? | **blocking**, inside `CreateDelegation`'s transaction |
+| `POST /v1/containment` | does a candidate set allow anything a baseline forbids? | read-only; returns the first exceeding dimension as the counterexample |
+| `GET /v1/principals/{id}/effective` | what can a principal's live root delegations do *jointly*? | report only |
+| agent-grant writes | did this write widen the template? | **advisory** — the write lands, a `containment` row records it (§14) |
+
+The delegation leg enforces child ≤ parent at every hop, exhaustively. Nothing
+compares **siblings**: two live root delegations under one principal, one
+reaching `/secret` and one reaching `EXTERNAL_COMMS`, are individually in bounds
+and jointly an exfiltration path. `/effective` is the first thing that can see
+that union.
+
+### What it does not do
+
+- **There is no principal ceiling.** `/effective` reports; nothing enforces
+  against it. Adding one is a follow-up whose whole implementation is one
+  `Contains` call against the value that route already returns.
+- **The verdict has no reader yet.** `containment` rows land in `audit_chain`
+  and are reachable only by direct SQL — no audit read route, no console
+  screen. Until one exists this design is partially delivered, and the spec
+  says so rather than pretending otherwise.
+- **Only two of the six epoch-bumping tables carry a `Set`.** `agents` and
+  `delegations` hold grants. `policies`, `tool_catalog`, `tier_overrides` and
+  `resource_label_rules` change the classification *function* — what tier an
+  action derives, what label a resource resolves to — which is not a question
+  `Contains` can typecheck against.
+
+---
+
+## 20. Where the authority actually lives
 
 If you remember four sentences:
 

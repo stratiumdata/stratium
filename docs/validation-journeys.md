@@ -459,17 +459,20 @@ resource at all.
 
 ---
 
-## 5. Three changes that would move it from "too strict" to "strict in the right places"
+## 5. Changes that move it from "too strict" to "strict in the right places"
 
 | # | Change | Unlocks |
 |---|---|---|
 | 1 | ~~**Give `Bash` a resource identity**~~ — **done 2026-08-28.** Every path the command names is extracted; the strictest label decides | Caps for the tool that matters most, and — now that #2 has landed too — resource-constraint scope for it as well (§4.3) |
 | 2 | ~~**Add a write path for `resource_constraints`**~~ — **done 2026-08-28.** `PUT /v1/agents/{id}/resource-constraints`, copied onto every root delegation at issuance | Scope-conditional permissions — the §4.4 sentence is now writable |
 | 3 | **Ship a documented default posture** — trust tier 3, `escalate_at: 4`, a real tool allowlist | A new tenant's first hour is not "everything denies" (J4) |
+| 4 | ~~**Make attenuation fail closed on new dimensions**~~ — **done 2026-09-16.** `ScopeNarrows` moved into `pkg/permset`; a `models.Delegation` field that is classified as neither a dimension nor an explicit exclusion now fails the build | A field added to a delegation can no longer leave children silently unconstrained on it |
+| 5 | ~~**Make a change's blast radius answerable**~~ — **done 2026-09-16.** `POST /v1/containment` answers "does this candidate allow anything the baseline forbids"; agent-grant writes record a `containment` audit entry when they widen | Config review stops being a point query someone has to think of |
+| 6 | ~~**Make a principal's *combined* reach visible**~~ — **done 2026-09-16.** `GET /v1/principals/{id}/effective` unions a principal's live root delegations | The sibling gap §7 of `concepts.md` describes can at least be seen; enforcing against it still needs a principal ceiling |
 
-A fourth, only if J10's measurement says the ceiling binds: batch audit appends
-behind the existing per-tenant lock. Not a retry, and not removing the lock —
-`audit.go:197` already rules both out.
+One more, unnumbered because it is conditional: batch audit appends behind the
+existing per-tenant lock, and only if J10's measurement says the ceiling binds.
+Not a retry, and not removing the lock — `audit.go:197` already rules both out.
 
 Note that #1 needs designing carefully rather than just implementing. Extracting
 a path from a shell command is *interpretation of a value*, which is exactly the
@@ -481,7 +484,7 @@ new logic server-side, where a hostile PEP cannot reach it.
 
 ---
 
-## 6. Honest scope statement, now that #1 and #2 have landed
+## 6. Honest scope statement, now that #1, #2 and #4-#6 have landed
 
 Stronger and narrower than the current docs imply:
 
