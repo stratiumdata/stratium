@@ -77,8 +77,21 @@ func AddrProbe(addr string) func() error {
 // EnsurePolicy POSTs one cedar policy to a PAP's /v1/policies -- a 201 or a
 // 409 (already exists) both count as success, the same idempotent-POST
 // convention every example's own resource-label and tool-catalog writes use.
+//
+// "enabled": true is not optional here. internal/store's own
+// loadAllPoliciesQuery (the PDP's principal-leg read, and Clamp's own
+// grant-probe read at delegation-creation time) filters WHERE enabled =
+// true; models.Policy.Enabled has no server-side default, so a body that
+// omits this field decodes to false and creates a policy every decision
+// silently skips -- found live, the hard way: a fresh delegation for a
+// caller's own newly-registered subject denied with "none of the requested
+// tools are held by this principal" even though the just-created policy
+// unconditionally permitted that exact subject, because the row this call
+// had just written was never enabled in the first place.
 func EnsurePolicy(papAddr, token, name, policyContent string) error {
-	body, _ := json.Marshal(map[string]string{"name": name, "language": "cedar", "policy_content": policyContent, "effect": "allow"})
+	body, _ := json.Marshal(map[string]any{
+		"name": name, "language": "cedar", "policy_content": policyContent, "effect": "allow", "enabled": true,
+	})
 	req, err := http.NewRequest(http.MethodPost, "http://"+papAddr+"/v1/policies", bytes.NewReader(body))
 	if err != nil {
 		return err

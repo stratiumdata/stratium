@@ -8,6 +8,11 @@ configuration, on purpose (see below).
 A fifth, [`containment`](containment/README.md), is deliberately outside that
 story — it polices nothing. See "The odd one out" at the bottom.
 
+A sixth, [`widening`](widening/README.md), closes the loop between the two: it
+polices a real tool call, same as the four below, and then does the one thing
+none of them do — widens the agent's own grant mid-run and shows the
+`containment` row that write leaves behind. See "Closing the loop" below.
+
 `stratium/example` is its own Go module (tied into the repo via the root
 `go.work`) so it can stay dependency-light and never bleeds into `services`'
 own build.
@@ -48,6 +53,27 @@ delegation at a time.
 Every `depth/*` example also proves a fourth thing the four surfaces above never need to: a *child*
 delegation that asks for **more** than its parent holds is refused at creation time, before any call
 is ever attempted, naming the dimension that would have widened.
+
+## Closing the loop — `widening/`
+
+Every example above either polices a tool call (the four directories, and every
+`depth/*` variant) or asks the admin plane about a change in isolation
+(`containment`). Nothing shows both halves happening to the same agent, in
+order. `widening` does: a real denial through `stratium-pep hook`, a real
+`PUT /v1/agents/{id}` that widens the denied agent's own allowlist mid-run, the
+identical tool call re-asked on the *same* delegation and now allowed, and —
+because there is no audit read endpoint — a direct Postgres read of the
+`containment` row that `PUT` left behind.
+
+| Directory | Surface | What it proves |
+|---|---|---|
+| [`widening`](widening/README.md) | `stratium-pep hook`, then `PUT /v1/agents/{id}` | A denial that turns into an allow mid-session, on the *same* delegation, because the delegation was minted wider than the agent's own starting allowlist and only the agent leg was ever the bottleneck — and the `containment` row `internal/store/containment_audit.go` appends for that write, read back directly from Postgres, since `stratium-pap` exposes no route that returns one. |
+
+Building it found a real bug, not just a live-server surprise: `example/agent.EnsurePolicy`
+— the helper this example and `depth/hook` both use to register a scoped policy —
+POSTed a body that never set `"enabled"`, so every policy it created was
+silently excluded from every decision. Fixed in `example/agent/setup.go`; see
+`widening/README.md`'s own "Traps a reader will hit" for the full story.
 
 ## The odd one out — `containment/`
 
@@ -191,7 +217,12 @@ short-lived rows that expire on their own rather than being cleaned up.
 **What the suite writes to the shared tenants.** `mcp` writes to
 `tenant-pap-e2e-integration`: two resource-label rules (a catch-all at
 `UNCLASSIFIED` and `secret-` at `SECRET`), its own agent row, a
-classification cap on that agent, and one delegation per run. `proxy` writes
+classification cap on that agent, and one delegation per run. `widening`
+(and `depth/hook`) write to the same tenant: their own scoped policy, their
+own agent row(s), and one delegation per run — `widening` additionally
+issues two `PUT /v1/agents/{id}` calls per run against its own agent (a
+reset to `[Read]`, then the deliberate widen to `[Read Write]`), the second
+of which appends one `containment` audit row every run. `proxy` writes
 to `tenant-proxy-integration`: two tool-catalog rows (Fetch, Purge), one
 blanket-permit policy, and one delegation per run — never the agent row
 itself, which is the `psql`-seeded fixture. `extauthz` writes to
