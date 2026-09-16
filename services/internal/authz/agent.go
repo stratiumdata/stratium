@@ -15,8 +15,10 @@ import (
 // tenant-supplied table from requiring LESS trust than DefaultTrustTable.
 // Spec §8 lists "Trust-tier table overrides" as an open item ("confirm or
 // reverse") for exactly this reason.
-// TODO(phase-2): decide per spec §8, and if raise-only is confirmed, add
-// write-time validation analogous to ValidateOverride.
+// TODO(phase-2): decide per spec section 8. If raise-only is confirmed, add
+// write-time validation analogous to ValidateOverride. Until then
+// TestDefaultTrustTableIsTheOnlyConstructionSite (trusttable_guard_test.go)
+// keeps the gap latent by failing the build on a second construction site.
 type TrustTable struct {
 	Required map[models.ActionTier]models.AgentTrustTier
 }

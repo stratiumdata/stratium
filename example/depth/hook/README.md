@@ -14,7 +14,7 @@ model feels like calling `Grep` twice.
    denial for a tool the parent never held would just be `example/proxy` one level deeper. Only a
    real two-hop chain can show the *parent* holding what the *child* does not.
 3. **A child asking for more than its parent granted is refused at creation**, before any hook ever
-   runs — `store.CreateDelegation`'s own `models.ScopeNarrows` check — and the refusal names the
+   runs — `store.CreateDelegation`'s own `permset.ScopeNarrows` check — and the refusal names the
    dimension that failed: `child tool "Write" not in parent approved_tools`.
 
 `Read` at depth 1 is probed too, alongside claim 2's `Grep`, to show the child isn't simply broken —
@@ -104,7 +104,7 @@ to this program and gitignored like every other example's own session file.
 
 ## The TTL wrinkle `BuildChain` hides
 
-`models.ScopeNarrows` checks expiry as one of its dimensions, alongside tier and tools. Requesting
+`permset.ScopeNarrows` checks expiry as one of its dimensions, alongside tier and tools. Requesting
 the *identical* `ttl_seconds` for both the parent and the child does not produce identical absolute
 expiries: `store.CreateDelegation` computes each delegation's `ExpiresAt` from `time.Now()` at the
 moment *that* RPC runs, and the child's call unavoidably runs some (small) amount of time after the

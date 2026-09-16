@@ -105,7 +105,7 @@ func CreateDelegation(pdpAddr string, req *pdpgrpc.CreateDelegationRequest) (*pd
 // BuildChain mints a two-link delegation chain in one subject's name: a root
 // (depth 0) granted parentScope, and a child (depth 1) narrowing it to
 // childScope. store.CreateDelegation (services/internal/store/delegation.go)
-// enforces the narrowing itself via models.ScopeNarrows -- this function
+// enforces the narrowing itself via permset.ScopeNarrows -- this function
 // adds nothing on top of that check, so a childScope that widens parentScope
 // on any dimension comes back as the PDP's own PermissionDenied error,
 // naming the failing dimension in its message, unchanged.
@@ -123,7 +123,7 @@ func CreateDelegation(pdpAddr string, req *pdpgrpc.CreateDelegationRequest) (*pd
 // ExpiresAt from time.Now() at the moment ITS OWN RPC runs, and the child's
 // call unavoidably runs some (small) amount of time after the parent's --
 // so an identical duration always yields a strictly LATER absolute expiry
-// for the child, which models.ScopeNarrows correctly refuses (confirmed
+// for the child, which permset.ScopeNarrows correctly refuses (confirmed
 // against a live PDP: "child expires_at exceeds parent"). One fixed margin,
 // comfortably larger than any realistic round trip between the two calls,
 // is simpler and more robust than decoding the parent's own token

@@ -192,7 +192,22 @@ func TestIntegration_PAPCRUD_AgentRoundTrip(t *testing.T) {
 		t.Fatalf("GetAgent() after delete: error = %v, want ErrNotFound", err)
 	}
 
-	assertAuditTrailMatches(t, tenant, "integration-operator", "agent_created", "agent_updated", "agent_deleted")
+	// "containment" sits between the update and the delete because of Task 7
+	// (containment_audit.go), and it belongs there: the UpdateAgent call at
+	// :172 replaces AllowedTools ["Read","Bash"] with [], and an empty
+	// allowlist means EVERY tool (store.ErrAllowedToolsRequired says so
+	// verbatim). That is a widening, so the update's transaction appends a
+	// second, hash-chained entry recording it. Narrowing or unchanged writes
+	// append nothing, which is why no other sequence in this file moved.
+	//
+	// This assertion is also the LIVE proof that two appends in one
+	// transaction chain correctly: assertAuditTrailMatches runs audit.Verify
+	// over the whole chain, so a containment entry linked to a stale tail --
+	// rather than to the agent_updated row this transaction inserted
+	// moments earlier -- fails here, against real Postgres, not just in the
+	// unit-level mocks that cannot model same-transaction visibility.
+	assertAuditTrailMatches(t, tenant, "integration-operator",
+		"agent_created", "agent_updated", "containment", "agent_deleted")
 }
 
 // TestIntegration_PAPCRUD_TierOverrideRoundTrip is the tier_overrides

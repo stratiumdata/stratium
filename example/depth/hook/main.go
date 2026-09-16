@@ -20,7 +20,7 @@
 //     level deeper. Showing the PARENT can do what the CHILD cannot is what only a real two-hop
 //     chain can prove.
 //  3. A child asking for MORE than its parent granted is refused at CREATION time, before any hook
-//     ever runs -- store.CreateDelegation's own models.ScopeNarrows check -- and the refusal names
+//     ever runs -- store.CreateDelegation's own permset.ScopeNarrows check -- and the refusal names
 //     the dimension that failed (the tool the parent never held).
 //
 // Read at depth 1 is probed too, alongside claim 2's Grep, to show the child is not simply broken:

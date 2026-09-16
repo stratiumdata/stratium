@@ -86,6 +86,18 @@ func TestValidateResourceConstraints_TrailingSlashErrorExplainsWhy(t *testing.T)
 // expectCatalog/expectLiveDelegations (agent_caps_test.go) rather than
 // duplicating any of them -- the same package, the same fixtures.
 
+// expectConstraintsBeforeRead registers writeAgentConstraints' locking read
+// of the scope this write is about to replace -- the first statement in that
+// transaction since Task 7, which needs a baseline inside the transaction to
+// judge the write against (containment_audit.go). beforeJSON is the column's
+// stored bytes; `{}` (an agent with no scope yet) is what every test here
+// wants, because setting a scope where there was none NARROWS, so no
+// containment entry follows and these sequences keep their single audit row.
+func expectConstraintsBeforeRead(mock sqlmock.Sqlmock, beforeJSON string) {
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentConstraintsForUpdateQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"resource_constraints"}).AddRow([]byte(beforeJSON)))
+}
+
 // TestSetAgentResourceConstraints_Success proves the real call sequence
 // (writeAgentConstraints's write+audit, then agentConstraintsView's own three
 // reads -- GetAgent for AllowedTools, the catalog, the live-delegation count)
@@ -98,6 +110,7 @@ func TestSetAgentResourceConstraints_Success(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectConstraintsBeforeRead(mock, `{}`)
 	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -159,6 +172,7 @@ func TestSetAgentResourceConstraints_EmptyMapIsAccepted(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectConstraintsBeforeRead(mock, `{}`)
 	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
@@ -180,16 +194,21 @@ func TestSetAgentResourceConstraints_EmptyMapIsAccepted(t *testing.T) {
 	assertExpectationsMet(t, mock)
 }
 
-// TestSetAgentResourceConstraints_NotFound proves zero rows affected by the
-// UPDATE becomes ErrNotFound, the identical treatment writeAgentCaps gives
+// TestSetAgentResourceConstraints_NotFound proves an id matching no row
+// becomes ErrNotFound, the identical treatment writeAgentCaps gives
 // sql.ErrNoRows.
+//
+// The refusal now comes from the LOAD rather than the UPDATE (Task 7: the
+// scope this write replaces is read first, under FOR UPDATE, so the
+// containment verdict has a baseline). Same sentinel, same rollback, one
+// statement earlier.
 func TestSetAgentResourceConstraints_NotFound(t *testing.T) {
 	s, mock := newMockStore(t)
 	id := uuid.New()
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
-	mock.ExpectQuery("UPDATE agents").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentConstraintsForUpdateQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 
 	_, err := s.SetAgentResourceConstraints(context.Background(), id,
@@ -210,6 +229,7 @@ func TestClearAgentResourceConstraints_Success(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectSetTenant(mock)
+	expectConstraintsBeforeRead(mock, `{}`)
 	mock.ExpectQuery("UPDATE agents").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(now))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)

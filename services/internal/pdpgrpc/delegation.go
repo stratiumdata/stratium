@@ -40,7 +40,7 @@ const noDenial int16 = -1
 // every other store call) -> load the target agent -> load the parent chain
 // if any -> probe the principal's own policy grants and clamp the request
 // to them (internal/authz.Clamp) -> reject if every requested tool was
-// clamped away -> build the delegation -> persist (models.ScopeNarrows runs
+// clamped away -> build the delegation -> persist (permset.ScopeNarrows runs
 // inside store.CreateDelegation for a child) -> audit -> respond. A failed
 // audit write fails the call and no delegation id is ever returned — spec
 // D3's sibling rule for creation, the same discipline Decide applies to an
@@ -201,7 +201,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		// renegotiated here: G6 clamps the tier ceiling and tool set only —
 		// resource and classification stay with the runtime principal leg
 		// (see internal/authz.Clamp's doc comment). An identical child value
-		// always narrows (models.ScopeNarrows treats equal as valid), so
+		// always narrows (permset.ScopeNarrows treats equal as valid), so
 		// copying the parent's maps unchanged is always accepted, never a
 		// widening.
 		d.ClassificationCaps = copyStringMap(parent.ClassificationCaps)

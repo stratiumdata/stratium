@@ -35,6 +35,38 @@ func expectWriteAndAudit(mock sqlmock.Sqlmock, writeQueryFragment string, writeR
 	mock.ExpectCommit()
 }
 
+// expectGrantWriteAndAudit is expectWriteAndAudit for the three endpoints
+// that change an agent's GRANT -- classification-caps, resource-constraints,
+// and PUT /v1/agents/{id} itself -- whose store methods read the column they
+// are about to replace FIRST, with a SELECT ... FOR UPDATE, so the
+// containment verdict they may then record has a baseline captured inside
+// the same transaction (internal/store/containment_audit.go).
+//
+// beforeColumn and beforeJSON are that read's column and its stored bytes.
+// Every handler test in this package passes a value the write then NARROWS
+// or leaves alone ({} for the two map columns, an unchanged list for
+// allowed_tools), so no containment entry follows and the sequence keeps
+// expectWriteAndAudit's single audit insert. A widening write's second entry
+// is proven one package over, against the store method that appends it, not
+// through the HTTP layer that cannot see it.
+func expectGrantWriteAndAudit(
+	mock sqlmock.Sqlmock, beforeColumn, beforeJSON, writeQueryFragment string, writeRows *sqlmock.Rows,
+) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	// The column is pinned in the MATCHER, not only in the returned row:
+	// beforeColumn is the one thing that distinguishes these three
+	// endpoints' sequences from each other, and matching a bare "FOR UPDATE"
+	// would accept a handler that read the wrong column entirely.
+	mock.ExpectQuery(`SELECT ` + beforeColumn + ` FROM agents WHERE id = \$1 FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{beforeColumn}).AddRow([]byte(beforeJSON)))
+	mock.ExpectQuery(writeQueryFragment).WillReturnRows(writeRows)
+	mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("FROM audit_chain").WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO audit_chain").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+}
+
 // expectDeleteAndAudit is expectWriteAndAudit's DELETE-shaped counterpart:
 // the write step returns exactly one named column, the RETURNING value
 // every Delete* method captures for its audit entry's Reason (a policy's

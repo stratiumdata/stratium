@@ -215,6 +215,7 @@ var routeTable = []routeSpec{
 	{Pattern: "DELETE /v1/policies/{id}", MinRole: RoleAdmin, Handler: deletePolicy},
 	{Pattern: "POST /v1/policies/validate", MinRole: RoleEditor, Handler: validatePolicy},
 	{Pattern: "POST /v1/policies/test", MinRole: RoleEditor, Handler: testPolicyAgainstSampleInput},
+	{Pattern: "POST /v1/containment", MinRole: RoleEditor, Handler: checkContainment},
 	{Pattern: "GET /v1/policy-languages", MinRole: RoleViewer, Handler: listPolicyLanguages},
 
 	{Pattern: "GET /v1/agents", MinRole: RoleViewer, Handler: listAgents},
@@ -256,6 +257,8 @@ var routeTable = []routeSpec{
 
 	{Pattern: "GET /v1/delegations", MinRole: RoleViewer, Handler: listDelegations},
 	{Pattern: "POST /v1/delegations/{id}/revoke", MinRole: RoleAdmin, Handler: revokeDelegation},
+
+	{Pattern: "GET /v1/principals/{id}/effective", MinRole: RoleViewer, Handler: getPrincipalEffective},
 
 	{Pattern: "GET /v1/resource-label-rules", MinRole: RoleViewer, Handler: listResourceLabelRules},
 	{Pattern: "POST /v1/resource-label-rules", MinRole: RoleEditor, Handler: createResourceLabelRule},

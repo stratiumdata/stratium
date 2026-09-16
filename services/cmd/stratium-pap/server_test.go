@@ -428,8 +428,8 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // delete -- migrations/000016_stratium_pap_role withholds that grant) and
 // actionRoutes' three (approve, deny, revoke) -- plus Task 5's own two
 // (validate, test), plus Task 6's own two list routes (GET /v1/approvals,
-// GET /v1/delegations), plus resource-label-rules' own five -- thirty-one
-// total.
+// GET /v1/delegations), plus resource-label-rules' own five, plus the
+// containment route -- thirty-two total.
 //
 // The two Task 6 routes are pinned here, in the same test that pins every
 // other route's existence, for the reason this test exists at all: without
@@ -444,12 +444,12 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // a wrong rule can only edit it -- and every rule that exists matches
 // something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1 + 1
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
 			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes + "+
 			"3 Task-7 classification-caps routes + 1 Task-2 configuration route + "+
-			"3 resource-constraints routes)",
+			"3 resource-constraints routes + 1 principals/effective route + 1 containment route)",
 			len(routeTable), wantTotal)
 	}
 
@@ -471,8 +471,11 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			writes++
 		}
 	}
-	const wantWrites = 19 + 2 + 2 // Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
-	// PUT and DELETE .../resource-constraints the same way; both GETs are not writes.
+	const wantWrites = 19 + 2 + 2 + 1 // Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
+	// PUT and DELETE .../resource-constraints the same way; both GETs are not writes. The containment route adds
+	// one more: POST /v1/containment is RoleEditor like every other POST here, so it counts as gated above
+	// RoleViewer even though its handler persists nothing -- see internal/store/pap_e2e_integration_test.go's
+	// papRouteTable, which this count's own Fatalf message below points at.
 	if writes != wantWrites {
 		t.Fatalf("routeTable has %d routes gated above RoleViewer, want %d -- if that is a deliberate new "+
 			"route, papRouteTable in internal/store/pap_e2e_integration_test.go must gain it too, or proofs "+
@@ -518,6 +521,15 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 	}
 	// Task 2's configuration route: the languages this build can evaluate.
 	want["GET /v1/policy-languages"] = false
+	// The union of a principal's live root delegations -- reports, does not
+	// enforce, so it is a plain read and needs no write-route sibling.
+	want["GET /v1/principals/{id}/effective"] = false
+	// Does this candidate permission set allow anything the baseline does
+	// not -- reports and does not enforce, but still gated RoleEditor like
+	// every other POST here (POST /v1/policies/test is its nearest
+	// analogue, also a non-persisting query gated RoleEditor), so it needs
+	// no write-route sibling but does need a Viewer to be refused.
+	want["POST /v1/containment"] = false
 
 	for _, rt := range routeTable {
 		if _, ok := want[rt.Pattern]; ok {

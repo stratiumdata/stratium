@@ -78,7 +78,12 @@ func TestUpdateAgent_Success(t *testing.T) {
 	// (internal/store's updateAgentQuery no longer writes either -- PUT can't
 	// touch these columns -- but still reads back their unchanged, real
 	// values; see that query's own doc comment).
-	expectWriteAndAudit(f.mock, "UPDATE agents",
+	// allowed_tools is read back under FOR UPDATE before the write, as the
+	// baseline for the containment verdict (internal/store/containment_audit.go).
+	// [] before and [] in the body is unrestricted -> unrestricted: the grant
+	// does not move, so the single audit insert below is still the whole
+	// sequence.
+	expectGrantWriteAndAudit(f.mock, "allowed_tools", `[]`, "UPDATE agents",
 		sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
 			AddRow(now, now, []byte(`{}`), []byte(`{}`)))
 

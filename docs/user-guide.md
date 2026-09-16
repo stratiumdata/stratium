@@ -768,6 +768,8 @@ Roles are ranked, so an admin satisfies every editor and viewer route.
 | `POST /v1/approvals/{id}/deny` | **admin** + identity | deny it |
 | `GET /v1/delegations` | viewer | list delegations |
 | `POST /v1/delegations/{id}/revoke` | **admin** | revoke a delegation |
+| `POST /v1/containment` | editor | does a candidate permission set allow anything a baseline forbids? Persists nothing |
+| `GET /v1/principals/{id}/effective` | viewer | the union of one principal's live root delegations |
 | `GET /ui-config` | *none* | public UI configuration — `issuer`, `client_id`, `audience`, `scope`. Carries no secret; it is the one route reachable without a token, because a browser cannot present one before being told where to get it. |
 
 **Three resources deliberately lack routes you might expect:**
@@ -1381,6 +1383,73 @@ Revocation sets `revoked`/`revoked_at` rather than deleting the row, so the
 audit trail survives, and it takes effect **on the very next tool call** — the
 PEP re-reads its session file on every call and the write bumps the tenant epoch,
 invalidating every cached decision fleet-wide.
+
+---
+
+### 5.11 Containment — what a change widens
+
+Every other question in this section is a **point query**: you hand it one
+sample and it tells you what happens to that sample. These two answer the
+universal one — *does this allow anything that was not allowed before?*
+
+**`POST /v1/containment`** compares two permission sets. It writes nothing; it
+is `editor` because every POST here is, not because it changes anything.
+
+```bash
+curl -X POST -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  "http://$PAP/v1/containment" -d '{
+    "baseline":  {"approved_tools":["Read","Write"],"max_action_tier":3,"expires_at":"2026-12-01T00:00:00Z"},
+    "candidate": {"approved_tools":["Read","Bash"],"max_action_tier":3,"expires_at":"2026-12-01T00:00:00Z"}
+  }'
+```
+
+```json
+{"contained":false,"reason":"child tool Bash not in parent approved_tools"}
+```
+
+`reason` is the counterexample: the **first** dimension on which the candidate
+exceeds the baseline, worded exactly as a refused delegation would word it. A
+contained candidate returns `{"contained":true,"reason":""}`.
+
+The fields are the six that bound a grant — `approved_tools`,
+`max_action_tier`, `escalate_at`, `classification_caps`, `resource_constraints`,
+`expires_at`. Omitted fields take their zero value, which is not the same as
+"unrestricted" for every dimension, so send the whole set rather than a patch.
+
+**`GET /v1/principals/{id}/effective`** answers the question the delegation
+chain cannot. Every hop is checked against its parent, exhaustively — but
+nothing compares **siblings**. Two live root delegations under one person, one
+reaching `/secret` and one reaching the internet, are each within bounds and
+together are an exfiltration path.
+
+```bash
+curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/principals/alice@example.com/effective"
+```
+
+```json
+{
+  "principal_id": "alice@example.com",
+  "union": {"approved_tools":["Bash","Read"],"max_action_tier":3,"classification_caps":{},"resource_constraints":{},"expires_at":"2026-12-01T00:00:00Z"},
+  "delegations_counted": 2,
+  "imprecision": ["resource constraint id_prefix differs across members (/workspace/ vs /tmp/), so the union is unconstrained for it"]
+}
+```
+
+The `{id}` is the principal's OIDC subject, not a UUID. Revoked, expired and
+non-root delegations contribute nothing.
+
+Two fields are easy to skim past and shouldn't be:
+
+- **`delegations_counted`** is what distinguishes "this principal holds nothing"
+  from "this principal holds everything." An empty `approved_tools` means
+  *unrestricted* everywhere else in Stratium, so a zero-value union and a
+  genuinely unrestricted one serialize identically. The count tells them apart.
+- **`imprecision`** names every dimension the union had to widen beyond an exact
+  join. The union deliberately errs upward — a report that quietly lost
+  precision would be worse than no report — and this is where it admits it.
+
+**This route reports; it enforces nothing.** There is no principal ceiling to
+check the union against yet.
 
 ---
 

@@ -390,7 +390,7 @@ message CreateDelegationRequest {
   RequestedScope requested_scope = 3;
 
   // parent_delegation_id, when set, makes this a child delegation: it must
-  // narrow the parent (models.ScopeNarrows, enforced inside
+  // narrow the parent (permset.ScopeNarrows, enforced inside
   // store.CreateDelegation) or the call fails with PERMISSION_DENIED. Empty
   // means a root delegation, granted directly from the principal — a UUID
   // string is never legitimately empty, so no separate presence field is

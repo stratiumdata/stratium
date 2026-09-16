@@ -24,6 +24,7 @@ import (
 
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // conformanceRan records which C-numbered properties actually executed in
@@ -169,7 +170,7 @@ func TestC5_AgentWritableOverrideNotHonored(t *testing.T) {
 // gate CreateDelegation calls (internal/pdpgrpc/delegation.go), not a
 // re-implementation of it — the same discipline every other property in
 // this file uses (C4 calls ValidateOverride directly, C7 calls
-// models.ScopeNarrows directly). clampFixture (clamp_test.go, same package)
+// permset.ScopeNarrows directly). clampFixture (clamp_test.go, same package)
 // stands in for policy.Probe here for the same reason GrantProbe's own
 // probe_test.go needs the real Cedar engine and this file does not: this
 // suite is a unit-level, no-DB, no-network gate (see the package doc, and
@@ -251,7 +252,7 @@ func TestC7_ChildCannotWidenParent(t *testing.T) {
 		t.Run(dim, func(t *testing.T) {
 			child := base()
 			widen(child)
-			if models.ScopeNarrows(base(), child) == "" {
+			if permset.ScopeNarrows(base(), child) == "" {
 				t.Fatalf("C7: widening %s must be rejected", dim)
 			}
 		})

@@ -15,7 +15,7 @@ unfamiliar.
    at depth 1`. A denial for a tool the parent never held would just be `example/mcp` one level
    deeper; only a real two-hop chain shows the *parent* holding what the *child* does not.
 3. **A child asking for more than its parent granted is refused at creation**, before either `mcp`
-   run below ever starts — `store.CreateDelegation`'s own `models.ScopeNarrows` check — naming the
+   run below ever starts — `store.CreateDelegation`'s own `permset.ScopeNarrows` check — naming the
    dimension that failed: `child tool "write_file" not in parent approved_tools`.
 
 `read_text_file` at depth 1 is probed too, alongside claim 2, to show the child isn't simply broken

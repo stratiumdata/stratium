@@ -1,0 +1,69 @@
+package main
+
+import (
+	"net/http"
+	"testing"
+	"time"
+
+	"stratium/pkg/models"
+	"stratium/pkg/permset"
+)
+
+func TestContainment_ReportsContainedAndNot(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	baseline := permset.Set{
+		Tools: []string{"Read", "Write"}, MaxTier: models.ActionTierExternalComms, ExpiresAt: at,
+	}
+	narrower := permset.Set{
+		Tools: []string{"Read"}, MaxTier: models.ActionTierReadOnly, ExpiresAt: at,
+	}
+	wider := permset.Set{
+		Tools: []string{"Read", "Bash"}, MaxTier: models.ActionTierExternalComms, ExpiresAt: at,
+	}
+
+	if got := containmentOf(baseline, narrower); !got.Contained || got.Reason != "" {
+		t.Errorf("narrower candidate must be contained, got %+v", got)
+	}
+	got := containmentOf(baseline, wider)
+	if got.Contained {
+		t.Error("a candidate adding a tool must not be contained")
+	}
+	if got.Reason != "child tool Bash not in parent approved_tools" {
+		t.Errorf("Reason = %q, want the tool reason verbatim", got.Reason)
+	}
+}
+
+func TestContainment_RouteIsRegisteredAtEditor(t *testing.T) {
+	var found bool
+	for _, rt := range routeTable {
+		if rt.Pattern == "POST /v1/containment" {
+			found = true
+			if rt.MinRole != RoleEditor {
+				t.Errorf("MinRole = %v, want RoleEditor: every POST route here is gated RoleEditor, "+
+					"same as its nearest analogue POST /v1/policies/test, even though this handler writes nothing", rt.MinRole)
+			}
+		}
+	}
+	if !found {
+		t.Error("POST /v1/containment is not in routeTable")
+	}
+}
+
+// TestCheckContainment_OutOfRangeMaxTier_Refused proves the wire path
+// actually calls ParseActionTier: containmentRequest decodes MaxTier as a
+// raw JSON int straight into models.ActionTier (the type compiles the
+// assignment; nothing about it range-checks), so an out-of-range value must
+// be caught by the handler, not merely by containmentOf's callers passing
+// good values in every other test in this file.
+func TestCheckContainment_OutOfRangeMaxTier_Refused(t *testing.T) {
+	f := newTestServerFixture(t)
+	body := map[string]any{
+		"baseline":  map[string]any{"max_action_tier": 99},
+		"candidate": map[string]any{"max_action_tier": 0},
+	}
+	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/containment", f.token(t, "org-editors"), body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}

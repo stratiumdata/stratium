@@ -380,6 +380,25 @@ Chains are bounded: the decision path enforces a configurable maximum depth
 well above it, so a cycle introduced by a bad write cannot become an infinite
 loop.
 
+### What the chain does not bound
+
+Everything above is **vertical**: each hop measured against the one above it,
+every time. There is no horizontal equivalent, and the gap is worth stating
+plainly because the vertical guarantee is strong enough to be mistaken for a
+complete one.
+
+A person can hold several root delegations at once — one per agent session.
+Each is independently checked against what that person may grant. Nothing checks
+them **against each other**. One delegation that can read `/secret` and a second
+that can reach the internet are both individually in bounds, and the person's
+agents jointly hold an exfiltration path that neither delegation describes.
+
+`GET /v1/principals/{id}/effective` computes that union and returns it. It is a
+**report** — nothing enforces against it, because there is no per-principal
+ceiling to enforce yet. Seeing the union is still the half that matters first:
+before this route, the combined reach of a person's agents was not merely
+unchecked, it was invisible.
+
 ---
 
 ## 8. The rest of the system, briefly

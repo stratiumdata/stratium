@@ -17,6 +17,7 @@ import (
 
 	"stratium/pkg/audit"
 	"stratium/pkg/models"
+	"stratium/pkg/permset"
 )
 
 // eventTypeAgentConstraintsSet and eventTypeAgentConstraintsCleared are
@@ -135,6 +136,24 @@ func (s *Store) ClearAgentResourceConstraints(ctx context.Context, id uuid.UUID,
 // is exactly one clock in play for this column, not two.
 const updateAgentConstraintsQuery = `UPDATE agents SET resource_constraints = $2, updated_at = NOW() WHERE id = $1 RETURNING updated_at`
 
+// loadAgentConstraintsForUpdateQuery reads the scope this write is about to
+// replace, and locks the row until the transaction ends -- the same
+// FOR UPDATE reasoning loadApprovalForUpdateQuery's own doc comment
+// (approval.go) gives for the same shape: read a row, then write it, inside
+// one transaction.
+//
+// Here the lock is what makes the containment verdict (containment_audit.go)
+// mean anything. Without it, two concurrent writes could both read the same
+// before-value, and the one that committed second would compare its new
+// scope against a scope that no longer existed -- an audit row asserting a
+// widening, or a silence asserting none, against a baseline that was never
+// the row's. FOR UPDATE blocks the second transaction here until the first
+// commits, so the value it reads is the value its own UPDATE then replaces.
+//
+// No WHERE tenant_id: RLS is the only tenant boundary in this package (see
+// store.go's package doc).
+const loadAgentConstraintsForUpdateQuery = `SELECT resource_constraints FROM agents WHERE id = $1 FOR UPDATE`
+
 // writeAgentConstraints is SetAgentResourceConstraints and
 // ClearAgentResourceConstraints's shared write path: replace
 // resource_constraints and audit the change in the SAME transaction (N4),
@@ -162,6 +181,20 @@ func (s *Store) writeAgentConstraints(ctx context.Context, id uuid.UUID, constra
 		return fmt.Errorf("store: marshal resource_constraints: %w", err)
 	}
 
+	// Captured INSIDE this transaction and BEFORE the UPDATE below, under the
+	// row lock, so the comparison cannot race another writer.
+	var beforeJSON []byte
+	if err := tx.QueryRowContext(ctx, loadAgentConstraintsForUpdateQuery, id.String()).Scan(&beforeJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: agent %s", ErrNotFound, id)
+		}
+		return fmt.Errorf("store: load agent %s resource constraints: %w", id, err)
+	}
+	var before map[string]string
+	if err := json.Unmarshal(beforeJSON, &before); err != nil {
+		return fmt.Errorf("store: unmarshal resource_constraints: %w", err)
+	}
+
 	var updatedAt time.Time
 	row := tx.QueryRowContext(ctx, updateAgentConstraintsQuery, id.String(), constraintsJSON)
 	if err := row.Scan(&updatedAt); err != nil {
@@ -182,6 +215,12 @@ func (s *Store) writeAgentConstraints(ctx context.Context, id uuid.UUID, constra
 		Reason:        renderConstraints(constraints),
 	}
 	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return err
+	}
+
+	if err := s.recordWideningTx(ctx, tx, id, actor, updatedAt,
+		permset.Set{ResourceConstraints: before},
+		permset.Set{ResourceConstraints: constraints}); err != nil {
 		return err
 	}
 
