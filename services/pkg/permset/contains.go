@@ -10,7 +10,7 @@ import (
 // Contains reports whether inner is a valid subset of outer, returning the
 // empty string when it is and a reason naming the first violated dimension
 // when it is not. The empty-means-valid convention is ScopeNarrows's, which
-// wraps Contains directly below -- including the two rules that are NOT
+// wraps Contains directly below -- including the three rules that are NOT
 // lattice containment:
 //
 //   - EscalateAt presence must MATCH. A child may neither introduce the field
@@ -18,11 +18,13 @@ import (
 //     Dropping is a widening. Introducing narrows, and is rejected anyway.
 //   - ResourceConstraints may not be INTRODUCED either, by the same rule and
 //     for the same reason.
+//   - ClassificationCaps may not be INTRODUCED either, for the same reason
+//     again: see the inline comment on that loop below.
 //
-// Both are stricter than pointwise ordering requires, both are deliberate
-// (spec section 4.3.1), and a clean lattice would quietly permit what they
-// forbid. Do not "fix" either without reading contains_test.go's
-// EscalateAtPresenceIsAsymmetric case first.
+// All three are stricter than pointwise ordering requires, all three are
+// deliberate (spec section 4.3.1), and a clean lattice would quietly permit
+// what they forbid. Do not "fix" any of them without reading
+// contains_test.go's EscalateAtPresenceIsAsymmetric case first.
 func Contains(outer, inner Set) string {
 	if inner.MaxTier > outer.MaxTier {
 		return "child max_action_tier " + inner.MaxTier.String() +
@@ -84,6 +86,12 @@ func Contains(outer, inner Set) string {
 				" in hierarchy " + hierarchy
 		}
 	}
+	// The child may not introduce a cap on a hierarchy the parent does not
+	// cap -- even though doing so would narrow. Rejected for the same reason
+	// EscalateAt and ResourceConstraints reject introduction above: a
+	// child's shape must be derivable from its parent's fixed set of
+	// dimensions, not from which hop in the chain first introduced a
+	// restriction nothing above it had.
 	for hierarchy := range inner.ClassificationCaps {
 		if _, ok := outer.ClassificationCaps[hierarchy]; !ok {
 			return "child caps hierarchy " + hierarchy + " which parent does not cap"
