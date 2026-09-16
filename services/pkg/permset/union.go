@@ -80,7 +80,11 @@ func Union(sets ...Set) (Set, []string) {
 			capped[h] = true
 		}
 	}
-	for h := range capped {
+	// Sorted, not range order: capped is a map, and out.Tools three lines up
+	// is deliberately sorted for the same reason -- an unsorted map range
+	// would make the reasons this loop appends (below) reorder between
+	// identical calls.
+	for _, h := range slices.Sorted(maps.Keys(capped)) {
 		var best string
 		haveBest, all := false, true
 		for _, s := range sets {
@@ -89,7 +93,7 @@ func Union(sets ...Set) (Set, []string) {
 				all = false
 				break
 			}
-			if !haveBest || classificationIndexAtLeast(h, lvl, best) {
+			if !haveBest || ranksAbove(h, lvl, best) {
 				best, haveBest = lvl, true
 			}
 		}
@@ -115,7 +119,10 @@ func Union(sets ...Set) (Set, []string) {
 			keys[k] = true
 		}
 	}
-	for k := range keys {
+	// Sorted for the same reason as the ClassificationCaps loop above: keys
+	// is a map, and ranging it directly would make the reasons appended
+	// below reorder between identical calls.
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
 		var val string
 		haveVal, agree, present := false, true, true
 		for _, s := range sets {
@@ -147,10 +154,17 @@ func Union(sets ...Set) (Set, []string) {
 	return out, reasons
 }
 
-// classificationIndexAtLeast reports whether lvl ranks at or above best in
-// hierarchy h. An unrankable level sorts as weakest here rather than
-// denying: Union is advisory and must not fail, and a level neither side can
-// rank cannot contribute a ceiling either way.
-func classificationIndexAtLeast(h, lvl, best string) bool {
+// ranksAbove reports whether lvl ranks strictly above best in hierarchy h.
+// Strictly, not "at least" -- the max-join loop above only ever needs to know
+// whether a new candidate beats the current best, and strictly-greater is
+// the right comparison for that. An unrankable level sorts as weakest here
+// rather than denying: Union is advisory and must not fail, and a level
+// neither side can rank cannot contribute a ceiling either way. One
+// consequence of that: if EVERY member's cap for h is unrankable,
+// classification.Index returns the same value for all of them, this always
+// reports false, and the join keeps whichever one it saw first -- so two
+// differing unrankable levels resolve by iteration order, not by any
+// ordering between them. Advisory-only and vanishingly rare in practice.
+func ranksAbove(h, lvl, best string) bool {
 	return classification.Index(h, lvl) > classification.Index(h, best)
 }

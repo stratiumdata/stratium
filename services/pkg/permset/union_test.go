@@ -142,10 +142,9 @@ func TestUnion_ResourceConstraintSetByOnlyOneMemberIsUnconstrained(t *testing.T)
 
 // An unrankable classification level -- one absent from classification.
 // Levels -- must never win the join over a real, rankable level, even when
-// it is the first member seen for that hierarchy. See
-// classificationIndexAtLeast's doc comment: classification.Index returns -1
-// uniformly for unrankable input, which always loses the ">" comparison to
-// any real rank.
+// it is the first member seen for that hierarchy. See ranksAbove's doc
+// comment: classification.Index returns -1 uniformly for unrankable input,
+// which always loses the ">" comparison to any real rank.
 func TestUnion_UnrankableClassificationLevelDoesNotWin(t *testing.T) {
 	a := Set{ClassificationCaps: map[string]string{"nato": "BOGUS"}}
 	b := Set{ClassificationCaps: map[string]string{"nato": "SECRET"}}
