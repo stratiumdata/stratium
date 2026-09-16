@@ -1,8 +1,13 @@
 package permset
 
 // dimensions names every models.Delegation field that bounds what its holder
-// may do, mapped to the wire name its reason strings use. Every entry here
-// must have a rule in contains.go AND a rule in union.go.
+// may do, mapped to the JSON field name Set (permset.go) uses for it. That
+// corrects an earlier claim that the values were "the wire name its reason
+// strings use" -- false on its own terms (classification_caps and
+// resource_constraints appear in no reason string) and beside the point
+// regardless: nothing here has ever read these values for anything: only
+// map membership is ever tested. Every entry here must have a rule in
+// contains.go AND a rule in union.go.
 var dimensions = map[string]string{
 	"ApprovedTools":       "approved_tools",
 	"MaxActionTier":       "max_action_tier",

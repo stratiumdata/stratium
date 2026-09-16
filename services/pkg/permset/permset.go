@@ -37,18 +37,18 @@ type Set struct {
 	// models.Delegation.HasTool and models.Agent.HasTool. That convention is
 	// why an empty child list under a restricted parent is a widening rather
 	// than an inheritance.
-	Tools []string
+	Tools []string `json:"approved_tools"`
 
-	MaxTier models.ActionTier
+	MaxTier models.ActionTier `json:"max_action_tier"`
 
 	// EscalateAt is nil when this grant never escalates. Lower is NARROWER:
 	// a lower threshold escalates sooner.
-	EscalateAt *models.ActionTier
+	EscalateAt *models.ActionTier `json:"escalate_at,omitempty"`
 
-	ClassificationCaps  map[string]string // hierarchy -> level
-	ResourceConstraints map[string]string // models.ResourceIDPrefixKey, today
+	ClassificationCaps  map[string]string `json:"classification_caps"`  // hierarchy -> level
+	ResourceConstraints map[string]string `json:"resource_constraints"` // models.ResourceIDPrefixKey, today
 
-	ExpiresAt time.Time
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // FromDelegation reduces a delegation to its permission set. Every field it
