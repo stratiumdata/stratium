@@ -269,11 +269,12 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // (cmd/stratium-pap/server_test.go) is where that direction is pinned -- it
 // asserts both the total route count and the number gated above RoleViewer,
 // so adding a route fails THERE and names this table as the other place to
-// update. The two counts must stay equal: 38 routes, 24 of them writes
+// update. The two counts must stay equal: 39 routes, 24 of them writes
 // (Task 7 added 3 routes, 2 of them writes, to what was 31/19; the
 // resource-constraints task added 3 more, 2 of them writes, to what was
 // 34/21; the containment route added 1 more, itself a write, to what was
-// 37/23).
+// 37/23; the principals/effective route added 1 more, non-write, to what was
+// 38/24).
 //
 // write records whether the route is gated above RoleViewer, which is the
 // only thing proof 2 needs to know about it.
@@ -302,7 +303,7 @@ func papRouteTable(id string) []papRoute {
 		// does not -- gated RoleEditor like every POST here, same as its
 		// nearest analogue immediately above (also a non-persisting query),
 		// so it belongs in this group and not among the GETs this table
-		// otherwise omits (policy-languages, principals/effective).
+		// otherwise omits (policy-languages).
 		{http.MethodPost, "/v1/containment", true},
 
 		{http.MethodGet, "/v1/agents", false},
@@ -342,6 +343,12 @@ func papRouteTable(id string) []papRoute {
 
 		{http.MethodGet, "/v1/delegations", false},
 		{http.MethodPost, "/v1/delegations/" + id + "/revoke", true},
+
+		// The most aggregating read in the API -- one principal's entire
+		// effective permission set -- and for that reason the one GET this
+		// table cannot afford to leave out of the unverified-token sweep,
+		// unlike the plain GETs it otherwise omits (policy-languages).
+		{http.MethodGet, "/v1/principals/" + id + "/effective", false},
 
 		{http.MethodGet, "/v1/resource-label-rules", false},
 		{http.MethodPost, "/v1/resource-label-rules", true},
