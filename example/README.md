@@ -5,6 +5,9 @@ Stratium sits in front of the tool call — not the model — deciding whether i
 goes through. Three directories are runnable programs; the fourth is a
 configuration, on purpose (see below).
 
+A fifth, [`containment`](containment/README.md), is deliberately outside that
+story — it polices nothing. See "The odd one out" at the bottom.
+
 `stratium/example` is its own Go module (tied into the repo via the root
 `go.work`) so it can stay dependency-light and never bleeds into `services`'
 own build.
@@ -45,6 +48,23 @@ delegation at a time.
 Every `depth/*` example also proves a fourth thing the four surfaces above never need to: a *child*
 delegation that asks for **more** than its parent holds is refused at creation time, before any call
 is ever attempted, naming the dimension that would have widened.
+
+## The odd one out — `containment/`
+
+Everything above asks *does this tool call go through?* [`containment`](containment/README.md)
+asks the admin plane a question no enforcement surface can answer: **does this
+change let an agent do anything it could not do before?** No model, no PEP, no
+delegation minted — just `stratium-pap` and two routes.
+
+| Directory | What it is | What it proves |
+|---|---|---|
+| [`containment`](containment/README.md) | Runnable: a Keycloak token and two PAP routes, no enforcement path at all | `contained: false` means two different things — a genuine widening and a deliberate *shape* refusal share a status and not a meaning. And the union of two contained siblings is itself contained, so the sibling risk `architecture.md` §19 describes is a composition property that no ceiling check will ever flag. |
+
+It earns its place by being the one example whose own assertions caught the
+documentation being wrong: Act 1's first case was written from intuition and
+the live server disagreed, and Act 2's lesson was rewritten after the server
+falsified the design note it was built from. Both corrections are in the
+directory's README.
 
 ## The one sentence that ties it together
 
