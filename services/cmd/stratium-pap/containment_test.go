@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -45,5 +46,24 @@ func TestContainment_RouteIsRegisteredAtEditor(t *testing.T) {
 	}
 	if !found {
 		t.Error("POST /v1/containment is not in routeTable")
+	}
+}
+
+// TestCheckContainment_OutOfRangeMaxTier_Refused proves the wire path
+// actually calls ParseActionTier: containmentRequest decodes MaxTier as a
+// raw JSON int straight into models.ActionTier (the type compiles the
+// assignment; nothing about it range-checks), so an out-of-range value must
+// be caught by the handler, not merely by containmentOf's callers passing
+// good values in every other test in this file.
+func TestCheckContainment_OutOfRangeMaxTier_Refused(t *testing.T) {
+	f := newTestServerFixture(t)
+	body := map[string]any{
+		"baseline":  map[string]any{"max_action_tier": 99},
+		"candidate": map[string]any{"max_action_tier": 0},
+	}
+	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/containment", f.token(t, "org-editors"), body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }

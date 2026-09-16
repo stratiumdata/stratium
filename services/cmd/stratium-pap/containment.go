@@ -19,6 +19,7 @@ package main
 import (
 	"net/http"
 
+	"stratium/pkg/models"
 	"stratium/pkg/permset"
 )
 
@@ -41,10 +42,36 @@ func containmentOf(baseline, candidate permset.Set) containmentResponse {
 	return containmentResponse{Contained: reason == "", Reason: reason}
 }
 
+// validateSetTiers range-checks a decoded Set's ActionTier fields, following
+// the same convention test_input.go's DeclaredTier check does: decodeJSON
+// puts an untrusted int straight into MaxTier and EscalateAt, which compiles
+// because ActionTier's underlying type is int, but ParseActionTier's own doc
+// comment warns that casting alone admits a value outside the lattice.
+// Empty string means valid, matching permset.Contains's own convention.
+func validateSetTiers(label string, set permset.Set) string {
+	if _, err := models.ParseActionTier(int(set.MaxTier)); err != nil {
+		return label + ".max_action_tier: " + err.Error()
+	}
+	if set.EscalateAt != nil {
+		if _, err := models.ParseActionTier(int(*set.EscalateAt)); err != nil {
+			return label + ".escalate_at: " + err.Error()
+		}
+	}
+	return ""
+}
+
 func checkContainment(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {
 	var req containmentRequest
 	if err := decodeJSON(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if msg := validateSetTiers("baseline", req.Baseline); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	if msg := validateSetTiers("candidate", req.Candidate); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusOK, containmentOf(req.Baseline, req.Candidate))
