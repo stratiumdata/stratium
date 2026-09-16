@@ -16,7 +16,7 @@ are, for the same underlying reason — nothing about this surface's own claim d
    depth 1`. A denial for a method the parent never held would just be `example/proxy` one level
    deeper; only a real two-hop chain shows the *parent* holding what the *child* does not.
 3. **A child asking for more than its parent granted is refused at creation**, before either probe
-   below ever runs — `store.CreateDelegation`'s own `models.ScopeNarrows` check — naming the
+   below ever runs — `store.CreateDelegation`'s own `permset.ScopeNarrows` check — naming the
    dimension that failed: `child tool "/stratium.target.v1.TargetService/CallCount" not in parent
    approved_tools`.
 
@@ -37,7 +37,7 @@ other agent id would simply be a delegation `pep-proxy` can never resolve, provi
 So this chain is **one agent narrowing its own authority**: `agent.BuildChain` is called with the
 identical `04ef809a-849f-404a-9a5c-015b7f73a014` as both `parentAgentID` and `childAgentID`. It is
 still a genuine depth-1 chain — the child's delegation still has `ParentDelegationId` set to the
-parent's own id, and `store.CreateDelegation` still runs the identical `models.ScopeNarrows` check
+parent's own id, and `store.CreateDelegation` still runs the identical `permset.ScopeNarrows` check
 it would for a true orchestrator/worker pair, including the identical expiry-margin behavior
 `example/depth/hook`'s own README documents (`agent.BuildChain`'s `childTTLMargin`) — it just proves
 "the same principal, one step later, with less" rather than "a different principal, downstream,

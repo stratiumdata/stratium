@@ -91,7 +91,7 @@ and an optional tool allowlist.
 `max_action_tier`, `approved_tools`, `resource_constraints`,
 `classification_caps`, `expires_at`, and an optional `escalate_at`. Delegations
 form a **chain**: a child may only ever narrow its parent
-(`models.ScopeNarrows`). The acting delegation is the last hop.
+(`permset.ScopeNarrows`). The acting delegation is the last hop.
 
 **Action tier** — how dangerous the action is, derived server-side:
 

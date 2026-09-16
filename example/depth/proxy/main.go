@@ -13,7 +13,7 @@
 //     for a method the parent never held would just be example/proxy one level deeper; only a real
 //     two-hop chain shows the PARENT holding what the CHILD does not.
 //  3. A child asking for more than its parent granted is refused at CREATION time, before either
-//     probe below ever runs -- store.CreateDelegation's own models.ScopeNarrows check -- naming the
+//     probe below ever runs -- store.CreateDelegation's own permset.ScopeNarrows check -- naming the
 //     dimension that failed (the method the parent never held).
 //
 // fetch at depth 1 is probed too, alongside claim 2's purge, to show the child is not simply
@@ -28,7 +28,7 @@
 // NARROWING ITS OWN AUTHORITY: agent.BuildChain is called with the identical agent id as BOTH
 // parentAgentID and childAgentID. It is still a genuine depth-1 chain -- the child's delegation
 // still has ParentDelegationId set to the parent's own id, and store.CreateDelegation still runs
-// the identical models.ScopeNarrows check it would for a true orchestrator/worker pair -- but it
+// the identical permset.ScopeNarrows check it would for a true orchestrator/worker pair -- but it
 // proves "the same principal, one step later, with less" rather than "a different principal,
 // downstream, with less." See README.md for the fuller case.
 //

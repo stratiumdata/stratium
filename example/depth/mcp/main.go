@@ -17,7 +17,7 @@
 //     would just be example/mcp one level deeper. Showing the PARENT can do what the CHILD cannot
 //     is what only a real two-hop chain can prove.
 //  3. A child asking for MORE than its parent granted is refused at CREATION time, before either
-//     mcp run ever starts -- store.CreateDelegation's own models.ScopeNarrows check -- and the
+//     mcp run ever starts -- store.CreateDelegation's own permset.ScopeNarrows check -- and the
 //     refusal names the dimension that failed (the tool the parent never held).
 //
 // read_text_file at depth 1 is probed too, alongside claim 2's search_files, to show the child is

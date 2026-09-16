@@ -95,7 +95,7 @@ func TestBuildChain_NarrowingChildSucceeds(t *testing.T) {
 // A child that widens its parent must come back as an error naming the
 // dimension that failed -- chain.go adds no narrowing logic of its own
 // (store.CreateDelegation, services/internal/store/delegation.go, is what
-// enforces models.ScopeNarrows), so this proves BuildChain propagates that
+// enforces permset.ScopeNarrows), so this proves BuildChain propagates that
 // refusal verbatim rather than swallowing or re-wording it.
 func TestBuildChain_WideningChildNamesTheFailingDimension(t *testing.T) {
 	parentScope := &pdpgrpc.RequestedScope{MaxActionTier: 1, Tools: []string{"Read"}}
