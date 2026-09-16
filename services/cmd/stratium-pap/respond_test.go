@@ -20,6 +20,8 @@ import (
 	"github.com/google/uuid"
 
 	"stratium/internal/store"
+
+	"stratium/pkg/models"
 )
 
 // TestWriteStoreError_UnrecognizedError_Returns500WithoutEchoingIt is the
@@ -112,5 +114,56 @@ func TestWriteStoreError_ApprovalNotPending_Returns409(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+// decodeJSON's own doc comment promises it never leaves v silently at its
+// zero value: "a caller that got no error from decodeJSON must be able to
+// trust v reflects what was actually sent." An unknown field broke exactly
+// that promise on all seventeen of its call sites -- encoding/json discards
+// a key the target struct does not have, so a typo decoded to a successful
+// request that wrote something other than what the operator typed.
+//
+// Most routes survived it only by accident of their own validation
+// (allowed_tools is required, caps reject empty, tool_name is required...).
+// Two did not, and both fail OPEN:
+//
+//   - agents.suspended: PUT {"suspened": true} returns 200 with the agent
+//     still active. The reversible kill switch silently does not throw.
+//   - resource_label_rules.prefix: a typo yields "", which is the
+//     empty-prefix CATCH-ALL rather than the narrow rule intended. Aimed at
+//     a permissive level it labels every previously-unlabelled resource, so
+//     resources that denied under a cap now satisfy it.
+//
+// One rejection at the decoder closes the whole class, which is why neither
+// field gets its own guard.
+func TestDecodeJSON_RefusesAnUnknownField(t *testing.T) {
+	var a models.Agent
+	req := httptest.NewRequest(http.MethodPut, "/v1/agents/x",
+		strings.NewReader(`{"name":"a","suspened":true}`))
+
+	err := decodeJSON(req, &a)
+	if err == nil {
+		t.Fatalf("decodeJSON accepted an unknown field and left suspended=%v -- a typo'd key "+
+			"must not decode to a silent zero value", a.Suspended)
+	}
+	if !strings.Contains(err.Error(), "suspened") {
+		t.Errorf("error = %q, want it to name the offending field so an operator can find the typo", err)
+	}
+}
+
+// The mirror: a body carrying exactly the struct's own fields still decodes.
+// Strictness that refused legitimate requests would be a worse bug than the
+// one it fixes.
+func TestDecodeJSON_AcceptsAKnownField(t *testing.T) {
+	var a models.Agent
+	req := httptest.NewRequest(http.MethodPut, "/v1/agents/x",
+		strings.NewReader(`{"name":"a","suspended":true,"allowed_tools":[]}`))
+
+	if err := decodeJSON(req, &a); err != nil {
+		t.Fatalf("decodeJSON(%q) = %v, want nil", `{"name":...,"suspended":true}`, err)
+	}
+	if !a.Suspended {
+		t.Error("suspended did not decode")
 	}
 }

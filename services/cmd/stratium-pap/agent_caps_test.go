@@ -178,19 +178,49 @@ func TestPutAgentCaps_NoCatchAllIsPlainTextConflict(t *testing.T) {
 
 // TestPutAgentCaps_EmptyOrAbsentCapsRejected pins ITEM 1 from the
 // whole-branch review at the HTTP layer: PUT must not be able to clear
-// enforcement by omission, only DELETE may. All three of PUT {},
-// PUT {"typo": ...} (an absent/misspelled classification_caps key, which
-// decodeJSON gives no special treatment -- it just leaves the field at its
-// zero value, nil), and an explicit classification_caps: {} must 400 with a
-// plain-text body naming DELETE -- and none of them may reach the store's
-// write path (no mock expectations registered).
+// enforcement by omission, only DELETE may. PUT {} and an explicit
+// classification_caps: {} must 400 with a plain-text body naming DELETE --
+// and neither may reach the store's write path (no mock expectations
+// registered).
+//
+// A MISSPELLED key is now a different case, and deliberately so. It used to
+// land here too, because encoding/json discarded the unknown key and left
+// the field at its zero value, making a typo indistinguishable from an
+// omission -- so it drew the same "use DELETE" message. That message was
+// wrong advice for it: the operator did not want to turn enforcement off,
+// they mistyped a key, and being sent to DELETE compounds the mistake.
+// decodeJSON now refuses an unknown field outright and names it, so the
+// misspelled case has its own subtest below asserting the better message.
+// A misspelled classification_caps key is refused by decodeJSON before the
+// handler sees it, with the offending field named. The status is unchanged
+// (400) -- what changed is that the reason now points at the typo instead of
+// at DELETE, and the request no longer reaches the store.
+func TestPutAgentCaps_MisspelledFieldNamesTheField(t *testing.T) {
+	f := newTestServerFixture(t)
+	rec := doJSONRequest(t, f.server, http.MethodPut,
+		"/v1/agents/"+uuid.New().String()+"/classification-caps", f.token(t, "org-admins"),
+		map[string]any{"typo": map[string]string{"nato": "SECRET"}})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "typo") {
+		t.Errorf("body does not name the offending field: %s", rec.Body.String())
+	}
+	// The old message sent a mistyping operator to DELETE, which would turn
+	// enforcement off -- the opposite of what they were reaching for.
+	if strings.Contains(rec.Body.String(), "DELETE") {
+		t.Errorf("body still advises DELETE for what is a typo: %s", rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock)
+}
+
 func TestPutAgentCaps_EmptyOrAbsentCapsRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body map[string]any
 	}{
 		{"empty request body", map[string]any{}},
-		{"misspelled field", map[string]any{"typo": map[string]string{"nato": "SECRET"}}},
 		{"explicit empty caps", map[string]any{"classification_caps": map[string]string{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

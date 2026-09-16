@@ -31,16 +31,40 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // decodeJSON decodes r's body into v. A nil body (no Content-Length, no
-// chunked body -- e.g. a GET-shaped request with no body reader at all) and
-// a body that fails to decode are both refused with a message naming the
-// problem, never silently leaving v at its zero value: a caller that got no
-// error from decodeJSON must be able to trust v reflects what was actually
-// sent.
+// chunked body -- e.g. a GET-shaped request with no body reader at all), a
+// body that fails to decode, and a body carrying a field v does not have are
+// all refused with a message naming the problem, never silently leaving v at
+// its zero value: a caller that got no error from decodeJSON must be able to
+// trust v reflects what was actually sent.
+//
+// DisallowUnknownFields is what makes that last clause true rather than
+// merely intended. encoding/json's default is to DISCARD a key the target
+// struct has no field for, so before this every one of decodeJSON's callers
+// accepted a typo as a successful write of something other than what the
+// operator typed. Most survived it by accident of their own validation --
+// allowed_tools is required, caps refuse empty, tool_name is required -- but
+// two did not, and both failed OPEN:
+//
+//   - agents.suspended. PUT {"suspened": true} returned 200 with the agent
+//     still active: the reversible kill switch, silently not thrown, on the
+//     one control an operator reaches for when an agent is misbehaving.
+//   - resource_label_rules.prefix. A typo yielded "", which is the
+//     empty-prefix CATCH-ALL rather than the narrow rule intended. Aimed at
+//     a permissive level that labels every previously-unlabelled resource,
+//     so resources a classification cap used to deny now satisfy it.
+//
+// Refusing at the decoder closes the whole class in one place, which is why
+// neither field carries a guard of its own. The cost is that a client
+// sending a field this server does not know now gets a 400 where it used to
+// get a silent discard -- the correct direction for an admin API whose
+// requests change security configuration.
 func decodeJSON(r *http.Request, v any) error {
 	if r.Body == nil {
 		return errors.New("request body is required")
 	}
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
 		return errors.New("malformed request body: " + err.Error())
 	}
 	return nil
