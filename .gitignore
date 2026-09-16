@@ -45,6 +45,8 @@ __pycache__/
 /example/depth/hook/.session-parent.json.cache.json
 /example/depth/hook/.session-child.json
 /example/depth/hook/.session-child.json.cache.json
+/example/widening/.session.json
+/example/widening/.session.json.cache.json
 /example/depth/mcp/.session-parent.json
 /example/depth/mcp/.session-parent.json.cache.json
 /example/depth/mcp/.session-child.json
