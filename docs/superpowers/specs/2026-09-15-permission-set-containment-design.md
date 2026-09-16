@@ -266,9 +266,13 @@ changes. That is the regression suite for the extraction.
 
 ### `POST /v1/containment` and config-write verdicts — gap 1
 
-A new endpoint (`RoleViewer`) takes a baseline and a candidate and returns
+A new endpoint (`RoleEditor`) takes a baseline and a candidate and returns
 contained / not-contained plus a reason. Callers pass either two explicit sets
-or a reference to a live object.
+or a reference to a live object. `RoleEditor`, not `RoleViewer`, even though it
+writes nothing: this codebase gates every POST route at `RoleEditor`
+regardless of whether the handler persists anything, and `POST
+/v1/policies/test` — the point-query counterpart to this universal one — is
+gated the same way for the same reason.
 
 Separately, writes that change an **agent's grant** record a containment
 verdict against the pre-write value: `PUT /v1/agents/{id}`,
@@ -412,6 +416,12 @@ New properties this change needs:
   union; nothing enforces it. Adding a ceiling is a follow-up whose entire
   implementation is one `Contains` call against a value this design already
   produces.
+- **(2026-09-15) A read path for the containment verdict.** Verdicts are
+  written to the audit chain and have no reader: no read endpoint, no console
+  screen. Direct SQL is the only way to see one today. Remaining work before
+  this design is complete: either an audit read endpoint filtered to
+  `event_type=containment`, or a console screen over it. Not done in this fix
+  wave — see the Risks section below.
 
 ---
 
@@ -431,9 +441,10 @@ New properties this change needs:
   review; nothing makes it impossible.
 - **An advisory verdict nobody reads is theatre.** Decision 3 trades safety for
   adoptability. If containment warnings accumulate unread in the audit chain,
-  this feature has cost effort and bought nothing. The console surfacing is
-  therefore not a nice-to-have; a verdict with no reader should be treated as
-  an incomplete implementation of this design.
+  this feature has cost effort and bought nothing. As of this fix wave, that
+  risk is not mitigated: the verdict is recorded but not yet surfaced. There is
+  no audit read endpoint and no console screen, and direct SQL is the only way
+  to see one. Until a read path exists, this design is partially delivered.
 - **`Union`'s imprecision escaping into a blocking path.** The over-approximation
   in decision 2 is sound only for advisory use. The `ponytail:` comment says
   so; a reviewer should treat any new blocking caller of `Union` as a design
