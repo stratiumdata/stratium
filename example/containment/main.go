@@ -38,10 +38,12 @@
 // and a shape refusal side by side; the status is identical and the reasons
 // are not. Read the reason, never the boolean alone.
 //
-// The store asks the other question for agent grants, and has to pre-fill the
-// before-value to get it (internal/store.containmentReason). That adapter is
-// not reachable through this endpoint. A named permset operation for it --
-// pure lattice containment, no shape rules -- is a recorded follow-up.
+// Both questions are reachable. Since 2026-09-17 the request takes a
+// "question" field: "delegation" (the default) is the above, and "grant"
+// runs permset.GrantWidens -- the same computation internal/store records on
+// an agent-grant write, so the endpoint and the audit row agree by
+// construction rather than by two implementations happening to match. Act 1
+// below asks BOTH on one input and shows them disagreeing.
 //
 // SECOND: the union of two contained siblings is itself contained.
 //
@@ -176,6 +178,27 @@ func run() error {
 			fmt.Printf("    reason:    %s\n", res.Reason)
 		}
 	}
+
+	fmt.Println("\n  ── the same input, the other question ──")
+	capAdded := baseline
+	capAdded.ClassificationCaps = map[string]string{"nato": "SECRET"}
+	for _, q := range []string{"delegation", "grant"} {
+		res, err := containmentAsking(papAddr, editor, q, baseline, capAdded)
+		if err != nil {
+			return fmt.Errorf("asking the %s question: %w", q, err)
+		}
+		if res.Question != q {
+			return fmt.Errorf("asked %q and the server answered %q", q, res.Question)
+		}
+		fmt.Printf("  question=%-11s contained: %-5v  %s\n", res.Question, res.Contained, res.Reason)
+	}
+	fmt.Println()
+	fmt.Println("  One input, two questions, opposite answers — and neither is wrong.")
+	fmt.Println("  \"delegation\" asks may a CHILD hold this; a child may not invent a dimension")
+	fmt.Println("  its parent never had. \"grant\" asks did this get WIDER; an absent cap means")
+	fmt.Println("  unrestricted, so adding the first one narrows. An unrecognised question is a")
+	fmt.Println("  400, never a silent fallback: guessing between two answers that differ is the")
+	fmt.Println("  one thing this endpoint must not do.")
 
 	fmt.Println("\n=== Act 2 — the union of two contained siblings is contained ===")
 
@@ -329,12 +352,22 @@ func act1(base permset.Set) []change {
 func tier(t models.ActionTier) *models.ActionTier { return &t }
 
 type containmentResponse struct {
+	Question  string `json:"question"`
 	Contained bool   `json:"contained"`
 	Reason    string `json:"reason"`
 }
 
 func containment(papAddr, token string, baseline, candidate permset.Set) (containmentResponse, error) {
-	body, err := json.Marshal(map[string]permset.Set{"baseline": baseline, "candidate": candidate})
+	return containmentAsking(papAddr, token, "delegation", baseline, candidate)
+}
+
+// containmentAsking is containment with the question named explicitly. The
+// two answers differ on an introduced key, so which one you asked is part of
+// the result, not context a reader is expected to remember.
+func containmentAsking(papAddr, token, question string, baseline, candidate permset.Set) (containmentResponse, error) {
+	body, err := json.Marshal(map[string]any{
+		"question": question, "baseline": baseline, "candidate": candidate,
+	})
 	if err != nil {
 		return containmentResponse{}, err
 	}

@@ -49,80 +49,18 @@ import (
 
 const eventTypeContainment = "containment"
 
-// containmentReason returns the reason the new grant is not contained in the
-// old one, or the empty string when the write narrows or leaves it unchanged.
+// containmentReason returns the reason this write widened the grant, or the
+// empty string when it narrowed or left it unchanged.
 //
-// Argument order reads backwards on purpose: Contains(outer, inner) asks
-// whether inner fits inside outer, so the BEFORE value is the outer one. A
-// write is a widening exactly when the after value does not fit inside it.
+// It is permset.GrantWidens, and it is a named function here only so this
+// file's callers read in one register. The argument order that looks
+// backwards -- before is the OUTER set -- and the whole explanation of why
+// this is not a bare permset.Contains call live on GrantWidens itself. Read
+// that doc comment before changing anything here; the two-line difference it
+// describes is the difference between recording real widenings and stamping
+// "widened" on the most protective write an operator makes.
 func containmentReason(before, after permset.Set) string {
-	// DO NOT DELETE THESE TWO LINES AS A SIMPLIFICATION. They are the whole
-	// difference between this function and a bare call to permset.Contains,
-	// and removing them puts a FALSE "widened" verdict on the most common
-	// write this package makes. The reasoning, in full:
-	//
-	// WHAT CONTAINS DOES. Given a key the inner set holds and the outer set
-	// does not, Contains refuses it -- "child caps hierarchy X which parent
-	// does not cap", "child constrains resource key X which parent does not
-	// constrain". That is DELIBERATE where Contains was written, and
-	// contains.go's own doc comment says so and tells you not to "fix" it:
-	// those two rules are explicitly NOT lattice containment (spec 4.3.1).
-	// They exist so a child delegation's SHAPE is derivable from its
-	// parent's -- a child may not invent a dimension the parent never had.
-	//
-	// WHY THAT ANSWER IS INVERTED HERE. An agent grant before/after is a
-	// pure LATTICE question, not a delegation-shape one. An absent cap means
-	// UNRESTRICTED (classification.CheckCap ALLOWs when len(caps)==0) and an
-	// absent constraint key means unrestricted too, so introducing either
-	// one NARROWS the grant. Under a bare Contains, the first cap and the
-	// first id_prefix an agent ever gets -- the narrowest, most common write
-	// an operator makes -- would each be recorded as a widening. That is
-	// exactly the noise that teaches operators to ignore an event type, and
-	// this whole file is worthless once they do.
-	//
-	// WHAT THE PRE-FILL DOES, AND ONLY THAT. It gives the before value every
-	// key the after value introduces, at the after value's own setting, so
-	// an introduced key compares equal to itself and is silent. Nothing else
-	// moves: a key DROPPED, a cap RAISED and a prefix WIDENED all still
-	// report, which contains_test.go's siblings in containment_audit_test.go
-	// pin in both directions.
-	//
-	// WHERE THIS BELONGS LONG TERM. In pkg/permset, as a named second
-	// operation beside Contains and Union -- this is a general question
-	// ("did this grant widen?"), not a store concern, and an adapter in
-	// internal/store is the wrong home for it. The controller has ledgered
-	// that as a follow-up. Until it lands, this is the seam; do not close it
-	// by deleting it.
-	//
-	// before is a copy (Set is a value) and withIntroducedKeys allocates, so
-	// the caller's own maps -- one of which is the row this write is about
-	// to describe -- are never written through.
-	before.ClassificationCaps = withIntroducedKeys(before.ClassificationCaps, after.ClassificationCaps)
-	before.ResourceConstraints = withIntroducedKeys(before.ResourceConstraints, after.ResourceConstraints)
-
-	// ponytail: the same asymmetry exists on EscalateAt (introducing one
-	// where the before value has none reports a widening) and is NOT
-	// handled, because no caller sets that field -- each compares one
-	// dimension with the rest at their zero value on both sides. Tools needs
-	// no pre-fill at all: Contains' tools clause is already a pure lattice
-	// rule, skipping entirely when the outer list is the empty (meaning
-	// unrestricted) one. A future caller that passes a whole agent grant
-	// needs the EscalateAt case added here first.
-	return permset.Contains(before, after)
-}
-
-// withIntroducedKeys returns a new map holding base plus every key of extra
-// that base does not already hold, at extra's value. Neither input is
-// modified.
-func withIntroducedKeys(base, extra map[string]string) map[string]string {
-	out := make(map[string]string, len(base)+len(extra))
-	for k, v := range extra {
-		out[k] = v
-	}
-	for k, v := range base {
-		out[k] = v
-	}
-	return out
+	return permset.GrantWidens(before, after)
 }
 
 // recordWideningTx appends the containment verdict to the tenant's hash chain

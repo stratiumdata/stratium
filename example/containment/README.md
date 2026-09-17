@@ -52,10 +52,21 @@ empty the tool allowlist  ([Read Write] → [])
 Identical status, opposite meanings. **Read the reason, never the boolean
 alone.**
 
-`internal/store.containmentReason` asks the other question for agent-grant
-writes, and has to pre-fill the before-value to get it. That adapter is not
-reachable through this endpoint; a named `permset` operation for it — pure
-lattice containment, no shape rules — is recorded as follow-up work.
+**You can ask the other question.** Since 2026-09-17 the endpoint takes a
+`question` field: `"delegation"` (the default, and what an omitted field
+means) is the above, and `"grant"` runs `permset.GrantWidens` — *did this get
+wider?* The identical bodies answer oppositely:
+
+```json
+{"question":"grant","contained":true,"reason":""}
+{"question":"delegation","contained":false,"reason":"child caps hierarchy nato which parent does not cap"}
+```
+
+An unrecognised value is a 400, not a silent fallback: guessing between two
+answers that differ is the one thing this endpoint must not do. `GrantWidens`
+is the same computation `internal/store` records on an agent-grant write, so
+the endpoint and the audit row now agree by construction rather than by two
+implementations happening to match.
 
 **2. The union of two contained siblings is itself contained.**
 

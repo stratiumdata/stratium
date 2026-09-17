@@ -1412,6 +1412,38 @@ curl -X POST -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/js
 exceeds the baseline, worded exactly as a refused delegation would word it. A
 contained candidate returns `{"contained":true,"reason":""}`.
 
+**Two questions, and they are not the same question.** Add `"question"` to
+select one:
+
+```bash
+# did this agent's grant get WIDER?  (an absent cap means unrestricted,
+# so adding the first one NARROWS)
+curl -X POST -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  "http://$PAP/v1/containment" -d '{
+    "question": "grant",
+    "baseline":  {"approved_tools":["Read"],"max_action_tier":1,"classification_caps":{},"expires_at":"2026-12-01T00:00:00Z"},
+    "candidate": {"approved_tools":["Read"],"max_action_tier":1,"classification_caps":{"nato":"SECRET"},"expires_at":"2026-12-01T00:00:00Z"}
+  }'
+```
+
+```json
+{"question":"grant","contained":true,"reason":""}
+```
+
+The identical bodies with `"question": "delegation"` — the default, and what
+an omitted field means — answer the opposite way:
+
+```json
+{"question":"delegation","contained":false,"reason":"child caps hierarchy nato which parent does not cap"}
+```
+
+Neither answer is wrong. `delegation` asks *may a child hold this?*, and a
+child may not invent a dimension its parent never had — a deliberate shape
+rule. `grant` asks *did this get wider?*, which is a pure lattice question, and
+introducing a restriction narrows. Ask the one you mean; an unrecognised value
+is a 400 rather than a silent fallback, because guessing between two answers
+that differ is the one thing this endpoint must not do.
+
 The fields are the six that bound a grant — `approved_tools`,
 `max_action_tier`, `escalate_at`, `classification_caps`, `resource_constraints`,
 `expires_at`. Omitted fields take their zero value, which is not the same as

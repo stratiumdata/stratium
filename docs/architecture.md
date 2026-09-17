@@ -800,12 +800,37 @@ neither a resource-constraint key nor a classification hierarchy may be
 introduced. All three are stricter than ordering requires and all three are
 deliberate (spec §4.3.1). A tidier version quietly permits what they forbid.
 
+### Two questions, which are not the same question
+
+`Contains` asks whether a **child delegation** may hold a set. `GrantWidens`
+asks whether a **grant got wider**. They disagree on exactly one case — a key
+the candidate introduces and the baseline lacks:
+
+```
+before: no classification cap        after: {"nato": "SECRET"}
+
+Contains     → refused. "child caps hierarchy nato which parent does not cap"
+GrantWidens  → narrows. An absent cap means UNRESTRICTED.
+```
+
+Both answers are right for their own question. `Contains`'s refusal is a
+deliberate *shape* rule — a child's dimensions must be derivable from its
+parent's (spec §4.3.1) — and it is explicitly not lattice containment.
+`GrantWidens` neutralises exactly those two introduce-a-key clauses by
+pre-filling the before-value, and touches nothing else: a dropped key, a
+raised cap level and a widened prefix all still fire.
+
+It **delegates to `Contains`** rather than reimplementing the comparison as
+pure lattice containment. The alternative would duplicate the comparison
+minus two clauses, including its frozen operator-facing reason strings — two
+places for the same strings to drift.
+
 ### Three consumers
 
 | Consumer | Question | Posture |
 |---|---|---|
 | `permset.ScopeNarrows` | is this child delegation inside its parent? | **blocking**, inside `CreateDelegation`'s transaction |
-| `POST /v1/containment` | does a candidate set allow anything a baseline forbids? | read-only; returns the first exceeding dimension as the counterexample |
+| `POST /v1/containment` | **two questions**, selected by `question`: `delegation` (default) may a child hold this? — `grant` did this get wider? | read-only; returns the first exceeding dimension as the counterexample |
 | `GET /v1/principals/{id}/effective` | what can a principal's live root delegations do *jointly*? | report only |
 | agent-grant writes | did this write widen the template? | **advisory** — the write lands, a `containment` row records it (§14) |
 
