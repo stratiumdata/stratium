@@ -593,6 +593,17 @@ Two rules:
 fails the call: a delegation created without a record did not happen, and an
 ALLOW that was not recorded is not returned.
 
+**The chain is readable.** `GET /v1/audit` (viewer) serves it newest-first,
+filtered by `event_type` and `agent_id`, paged by `seq` — which is the primary
+key and insertion-ordered, so a cursor cannot skip or repeat a row while new
+entries are appended. Every row carries `prev_hash` and `entry_hash`.
+
+It deliberately does **not** verify. `audit.Verify` requires its first entry to
+link to the zero hash, so it runs only over a contiguous range from a tenant's
+first row, and a filtered read is not contiguous. Shipping a "verified: true"
+that silently meant something weaker was the alternative; carrying the hashes
+and letting a caller who read a contiguous range re-walk it is the honest one.
+
 `containment` is a fourth event type alongside `decision`, `delegation_created`
 and the CRUD events. It is written when a write to an **agent's grant** widens
 it (§19), and **only** then: a narrowing or an unchanged write appends nothing,
@@ -809,10 +820,11 @@ that union.
 - **There is no principal ceiling.** `/effective` reports; nothing enforces
   against it. Adding one is a follow-up whose whole implementation is one
   `Contains` call against the value that route already returns.
-- **The verdict has no reader yet.** `containment` rows land in `audit_chain`
-  and are reachable only by direct SQL — no audit read route, no console
-  screen. Until one exists this design is partially delivered, and the spec
-  says so rather than pretending otherwise.
+- **The verdict has a reader, and no console screen.** `GET /v1/audit`
+  (§14, added 2026-09-16) serves `containment` rows back, which is what closed
+  the gap this design shipped with — until then the record was tamper-evident
+  and unreachable. There is still no admin-console view of it; the API is the
+  whole of it.
 - **Only two of the six epoch-bumping tables carry a `Set`.** `agents` and
   `delegations` hold grants. `policies`, `tool_catalog`, `tier_overrides` and
   `resource_label_rules` change the classification *function* — what tier an

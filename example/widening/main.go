@@ -31,7 +31,7 @@
 // what an operator reaching for `psql` would do, because there is nothing
 // else to reach for. That is a documented gap (containment_audit.go's own
 // package doc names a `permset`-level containment operation as follow-up
-// work; a read endpoint is a narrower version of the same debt), and the
+// work), and the
 // honest way to show a reader a gap is to make them watch the workaround,
 // not to describe it in prose they can skim past.
 //
@@ -122,6 +122,12 @@ const (
 
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
+
+	// GET /v1/audit is a viewer read. Using the LOWEST role that can do it
+	// is the point, not incidental: it shows that reading the forensic
+	// record does not require the role that can change anything.
+	viewerUser = "pap-viewer"
+	viewerPass = "pap_viewer_local_dev_only"
 
 	policyName = "example-widening-permit"
 	// policyContent is scoped to THIS example's own subject, matching
@@ -282,7 +288,7 @@ func run() int {
 	fmt.Println("  What differs is what it leaves behind: see step 5.")
 
 	fmt.Println("\n=== Step 3 — that write appends a `containment` row to the audit chain ===")
-	fmt.Println("  (nothing to show yet — there is no read endpoint for it. That is step 5.)")
+	fmt.Println("  (nothing to show yet — the row is written but not yet read. That is step 5.)")
 
 	fmt.Println("\n=== Step 4 — the SAME tool call, on the SAME session, now ALLOWED ===")
 	delegationAfter, err := agent.ReadDelegationID(sessionFile)
@@ -312,28 +318,58 @@ func run() int {
 	fmt.Println("  allowlist, would have needed a brand-new session here instead — see this program's own")
 	fmt.Println("  package doc, \"Same session, not a new one,\" for why.")
 
-	fmt.Println("\n=== Step 5 — reading the containment row directly from Postgres (no audit read endpoint exists) ===")
+	fmt.Println("\n=== Step 5 — reading the containment row back through GET /v1/audit ===")
+	const wantContainmentReason = "agent grant widened: child tool Write not in parent approved_tools"
+
+	viewer, err := agent.MintToken(kcAddr, viewerUser, viewerPass)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example: minting viewer token:", err)
+		return 1
+	}
+	served, err := readContainmentViaAPI(papAddr, viewer, agentID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example: GET /v1/audit:", err)
+		return 1
+	}
+	fmt.Printf("  seq:         %d\n", served.Seq)
+	fmt.Printf("  occurred_at: %s\n", served.OccurredAt.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Printf("  actor:       %s\n", served.Actor)
+	fmt.Printf("  decision:    %s\n", served.Decision)
+	fmt.Printf("  reason:      %s\n", served.Reason)
+	fmt.Printf("  entry_hash:  %x (prev_hash %x)\n", served.EntryHash, served.PrevHash)
+	if served.Reason != wantContainmentReason {
+		fmt.Fprintf(os.Stderr, "\nstratium-example: containment row's reason was %q, expected %q — "+
+			"the example is wrong, or the engine changed; do not paper over this\n", served.Reason, wantContainmentReason)
+		return 1
+	}
+
+	// Corroborate the route against the table it claims to serve. This is
+	// why the direct-Postgres read survived the arrival of GET /v1/audit
+	// rather than being deleted with it: an endpoint that returned a
+	// plausible row assembled from anywhere would satisfy every assertion
+	// above, and only a second, independent read can tell the difference.
+	// example/proxy makes the same move with grpc-target's own call
+	// counter, for the same reason.
 	row, err := readContainmentRow(pgAddr, agentID)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "stratium-example: querying audit_chain directly (stratium-pap exposes no "+
-			"read endpoint for this event type, so this program connects to its own Postgres instance as the "+
-			"postgres superuser — the same thing an operator reaching for psql would do):", err)
+		fmt.Fprintln(os.Stderr, "stratium-example: corroborating against audit_chain directly:", err)
 		return 1
 	}
-	fmt.Printf("  occurred_at: %s\n", row.OccurredAt.Format("2006-01-02T15:04:05Z07:00"))
-	fmt.Printf("  actor:       %s\n", row.Actor)
-	fmt.Printf("  decision:    %s\n", row.Decision)
-	fmt.Printf("  reason:      %s\n", row.Reason)
-	const wantContainmentReason = "agent grant widened: child tool Write not in parent approved_tools"
-	if row.Reason != wantContainmentReason {
-		fmt.Fprintf(os.Stderr, "\nstratium-example: containment row's reason was %q, expected %q — "+
-			"the example is wrong, or the engine changed; do not paper over this\n", row.Reason, wantContainmentReason)
+	if row.Reason != served.Reason || !row.OccurredAt.Equal(served.OccurredAt) || row.Actor != served.Actor {
+		fmt.Fprintf(os.Stderr, "\nstratium-example: the audit route and the table disagree.\n"+
+			"  route: %s / %s / %s\n  table: %s / %s / %s\n"+
+			"do not paper over this — a route that does not serve what is stored is worse than no route\n",
+			served.Actor, served.OccurredAt, served.Reason, row.Actor, row.OccurredAt, row.Reason)
 		return 1
 	}
-	fmt.Println("\n  That reason is the SAME containmentReason(before, after) computation")
-	fmt.Println("  example/containment/main.go's own Act 1 drives through a live POST /v1/containment call — here")
-	fmt.Println("  it ran as a side effect of an ordinary PUT, inside the same transaction as the write it")
-	fmt.Println("  describes, and the only way to see it afterwards was to open the database directly.")
+	fmt.Println("\n  Corroborated: a direct read of audit_chain returns the same actor, timestamp and")
+	fmt.Println("  reason the route served. The route is not assembling a plausible answer.")
+	fmt.Println()
+	fmt.Println("  That reason is the SAME containmentReason(before, after) computation")
+	fmt.Println("  example/containment/main.go's own Act 1 drives through a live POST /v1/containment call —")
+	fmt.Println("  here it ran as a side effect of an ordinary PUT, inside the same transaction as the write")
+	fmt.Println("  it describes. Until GET /v1/audit existed (2026-09-16) opening the database was the ONLY")
+	fmt.Println("  way to see it; this example predates the route and kept that read as the corroboration.")
 
 	fmt.Println("\nAll five steps ran against the live stack: a real denial, a real widening write, a real")
 	fmt.Println("containment row, a real re-decision on the same session, and a real read off the audit chain.")

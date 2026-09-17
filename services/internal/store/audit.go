@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	"stratium/pkg/audit"
+	"stratium/pkg/models"
 )
 
 // auditTailQuery reads the tenant's current chain tail — the most recently
@@ -314,4 +316,118 @@ func scanAuditTail(row *sql.Row) (*audit.Entry, error) {
 	}
 
 	return &e, nil
+}
+
+// --- reading the chain ---
+
+// listAuditQuery is ONE fixed statement whose parameters carry every
+// filter's optionality, because internal/store forbids runtime-assembled SQL
+// (TestNoRuntimeAssembledSQL) -- appending "AND event_type = ..." as text
+// when a filter is set would be exactly that, and would also make the tenant
+// predicate unreadable to the guard that scans string literals for one.
+//
+// So each filter is a parameter that can mean "unset": the empty string for
+// event_type, a NULL uuid for agent_id, and 0 for the cursor, none of which
+// is a legal value for the thing it filters. seq is BIGSERIAL, so 0 is never
+// a real row.
+//
+// No WHERE tenant_id, deliberately: RLS is the only implementation of the
+// tenant boundary in this package, and a second one in a WHERE clause is
+// worse than none -- when the two disagree the clause silently wins while
+// RLS looks like it is still doing the work.
+//
+// ORDER BY seq DESC is newest-first, which is the order an incident is read
+// in. It also makes seq a stable cursor: seq is the primary key and
+// insertion-ordered, so paging by "seq < the smallest on the last page"
+// cannot skip or repeat a row even while new rows are being appended.
+const listAuditQuery = `SELECT seq, prev_hash, entry_hash, occurred_at, event_type, actor, ` +
+	`agent_id, delegation_id, tool_name, derived_tier, decision, reason ` +
+	`FROM audit_chain ` +
+	`WHERE ($1 = '' OR event_type = $1) ` +
+	`AND ($2::uuid IS NULL OR agent_id = $2::uuid) ` +
+	`AND ($3 = 0 OR seq < $3) ` +
+	`ORDER BY seq DESC LIMIT $4`
+
+// Audit page-size bounds. Clamped here rather than only in the handler: the
+// handler enforces the API contract, and this enforces that no caller of
+// this package -- including a future one that is not an HTTP handler -- can
+// ask the database for an unbounded scan of an append-only table that grows
+// forever.
+const (
+	auditDefaultLimit = 50
+	auditMaxLimit     = 500
+)
+
+// AuditFilter selects which audit rows to return. Every field's zero value
+// means "unfiltered", which is what lets listAuditQuery stay one statement.
+type AuditFilter struct {
+	EventType string
+	AgentID   *uuid.UUID
+
+	// BeforeSeq pages backwards: only rows with a smaller seq are returned.
+	// Zero starts at the newest.
+	BeforeSeq int64
+
+	// Limit is clamped to [1, auditMaxLimit]; zero takes auditDefaultLimit.
+	Limit int
+}
+
+// ListAudit returns one page of the tenant's audit chain, newest first.
+//
+// Not audited itself: N4 covers writes, and an audit read that appended an
+// audit row would grow the table by reading it.
+func (s *Store) ListAudit(ctx context.Context, f AuditFilter) (models.AuditPage, error) {
+	limit := f.Limit
+	switch {
+	case limit <= 0:
+		limit = auditDefaultLimit
+	case limit > auditMaxLimit:
+		limit = auditMaxLimit
+	}
+
+	var agentArg any
+	if f.AgentID != nil {
+		agentArg = f.AgentID.String()
+	}
+
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return models.AuditPage{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, listAuditQuery, f.EventType, agentArg, f.BeforeSeq, int64(limit))
+	if err != nil {
+		return models.AuditPage{}, fmt.Errorf("store: list audit: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// make, not var: an empty page marshals as [] rather than null, matching
+	// every other list route in this package.
+	entries := make([]models.AuditEntryView, 0, limit)
+	for rows.Next() {
+		var e models.AuditEntryView
+		if err := rows.Scan(&e.Seq, &e.PrevHash, &e.EntryHash, &e.OccurredAt, &e.EventType, &e.Actor,
+			&e.AgentID, &e.DelegationID, &e.ToolName, &e.DerivedTier, &e.Decision, &e.Reason); err != nil {
+			return models.AuditPage{}, fmt.Errorf("store: scan audit row: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return models.AuditPage{}, fmt.Errorf("store: iterate audit rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return models.AuditPage{}, fmt.Errorf("store: commit: %w", err)
+	}
+
+	page := models.AuditPage{Entries: entries}
+	// A cursor only when the page was FULL. A short page has reached the
+	// end, and handing back a cursor there would cost every caller one
+	// round trip to discover an empty page.
+	if len(entries) == limit {
+		last := entries[len(entries)-1].Seq
+		page.NextBeforeSeq = &last
+	}
+	return page, nil
 }

@@ -269,12 +269,12 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // (cmd/stratium-pap/server_test.go) is where that direction is pinned -- it
 // asserts both the total route count and the number gated above RoleViewer,
 // so adding a route fails THERE and names this table as the other place to
-// update. The two counts must stay equal: 39 routes, 24 of them writes
+// update. The two counts must stay equal: 40 routes, 24 of them writes
 // (Task 7 added 3 routes, 2 of them writes, to what was 31/19; the
 // resource-constraints task added 3 more, 2 of them writes, to what was
 // 34/21; the containment route added 1 more, itself a write, to what was
 // 37/23; the principals/effective route added 1 more, non-write, to what was
-// 38/24).
+// 38/24; the audit read route added 1 more, non-write, to what was 39/24).
 //
 // write records whether the route is gated above RoleViewer, which is the
 // only thing proof 2 needs to know about it.
@@ -349,6 +349,7 @@ func papRouteTable(id string) []papRoute {
 		// table cannot afford to leave out of the unverified-token sweep,
 		// unlike the plain GETs it otherwise omits (policy-languages).
 		{http.MethodGet, "/v1/principals/" + id + "/effective", false},
+		{http.MethodGet, "/v1/audit", false},
 
 		{http.MethodGet, "/v1/resource-label-rules", false},
 		{http.MethodPost, "/v1/resource-label-rules", true},
@@ -1385,4 +1386,92 @@ func TestIntegration_PAPE2E_ClassificationDenialReachableWithoutSQL(t *testing.T
 func papE2EEnvError(missing []string) error {
 	return fmt.Errorf("%s must be set — run via `make integration`, not `go test` directly",
 		strings.Join(missing, ", "))
+}
+
+// TestIntegration_PAPE2E_AWideningIsReadableThroughTheAuditRoute is the
+// proof that the containment verdict finally has a reader.
+//
+// Before GET /v1/audit existed, a containment row was written into an
+// append-only, hash-chained table that no route served back: the record was
+// tamper-evident and unreachable, and the only way to see a verdict about
+// your own tenant was to open Postgres. example/widening had to do exactly
+// that to show its own row. This test does the whole loop through the API --
+// create an agent, widen it, read the verdict back -- with no database
+// handle anywhere in it.
+//
+// It is deliberately end-to-end on BOTH halves. Writing through the store
+// and reading through the route would leave the interesting half untested:
+// the containment row is appended inside PUT /v1/agents/{id}'s own
+// transaction, so a route that could not see a row written that way would
+// pass a test that wrote one any other way.
+func TestIntegration_PAPE2E_AWideningIsReadableThroughTheAuditRoute(t *testing.T) {
+	editor := papAccessToken(t, papEditorUser, papEditorPass)
+
+	// A RESTRICTED allowlist, because an empty one means UNRESTRICTED
+	// (models.Agent.HasTool) and widening it would then be impossible --
+	// there would be nothing wider to go to.
+	var created models.Agent
+	papJSON(t, papAddr, http.MethodPost, "/v1/agents", editor, map[string]any{
+		"name": "audit-read-widening-" + uuid.NewString()[:8], "provider": "example",
+		"model_id": "n/a", "trust_tier": 3, "enabled": true, "suspended": false,
+		"allowed_tools": []string{"Read"},
+	}, &created)
+
+	// The widening. A full replace, per PUT's own contract.
+	papJSON(t, papAddr, http.MethodPut, "/v1/agents/"+created.ID.String(), editor, map[string]any{
+		"name": created.Name, "provider": created.Provider, "model_id": created.ModelID,
+		"trust_tier": int(created.TrustTier), "enabled": true, "suspended": false,
+		"allowed_tools": []string{"Read", "Write"},
+	}, nil)
+
+	viewer := papAccessToken(t, papViewerUser, papViewerPass)
+	var page models.AuditPage
+	papJSON(t, papAddr, http.MethodGet,
+		"/v1/audit?event_type=containment&agent_id="+created.ID.String(), viewer, nil, &page)
+
+	if len(page.Entries) != 1 {
+		t.Fatalf("audit route returned %d containment entries for this agent, want exactly 1 -- "+
+			"the widening either recorded nothing or recorded more than once", len(page.Entries))
+	}
+	got := page.Entries[0]
+
+	if got.EventType != "containment" {
+		t.Errorf("event_type = %q, want containment", got.EventType)
+	}
+	const wantReason = "agent grant widened: child tool Write not in parent approved_tools"
+	if got.Reason != wantReason {
+		t.Errorf("reason = %q, want %q -- this is the operator-facing string, and it is frozen", got.Reason, wantReason)
+	}
+	if got.AgentID == nil || *got.AgentID != created.ID {
+		t.Errorf("agent_id = %v, want %s", got.AgentID, created.ID)
+	}
+
+	// The hashes are the only reason a reader can check the chain at all.
+	// A route that served every human-readable field and dropped these
+	// would pass every other assertion here.
+	if len(got.PrevHash) == 0 || len(got.EntryHash) == 0 {
+		t.Errorf("prev_hash/entry_hash absent from the wire shape: prev=%d bytes, entry=%d bytes",
+			len(got.PrevHash), len(got.EntryHash))
+	}
+	if got.Seq == 0 {
+		t.Error("seq = 0; it is the paging cursor and BIGSERIAL never issues 0")
+	}
+
+	// A NARROWING records nothing. Without this half the test would pass
+	// against an implementation that logged a containment row on every
+	// write, which is the failure mode that teaches operators to ignore
+	// the event type.
+	papJSON(t, papAddr, http.MethodPut, "/v1/agents/"+created.ID.String(), editor, map[string]any{
+		"name": created.Name, "provider": created.Provider, "model_id": created.ModelID,
+		"trust_tier": int(created.TrustTier), "enabled": true, "suspended": false,
+		"allowed_tools": []string{"Read"},
+	}, nil)
+
+	var after models.AuditPage
+	papJSON(t, papAddr, http.MethodGet,
+		"/v1/audit?event_type=containment&agent_id="+created.ID.String(), viewer, nil, &after)
+	if len(after.Entries) != 1 {
+		t.Errorf("after narrowing the grant there are %d containment entries, want still 1 -- "+
+			"only a widening may record one", len(after.Entries))
+	}
 }

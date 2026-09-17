@@ -770,6 +770,7 @@ Roles are ranked, so an admin satisfies every editor and viewer route.
 | `POST /v1/delegations/{id}/revoke` | **admin** | revoke a delegation |
 | `POST /v1/containment` | editor | does a candidate permission set allow anything a baseline forbids? Persists nothing |
 | `GET /v1/principals/{id}/effective` | viewer | the union of one principal's live root delegations |
+| `GET /v1/audit` | viewer | read the hash-chained audit log, newest first; filter by `event_type` and `agent_id` |
 | `GET /ui-config` | *none* | public UI configuration — `issuer`, `client_id`, `audience`, `scope`. Carries no secret; it is the one route reachable without a token, because a browser cannot present one before being told where to get it. |
 
 **Three resources deliberately lack routes you might expect:**
@@ -1450,6 +1451,65 @@ Two fields are easy to skim past and shouldn't be:
 
 **This route reports; it enforces nothing.** There is no principal ceiling to
 check the union against yet.
+
+---
+
+### 5.12 Reading the audit log
+
+`audit_chain` is append-only and hash-linked: every entry commits to its
+predecessor's hash, so a mutation or a deletion breaks verification. Everything
+the admin plane does lands there — every decision, every delegation, every CRUD
+write, and a `containment` row whenever a write widens an agent's grant (§5.11).
+
+```bash
+# the containment verdicts, newest first
+curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/audit?event_type=containment"
+
+# everything that happened to one agent
+curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/audit?agent_id=$AGENT&limit=200"
+```
+
+```json
+{
+  "entries": [{
+    "seq": 1287,
+    "prev_hash": "3q2+7w==", "entry_hash": "kR4x9A==",
+    "occurred_at": "2026-09-16T23:58:35Z",
+    "event_type": "containment",
+    "actor": "f2cc233c-acbe-4c41-916d-80fd94daed3f",
+    "agent_id": "5359f7c0-d5b3-46de-add4-8f94147dde23",
+    "decision": "ALLOW",
+    "reason": "agent grant widened: child tool Write not in parent approved_tools"
+  }],
+  "next_before_seq": 1240
+}
+```
+
+`event_type`, `agent_id`, `limit` (default 50, max 500) and `before_seq` all
+combine. Paging is by `seq`, which is the primary key and insertion-ordered, so
+a cursor cannot skip or repeat a row even while new entries are being appended.
+**`next_before_seq` is present only when the page was full** — no cursor means
+you have reached the end, which saves a round trip to discover an empty page.
+
+**Two things this route does not do.**
+
+It does not verify the chain. `pkg/audit.Verify` requires its first entry to
+link to the zero hash, so it can only run over a *contiguous* range starting at
+a tenant's very first row — and a filtered read is by construction not
+contiguous. Rather than ship a check that quietly means something weaker than
+it sounds, every row carries `prev_hash` and `entry_hash` and a caller who has
+read a contiguous range can re-walk it themselves.
+
+It does not return raw tool inputs, because they were never stored — only
+`input_digest`. Writing raw shell commands into an undeletable table before
+per-tenant key management exists would be worse than not storing them
+([`architecture.md`](architecture.md) §14).
+
+**On the role.** This is `viewer`, like every other read here. Worth knowing
+what that includes: `reason` strings name the resource identities a call
+resolved to, which is more than `GET /v1/delegations` reveals. There is no
+secret material in it, but "who gets viewer" is a slightly bigger question once
+the audit log is readable.
 
 ---
 

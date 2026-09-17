@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // agentRecord is the subset of models.Agent this program round-trips
@@ -149,4 +150,61 @@ func putAgent(papAddr, token, agentID string, rec agentRecord) error {
 		return fmt.Errorf("agents: put %s: %s: %s", agentID, resp.Status, b)
 	}
 	return nil
+}
+
+// auditEntry mirrors the fields models.AuditEntryView puts on the wire.
+// Declared here rather than imported so this example stays a CLIENT of the
+// API's JSON contract: if a field is renamed on the server, this example
+// should fail the way any other consumer would, not silently follow the
+// rename through a shared Go type.
+type auditEntry struct {
+	Seq        int64     `json:"seq"`
+	PrevHash   []byte    `json:"prev_hash"`
+	EntryHash  []byte    `json:"entry_hash"`
+	OccurredAt time.Time `json:"occurred_at"`
+	EventType  string    `json:"event_type"`
+	Actor      string    `json:"actor"`
+	Decision   string    `json:"decision"`
+	Reason     string    `json:"reason"`
+}
+
+type auditPage struct {
+	Entries       []auditEntry `json:"entries"`
+	NextBeforeSeq *int64       `json:"next_before_seq,omitempty"`
+}
+
+// readContainmentViaAPI fetches this agent's containment rows through
+// GET /v1/audit and returns the single one this run produced.
+//
+// It asserts exactly one. More than one would mean a write this example did
+// not intend also widened the grant, and reporting the newest without
+// noticing would hide that.
+func readContainmentViaAPI(papAddr, token, agentID string) (auditEntry, error) {
+	req, err := http.NewRequest(http.MethodGet,
+		"http://"+papAddr+"/v1/audit?event_type=containment&agent_id="+agentID, nil)
+	if err != nil {
+		return auditEntry{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return auditEntry{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return auditEntry{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return auditEntry{}, fmt.Errorf("GET /v1/audit → %d: %s", resp.StatusCode, raw)
+	}
+	var page auditPage
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return auditEntry{}, fmt.Errorf("decode audit page: %w; body: %s", err, raw)
+	}
+	if len(page.Entries) != 1 {
+		return auditEntry{}, fmt.Errorf("audit route returned %d containment entries for agent %s, want exactly 1",
+			len(page.Entries), agentID)
+	}
+	return page.Entries[0], nil
 }

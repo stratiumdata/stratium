@@ -13,8 +13,8 @@ questions answered for the **same agent, in order**:
 3. That write appends a **`containment`** audit row: `agent grant widened: <reason>`.
 4. The identical tool call, on the **same** delegation minted before step 1, now →
    **ALLOWED**.
-5. This program reads the containment row back out of Postgres directly and
-   prints it — there is no audit read endpoint, so that is the only way to see it.
+5. This program reads the containment row back through **`GET /v1/audit`**, then
+   corroborates it against Postgres directly — the route and the table must agree.
 
 ## Running it
 
@@ -61,15 +61,24 @@ wide the agent's own allowlist became. Which shape a real operator is holding is
 not visible from the outside — this is the distinction worth knowing before
 promising "it'll work as soon as I widen the grant."
 
-**The containment row exists, but nothing serves it back.**
-`internal/store/containment_audit.go`'s `recordWideningTx` appends the row inside
-the *same transaction* as the `PUT` — it commits with the write it describes or
-not at all — but `stratium-pap` exposes no route that returns it.
-`example/containment` shows `POST /v1/containment` answering the same
-`permset.Contains` question on demand, against two sets a caller supplies; this
-program shows the identical computation running as a *side effect* of an ordinary
-write, with its answer readable only by opening the database `stratium-pap` itself
-writes to.
+**The containment row is written inside the write it describes, and is now
+readable.** `internal/store/containment_audit.go`'s `recordWideningTx` appends
+the row inside the *same transaction* as the `PUT` — it commits with the write
+it describes or not at all. `example/containment` shows `POST /v1/containment`
+answering the same `permset.Contains` question on demand, against two sets a
+caller supplies; this program shows the identical computation running as a
+*side effect* of an ordinary write.
+
+**Why this program still opens Postgres.** It no longer has to: `GET /v1/audit`
+arrived on 2026-09-16 and step 5 reads the row through it, as a **viewer** —
+the lowest role that can, which is itself the point. The direct read stayed as
+**corroboration**. An endpoint that returned a plausible row assembled from
+anywhere would satisfy every assertion about actor, timestamp and reason; only
+a second, independent read of the table can tell the difference, and the
+program fails loudly if the two disagree. `example/proxy` makes the same move
+with `grpc-target`'s own call counter, for the same reason.
+
+This example predates the route, which is why it is written this way round.
 
 ## Traps a reader will hit
 

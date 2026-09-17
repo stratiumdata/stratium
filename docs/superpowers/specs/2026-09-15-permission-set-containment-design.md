@@ -416,12 +416,14 @@ New properties this change needs:
   union; nothing enforces it. Adding a ceiling is a follow-up whose entire
   implementation is one `Contains` call against a value this design already
   produces.
-- **(2026-09-15) A read path for the containment verdict.** Verdicts are
-  written to the audit chain and have no reader: no read endpoint, no console
-  screen. Direct SQL is the only way to see one today. Remaining work before
-  this design is complete: either an audit read endpoint filtered to
-  `event_type=containment`, or a console screen over it. Not done in this fix
-  wave — see the Risks section below.
+- ~~**(2026-09-15) A read path for the containment verdict.**~~ **Done
+  2026-09-16:** `GET /v1/audit` (viewer) serves the chain newest-first,
+  filtered by `event_type` and `agent_id`, paged by `seq`, with `prev_hash`
+  and `entry_hash` on every row. It does not verify the chain — `audit.Verify`
+  needs a contiguous range from a tenant's first row and a filtered read is not
+  contiguous — so verification stays a caller's job over a range they read
+  themselves. A **console screen** over it is still absent; the API is the
+  whole of it.
 
 ---
 
@@ -441,10 +443,14 @@ New properties this change needs:
   review; nothing makes it impossible.
 - **An advisory verdict nobody reads is theatre.** Decision 3 trades safety for
   adoptability. If containment warnings accumulate unread in the audit chain,
-  this feature has cost effort and bought nothing. As of this fix wave, that
-  risk is not mitigated: the verdict is recorded but not yet surfaced. There is
-  no audit read endpoint and no console screen, and direct SQL is the only way
-  to see one. Until a read path exists, this design is partially delivered.
+  this feature has cost effort and bought nothing. **Partially mitigated
+  2026-09-16**: `GET /v1/audit` makes the verdict reachable, and
+  `TestIntegration_PAPE2E_AWideningIsReadableThroughTheAuditRoute` proves the
+  whole loop through the API with no database handle in it. What reachable does
+  not mean is *read*: there is no console screen and nothing draws an
+  operator's attention to a widening. A route nobody calls is a quieter version
+  of the same risk, and closing it properly is a surfacing problem, not an API
+  one.
 - **`Union`'s imprecision escaping into a blocking path.** The over-approximation
   in decision 2 is sound only for advisory use. The `ponytail:` comment says
   so; a reviewer should treat any new blocking caller of `Union` as a design

@@ -260,6 +260,8 @@ var routeTable = []routeSpec{
 
 	{Pattern: "GET /v1/principals/{id}/effective", MinRole: RoleViewer, Handler: getPrincipalEffective},
 
+	{Pattern: "GET /v1/audit", MinRole: RoleViewer, Handler: listAudit},
+
 	{Pattern: "GET /v1/resource-label-rules", MinRole: RoleViewer, Handler: listResourceLabelRules},
 	{Pattern: "POST /v1/resource-label-rules", MinRole: RoleEditor, Handler: createResourceLabelRule},
 	{Pattern: "GET /v1/resource-label-rules/{id}", MinRole: RoleViewer, Handler: getResourceLabelRule},
