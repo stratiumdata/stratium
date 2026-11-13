@@ -3,13 +3,14 @@ name = "stratium-sdk"
 version = "0.1.0"
 description = "Build a Stratium policy enforcement point"
 requires-python = ">=3.12"
+license = "Apache-2.0"
 dependencies = ["grpcio>=1.60"]
 
 [project.optional-dependencies]
 dev = ["grpcio-tools>=1.60", "pytest>=8"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

@@ -70,3 +70,7 @@ an MCP proxy. See [`docs/pep.md`](docs/pep.md) for the `.claude/settings.json`
 hook entry, launching the MCP proxy in place of a real server, required
 environment variables, and how to start a session — **every tool call is
 denied until a session is started and a policy permits it.**
+
+## License
+
+Apache-2.0 — see [`LICENSE`](LICENSE). Security reports: [`SECURITY.md`](SECURITY.md).
