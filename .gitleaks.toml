@@ -1,0 +1,10 @@
+# Known false positives, matched by content so they survive history rewrites.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Doc placeholder JWT (ES256 header only, truncated) and the extauthz example's TTL env string"
+regexes = [
+  '''eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9\.\.\.''',
+  '''STRATIUM_PEP_TTL_SECONDS=3600''',
+]
