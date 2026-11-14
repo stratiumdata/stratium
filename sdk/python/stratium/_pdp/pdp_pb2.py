@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10pdp/v1/pdp.proto\x12\x0fstratium.pdp.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa7\x03\n\rDecideRequest\x12\x10\n\x08\x61gent_id\x18\x02 \x01(\t\x12\x0f\n\x07subject\x18\x03 \x01(\t\x12\x0c\n\x04tool\x18\x04 \x01(\t\x12\x11\n\traw_input\x18\x06 \x01(\t\x12\x1a\n\rdeclared_tier\x18\x07 \x01(\x05H\x00\x88\x01\x01\x12>\n\x08resource\x18\x08 \x03(\x0b\x32,.stratium.pdp.v1.DecideRequest.ResourceEntry\x12\x18\n\x0b\x61pproval_id\x18\n \x01(\tH\x01\x88\x01\x01\x12\r\n\x05token\x18\x0b \x01(\t\x12\x12\n\ndpop_proof\x18\x0c \x01(\t\x12\x17\n\x0fobserved_method\x18\r \x01(\t\x12\x14\n\x0cobserved_uri\x18\x0e \x01(\t\x1a/\n\rResourceEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\x10\n\x0e_declared_tierB\x0e\n\x0c_approval_idJ\x04\x08\x01\x10\x02J\x04\x08\x05\x10\x06J\x04\x08\t\x10\nR\rdelegation_idR\x04verbR\x10normalized_input\"\xa2\x04\n\x0e\x44\x65\x63ideResponse\x12\'\n\x06\x65\x66\x66\x65\x63t\x18\x01 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x14\n\x0c\x64\x65rived_tier\x18\x02 \x01(\x05\x12\x31\n\x10principal_effect\x18\x03 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x18\n\x10principal_reason\x18\x04 \x01(\t\x12-\n\x0c\x61gent_effect\x18\x05 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x14\n\x0c\x61gent_reason\x18\x06 \x01(\t\x12\x32\n\x11\x64\x65legation_effect\x18\x07 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x19\n\x11\x64\x65legation_reason\x18\x08 \x01(\t\x12\x12\n\ndenied_leg\x18\t \x01(\t\x12\x17\n\x0f\x64\x65nied_at_depth\x18\n \x01(\x05\x12\x0e\n\x06reason\x18\x0b \x01(\t\x12\x1b\n\x0e\x64\x65\x63ided_source\x18\x0c \x01(\tH\x00\x88\x01\x01\x12\x1e\n\x11\x64\x65\x63ided_policy_id\x18\r \x01(\tH\x01\x88\x01\x01\x12\x13\n\x0b\x61pproval_id\x18\x0e \x01(\t\x12\x12\n\x05\x65poch\x18\x0f \x01(\x03H\x02\x88\x01\x01\x12\x1a\n\x12sender_constrained\x18\x10 \x01(\x08\x42\x11\n\x0f_decided_sourceB\x14\n\x12_decided_policy_idB\x08\n\x06_epoch\"8\n\x0eRequestedScope\x12\x17\n\x0fmax_action_tier\x18\x01 \x01(\x05\x12\r\n\x05tools\x18\x02 \x03(\t\"P\n\x0cScopeRemoval\x12\x11\n\tdimension\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x0e\n\x06\x64\x65tail\x18\x04 \x01(\t\"f\n\x0cGrantedScope\x12\x17\n\x0fmax_action_tier\x18\x01 \x01(\x05\x12\r\n\x05tools\x18\x02 \x03(\t\x12.\n\x07removed\x18\x03 \x03(\x0b\x32\x1d.stratium.pdp.v1.ScopeRemoval\"\xba\x01\n\x17\x43reateDelegationRequest\x12\x0f\n\x07subject\x18\x01 \x01(\t\x12\x10\n\x08\x61gent_id\x18\x02 \x01(\t\x12\x38\n\x0frequested_scope\x18\x03 \x01(\x0b\x32\x1f.stratium.pdp.v1.RequestedScope\x12\x1c\n\x14parent_delegation_id\x18\x04 \x01(\t\x12\x0f\n\x07purpose\x18\x05 \x01(\t\x12\x13\n\x0bttl_seconds\x18\x06 \x01(\x03\"\x85\x01\n\x18\x43reateDelegationResponse\x12\x15\n\rdelegation_id\x18\x01 \x01(\t\x12\x34\n\rgranted_scope\x18\x02 \x01(\x0b\x32\x1d.stratium.pdp.v1.GrantedScope\x12\r\n\x05token\x18\x03 \x01(\t\x12\r\n\x05\x65poch\x18\x04 \x01(\x03\"c\n\x11IssueTokenRequest\x12\x15\n\rdelegation_id\x18\x01 \x01(\t\x12\x13\n\x0bttl_seconds\x18\x02 \x01(\x03\x12\x15\n\x08\x64pop_jwk\x18\x03 \x01(\tH\x00\x88\x01\x01\x42\x0b\n\t_dpop_jwk\"\x88\x01\n\x12IssueTokenResponse\x12\r\n\x05token\x18\x01 \x01(\t\x12.\n\nexpires_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12$\n\x1c\x63lamped_to_delegation_expiry\x18\x03 \x01(\x08\x12\r\n\x05\x65poch\x18\x04 \x01(\x03\")\n\x12GetApprovalRequest\x12\x13\n\x0b\x61pproval_id\x18\x01 \x01(\t\"U\n\x13GetApprovalResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12.\n\nexpires_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp*@\n\x06\x45\x66\x66\x65\x63t\x12\x0f\n\x0b\x45\x46\x46\x45\x43T_DENY\x10\x00\x12\x10\n\x0c\x45\x46\x46\x45\x43T_ALLOW\x10\x01\x12\x13\n\x0f\x45\x46\x46\x45\x43T_ESCALATE\x10\x02\x32\xf1\x02\n\nPDPService\x12I\n\x06\x44\x65\x63ide\x12\x1e.stratium.pdp.v1.DecideRequest\x1a\x1f.stratium.pdp.v1.DecideResponse\x12g\n\x10\x43reateDelegation\x12(.stratium.pdp.v1.CreateDelegationRequest\x1a).stratium.pdp.v1.CreateDelegationResponse\x12U\n\nIssueToken\x12\".stratium.pdp.v1.IssueTokenRequest\x1a#.stratium.pdp.v1.IssueTokenResponse\x12X\n\x0bGetApproval\x12#.stratium.pdp.v1.GetApprovalRequest\x1a$.stratium.pdp.v1.GetApprovalResponseB;Z9github.com/stratiumdata/stratium/internal/pdpgrpc;pdpgrpcb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10pdp/v1/pdp.proto\x12\x0fstratium.pdp.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa7\x03\n\rDecideRequest\x12\x10\n\x08\x61gent_id\x18\x02 \x01(\t\x12\x0f\n\x07subject\x18\x03 \x01(\t\x12\x0c\n\x04tool\x18\x04 \x01(\t\x12\x11\n\traw_input\x18\x06 \x01(\t\x12\x1a\n\rdeclared_tier\x18\x07 \x01(\x05H\x00\x88\x01\x01\x12>\n\x08resource\x18\x08 \x03(\x0b\x32,.stratium.pdp.v1.DecideRequest.ResourceEntry\x12\x18\n\x0b\x61pproval_id\x18\n \x01(\tH\x01\x88\x01\x01\x12\r\n\x05token\x18\x0b \x01(\t\x12\x12\n\ndpop_proof\x18\x0c \x01(\t\x12\x17\n\x0fobserved_method\x18\r \x01(\t\x12\x14\n\x0cobserved_uri\x18\x0e \x01(\t\x1a/\n\rResourceEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\x10\n\x0e_declared_tierB\x0e\n\x0c_approval_idJ\x04\x08\x01\x10\x02J\x04\x08\x05\x10\x06J\x04\x08\t\x10\nR\rdelegation_idR\x04verbR\x10normalized_input\"\xa2\x04\n\x0e\x44\x65\x63ideResponse\x12\'\n\x06\x65\x66\x66\x65\x63t\x18\x01 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x14\n\x0c\x64\x65rived_tier\x18\x02 \x01(\x05\x12\x31\n\x10principal_effect\x18\x03 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x18\n\x10principal_reason\x18\x04 \x01(\t\x12-\n\x0c\x61gent_effect\x18\x05 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x14\n\x0c\x61gent_reason\x18\x06 \x01(\t\x12\x32\n\x11\x64\x65legation_effect\x18\x07 \x01(\x0e\x32\x17.stratium.pdp.v1.Effect\x12\x19\n\x11\x64\x65legation_reason\x18\x08 \x01(\t\x12\x12\n\ndenied_leg\x18\t \x01(\t\x12\x17\n\x0f\x64\x65nied_at_depth\x18\n \x01(\x05\x12\x0e\n\x06reason\x18\x0b \x01(\t\x12\x1b\n\x0e\x64\x65\x63ided_source\x18\x0c \x01(\tH\x00\x88\x01\x01\x12\x1e\n\x11\x64\x65\x63ided_policy_id\x18\r \x01(\tH\x01\x88\x01\x01\x12\x13\n\x0b\x61pproval_id\x18\x0e \x01(\t\x12\x12\n\x05\x65poch\x18\x0f \x01(\x03H\x02\x88\x01\x01\x12\x1a\n\x12sender_constrained\x18\x10 \x01(\x08\x42\x11\n\x0f_decided_sourceB\x14\n\x12_decided_policy_idB\x08\n\x06_epoch\"b\n\x0eRequestedScope\x12\x17\n\x0fmax_action_tier\x18\x01 \x01(\x05\x12\r\n\x05tools\x18\x02 \x03(\t\x12\x18\n\x0b\x65scalate_at\x18\x03 \x01(\x05H\x00\x88\x01\x01\x42\x0e\n\x0c_escalate_at\"P\n\x0cScopeRemoval\x12\x11\n\tdimension\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x0e\n\x06\x64\x65tail\x18\x04 \x01(\t\"\x90\x01\n\x0cGrantedScope\x12\x17\n\x0fmax_action_tier\x18\x01 \x01(\x05\x12\r\n\x05tools\x18\x02 \x03(\t\x12.\n\x07removed\x18\x03 \x03(\x0b\x32\x1d.stratium.pdp.v1.ScopeRemoval\x12\x18\n\x0b\x65scalate_at\x18\x04 \x01(\x05H\x00\x88\x01\x01\x42\x0e\n\x0c_escalate_at\"\xba\x01\n\x17\x43reateDelegationRequest\x12\x0f\n\x07subject\x18\x01 \x01(\t\x12\x10\n\x08\x61gent_id\x18\x02 \x01(\t\x12\x38\n\x0frequested_scope\x18\x03 \x01(\x0b\x32\x1f.stratium.pdp.v1.RequestedScope\x12\x1c\n\x14parent_delegation_id\x18\x04 \x01(\t\x12\x0f\n\x07purpose\x18\x05 \x01(\t\x12\x13\n\x0bttl_seconds\x18\x06 \x01(\x03\"\x85\x01\n\x18\x43reateDelegationResponse\x12\x15\n\rdelegation_id\x18\x01 \x01(\t\x12\x34\n\rgranted_scope\x18\x02 \x01(\x0b\x32\x1d.stratium.pdp.v1.GrantedScope\x12\r\n\x05token\x18\x03 \x01(\t\x12\r\n\x05\x65poch\x18\x04 \x01(\x03\"c\n\x11IssueTokenRequest\x12\x15\n\rdelegation_id\x18\x01 \x01(\t\x12\x13\n\x0bttl_seconds\x18\x02 \x01(\x03\x12\x15\n\x08\x64pop_jwk\x18\x03 \x01(\tH\x00\x88\x01\x01\x42\x0b\n\t_dpop_jwk\"\x88\x01\n\x12IssueTokenResponse\x12\r\n\x05token\x18\x01 \x01(\t\x12.\n\nexpires_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12$\n\x1c\x63lamped_to_delegation_expiry\x18\x03 \x01(\x08\x12\r\n\x05\x65poch\x18\x04 \x01(\x03\")\n\x12GetApprovalRequest\x12\x13\n\x0b\x61pproval_id\x18\x01 \x01(\t\"U\n\x13GetApprovalResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12.\n\nexpires_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp*@\n\x06\x45\x66\x66\x65\x63t\x12\x0f\n\x0b\x45\x46\x46\x45\x43T_DENY\x10\x00\x12\x10\n\x0c\x45\x46\x46\x45\x43T_ALLOW\x10\x01\x12\x13\n\x0f\x45\x46\x46\x45\x43T_ESCALATE\x10\x02\x32\xf1\x02\n\nPDPService\x12I\n\x06\x44\x65\x63ide\x12\x1e.stratium.pdp.v1.DecideRequest\x1a\x1f.stratium.pdp.v1.DecideResponse\x12g\n\x10\x43reateDelegation\x12(.stratium.pdp.v1.CreateDelegationRequest\x1a).stratium.pdp.v1.CreateDelegationResponse\x12U\n\nIssueToken\x12\".stratium.pdp.v1.IssueTokenRequest\x1a#.stratium.pdp.v1.IssueTokenResponse\x12X\n\x0bGetApproval\x12#.stratium.pdp.v1.GetApprovalRequest\x1a$.stratium.pdp.v1.GetApprovalResponseB;Z9github.com/stratiumdata/stratium/internal/pdpgrpc;pdpgrpcb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,8 +35,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'Z9github.com/stratiumdata/stratium/internal/pdpgrpc;pdpgrpc'
   _globals['_DECIDEREQUEST_RESOURCEENTRY']._loaded_options = None
   _globals['_DECIDEREQUEST_RESOURCEENTRY']._serialized_options = b'8\001'
-  _globals['_EFFECT']._serialized_start=1984
-  _globals['_EFFECT']._serialized_end=2048
+  _globals['_EFFECT']._serialized_start=2069
+  _globals['_EFFECT']._serialized_end=2133
   _globals['_DECIDEREQUEST']._serialized_start=71
   _globals['_DECIDEREQUEST']._serialized_end=494
   _globals['_DECIDEREQUEST_RESOURCEENTRY']._serialized_start=356
@@ -44,23 +44,23 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_DECIDERESPONSE']._serialized_start=497
   _globals['_DECIDERESPONSE']._serialized_end=1043
   _globals['_REQUESTEDSCOPE']._serialized_start=1045
-  _globals['_REQUESTEDSCOPE']._serialized_end=1101
-  _globals['_SCOPEREMOVAL']._serialized_start=1103
-  _globals['_SCOPEREMOVAL']._serialized_end=1183
-  _globals['_GRANTEDSCOPE']._serialized_start=1185
-  _globals['_GRANTEDSCOPE']._serialized_end=1287
-  _globals['_CREATEDELEGATIONREQUEST']._serialized_start=1290
-  _globals['_CREATEDELEGATIONREQUEST']._serialized_end=1476
-  _globals['_CREATEDELEGATIONRESPONSE']._serialized_start=1479
-  _globals['_CREATEDELEGATIONRESPONSE']._serialized_end=1612
-  _globals['_ISSUETOKENREQUEST']._serialized_start=1614
-  _globals['_ISSUETOKENREQUEST']._serialized_end=1713
-  _globals['_ISSUETOKENRESPONSE']._serialized_start=1716
-  _globals['_ISSUETOKENRESPONSE']._serialized_end=1852
-  _globals['_GETAPPROVALREQUEST']._serialized_start=1854
-  _globals['_GETAPPROVALREQUEST']._serialized_end=1895
-  _globals['_GETAPPROVALRESPONSE']._serialized_start=1897
-  _globals['_GETAPPROVALRESPONSE']._serialized_end=1982
-  _globals['_PDPSERVICE']._serialized_start=2051
-  _globals['_PDPSERVICE']._serialized_end=2420
+  _globals['_REQUESTEDSCOPE']._serialized_end=1143
+  _globals['_SCOPEREMOVAL']._serialized_start=1145
+  _globals['_SCOPEREMOVAL']._serialized_end=1225
+  _globals['_GRANTEDSCOPE']._serialized_start=1228
+  _globals['_GRANTEDSCOPE']._serialized_end=1372
+  _globals['_CREATEDELEGATIONREQUEST']._serialized_start=1375
+  _globals['_CREATEDELEGATIONREQUEST']._serialized_end=1561
+  _globals['_CREATEDELEGATIONRESPONSE']._serialized_start=1564
+  _globals['_CREATEDELEGATIONRESPONSE']._serialized_end=1697
+  _globals['_ISSUETOKENREQUEST']._serialized_start=1699
+  _globals['_ISSUETOKENREQUEST']._serialized_end=1798
+  _globals['_ISSUETOKENRESPONSE']._serialized_start=1801
+  _globals['_ISSUETOKENRESPONSE']._serialized_end=1937
+  _globals['_GETAPPROVALREQUEST']._serialized_start=1939
+  _globals['_GETAPPROVALREQUEST']._serialized_end=1980
+  _globals['_GETAPPROVALRESPONSE']._serialized_start=1982
+  _globals['_GETAPPROVALRESPONSE']._serialized_end=2067
+  _globals['_PDPSERVICE']._serialized_start=2136
+  _globals['_PDPSERVICE']._serialized_end=2505
 # @@protoc_insertion_point(module_scope)

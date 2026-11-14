@@ -66,7 +66,7 @@ func (s *Store) SetAgentEscalation(
 	ctx context.Context, id uuid.UUID, tier models.ActionTier, actor string,
 ) (models.AgentEscalationView, error) {
 	if _, err := models.ParseActionTier(int(tier)); err != nil {
-		return models.AgentEscalationView{}, fmt.Errorf("%w: escalate_at: %s", ErrInvalidRequest, err)
+		return models.AgentEscalationView{}, fmt.Errorf("%w: escalate_at: %w", ErrInvalidRequest, err)
 	}
 	if err := s.writeAgentEscalation(ctx, id, &tier, actor); err != nil {
 		return models.AgentEscalationView{}, err
