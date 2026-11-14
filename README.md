@@ -73,4 +73,4 @@ denied until a session is started and a policy permits it.**
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE). Security reports: [`SECURITY.md`](SECURITY.md).
+Apache-2.0 — see [`LICENSE`](LICENSE). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md). Security reports: [`SECURITY.md`](SECURITY.md).
