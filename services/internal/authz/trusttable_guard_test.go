@@ -1,6 +1,7 @@
 package authz
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -38,7 +39,9 @@ func TestDefaultTrustTableIsTheOnlyConstructionSite(t *testing.T) {
 		}
 		f, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
-			return nil // not this test's business
+			// An unparsed file is an unchecked file: a construction site in it
+			// would pass this guard silently.
+			return fmt.Errorf("parse %s: %w", path, perr)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			lit, ok := n.(*ast.CompositeLit)
