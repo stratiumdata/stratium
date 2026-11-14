@@ -121,7 +121,7 @@ jobs:
             | tar -xz -C /usr/local/bin gitleaks
           gitleaks git --no-banner --redact --verbose .
         env:
-          GITLEAKS_VERSION: "8.24.3"
+          GITLEAKS_VERSION: "8.30.1"
 
   conformance:
     name: Authorization conformance
