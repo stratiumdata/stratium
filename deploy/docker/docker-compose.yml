@@ -928,9 +928,17 @@ services:
   #
   # Port published without a fixed host port, matching every other service
   # in this file, so it doesn't collide with a developer's own LiteLLM.
+  #
+  # LiteLLM releases from 2026-11-13 refuse to start without a master key
+  # (exit 3). This stack deliberately has none: access to the models is
+  # Stratium's decision at Envoy's ext_authz filter, which is the point of the
+  # example, and this is a throwaway local stack. The variable below is
+  # LiteLLM's own documented switch for local development.
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY: "true"
     volumes:
       - ./litellm/config.yaml:/etc/litellm/config.yaml:ro
     extra_hosts:
