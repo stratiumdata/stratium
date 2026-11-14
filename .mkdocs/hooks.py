@@ -12,7 +12,7 @@ import re
 
 REPO = "https://github.com/stratiumdata/stratium"
 BRANCH = "main"
-EXCLUDED = ("superpowers/",)
+EXCLUDED = ("superpowers/", "validation-journeys.md")  # keep in sync with mkdocs.yml exclude_docs
 
 # [text](target), and ![alt](src) alike.
 LINK = re.compile(r"(\]\()([^)\s]+)(\))")
@@ -58,6 +58,8 @@ if __name__ == "__main__":
         ("validation-journeys.md", "[s](superpowers/specs/x.md#a)"):
             f"[s]({REPO}/blob/main/docs/superpowers/specs/x.md#a)",
         ("pep/hook.md", "[p](../pep.md)"): "[p](../pep.md)",
+        ("default-posture.md", "[v](validation-journeys.md)"):
+            f"[v]({REPO}/blob/main/docs/validation-journeys.md)",
         ("concepts.md", "[a](architecture.md#x)"): "[a](architecture.md#x)",
         ("concepts.md", "[w](https://example.com)"): "[w](https://example.com)",
         ("concepts.md", "[h](#here)"): "[h](#here)",

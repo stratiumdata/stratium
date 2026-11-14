@@ -71,8 +71,16 @@ classification itself. The test for any change:
 
     What the system decides and why it holds, without reading code.
 
-    [Concepts](concepts.md) · [Glossary](glossary.md) ·
-    [Where the model is too tight](validation-journeys.md)
+    [Concepts](concepts.md) · [Glossary](glossary.md)
+
+-   :material-map-marker-path: **Do something with it**
+
+    ---
+
+    Step-by-step journeys: keep an agent in its workspace, protect sensitive
+    data, hand a sub-agent less, stop an agent now, investigate an incident.
+
+    [User journeys](journeys/index.md)
 
 -   :material-shield-lock: **Enforce it**
 

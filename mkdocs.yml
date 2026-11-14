@@ -7,10 +7,12 @@ edit_uri: edit/main/docs/
 copyright: Apache-2.0 · <a href="https://stratium.dev">stratium.dev</a>
 
 docs_dir: docs
-# docs/superpowers holds internal design specs and AI planning notes. Links to
+# Internal engineering documents: design specs, AI planning notes, and the
+# pre-launch validation checklist (whose tests point at it by path). Links to
 # them are rewritten to GitHub by the hook below rather than published here.
 exclude_docs: |
   superpowers/
+  validation-journeys.md
 
 hooks:
   - .mkdocs/hooks.py
@@ -75,7 +77,17 @@ nav:
   - Concepts:
       - The concepts: concepts.md
       - Glossary: glossary.md
-      - Validation journeys: validation-journeys.md
+  - User journeys:
+      - journeys/index.md
+      - Your first governed agent: journeys/first-agent.md
+      - Understand a denial: journeys/understand-a-denial.md
+      - Keep an agent in its workspace: journeys/workspace-scope.md
+      - Protect sensitive data: journeys/sensitive-data.md
+      - Hand a sub-agent less: journeys/sub-agents.md
+      - Govern a tool server: journeys/tool-server.md
+      - Review a change: journeys/review-a-change.md
+      - Stop an agent now: journeys/stop-an-agent.md
+      - Investigate what an agent did: journeys/investigate.md
   - Get started:
       - Quickstart: quickstart.md
       - A default posture: default-posture.md

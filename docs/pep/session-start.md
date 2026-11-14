@@ -40,7 +40,7 @@ STRATIUM_PEP_REQUESTED_TOOLS, STRATIUM_PEP_TTL_SECONDS
 | `STRATIUM_PEP_SUBJECT` | `you@example.com` | The principal delegating. A policy must name it, or issuance fails. |
 | `STRATIUM_PEP_SESSION_FILE` | `/run/stratium/session.json` | Where the delegation lands. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds the gRPC dial only. |
-| `STRATIUM_PEP_REQUESTED_TIER` | `3` | Ceiling on action tier, 0–3. |
+| `STRATIUM_PEP_REQUESTED_TIER` | `3` | Ceiling on action tier, 0–4. |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | `Read,Grep,Glob` | Comma-separated. Empty is refused, not treated as "all". |
 | `STRATIUM_PEP_TTL_SECONDS` | `3600` | Delegation lifetime. |
 
