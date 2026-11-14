@@ -83,7 +83,9 @@ refused.
   and may lower it (pass `escalate_at=` to `create_delegation`). A worker
   whose own ceiling sits below the threshold drops it, since it could never
   reach it, so handing a worker less authority never makes it ask for
-  approval more often.
+  approval more often. If the orchestrator has **no** threshold, a worker
+  can't add one (`child introduces escalate_at`), the same rule as caps and
+  scope: set it on the orchestrator's agent instead.
 - **Chains are capped in depth** (5 by default).
 - **Siblings aren't compared with each other.** Two workers can each be within
   bounds yet together reach more than either alone. Use
