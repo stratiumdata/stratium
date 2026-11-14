@@ -260,7 +260,7 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // Drift is caught in ONE direction here and in the other direction there,
 // and it took a review to notice the asymmetry. A route this table names but
 // the server does not register fails here (it answers 404 where a 401/403 is
-// asserted), and proof 2's own `writes != 24` catches a write route deleted
+// asserted), and proof 2's own `writes != 26` catches a write route deleted
 // from this copy. Neither catches a route ADDED to server.go: proof 2 would
 // still count 24 and pass, proof 3's "everywhere" sweep would never touch
 // the new route, and C5's machine-checked pointer would go on citing proof 3
@@ -325,6 +325,10 @@ func papRouteTable(id string) []papRoute {
 		{http.MethodGet, "/v1/agents/" + id + "/resource-constraints", false},
 		{http.MethodPut, "/v1/agents/" + id + "/resource-constraints", true},
 		{http.MethodDelete, "/v1/agents/" + id + "/resource-constraints", true},
+		// escalation sub-resource, gated like the two above.
+		{http.MethodGet, "/v1/agents/" + id + "/escalation", false},
+		{http.MethodPut, "/v1/agents/" + id + "/escalation", true},
+		{http.MethodDelete, "/v1/agents/" + id + "/escalation", true},
 
 		{http.MethodGet, "/v1/tier-overrides", false},
 		{http.MethodPost, "/v1/tier-overrides", true},
@@ -533,8 +537,8 @@ func TestIntegration_PAPE2E_ViewerIsRefusedEveryWrite(t *testing.T) {
 	// server.go is caught by TestRouteTable_CoversEveryCRUDRouteForEveryResource
 	// instead -- see papRoute's own doc comment for why the two halves live
 	// in different packages and must agree.
-	if writes != 24 {
-		t.Errorf("swept %d write routes, want 24 -- papRouteTable has drifted from "+
+	if writes != 26 {
+		t.Errorf("swept %d write routes, want 26 -- papRouteTable has drifted from "+
 			"cmd/stratium-pap/server.go's routeTable", writes)
 	}
 

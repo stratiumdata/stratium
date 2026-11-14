@@ -240,6 +240,13 @@ var routeTable = []routeSpec{
 	{Pattern: "PUT /v1/agents/{id}/resource-constraints", MinRole: RoleAdmin, Handler: putAgentConstraints},
 	{Pattern: "DELETE /v1/agents/{id}/resource-constraints", MinRole: RoleAdmin, Handler: deleteAgentConstraints},
 
+	// escalation is gated like the two ceilings above: removing or raising a
+	// threshold lets an agent act unattended where a human was asked, so a
+	// writer must hold RoleAdmin.
+	{Pattern: "GET /v1/agents/{id}/escalation", MinRole: RoleViewer, Handler: getAgentEscalation},
+	{Pattern: "PUT /v1/agents/{id}/escalation", MinRole: RoleAdmin, Handler: putAgentEscalation},
+	{Pattern: "DELETE /v1/agents/{id}/escalation", MinRole: RoleAdmin, Handler: deleteAgentEscalation},
+
 	{Pattern: "GET /v1/tier-overrides", MinRole: RoleViewer, Handler: listTierOverrides},
 	{Pattern: "POST /v1/tier-overrides", MinRole: RoleEditor, Handler: createTierOverride},
 	{Pattern: "GET /v1/tier-overrides/{id}", MinRole: RoleViewer, Handler: getTierOverride},

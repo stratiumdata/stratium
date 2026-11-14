@@ -370,6 +370,9 @@ var actionRoutes = map[string]bool{
 	// reason: a resource-identity ceiling is a security boundary, not
 	// ordinary agent configuration.
 	"PUT /v1/agents/{id}/resource-constraints": true,
+	// escalation's write, RoleAdmin again: raising a threshold lets an agent
+	// act unattended where a human was asked.
+	"PUT /v1/agents/{id}/escalation": true,
 }
 
 // TestRouteTable_RoleGatingMatchesSpec checks the stated role mapping
@@ -444,13 +447,13 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // a wrong rule can only edit it -- and every rule that exists matches
 // something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1 + 1 + 1
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1 + 1 + 1 + 3
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
 			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes + "+
 			"3 Task-7 classification-caps routes + 1 Task-2 configuration route + "+
 			"3 resource-constraints routes + 1 principals/effective route + 1 containment route + "+
-			"1 audit read route)",
+			"1 audit read route + 3 escalation routes)",
 			len(routeTable), wantTotal)
 	}
 
@@ -472,7 +475,8 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			writes++
 		}
 	}
-	const wantWrites = 19 + 2 + 2 + 1 // Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
+	const wantWrites = 19 + 2 + 2 + 1 + 2 // escalation adds PUT and DELETE .../escalation, admin like caps and scope.
+	// Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
 	// PUT and DELETE .../resource-constraints the same way; both GETs are not writes. The containment route adds
 	// one more: POST /v1/containment is RoleEditor like every other POST here, so it counts as gated above
 	// RoleViewer even though its handler persists nothing -- see internal/store/pap_e2e_integration_test.go's
