@@ -1,0 +1,98 @@
+site_name: Stratium
+site_description: Per-tool-call authorization for AI agents.
+site_url: https://docs.stratium.dev/
+repo_url: https://github.com/stratiumdata/stratium
+repo_name: stratiumdata/stratium
+edit_uri: edit/main/docs/
+copyright: Apache-2.0 · <a href="https://stratium.dev">stratium.dev</a>
+
+docs_dir: docs
+# docs/superpowers holds internal design specs and AI planning notes. Links to
+# them are rewritten to GitHub by the hook below rather than published here.
+exclude_docs: |
+  superpowers/
+
+hooks:
+  - .mkdocs/hooks.py
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle: { icon: material/weather-sunny, name: Light mode }
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # GitHub-style anchors, so in-doc links work both on GitHub and here.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify { kwds: { case: lower } }
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: info
+    unrecognized_links: info
+
+nav:
+  - Home: index.md
+  - Concepts:
+      - The concepts: concepts.md
+      - Glossary: glossary.md
+      - Validation journeys: validation-journeys.md
+  - Get started:
+      - Quickstart: quickstart.md
+      - A default posture: default-posture.md
+  - Operate:
+      - User guide: user-guide.md
+      - Release notes:
+          - Sender-constrained tokens (DPoP): releases/2026-08-17-sender-constrained-tokens.md
+  - Enforcement (PEP):
+      - pep/README.md
+      - Installing stratium-pep: pep.md
+      - session-start: pep/session-start.md
+      - hook: pep/hook.md
+      - mcp: pep/mcp.md
+      - proxy: pep/proxy.md
+      - extauthz: pep/extauthz.md
+  - Architecture:
+      - Technical walkthrough: architecture.md
+  - Testing:
+      - Testing against a real agent: testing/2026-08-20-agent-integration-test.md
+      - Resource labelling test plan: testing/2026-08-19-resource-labelling-manual-test.md

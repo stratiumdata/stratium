@@ -21,7 +21,7 @@ toolchain, and Python 3. The script checks all three before doing anything else
 and names what is missing.
 
 ```bash
-git clone <this repo> && cd stratium-data
+git clone https://github.com/stratiumdata/stratium.git && cd stratium
 ```
 
 Everything below runs from the repository root.
@@ -52,7 +52,7 @@ images):
          resolved now, never stored -- they change on every compose up
 
 [3] Build the PEP
-    ok   /Users/you/stratium-data/bin/stratium-pep
+    ok   /Users/you/stratium/bin/stratium-pep
 
 [4] Policy so the principal may delegate
     ok   already present (subject agent-tester@example.com)
@@ -133,7 +133,7 @@ If you ran it **from inside a Claude Code or Codex session**, step 9 stopped:
          was not launched with the environment the hook reads.
 
          Finish from a plain terminal:
-             deploy/stratium install --claude --bin /Users/you/stratium-data/bin/stratium-pep
+             deploy/stratium install --claude --bin /Users/you/stratium/bin/stratium-pep
              deploy/stratium run claude
 
          Or re-run with --wire-anyway if you meant to disable this session.
@@ -152,7 +152,7 @@ deploy/stratium install --claude --bin "$PWD/bin/stratium-pep"
 **Observed:**
 
 ```
-installed SessionStart + PreToolUse (matcher '*', command '/Users/you/stratium-data/bin/stratium-pep') in .claude/settings.json
+installed SessionStart + PreToolUse (matcher '*', command '/Users/you/stratium/bin/stratium-pep') in .claude/settings.json
 ```
 
 > **This gags every agent session already open in this project — including one
@@ -302,7 +302,7 @@ deploy/stratium doctor
   OK  stack        18 services running
   OK  ports        pap=localhost:51465 pdp=localhost:51458
   OK  state        quickstart-46384b (0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19)
-  OK  binary       /Users/you/stratium-data/bin/stratium-pep
+  OK  binary       /Users/you/stratium/bin/stratium-pep
   --  hooks        none in any scope
   XX  environment  11 of 11 missing in this shell
      -> you are outside the launcher -- use: deploy/stratium run claude

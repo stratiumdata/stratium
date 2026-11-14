@@ -106,8 +106,8 @@ This brings up everything — Postgres, PDPs, PEPs, Envoy, Keycloak, and two PAP
 ready-made Keycloak realm with three operator accounts.
 
 ```bash
-git clone <your-repo-url> stratium-data
-cd stratium-data
+git clone https://github.com/stratiumdata/stratium.git
+cd stratium
 docker compose -f deploy/docker/docker-compose.yml up -d --build --wait --wait-timeout 300
 ```
 

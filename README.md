@@ -4,6 +4,10 @@ Multi-tenant authorization platform for AI agents. Decides, per action, whether 
 specific agent — acting under a specific person's delegated authority, at a
 specific point in a delegation chain — may perform a specific action.
 
+**📖 Documentation: [docs.stratium.dev](https://docs.stratium.dev)**: concepts,
+quickstart, the enforcement surfaces, and the full user guide. The site is
+built from [`docs/`](docs/), so the same pages also read fine on GitHub.
+
 ## Layout
 
 - `services/` — the Go module (`module github.com/stratiumdata/stratium`). PDP, PAP, and PEP.

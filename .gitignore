@@ -54,3 +54,6 @@ __pycache__/
 
 # Claude Code local settings — machine-local hook paths
 .claude/
+
+# MkDocs build output
+/site/
