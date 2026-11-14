@@ -934,8 +934,13 @@ services:
   # Stratium's decision at Envoy's ext_authz filter, which is the point of the
   # example, and this is a throwaway local stack. The variable below is
   # LiteLLM's own documented switch for local development.
+  #
+  # Pinned by digest: main-latest moves daily, and an upstream release already
+  # broke `make integration` once. This is the main-latest image of 2026-11-13
+  # that the full integration suite passed against. To upgrade, pull the new
+  # image, run `make integration`, and replace the digest.
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
     command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
     environment:
       LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY: "true"
