@@ -60,6 +60,7 @@ class Client:
         self, *, subject: str, agent_id: str, tools: Sequence[str],
         max_action_tier: int, purpose: str, ttl_seconds: int,
         parent_delegation_id: str | None = None,
+        escalate_at: int | None = None,
     ) -> Grant:
         """Mint a delegation.
 
@@ -76,6 +77,11 @@ class Client:
         )
         if parent_delegation_id:
             req.parent_delegation_id = parent_delegation_id
+        # Only ever LOWERS the threshold the delegation would carry anyway
+        # (the agent's, or the parent's). None asks for nothing; it does not
+        # mean "never escalate", and cannot remove an inherited threshold.
+        if escalate_at is not None:
+            req.requested_scope.escalate_at = escalate_at
 
         resp = self._stub.CreateDelegation(req, timeout=self._timeout)
         return Grant(
@@ -84,6 +90,8 @@ class Client:
             granted_scope=Scope(
                 max_action_tier=resp.granted_scope.max_action_tier,
                 tools=tuple(resp.granted_scope.tools),
+                escalate_at=(resp.granted_scope.escalate_at
+                             if resp.granted_scope.HasField("escalate_at") else None),
             ),
             epoch=resp.epoch,
         )

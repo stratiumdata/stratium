@@ -70,6 +70,11 @@ type sessionStartConfig struct {
 	RequestedTools  []string
 	Purpose         string
 	TTLSeconds      int64
+
+	// EscalateAt is optional (STRATIUM_PEP_ESCALATE_AT). nil asks for
+	// nothing, which leaves the agent's own threshold in force: a request can
+	// only LOWER it (internal/pdpgrpc/escalate_at.go), never remove it.
+	EscalateAt *int32
 }
 
 // loadSessionStartConfigFromEnv reads sessionStartConfig from the
@@ -128,6 +133,18 @@ func loadSessionStartConfigFromEnv() (sessionStartConfig, error) {
 	}
 	cfg.TTLSeconds = ttl
 
+	// Optional, so it is not in the missing-variable sweep above. Not
+	// range-checked here for the reason REQUESTED_TIER is not: CreateDelegation
+	// validates it, and a second check would be a second place to drift.
+	if raw := strings.TrimSpace(os.Getenv("STRATIUM_PEP_ESCALATE_AT")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil {
+			return sessionStartConfig{}, fmt.Errorf("STRATIUM_PEP_ESCALATE_AT: %w", err)
+		}
+		esc := int32(v)
+		cfg.EscalateAt = &esc
+	}
+
 	return cfg, nil
 }
 
@@ -179,6 +196,7 @@ func runSessionStart(client pdpgrpc.PDPServiceClient, cfg sessionStartConfig, st
 		RequestedScope: &pdpgrpc.RequestedScope{
 			MaxActionTier: cfg.RequestedTier,
 			Tools:         cfg.RequestedTools,
+			EscalateAt:    cfg.EscalateAt,
 		},
 		Purpose:    cfg.Purpose,
 		TtlSeconds: cfg.TTLSeconds,

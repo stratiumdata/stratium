@@ -55,6 +55,9 @@ class Legs:
 class Scope:
     max_action_tier: int
     tools: tuple[str, ...]
+    escalate_at: int | None = None
+    """The threshold the delegation was issued with: at or above this tier a
+    call waits for a human. None means it never escalates."""
 
 
 @dataclass(frozen=True)

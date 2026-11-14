@@ -449,6 +449,7 @@ func clearSessionStartEnv(t *testing.T) {
 		"STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
 		"STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT", "STRATIUM_PEP_REQUESTED_TIER",
 		"STRATIUM_PEP_REQUESTED_TOOLS", "STRATIUM_PEP_TTL_SECONDS", "STRATIUM_PEP_PURPOSE",
+		"STRATIUM_PEP_ESCALATE_AT",
 	} {
 		t.Setenv(k, "")
 	}
@@ -615,4 +616,64 @@ func TestRunSessionStartCmd_MissingConfig_FailsClosed(t *testing.T) {
 	if stderr.Len() == 0 {
 		t.Error("stderr is empty, want a reason naming the missing configuration")
 	}
+}
+
+// STRATIUM_PEP_ESCALATE_AT is optional: unset asks for nothing (the agent's
+// own threshold stays in force), set is forwarded as requested_scope.escalate_at,
+// and a non-number fails closed at load rather than being dropped silently.
+func TestSessionStart_EscalateAt(t *testing.T) {
+	setRequired := func(t *testing.T) {
+		clearSessionStartEnv(t)
+		t.Setenv("STRATIUM_PEP_PDP_ADDR", "localhost:50051")
+		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
+		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
+		t.Setenv("STRATIUM_PEP_SESSION_FILE", "/tmp/stratium-pep-session.json")
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
+		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "4")
+		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Bash")
+		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "3600")
+	}
+
+	t.Run("unset asks for nothing", func(t *testing.T) {
+		setRequired(t)
+		cfg, err := loadSessionStartConfigFromEnv()
+		if err != nil || cfg.EscalateAt != nil {
+			t.Fatalf("cfg.EscalateAt = %v, err = %v; want nil, nil", cfg.EscalateAt, err)
+		}
+	})
+	t.Run("set is parsed", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("STRATIUM_PEP_ESCALATE_AT", " 3 ")
+		cfg, err := loadSessionStartConfigFromEnv()
+		if err != nil || cfg.EscalateAt == nil || *cfg.EscalateAt != 3 {
+			t.Fatalf("cfg.EscalateAt = %v, err = %v; want 3", cfg.EscalateAt, err)
+		}
+	})
+	t.Run("not a number fails closed", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("STRATIUM_PEP_ESCALATE_AT", "high")
+		if _, err := loadSessionStartConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "STRATIUM_PEP_ESCALATE_AT") {
+			t.Fatalf("err = %v, want one naming STRATIUM_PEP_ESCALATE_AT", err)
+		}
+	})
+	t.Run("the request carries it", func(t *testing.T) {
+		fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
+			DelegationId: "deleg-esc",
+			GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: 4, Tools: []string{"Bash"}},
+			Token:        "deleg-esc-token",
+		}}
+		client := startFakePDP(t, fake)
+		cfg := testSessionStartCfg(t)
+		esc := int32(3)
+		cfg.EscalateAt = &esc
+
+		var stderr bytes.Buffer
+		if code := runSessionStart(client, cfg, &stderr); code != 0 {
+			t.Fatalf("runSessionStart() = %d; stderr: %s", code, stderr.String())
+		}
+		got := fake.lastCreateRequest().GetRequestedScope()
+		if got.EscalateAt == nil || got.GetEscalateAt() != 3 {
+			t.Errorf("requested_scope.escalate_at = %v, want 3", got.EscalateAt)
+		}
+	})
 }

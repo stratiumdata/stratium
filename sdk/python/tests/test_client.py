@@ -177,3 +177,39 @@ def test_leaving_the_context_manager_closes_the_channel(fake_pdp):
     # One scripted response is left unused: proof the failure was the closed
     # channel and not an exhausted fixture.
     assert len(fake_pdp.decide_calls) == 1
+
+
+# escalate_at can only LOWER a threshold, so the SDK must forward it when
+# given and send nothing at all when not: an explicit 0 would ask for
+# "escalate on every action", the opposite of not asking.
+def test_escalate_at_is_forwarded_only_when_given(fake_pdp):
+    for _ in range(2):
+        fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+            delegation_id="d4", token="tok", epoch=1,
+            granted_scope=pdp_pb2.GrantedScope(max_action_tier=4, tools=["Bash"])))
+    with Client(fake_pdp.addr) as c:
+        c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
+                            max_action_tier=4, purpose="p", ttl_seconds=60,
+                            escalate_at=3)
+        c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
+                            max_action_tier=4, purpose="p", ttl_seconds=60)
+    asked, not_asked = fake_pdp.delegation_calls
+    assert asked.requested_scope.HasField("escalate_at")
+    assert asked.requested_scope.escalate_at == 3
+    assert not not_asked.requested_scope.HasField("escalate_at")
+
+
+def test_the_granted_threshold_is_reported(fake_pdp):
+    fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+        delegation_id="d5", token="tok", epoch=1,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=4, tools=["Bash"], escalate_at=4)))
+    fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+        delegation_id="d6", token="tok", epoch=1,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=3, tools=["Bash"])))
+    with Client(fake_pdp.addr) as c:
+        with_threshold = c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
+                                             max_action_tier=4, purpose="p", ttl_seconds=60)
+        without = c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
+                                      max_action_tier=3, purpose="p", ttl_seconds=60)
+    assert with_threshold.granted_scope.escalate_at == 4
+    assert without.granted_scope.escalate_at is None
