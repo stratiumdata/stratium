@@ -51,3 +51,6 @@ __pycache__/
 /example/depth/mcp/.session-parent.json.cache.json
 /example/depth/mcp/.session-child.json
 /example/depth/mcp/.session-child.json.cache.json
+
+# Claude Code local settings — machine-local hook paths
+.claude/
