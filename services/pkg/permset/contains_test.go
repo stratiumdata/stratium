@@ -111,3 +111,48 @@ func TestContains_EscalateAtPresenceIsAsymmetric(t *testing.T) {
 		t.Errorf("a child lowering escalate_at narrows and must be accepted: %s", reason)
 	}
 }
+
+// TestContains_EscalateAtMayBeOmittedOnlyWhereUnreachable pins the one
+// exception to the drop rule. A child whose own ceiling sits below the
+// parent's threshold can never reach the escalate band, so leaving the field
+// unset says the same thing the parent's value would. Without the exception
+// such a child must carry a threshold at or below its own ceiling, which
+// makes a worker handed LESS authority escalate MORE than its parent.
+//
+// The boundary is MaxTier < EscalateAt, strictly. At equality the child can
+// reach the band, and omitting the field would let it act there unattended.
+func TestContains_EscalateAtMayBeOmittedOnlyWhereUnreachable(t *testing.T) {
+	destructive := models.ActionTierDestructive
+	external := models.ActionTierExternalComms
+
+	for _, tc := range []struct {
+		name          string
+		parentMax     models.ActionTier
+		parentEsc     *models.ActionTier
+		childMax      models.ActionTier
+		wantContained bool
+	}{
+		{"child ceiling below the threshold may omit it",
+			models.ActionTierDestructive, &destructive, models.ActionTierExternalComms, true},
+		{"child ceiling far below the threshold may omit it",
+			models.ActionTierDestructive, &destructive, models.ActionTierReadOnly, true},
+		{"child ceiling AT the threshold may not omit it",
+			models.ActionTierDestructive, &destructive, models.ActionTierDestructive, false},
+		{"child ceiling above a lower threshold may not omit it",
+			models.ActionTierDestructive, &external, models.ActionTierExternalComms, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outer, inner := baseSet(), baseSet()
+			outer.MaxTier, outer.EscalateAt = tc.parentMax, tc.parentEsc
+			inner.MaxTier, inner.EscalateAt = tc.childMax, nil
+
+			got := Contains(outer, inner)
+			if tc.wantContained && got != "" {
+				t.Errorf("want contained, got %q", got)
+			}
+			if !tc.wantContained && got != "child drops parent escalate_at "+tc.parentEsc.String() {
+				t.Errorf("want the frozen drop reason, got %q", got)
+			}
+		})
+	}
+}
