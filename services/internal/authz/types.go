@@ -145,6 +145,11 @@ type AgentInfo struct {
 	// (checkResourceConstraints) -- so a change here never affects a
 	// delegation already issued.
 	ResourceConstraints map[string]string
+
+	// EscalateAt is the threshold a ROOT delegation's escalate_at starts
+	// from at issuance, the same template role the two maps above play. nil
+	// means the agent sets none. Never consulted at decision time.
+	EscalateAt *models.ActionTier
 }
 
 // Request is a complete decision input. Chain is ordered root-first, with the

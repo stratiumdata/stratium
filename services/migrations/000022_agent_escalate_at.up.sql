@@ -1,0 +1,13 @@
+-- The escalation threshold an operator sets on an agent, copied onto every
+-- ROOT delegation at issuance (internal/pdpgrpc/delegation.go) the same way
+-- classification_caps (000020) and resource_constraints (000021) are.
+--
+-- Nullable with no default, and NULL means "never escalate" -- not tier 0,
+-- for the reason 000011 gives for delegations.escalate_at: REASONING is tier
+-- 0, so a column defaulting to 0 would make every existing agent escalate on
+-- every action the moment this migration ran. Existing agents read NULL and
+-- keep the behaviour they had.
+--
+-- Same CHECK as delegations.escalate_at, and no grant migration, by
+-- 000010's precedent: agents' table-level grants cover added columns.
+ALTER TABLE agents ADD COLUMN escalate_at SMALLINT CHECK (escalate_at BETWEEN 0 AND 4);

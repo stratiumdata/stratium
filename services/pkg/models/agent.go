@@ -35,6 +35,15 @@ type Agent struct {
 	// -- so a change here never affects a delegation already issued.
 	ResourceConstraints map[string]string `json:"resource_constraints" db:"resource_constraints"`
 
+	// EscalateAt is the escalation threshold copied onto every ROOT
+	// delegation at issuance, the same way ClassificationCaps and
+	// ResourceConstraints are: at or above this tier a call waits for a
+	// human instead of being allowed outright. nil means never escalate. A
+	// caller's CreateDelegation request may LOWER it for that delegation,
+	// never raise or remove it. Written only by SetAgentEscalation and
+	// ClearAgentEscalation (internal/store/agent_escalation.go).
+	EscalateAt *ActionTier `json:"escalate_at" db:"escalate_at"`
+
 	// CreatedAt/UpdatedAt were absent from this type before internal/store's
 	// PAP CRUD (Task 3) added them: LoadAgent (internal/store/store.go), the
 	// only reader before that task, reduces to authz.AgentInfo and never
