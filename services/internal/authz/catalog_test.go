@@ -5,7 +5,7 @@ import (
 	"maps"
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Every seeded tool must derive its documented tier through DeriveTier (not

@@ -41,13 +41,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
-	"stratium/internal/config"
-	"stratium/internal/dpop"
-	"stratium/internal/pdpgrpc"
-	"stratium/internal/policy"
-	"stratium/internal/store"
-	"stratium/internal/token"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/dpop"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/token"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // The window this PDP is configured with. Odd and un-round on purpose: the

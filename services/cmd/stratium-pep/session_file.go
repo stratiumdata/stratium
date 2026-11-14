@@ -31,7 +31,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // sessionFileMode is the session file's permission bits from the instant it

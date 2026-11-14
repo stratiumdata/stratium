@@ -45,8 +45,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"stratium/example/agent"
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/example/agent"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 const (

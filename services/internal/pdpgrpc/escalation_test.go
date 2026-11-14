@@ -11,10 +11,10 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/internal/store"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // escalationFixture returns a fake store and request whose compound

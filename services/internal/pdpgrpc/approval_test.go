@@ -10,8 +10,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 
-	"stratium/internal/store"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // approvalFixture returns a fake store loaded with one approval row, and the

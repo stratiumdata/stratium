@@ -59,7 +59,7 @@ import (
 	"io"
 	"time"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // awaitApproval is what runHook's EFFECT_ESCALATE case calls: resolveApproval's

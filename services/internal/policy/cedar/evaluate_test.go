@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func prepare(t *testing.T, policies []policy.StoredPolicy) policy.CompiledPolicySet {

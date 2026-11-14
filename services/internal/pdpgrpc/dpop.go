@@ -70,8 +70,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"stratium/internal/dpop"
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/dpop"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // errNoProof is what matchProof returns when the presented token carries a

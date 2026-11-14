@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func TestUnion_TakesTheWeakestOfEachDimension(t *testing.T) {

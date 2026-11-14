@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"time"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func listTierOverrides(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {

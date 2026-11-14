@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"stratium/internal/policy"
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // candidatePolicyID marks a StoredPolicy built from request text rather than

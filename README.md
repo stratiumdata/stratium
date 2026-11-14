@@ -6,7 +6,7 @@ specific point in a delegation chain — may perform a specific action.
 
 ## Layout
 
-- `services/` — the Go module (`module stratium`). PDP, PAP, and PEP.
+- `services/` — the Go module (`module github.com/stratiumdata/stratium`). PDP, PAP, and PEP.
 - `clients/` — Python SDK and admin UI.
 - `deploy/` — Docker and Postgres setup.
 - `proto/` — service contracts.
@@ -44,7 +44,7 @@ build only when the UI's own inputs have changed. Node is therefore a build
 dependency of this repository, not only of the UI. `make ui` on its own is
 enough to unblock bare `go` commands afterwards.
 
-One consequence of this: `go install stratium/cmd/stratium-pap@…` can never
+One consequence of this: `go install github.com/stratiumdata/stratium/services/cmd/stratium-pap@…` can never
 work. There is no `make ui` step in a module install, and `dist/` — git-ignored
 for the reason above — is never part of the module's source either way.
 Building `stratium-pap` means cloning this repository and running `make`.

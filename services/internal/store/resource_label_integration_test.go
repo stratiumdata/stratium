@@ -25,9 +25,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/internal/store"
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // beginServingTenantTx begins a transaction on servingDB with app.tenant_id

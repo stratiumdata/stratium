@@ -1,6 +1,6 @@
 package authz
 
-import "stratium/pkg/models"
+import "github.com/stratiumdata/stratium/pkg/models"
 
 // DefaultCatalog returns the shipped tool-name -> tier table. The caller
 // merges it into TierTable.Catalog when building a tenant's decision

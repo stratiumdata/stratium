@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"stratium/internal/mcpupstream"
+	"github.com/stratiumdata/stratium/internal/mcpupstream"
 )
 
 func main() {

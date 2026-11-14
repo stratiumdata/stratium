@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 func TestContainment_ReportsContainedAndNot(t *testing.T) {

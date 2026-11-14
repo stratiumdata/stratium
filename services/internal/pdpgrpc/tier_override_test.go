@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // captureLogs points slog's default logger at a buffer for the duration of

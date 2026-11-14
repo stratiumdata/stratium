@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func grantBase() Set {

@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 // journeys_test.go is the pure half of the validation harness for

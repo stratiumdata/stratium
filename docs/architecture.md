@@ -712,7 +712,7 @@ make integration    # brings the whole stack up in Docker, runs the
 with `//go:embed dist`, and `dist/` is a git-ignored build output. On a fresh
 checkout every Go command that compiles `cmd/stratium-pap` fails with
 `pattern dist: no matching files found` until `make ui` has run. A consequence:
-`go install stratium/cmd/stratium-pap@…` can never work.
+`go install github.com/stratiumdata/stratium/services/cmd/stratium-pap@…` can never work.
 
 To drive it by hand:
 

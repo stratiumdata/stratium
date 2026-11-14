@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // probeCall records one (tool, tier) pair Clamp asked allows about. Tests

@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // decodeJSONRPCError parses raw as the one frame shape this proxy ever authors itself -- mirrors

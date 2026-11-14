@@ -40,4 +40,4 @@ formatters:
     - goimports
   settings:
     goimports:
-      local-prefixes: [stratium]
+      local-prefixes: [github.com/stratiumdata/stratium]

@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/policy"
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // loadAllPoliciesQuery loads every enabled policy for a tenant, regardless of

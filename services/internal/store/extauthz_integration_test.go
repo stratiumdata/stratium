@@ -98,9 +98,9 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 
-	"stratium/internal/pdpgrpc"
-	"stratium/internal/store"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // extauthzAgentID and extauthzSubject: see this file's own package doc,

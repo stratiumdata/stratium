@@ -3,7 +3,7 @@ package models
 import (
 	"github.com/google/uuid"
 
-	"stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/classification"
 )
 
 // ResourceLabelRule is one row of the resource_label_rules table

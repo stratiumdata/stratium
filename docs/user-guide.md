@@ -177,7 +177,7 @@ make ui            # build only the admin UI
 > ```
 >
 > `make ui` on its own is enough to unblock bare `go` commands afterwards. A
-> consequence worth knowing: `go install stratium/cmd/stratium-pap@…` can never
+> consequence worth knowing: `go install github.com/stratiumdata/stratium/services/cmd/stratium-pap@…` can never
 > work. Building the PAP means cloning the repository.
 
 `stratium-pep` has no such dependency and builds on its own:

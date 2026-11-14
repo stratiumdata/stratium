@@ -13,7 +13,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // pastExpiry is a fixed, unambiguously-in-the-past instant used for a

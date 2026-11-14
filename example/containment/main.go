@@ -85,9 +85,9 @@ import (
 	"os"
 	"time"
 
-	"stratium/example/agent"
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/example/agent"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 const (

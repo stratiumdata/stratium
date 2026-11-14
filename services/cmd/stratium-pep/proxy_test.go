@@ -19,7 +19,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // ---------------------------------------------------------------------------

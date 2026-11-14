@@ -82,8 +82,8 @@ proto: ## Generate Go code from proto/ (requires protoc, protoc-gen-go, protoc-g
 		echo "protoc-gen-go-grpc not found: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"; exit 1; }
 	protoc \
 		--proto_path=$(PROTO_DIR) \
-		--go_out=$(GO_DIR) --go_opt=module=stratium \
-		--go-grpc_out=$(GO_DIR) --go-grpc_opt=module=stratium \
+		--go_out=$(GO_DIR) --go_opt=module=github.com/stratiumdata/stratium \
+		--go-grpc_out=$(GO_DIR) --go-grpc_opt=module=github.com/stratiumdata/stratium \
 		$(PROTO_DIR)/pdp/v1/pdp.proto \
 		$(PROTO_DIR)/target/v1/target.proto
 

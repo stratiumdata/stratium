@@ -52,8 +52,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/pdpgrpc"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // journeyCatchAll creates the empty-prefix rule these proofs need and

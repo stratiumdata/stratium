@@ -30,7 +30,7 @@ import (
 
 	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
 
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // shutdownTimeout bounds Shutdown -- the http.Server analogue of

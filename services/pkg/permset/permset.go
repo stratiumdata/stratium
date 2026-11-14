@@ -21,7 +21,7 @@ package permset
 import (
 	"time"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Set is a permission grant reduced to the dimensions that bound what its

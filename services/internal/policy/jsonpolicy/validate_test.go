@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // TestValidate_MissingMatchIsRejected is mutation target (a) from the task

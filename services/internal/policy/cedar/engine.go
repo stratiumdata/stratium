@@ -63,7 +63,7 @@ import (
 
 	cedarlib "github.com/cedar-policy/cedar-go"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // language is the value stored in policies.language for this engine, and

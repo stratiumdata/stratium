@@ -22,7 +22,7 @@ package policy
 import (
 	"context"
 
-	"stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/authz"
 )
 
 // PrincipalPolicy decides the principal leg: whether the human on whose

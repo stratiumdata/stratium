@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func tierPtr(t models.ActionTier) *models.ActionTier { return &t }

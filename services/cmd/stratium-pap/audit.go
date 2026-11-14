@@ -32,7 +32,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // maxAuditLimitHint is used only in the 400 message. The real clamp lives in

@@ -3,7 +3,7 @@ package authz
 import (
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func strPtr(s string) *string { return &s }

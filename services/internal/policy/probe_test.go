@@ -11,9 +11,9 @@ import (
 	"errors"
 	"testing"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/internal/policy/cedar"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy/cedar"
 )
 
 // prepareCedar compiles policies with the real Cedar engine — the same one

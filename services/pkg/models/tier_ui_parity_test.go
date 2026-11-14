@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // The admin console renders these tier names. It cannot import Go, so

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/authz"
 )
 
 // AllPolicySource loads every enabled policy for a tenant across every

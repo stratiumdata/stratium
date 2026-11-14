@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/authz"
 )
 
 // constructors is the documented convention the guard test below enforces

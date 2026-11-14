@@ -43,8 +43,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 const eventTypeContainment = "containment"

@@ -17,12 +17,12 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"stratium/internal/policy"
-	"stratium/internal/policy/cedar"
-	"stratium/internal/policy/jsonpolicy"
-	"stratium/internal/policy/rego"
-	"stratium/internal/policy/xacml"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy/cedar"
+	"github.com/stratiumdata/stratium/internal/policy/jsonpolicy"
+	"github.com/stratiumdata/stratium/internal/policy/rego"
+	"github.com/stratiumdata/stratium/internal/policy/xacml"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // newPolicyTestFixture builds on newTestServerFixture (server_test.go),

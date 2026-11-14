@@ -1,11 +1,11 @@
 package main
 
 import (
-	"stratium/internal/policy"
-	"stratium/internal/policy/cedar"
-	"stratium/internal/policy/jsonpolicy"
-	"stratium/internal/policy/rego"
-	"stratium/internal/policy/xacml"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy/cedar"
+	"github.com/stratiumdata/stratium/internal/policy/jsonpolicy"
+	"github.com/stratiumdata/stratium/internal/policy/rego"
+	"github.com/stratiumdata/stratium/internal/policy/xacml"
 )
 
 // newPolicyRegistry returns every policy engine this binary ships, keyed by

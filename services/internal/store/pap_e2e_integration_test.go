@@ -68,8 +68,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
-	"stratium/internal/pdpgrpc"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // The realm's operators (deploy/docker/keycloak/stratium-realm.json). Group

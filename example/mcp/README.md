@@ -7,7 +7,7 @@ JSON-RPC 2.0 over stdio — to what it believes is a filesystem server.
 `tools/call` against the PDP before it ever reaches the real
 `@modelcontextprotocol/server-filesystem`.
 
-The thing to notice is what is **absent**: `mcpclient.go` and `stratium/example/agent`
+The thing to notice is what is **absent**: `mcpclient.go` and `github.com/stratiumdata/stratium/example/agent`
 contain no Stratium code at all. They know MCP; they do not know Stratium exists.
 Every Stratium-aware line lives in `main.go`'s setup, before the agent loop starts,
 and in the two arguments handed to `startMCP`.

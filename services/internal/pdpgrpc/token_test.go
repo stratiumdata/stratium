@@ -22,9 +22,9 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 
-	"stratium/internal/store"
-	"stratium/internal/token"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/token"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // freshECKeyPEM generates a new random P-256 key and writes it, PEM-encoded,

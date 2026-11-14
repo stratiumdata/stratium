@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/audit"
 )
 
 // fullAuditEntry returns an Entry with every field set to a distinguishable,

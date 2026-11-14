@@ -20,7 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // TestDecideAndRelay_CacheHit_Allow_ForwardsWithoutContactingPDP is the mcp

@@ -16,8 +16,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"stratium/internal/dpop"
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/dpop"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // Claim keys for every token this package signs. Named constants, not

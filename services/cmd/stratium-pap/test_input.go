@@ -33,9 +33,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // tierSourceDerived and tierSourceDeclaredOverride label policyTestTier.Source

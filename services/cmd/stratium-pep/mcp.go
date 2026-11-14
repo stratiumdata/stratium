@@ -121,7 +121,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // maxFrameBytes bounds how large a single JSON-RPC line this proxy will read in either direction.

@@ -147,7 +147,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // cacheFilePathFor derives the decision cache's own file path from the

@@ -30,8 +30,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/store"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // TestIntegration_ListApprovals_EveryStatusUnderThePAPRole is the live half

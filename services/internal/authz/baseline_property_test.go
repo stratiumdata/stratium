@@ -5,7 +5,7 @@ import (
 	"maps"
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // propertyCatalog is the tenant configuration every case below is generated

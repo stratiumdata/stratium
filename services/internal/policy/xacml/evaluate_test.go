@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // prepareOne is the shared setup every test below needs: one StoredPolicy,

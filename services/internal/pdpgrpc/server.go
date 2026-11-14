@@ -23,13 +23,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/authz"
-	"stratium/internal/config"
-	"stratium/internal/policy"
-	"stratium/internal/store"
-	"stratium/pkg/audit"
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Store is what Decide needs from the tenant-scoped repository. *store.Store

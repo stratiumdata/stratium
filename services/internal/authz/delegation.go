@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // DelegationLeg evaluates every hop in the chain, returning the leg result and

@@ -57,9 +57,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/internal/store"
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // withPAPTenantTx runs fn inside a transaction on papDB (the real

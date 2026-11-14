@@ -3,8 +3,8 @@ package jsonpolicy
 import (
 	"context"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // compiledPolicy is one StoredPolicy's validated, evaluable form — built

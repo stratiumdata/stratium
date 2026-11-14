@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // syntheticPolicies builds n well-formed, distinct Cedar policies, each

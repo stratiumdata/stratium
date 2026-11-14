@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 var authzNow = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)

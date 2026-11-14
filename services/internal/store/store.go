@@ -45,8 +45,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/internal/authz"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // ErrNotFound indicates the requested row does not exist for this tenant.

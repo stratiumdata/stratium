@@ -31,12 +31,12 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
-	"stratium/internal/config"
-	"stratium/internal/pdpgrpc"
-	"stratium/internal/policy"
-	"stratium/internal/store"
-	"stratium/internal/token"
-	"stratium/migrations"
+	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/token"
+	"github.com/stratiumdata/stratium/migrations"
 )
 
 // shutdownTimeout bounds GracefulStop. A connection that never finishes must

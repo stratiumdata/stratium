@@ -64,8 +64,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/mcpupstream"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/mcpupstream"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // ---------------------------------------------------------------------------

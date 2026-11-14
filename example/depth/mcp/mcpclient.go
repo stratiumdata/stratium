@@ -10,8 +10,8 @@ import (
 	"context"
 	"io"
 
-	"stratium/example/agent"
-	"stratium/example/mcpwire"
+	"github.com/stratiumdata/stratium/example/agent"
+	"github.com/stratiumdata/stratium/example/mcpwire"
 )
 
 // mcpTransport implements agent.Transport against a child process speaking MCP over stdio.

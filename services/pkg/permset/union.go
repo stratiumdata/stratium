@@ -4,8 +4,8 @@ import (
 	"maps"
 	"slices"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Union returns the weakest Set containing every input: the permissions a

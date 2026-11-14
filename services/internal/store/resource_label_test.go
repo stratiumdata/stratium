@@ -19,8 +19,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // resourceLabelRuleColumns is loadResourceLabelRulesQuery's own column order,

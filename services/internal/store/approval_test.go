@@ -15,8 +15,8 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // approvalColumns is the loadApprovalQuery column order, factored out since

@@ -16,8 +16,8 @@ import (
 	"net/http"
 	"time"
 
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 type effectiveResponse struct {

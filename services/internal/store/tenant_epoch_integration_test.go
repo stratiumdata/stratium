@@ -42,8 +42,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/internal/store"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // readTenantEpoch reads tenant_epoch's row for tenant, tenant-scoped via

@@ -4,8 +4,8 @@ import (
 	cedarlib "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // Entity types are deliberately flat, un-namespaced names. Namespacing

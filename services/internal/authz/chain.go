@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // ErrChainInvalid indicates the delegation chain is not a well-formed lineage.

@@ -22,7 +22,7 @@ syntax = "proto3";
 
 package stratium.target.v1;
 
-option go_package = "stratium/pkg/grpctarget;grpctarget";
+option go_package = "github.com/stratiumdata/stratium/pkg/grpctarget;grpctarget";
 
 message EchoRequest {
   string message = 1;

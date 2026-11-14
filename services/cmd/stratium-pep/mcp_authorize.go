@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // mcpErrorCodeAuthorizationDenied is this proxy's JSON-RPC error code for a tools/call the PDP

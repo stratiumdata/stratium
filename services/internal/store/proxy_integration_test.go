@@ -71,10 +71,10 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/pdpgrpc"
-	"stratium/internal/store"
-	"stratium/pkg/grpctarget"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/grpctarget"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // proxyAgentID and proxySubject: see this file's own package doc, FIXED

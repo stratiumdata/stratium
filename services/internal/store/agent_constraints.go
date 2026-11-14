@@ -15,9 +15,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 // eventTypeAgentConstraintsSet and eventTypeAgentConstraintsCleared are

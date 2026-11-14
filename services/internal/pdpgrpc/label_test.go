@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // labelFixture is the shape every test below starts from: a tenant that has

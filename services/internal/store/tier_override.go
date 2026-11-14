@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/authz"
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Package doc for this file: the PAP's CRUD surface over the tier_overrides

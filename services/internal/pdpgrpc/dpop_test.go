@@ -15,9 +15,9 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 
-	"stratium/internal/dpop"
-	"stratium/internal/store"
-	"stratium/internal/token"
+	"github.com/stratiumdata/stratium/internal/dpop"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/token"
 )
 
 // The request the enforcement surface reports observing. A gRPC proxy shape

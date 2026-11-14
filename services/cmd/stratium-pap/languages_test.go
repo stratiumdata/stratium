@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // Sorting is the property under test, so the handler is called directly with a

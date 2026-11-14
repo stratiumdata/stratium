@@ -1,4 +1,4 @@
-module stratium/example
+module github.com/stratiumdata/stratium/example
 
 go 1.25.0
 
@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
 	google.golang.org/grpc v1.83.0
-	stratium v0.0.0
+	github.com/stratiumdata/stratium v0.0.0
 )
 
 require (
@@ -20,3 +20,5 @@ require (
 )
 
 replace stratium => ../services
+
+replace github.com/stratiumdata/stratium => ../services

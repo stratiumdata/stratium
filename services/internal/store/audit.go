@@ -9,8 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // auditTailQuery reads the tenant's current chain tail — the most recently

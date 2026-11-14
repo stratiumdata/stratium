@@ -47,8 +47,8 @@ import (
 	"net/http"
 	"strings"
 
-	"stratium/internal/policy"
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // Operator is a verified operator's identity as it reaches a route

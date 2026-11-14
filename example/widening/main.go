@@ -81,8 +81,8 @@ import (
 	"fmt"
 	"os"
 
-	"stratium/example/agent"
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/example/agent"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 const (

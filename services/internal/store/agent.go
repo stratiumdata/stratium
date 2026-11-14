@@ -10,9 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 // Package doc for this file: the PAP's CRUD surface over the agents table

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/classification"
 )
 
 // TestResourceLabelRule_RuleCopiesEveryMatcherField is the guarantee

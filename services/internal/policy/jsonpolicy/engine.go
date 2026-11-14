@@ -164,8 +164,8 @@ import (
 	"io"
 	"strings"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 const (

@@ -9,9 +9,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
-	"stratium/internal/config"
-	"stratium/internal/policy"
-	"stratium/internal/token"
+	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/token"
 )
 
 // decideTokenFixture returns wellFormedFixture's own fixture, plus the exact

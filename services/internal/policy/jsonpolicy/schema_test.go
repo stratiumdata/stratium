@@ -3,7 +3,7 @@ package jsonpolicy
 import (
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // intPtr returns a pointer to n. tierMatch.AtMost is *int, and Go cannot

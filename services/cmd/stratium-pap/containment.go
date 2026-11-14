@@ -19,8 +19,8 @@ package main
 import (
 	"net/http"
 
-	"stratium/pkg/models"
-	"stratium/pkg/permset"
+	"github.com/stratiumdata/stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/permset"
 )
 
 // The two questions this endpoint can answer. They are NOT

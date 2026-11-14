@@ -1,8 +1,8 @@
 package rego
 
 import (
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // buildInput maps a policy.EvaluationInput onto the plain map[string]any OPA

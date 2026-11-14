@@ -83,14 +83,14 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 
-	"stratium/internal/config"
-	"stratium/internal/pdpgrpc"
-	"stratium/internal/policy"
-	"stratium/internal/policy/cedar"
-	"stratium/internal/store"
-	"stratium/internal/token"
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy/cedar"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/token"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // escalationBlanketPermit is the simplest possible Cedar policy — the same

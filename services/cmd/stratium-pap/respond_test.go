@@ -19,9 +19,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/store"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // TestWriteStoreError_UnrecognizedError_Returns500WithoutEchoingIt is the

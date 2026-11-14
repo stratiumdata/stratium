@@ -263,7 +263,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // proxyFrame carries one gRPC message's raw wire bytes, and nothing else -- never unmarshaled

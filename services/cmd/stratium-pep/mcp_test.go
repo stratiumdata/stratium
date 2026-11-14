@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // --- mcpConfig ---------------------------------------------------------

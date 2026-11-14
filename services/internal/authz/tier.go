@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 var (

@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // ToolCatalogEntry is defined in pkg/models, not here: see that file's own

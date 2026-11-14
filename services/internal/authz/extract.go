@@ -33,7 +33,7 @@ package authz
 import (
 	"encoding/json"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // ExtractedInput is what a's catalog row, if any, contributes for one tool

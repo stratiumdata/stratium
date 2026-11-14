@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // mustCachePut is the shared "write and fail the test on error" helper

@@ -1,8 +1,8 @@
 package policy
 
 import (
-	"stratium/internal/authz"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // EvaluationInput is what every engine receives. It carries the agent and

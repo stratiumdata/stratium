@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/authz"
 )
 
 // TestPolicyVerdict_CannotWiden is a structural claim about the return type

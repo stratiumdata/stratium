@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/internal/policy/policytest"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy/policytest"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // TestEngine_Contract runs the shared conformance suite every PolicyEngine

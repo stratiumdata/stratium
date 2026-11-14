@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/audit"
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // eventTypeResourceLabelRuleCreated, eventTypeResourceLabelRuleUpdated and

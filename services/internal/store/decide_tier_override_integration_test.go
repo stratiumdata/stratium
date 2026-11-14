@@ -50,12 +50,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/internal/config"
-	"stratium/internal/pdpgrpc"
-	"stratium/internal/policy"
-	"stratium/internal/store"
-	"stratium/internal/token"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/token"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // tierOverrideServer builds a real pdpgrpc.Server for tenant on the SERVING

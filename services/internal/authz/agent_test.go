@@ -5,7 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func agentInfo(trust models.AgentTrustTier, tools []string) AgentInfo {

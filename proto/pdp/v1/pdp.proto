@@ -9,7 +9,7 @@ package stratium.pdp.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "stratium/internal/pdpgrpc;pdpgrpc";
+option go_package = "github.com/stratiumdata/stratium/internal/pdpgrpc;pdpgrpc";
 
 // Effect mirrors internal/authz.Effect. EFFECT_DENY is deliberately the zero
 // value, not EFFECT_UNSPECIFIED as typical proto3 style would put there: an

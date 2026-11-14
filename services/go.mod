@@ -1,4 +1,4 @@
-module stratium
+module github.com/stratiumdata/stratium
 
 go 1.25.0
 

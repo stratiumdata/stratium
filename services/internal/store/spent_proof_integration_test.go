@@ -32,7 +32,7 @@ import (
 
 	"github.com/lib/pq"
 
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // spentProofJTIs reads back every spent_proofs row visible to tenant, in a

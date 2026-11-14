@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"stratium/internal/policy"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // The fixed AttributeDesignator vocabulary this engine understands — see

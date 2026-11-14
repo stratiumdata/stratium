@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 
-	"stratium/example/agent"
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/example/agent"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // writeSessionFile writes path in the exact shape stratium-pep's own

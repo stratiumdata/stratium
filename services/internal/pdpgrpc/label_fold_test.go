@@ -3,7 +3,7 @@ package pdpgrpc
 import (
 	"testing"
 
-	"stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/classification"
 )
 
 // The fold labelResource applies when a command-field tool yields several

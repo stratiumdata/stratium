@@ -27,7 +27,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // The cases live outside the Go module, so a moved directory must fail loudly

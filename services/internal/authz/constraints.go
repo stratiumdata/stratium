@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // satisfiesIDPrefix reports whether EVERY resource identity in ids is inside

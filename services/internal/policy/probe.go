@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"stratium/internal/authz"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // GrantProbe asks what a principal may delegate, as distinct from what they

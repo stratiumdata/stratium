@@ -12,10 +12,10 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/internal/store"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // grantSet is a policy.CompiledPolicySet under full test control: it allows

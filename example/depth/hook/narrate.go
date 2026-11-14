@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"stratium/example/agent"
+	"github.com/stratiumdata/stratium/example/agent"
 )
 
 const (

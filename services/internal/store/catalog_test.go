@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // tierPtr builds a fixed, non-NULL *models.ActionTier for a

@@ -14,8 +14,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/authz"
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // writeJSON encodes v as the response body with the given status code. Its

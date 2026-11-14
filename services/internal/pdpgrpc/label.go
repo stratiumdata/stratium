@@ -16,7 +16,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/classification"
 )
 
 // labelResource returns resource with the tenant's own classification label

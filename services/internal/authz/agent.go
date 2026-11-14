@@ -3,7 +3,7 @@ package authz
 import (
 	"fmt"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // TrustTable maps an action tier to the minimum agent trust tier that may

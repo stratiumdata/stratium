@@ -3,7 +3,7 @@ package policy
 import (
 	"context"
 
-	"stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/authz"
 )
 
 // PolicyEngine compiles policy text. Compilation is separate from evaluation

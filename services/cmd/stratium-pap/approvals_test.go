@@ -20,7 +20,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // approvalFixtureRequestedAt/approvalFixtureExpiresAt are real time.Time

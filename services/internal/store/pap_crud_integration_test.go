@@ -47,9 +47,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/store"
-	"stratium/pkg/audit"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/store"
+	"github.com/stratiumdata/stratium/pkg/audit"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // TestIntegration_PAPCRUD_PolicyRoundTrip is the brief's own "each resource

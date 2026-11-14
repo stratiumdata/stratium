@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // GetApproval reports one approval's current status and expiry, for a PEP

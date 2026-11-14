@@ -7,7 +7,7 @@ import (
 
 	cedarlib "github.com/cedar-policy/cedar-go"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // This file is Cedar's contribution to contract property 8 (see

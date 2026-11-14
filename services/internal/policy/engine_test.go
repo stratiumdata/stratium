@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
-	"stratium/internal/policy/policytest"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy/policytest"
 )
 
 // fakeEngine is a trivial PolicyEngine that exists only to prove

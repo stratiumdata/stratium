@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func request() Request {

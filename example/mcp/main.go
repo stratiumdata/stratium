@@ -30,7 +30,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"stratium/example/agent"
+	"github.com/stratiumdata/stratium/example/agent"
 )
 
 const (

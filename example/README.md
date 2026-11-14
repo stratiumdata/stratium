@@ -13,7 +13,7 @@ polices a real tool call, same as the four below, and then does the one thing
 none of them do — widens the agent's own grant mid-run and shows the
 `containment` row that write leaves behind. See "Closing the loop" below.
 
-`stratium/example` is its own Go module (tied into the repo via the root
+`github.com/stratiumdata/stratium/example` is its own Go module (tied into the repo via the root
 `go.work`) so it can stay dependency-light and never bleeds into `services`'
 own build.
 

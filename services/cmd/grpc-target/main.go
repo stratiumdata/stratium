@@ -29,7 +29,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
-	"stratium/pkg/grpctarget"
+	"github.com/stratiumdata/stratium/pkg/grpctarget"
 )
 
 // listenAddr is fixed, not read from the environment: unlike stratium-pdp

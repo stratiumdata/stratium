@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 func TestCreateAgent_Success(t *testing.T) {

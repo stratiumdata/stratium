@@ -87,7 +87,7 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 
-	"stratium/example/agent"
+	"github.com/stratiumdata/stratium/example/agent"
 )
 
 const (

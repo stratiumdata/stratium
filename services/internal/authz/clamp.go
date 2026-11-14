@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // RequestedScope is what the caller asked for when creating a delegation.

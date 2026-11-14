@@ -3,8 +3,8 @@ package permset
 import (
 	"strings"
 
-	"stratium/pkg/classification"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/classification"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Contains reports whether inner is a valid subset of outer, returning the

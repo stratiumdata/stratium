@@ -15,8 +15,8 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"stratium/internal/authz"
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // toolCatalogLoadColumns and policyLoadColumns are the two production

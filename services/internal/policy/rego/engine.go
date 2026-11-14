@@ -173,7 +173,7 @@ import (
 	"github.com/open-policy-agent/opa/v1/ast"
 	regolib "github.com/open-policy-agent/opa/v1/rego"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // queryPath is the fixed Rego query every policy is compiled and evaluated

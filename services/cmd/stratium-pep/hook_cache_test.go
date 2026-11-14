@@ -25,7 +25,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/internal/pdpgrpc"
+	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // hookCacheFixture writes a session file naming a fresh delegation id and a

@@ -15,7 +15,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // eventTypeArgIndex is insertAuditQuery's zero-based position for event_type

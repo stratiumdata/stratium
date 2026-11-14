@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/authz"
 )
 
 // fakeAllSource is an AllPolicySource test double — the load-everything-at-

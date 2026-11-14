@@ -26,7 +26,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Effect is the outcome of a decision, or of one leg of it.

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // TestEveryDelegationFieldIsClassified is the whole of gap 5. A field added

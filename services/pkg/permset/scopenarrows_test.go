@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"stratium/pkg/models"
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 var testNow = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)

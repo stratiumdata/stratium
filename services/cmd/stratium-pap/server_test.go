@@ -13,8 +13,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	"stratium/internal/policy"
-	"stratium/internal/store"
+	"github.com/stratiumdata/stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/store"
 )
 
 // testServerFixture builds a real Server backed by a real,

@@ -6,8 +6,8 @@ import (
 
 	regolib "github.com/open-policy-agent/opa/v1/rego"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // compiledSet is Engine's policy.CompiledPolicySet: every policy's

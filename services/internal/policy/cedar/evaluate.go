@@ -7,8 +7,8 @@ import (
 
 	cedarlib "github.com/cedar-policy/cedar-go"
 
-	"stratium/internal/authz"
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // compiledSet is Engine's policy.CompiledPolicySet: a parsed cedar.PolicySet

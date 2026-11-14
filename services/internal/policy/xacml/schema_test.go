@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 // TestValidate_NonDenyOverridesCombiningAlgIsRejected is the task brief's

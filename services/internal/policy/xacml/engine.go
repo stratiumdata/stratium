@@ -291,7 +291,7 @@ import (
 	"encoding/xml"
 	"fmt"
 
-	"stratium/internal/policy"
+	"github.com/stratiumdata/stratium/internal/policy"
 )
 
 const (
