@@ -32,6 +32,10 @@ handed over). The reason tells you which one refused.
 | `resource declares no classification; … cannot be evaluated` | Delegation | A cap is set and nothing labelled this resource. Add a catch-all label rule. |
 | `delegation … is revoked` / `expired at …` | Delegation | Start a new session. |
 
+A reason that reads `action tier X at or above delegation escalate_at Y` is
+not a denial: the call is waiting for a person to
+[approve it](require-approval.md).
+
 `at depth N` in a reason tells you which hop of a delegation chain refused:
 `depth 0` is the session you started, and higher depths are
 [sub-agents](sub-agents.md).

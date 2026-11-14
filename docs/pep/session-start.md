@@ -47,6 +47,11 @@ STRATIUM_PEP_REQUESTED_TOOLS, STRATIUM_PEP_TTL_SECONDS
 `STRATIUM_PEP_PURPOSE` is optional and free text; it is recorded on the
 delegation and shown in audit.
 
+`STRATIUM_PEP_ESCALATE_AT` is optional too. It asks for a lower escalation
+threshold than the agent's own, so more calls wait for a human. It can never
+raise or remove the agent's threshold. The threshold actually granted is in
+the session file, under `granted_scope.escalate_at`.
+
 > **These eight are not `hook`'s eight.** They overlap in five. Exporting only
 > this set and then launching an agent leaves every tool call denying with
 > `missing required configuration` — a denial that reads exactly like a policy

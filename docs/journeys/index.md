@@ -9,6 +9,7 @@ what Stratium does at each one, and what you will see.
 | Understand why a tool call was blocked | Anyone running an agent | [Understand a denial](understand-a-denial.md) |
 | Keep an agent inside one project directory | Platform engineer | [Keep an agent in its workspace](workspace-scope.md) |
 | Stop an agent from reading sensitive files | Security, data owner | [Protect sensitive data](sensitive-data.md) |
+| Have a person approve destructive actions | Platform, security lead | [Require approval for risky actions](require-approval.md) |
 | Give a sub-agent less authority than its orchestrator | Agent developer | [Hand a sub-agent less](sub-agents.md) |
 | Put an MCP server, HTTP API, or gRPC service behind Stratium | Platform engineer | [Govern a tool server](tool-server.md) |
 | Check what a permission change would allow before making it | Security reviewer | [Review a change before you make it](review-a-change.md) |

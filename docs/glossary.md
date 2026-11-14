@@ -141,9 +141,12 @@ two terms are commonly confused, the entry says so.
 ## Operations
 
 **Escalation**
-:   A delegation's band at or above which a call asks a human rather than
-    allowing. Creates a pending **approval** that a human resolves in the PAP,
+:   A threshold at or above which a call waits for a human rather than being
+    allowed. An admin sets it on the agent, and each session copies it; a
+    session may lower it, never raise or remove it. A call in the band creates
+    a pending **approval** the person the agent acts for resolves in the PAP,
     layered on top of a fresh three-leg evaluation, never instead of one.
+    [Require approval for risky actions](journeys/require-approval.md)
 
 **Epoch**
 :   A per-tenant counter, bumped by a database trigger on every configuration

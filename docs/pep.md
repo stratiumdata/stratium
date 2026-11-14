@@ -64,6 +64,7 @@ polls, so it has no use for either):
 | `STRATIUM_PEP_REQUESTED_TOOLS` | Comma-separated tool names to request, e.g. `Read,Grep,Bash`. Must not be empty. Include discovery tools — see below. |
 | `STRATIUM_PEP_TTL_SECONDS` | How long the new delegation is valid for, in seconds. |
 | `STRATIUM_PEP_PURPOSE` (optional) | Free-text reason for the delegation, for audit legibility. |
+| `STRATIUM_PEP_ESCALATE_AT` (optional) | A lower escalation threshold than the agent's own, `0`–`4`. It can only make the session stricter, so leaving it unset changes nothing. |
 
 `mcp` only, in addition to the seven shared by `hook` and `mcp` above:
 

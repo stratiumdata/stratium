@@ -83,6 +83,7 @@ nav:
       - Understand a denial: journeys/understand-a-denial.md
       - Keep an agent in its workspace: journeys/workspace-scope.md
       - Protect sensitive data: journeys/sensitive-data.md
+      - Require approval: journeys/require-approval.md
       - Hand a sub-agent less: journeys/sub-agents.md
       - Govern a tool server: journeys/tool-server.md
       - Review a change: journeys/review-a-change.md

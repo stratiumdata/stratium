@@ -28,7 +28,7 @@ against data you would not mind an engineer reading:
 | Resource constraints (`id_prefix`) | **none** | Scopes the agent to a path prefix. Same failure mode as caps: it denies any tool resolving no resource identity. §4a. |
 | Delegation `max_action_tier` | The lowest tier that lets the agent finish its work — start at `1` (`READ_ONLY`) and raise it when something denies | The ceiling no policy can raise. Raising it later costs one command; starting high costs you the habit. |
 | Delegation `approved_tools` | An explicit list. Never empty. | An empty list means **unrestricted**, everywhere in this system. |
-| Delegation `escalate_at` | unset at first; `4` once the agent needs `DESTRUCTIVE` | §5. |
+| Agent escalation threshold | unset at first; `4` once the agent needs `DESTRUCTIVE` | Copied onto every session. §5. |
 | Delegation TTL | One working session — an hour or two | A delegation is the blast radius of a compromised agent host, measured in time. |
 | Policy | One permit for the principal, narrowed later | Without a policy the delegation cannot be issued at all: `session-start` fails with *"none of the requested tools are held by this principal"*. |
 
@@ -172,12 +172,20 @@ only ever raise a tier and a positive destructive match is never lowered:
 **raise the ceiling** (weakens every other action at that tier) or **escalate**
 (a human approves, every occurrence).
 
-So `escalate_at` is what lets you grant tier 4 without granting it unattended:
+So an escalation threshold is what lets you grant tier 4 without granting it
+unattended. Set it on the agent, then start sessions with a tier-4 ceiling:
 
-    max_action_tier: 4, escalate_at: 4
+```bash
+curl -sS -X PUT "http://$PAP/v1/agents/$AGENT/escalation" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"escalate_at": 4}'
+# then: STRATIUM_PEP_REQUESTED_TIER=4 stratium-pep session-start
+```
 
-means everything up to `EXTERNAL_COMMS` proceeds, and anything `DESTRUCTIVE`
-waits for a person. Set it the moment an agent needs destructive operations at
+Everything up to `EXTERNAL_COMMS` proceeds, and anything `DESTRUCTIVE` waits
+for a person. The threshold lives on the agent because a session cannot be
+trusted to ask for its own supervision: a session may lower it, never remove
+it. Walkthrough: [Require approval for risky actions](journeys/require-approval.md). Set it the moment an agent needs destructive operations at
 all, because the tier is coarse: `rm -rf ./node_modules` and `rm -rf /` are the
 same tier and require the same trust, so the routine case and the catastrophic
 one arrive on the same permission.
