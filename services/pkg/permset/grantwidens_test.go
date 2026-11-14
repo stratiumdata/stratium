@@ -45,6 +45,16 @@ func TestGrantWidens_DisagreesWithContainsExactlyOnIntroducedKeys(t *testing.T) 
 				return s
 			},
 		},
+		{
+			// An absent escalate_at means "never escalate", so adding one puts a
+			// human in front of the band: the grant narrows.
+			name: "first escalation threshold",
+			after: func(s Set) Set {
+				t := models.ActionTierExternalComms
+				s.EscalateAt = &t
+				return s
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := grantBase()
@@ -72,6 +82,10 @@ func TestGrantWidens_StillNamesEveryRealWidening(t *testing.T) {
 
 	scoped := grantBase()
 	scoped.ResourceConstraints = map[string]string{models.ResourceIDPrefixKey: "/workspace/"}
+
+	internal := models.ActionTierInternalModify
+	escalating := grantBase()
+	escalating.EscalateAt = &internal
 
 	for _, tc := range []struct {
 		name          string
@@ -102,6 +116,21 @@ func TestGrantWidens_StillNamesEveryRealWidening(t *testing.T) {
 			after: func() Set {
 				s := grantBase()
 				s.ResourceConstraints = map[string]string{models.ResourceIDPrefixKey: "/workspace-evil/"}
+				return s
+			}(),
+		},
+		{
+			name:   "an escalation threshold is dropped",
+			before: escalating,
+			after:  grantBase(),
+		},
+		{
+			name:   "an escalation threshold is raised",
+			before: escalating,
+			after: func() Set {
+				s := grantBase()
+				external := models.ActionTierExternalComms
+				s.EscalateAt = &external
 				return s
 			}(),
 		},

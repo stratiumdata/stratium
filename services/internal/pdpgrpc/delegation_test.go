@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/authz"
 	"github.com/stratiumdata/stratium/internal/policy"
@@ -649,8 +650,11 @@ func TestCreateDelegationRPC_CarriesNoClassificationCapField(t *testing.T) {
 	}{
 		{reflect.TypeOf(CreateDelegationRequest{}),
 			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds"}},
+		// EscalateAt is not a classification cap, and it can only LOWER a
+		// threshold (effectiveEscalateAt, escalate_at.go), so the docs/pep.md
+		// claim this guards is unchanged by it.
 		{reflect.TypeOf(RequestedScope{}),
-			[]string{"MaxActionTier", "Tools"}},
+			[]string{"MaxActionTier", "Tools", "EscalateAt"}},
 	} {
 		t.Run(tc.typ.Name(), func(t *testing.T) {
 			var got []string
@@ -818,5 +822,128 @@ func TestCreateDelegation_ChildStillCopiesParentNotAgent(t *testing.T) {
 
 	if got := fs.created[0].ClassificationCaps; got["nato"] != "RESTRICTED" {
 		t.Errorf("child caps = %v, want the parent's RESTRICTED, not the agent's TOP-SECRET", got)
+	}
+}
+
+// --- escalate_at at issuance ---
+//
+// These drive the real RPC for the properties effectiveEscalateAt's own table
+// test (escalate_at_test.go) pins in isolation: the threshold reaches the
+// stored row and the response, and nothing the caller sends raises or removes
+// it.
+
+func i32(v int32) *int32 { return &v }
+
+func issueWithEscalation(
+	t *testing.T, agentEsc *models.ActionTier, maxTier models.ActionTier, requested *int32, grants *grantSet,
+) (*models.Delegation, *CreateDelegationResponse) {
+	t.Helper()
+	fs, req, _ := wellFormedDelegationFixture()
+	fs.agent.EscalateAt = agentEsc
+	req.RequestedScope.MaxActionTier = int32(maxTier)
+	req.RequestedScope.EscalateAt = requested
+	resp, err := newDelegationServer(fs, grants).CreateDelegation(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateDelegation() error = %v", err)
+	}
+	if len(fs.created) != 1 {
+		t.Fatalf("delegation rows created = %d, want 1", len(fs.created))
+	}
+	return fs.created[0], resp
+}
+
+func TestCreateDelegation_RootInheritsTheAgentsThreshold(t *testing.T) {
+	row, resp := issueWithEscalation(t, tierPtr(models.ActionTierDestructive),
+		models.ActionTierDestructive, nil, permissiveGrantSet())
+
+	if row.EscalateAt == nil || *row.EscalateAt != models.ActionTierDestructive {
+		t.Errorf("stored escalate_at = %v, want the agent's DESTRUCTIVE", row.EscalateAt)
+	}
+	if resp.GetGrantedScope().EscalateAt == nil || resp.GetGrantedScope().GetEscalateAt() != 4 {
+		t.Errorf("granted_scope.escalate_at = %v, want 4 echoed to the caller", resp.GetGrantedScope().EscalateAt)
+	}
+}
+
+// The property the threshold exists for: the caller is the party being
+// policed, so neither asking for a higher threshold nor asking for none may
+// move the agent's.
+func TestCreateDelegation_CallerCannotRaiseOrRemoveTheAgentsThreshold(t *testing.T) {
+	for name, requested := range map[string]*int32{
+		"asks to raise it": i32(4),
+		"asks for nothing": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			row, _ := issueWithEscalation(t, tierPtr(models.ActionTierInternalModify),
+				models.ActionTierDestructive, requested, permissiveGrantSet())
+			if row.EscalateAt == nil || *row.EscalateAt != models.ActionTierInternalModify {
+				t.Errorf("stored escalate_at = %v, want the agent's INTERNAL_MODIFY kept", row.EscalateAt)
+			}
+		})
+	}
+}
+
+func TestCreateDelegation_CallerMayLowerTheThreshold(t *testing.T) {
+	row, _ := issueWithEscalation(t, tierPtr(models.ActionTierDestructive),
+		models.ActionTierDestructive, i32(2), permissiveGrantSet())
+	if row.EscalateAt == nil || *row.EscalateAt != models.ActionTierInternalModify {
+		t.Errorf("stored escalate_at = %v, want the requested INTERNAL_MODIFY", row.EscalateAt)
+	}
+}
+
+// Policy clamps the ceiling to EXTERNAL_COMMS, below the agent's DESTRUCTIVE
+// threshold. The threshold can never fire, so it is dropped and named in
+// removed, rather than failing issuance in the store.
+func TestCreateDelegation_UnreachableThresholdIsDroppedAndReported(t *testing.T) {
+	grants := permissiveGrantSet()
+	grants.maxTier = models.ActionTierExternalComms
+	row, resp := issueWithEscalation(t, tierPtr(models.ActionTierDestructive),
+		models.ActionTierDestructive, nil, grants)
+
+	if row.MaxActionTier != models.ActionTierExternalComms {
+		t.Fatalf("MaxActionTier = %s, want the clamped EXTERNAL_COMMS", row.MaxActionTier)
+	}
+	if row.EscalateAt != nil {
+		t.Errorf("stored escalate_at = %s, want none: it is above the granted ceiling", *row.EscalateAt)
+	}
+	if resp.GetGrantedScope().EscalateAt != nil {
+		t.Errorf("granted_scope.escalate_at = %d, want unset", resp.GetGrantedScope().GetEscalateAt())
+	}
+	r := findRemoval(resp.GetGrantedScope().GetRemoved(), "escalate_at", "DESTRUCTIVE")
+	if r == nil || r.GetReason() != "unreachable" {
+		t.Errorf("removed = %v, want an unreachable escalate_at DESTRUCTIVE entry", resp.GetGrantedScope().GetRemoved())
+	}
+}
+
+func TestCreateDelegation_InvalidRequestedThresholdIsRefused(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	req.RequestedScope.EscalateAt = i32(7)
+	_, err := newDelegationServer(fs, permissiveGrantSet()).CreateDelegation(context.Background(), req)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("error = %v, want InvalidArgument", err)
+	}
+	if len(fs.created) != 0 {
+		t.Error("a delegation row was written for an invalid request")
+	}
+}
+
+// A child starts from its PARENT's threshold, not its agent's: the agent
+// template applies at the root only, like caps and scope.
+func TestCreateDelegation_ChildStartsFromTheParentsThreshold(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	fs.agent.EscalateAt = tierPtr(models.ActionTierReadOnly) // must be ignored for a child
+	parentID, parentAgentID := uuid.New(), uuid.New()
+	req.ParentDelegationId = parentID.String()
+	req.RequestedScope.MaxActionTier = int32(models.ActionTierDestructive)
+	fs.chain = []*models.Delegation{{
+		ID: parentID, RootDelegationID: parentID, AgentID: parentAgentID,
+		MaxActionTier: models.ActionTierDestructive, ApprovedTools: []string{"Bash", "Read"},
+		EscalateAt: tierPtr(models.ActionTierExternalComms), ChainAgentIDs: []uuid.UUID{parentAgentID},
+	}}
+	if _, err := newDelegationServer(fs, permissiveGrantSet()).CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v", err)
+	}
+	row := fs.created[0]
+	if row.EscalateAt == nil || *row.EscalateAt != models.ActionTierExternalComms {
+		t.Errorf("stored escalate_at = %v, want the parent's EXTERNAL_COMMS", row.EscalateAt)
 	}
 }

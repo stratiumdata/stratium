@@ -60,6 +60,13 @@ func GrantWidens(before, after Set) string {
 	widened := before
 	widened.ClassificationCaps = withIntroducedKeys(before.ClassificationCaps, after.ClassificationCaps)
 	widened.ResourceConstraints = withIntroducedKeys(before.ResourceConstraints, after.ResourceConstraints)
+	// The same pre-fill for the one scalar dimension with an introduce rule:
+	// an absent escalate_at means "never escalate", so a first threshold puts
+	// a human in front of the band and narrows. Only the absent case is
+	// filled, so a dropped or raised threshold still reaches Contains as one.
+	if widened.EscalateAt == nil {
+		widened.EscalateAt = after.EscalateAt
+	}
 	return Contains(widened, after)
 }
 

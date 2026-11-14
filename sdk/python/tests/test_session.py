@@ -422,3 +422,13 @@ def test_the_delegation_expiry_comes_from_the_token_not_the_requested_ttl(fake_p
     s.check(tool="Read", raw_input={"file_path": "/tmp/x"})
 
     assert len(fake_pdp.decide_calls) == 1
+
+
+# The threshold rides on the mint arguments, so it reaches the first
+# delegation and any re-mint alike; leaving it out asks for nothing.
+def test_a_session_forwards_its_escalation_threshold(fake_pdp):
+    session(fake_pdp, Clock(), escalate_at=2)
+    session(fake_pdp, Clock())
+    asked, not_asked = fake_pdp.delegation_calls
+    assert asked.requested_scope.escalate_at == 2
+    assert not not_asked.requested_scope.HasField("escalate_at")

@@ -19,7 +19,7 @@ import (
 
 func agentRowColumns() []string {
 	return []string{"id", "tenant_id", "name", "provider", "model_id",
-		"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "created_at", "updated_at"}
+		"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "created_at", "updated_at", "escalate_at"}
 }
 
 // validAgent returns a models.Agent that passes validateAgentFields --
@@ -263,7 +263,7 @@ func TestStore_GetAgent_Success(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", "claude-opus",
 				int64(models.TrustTierCertified), true, false, []byte(`["Read","Bash"]`), []byte(`{"nato":"SECRET"}`),
-				[]byte(`{"id_prefix":"/workspace/"}`), now, now))
+				[]byte(`{"id_prefix":"/workspace/"}`), now, now, nil))
 	mock.ExpectCommit()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -294,7 +294,7 @@ func TestStore_GetAgent_NullModelIDDecodesAsEmptyString(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", nil,
-				int64(models.TrustTierCertified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now, nil))
 	mock.ExpectCommit()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -321,7 +321,7 @@ func TestStore_GetAgent_CorruptAllowedToolsFailsLoudly(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
 			AddRow(id.String(), testTenant, "billing-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, []byte(`not-json`), []byte(`{}`), []byte(`{}`), now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`not-json`), []byte(`{}`), []byte(`{}`), now, now, nil))
 	mock.ExpectRollback()
 
 	got, err := s.GetAgent(context.Background(), id)
@@ -364,8 +364,8 @@ func TestStore_ListAgents_IncludesSuspended(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(listAgentsQuery)).
 		WillReturnRows(sqlmock.NewRows(agentRowColumns()).
-			AddRow(uuid.New().String(), testTenant, "active-bot", "anthropic", "", int64(1), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now).
-			AddRow(uuid.New().String(), testTenant, "suspended-bot", "anthropic", "", int64(1), true, true, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now))
+			AddRow(uuid.New().String(), testTenant, "active-bot", "anthropic", "", int64(1), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now, nil).
+			AddRow(uuid.New().String(), testTenant, "suspended-bot", "anthropic", "", int64(1), true, true, []byte(`[]`), []byte(`{}`), []byte(`{}`), now, now, nil))
 	mock.ExpectCommit()
 
 	got, err := s.ListAgents(context.Background())
@@ -429,8 +429,8 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
 			false, true, []byte(`["Bash"]`), id.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
-			AddRow(now, now, []byte(`{"nato":"SECRET"}`), []byte(`{"id_prefix":"/workspace/"}`)))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(now, now, []byte(`{"nato":"SECRET"}`), []byte(`{"id_prefix":"/workspace/"}`), nil))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -482,8 +482,8 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
 		WithArgs("renamed-bot", "anthropic", "claude-opus", int64(models.TrustTierPlatformTrusted),
 			false, true, []byte(`["Bash"]`), id.String()).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
-			AddRow(now, now, []byte(`{"nato":"SECRET"}`), []byte(`{"id_prefix":"/workspace/"}`)))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(now, now, []byte(`{"nato":"SECRET"}`), []byte(`{"id_prefix":"/workspace/"}`), int64(4)))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -493,11 +493,13 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 		Name: "renamed-bot", Provider: "anthropic", ModelID: "claude-opus",
 		TrustTier: models.TrustTierPlatformTrusted, Enabled: false, Suspended: true,
 		AllowedTools: []string{"Bash"},
-		// An attacker (or a stale-form editor) trying to smuggle a caps and a
-		// resource-constraints change through the whole-object PUT. Both must
-		// be ignored.
+		// An attacker (or a stale-form editor) trying to smuggle a caps, a
+		// resource-constraints, and an escalation change through the
+		// whole-object PUT. All three must be ignored. A nil EscalateAt would
+		// remove the threshold and let the agent act unattended.
 		ClassificationCaps:  map[string]string{"nato": "UNCLASSIFIED"},
 		ResourceConstraints: map[string]string{models.ResourceIDPrefixKey: "/"},
+		EscalateAt:          nil,
 	}
 	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2")
 	if err != nil {
@@ -508,6 +510,9 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 	}
 	if got.ResourceConstraints[models.ResourceIDPrefixKey] != "/workspace/" {
 		t.Errorf("ResourceConstraints = %v, want the row's real id_prefix=/workspace/, not the request body's /", got.ResourceConstraints)
+	}
+	if got.EscalateAt == nil || *got.EscalateAt != models.ActionTierDestructive {
+		t.Errorf("EscalateAt = %v, want the row's real DESTRUCTIVE, not the request body's nil", got.EscalateAt)
 	}
 
 	assertExpectationsMet(t, mock)

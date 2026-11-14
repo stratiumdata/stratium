@@ -16,6 +16,8 @@ import (
 //   - EscalateAt presence must MATCH. A child may neither introduce the field
 //     where the parent leaves it unset nor drop it where the parent sets it.
 //     Dropping is a widening. Introducing narrows, and is rejected anyway.
+//     One exception: a child whose own ceiling is strictly below the parent's
+//     threshold may leave it unset, because it can never reach the band.
 //   - ResourceConstraints may not be INTRODUCED either, by the same rule and
 //     for the same reason.
 //   - ClassificationCaps may not be INTRODUCED either, for the same reason
@@ -40,7 +42,13 @@ func Contains(outer, inner Set) string {
 	case outer.EscalateAt == nil && inner.EscalateAt != nil:
 		return "child introduces escalate_at " + inner.EscalateAt.String() +
 			" which parent leaves unset"
-	case outer.EscalateAt != nil && inner.EscalateAt == nil:
+	case outer.EscalateAt != nil && inner.EscalateAt == nil && inner.MaxTier >= *outer.EscalateAt:
+		// Dropping is a widening only where the child can reach the band. A
+		// child whose ceiling sits strictly below the parent's threshold can
+		// never escalate, so an unset field there means the same thing the
+		// parent's value would. Requiring it anyway would force the child to
+		// carry a threshold at or below its own ceiling, so a worker handed
+		// LESS authority would escalate MORE than its parent.
 		return "child drops parent escalate_at " + outer.EscalateAt.String()
 	case outer.EscalateAt != nil && inner.EscalateAt != nil && *inner.EscalateAt > *outer.EscalateAt:
 		return "child escalate_at " + inner.EscalateAt.String() +

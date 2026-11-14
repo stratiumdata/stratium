@@ -78,7 +78,8 @@ classification itself. The test for any change:
     ---
 
     Step-by-step journeys: keep an agent in its workspace, protect sensitive
-    data, hand a sub-agent less, stop an agent now, investigate an incident.
+    data, require approval for risky actions, hand a sub-agent less, stop an
+    agent now, investigate an incident.
 
     [User journeys](journeys/index.md)
 

@@ -57,8 +57,8 @@ func TestStore_LoadAgent_Success(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
 		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
-			AddRow(agentID.String(), int64(2), true, false, []byte(`["Bash","Read"]`), []byte(`{}`), []byte(`{}`)))
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(agentID.String(), int64(2), true, false, []byte(`["Bash","Read"]`), []byte(`{}`), []byte(`{}`), nil))
 	mock.ExpectCommit()
 
 	got, err := s.LoadAgent(context.Background(), agentID)
@@ -137,8 +137,8 @@ func TestStore_LoadAgent_DecodeFailure(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
 		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
-			AddRow(agentID.String(), int64(0), true, false, []byte(`not-json`), []byte(`{}`), []byte(`{}`)))
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(agentID.String(), int64(0), true, false, []byte(`not-json`), []byte(`{}`), []byte(`{}`), nil))
 	mock.ExpectRollback()
 
 	got, err := s.LoadAgent(context.Background(), agentID)
@@ -186,8 +186,8 @@ func TestStore_LoadAgent_CarriesClassificationCaps(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
 		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
-			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`), []byte(`{}`)))
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{"nato":"CONFIDENTIAL"}`), []byte(`{}`), nil))
 	mock.ExpectCommit()
 
 	info, err := s.LoadAgent(context.Background(), agentID)
@@ -214,8 +214,8 @@ func TestStore_LoadAgent_CarriesResourceConstraints(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
 		WithArgs(agentID.String()).
 		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints"}).
-			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{}`), []byte(`{"id_prefix":"/workspace/"}`)))
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{}`), []byte(`{"id_prefix":"/workspace/"}`), nil))
 	mock.ExpectCommit()
 
 	info, err := s.LoadAgent(context.Background(), agentID)
@@ -224,6 +224,33 @@ func TestStore_LoadAgent_CarriesResourceConstraints(t *testing.T) {
 	}
 	if info.ResourceConstraints["id_prefix"] != "/workspace/" {
 		t.Errorf("constraints = %v, want id_prefix=/workspace/", info.ResourceConstraints)
+	}
+
+	assertExpectationsMet(t, mock)
+}
+
+// TestStore_LoadAgent_CarriesEscalateAt: the threshold CreateDelegation
+// copies onto a root must actually come back from LoadAgent, as the two maps
+// above do.
+func TestStore_LoadAgent_CarriesEscalateAt(t *testing.T) {
+	s, mock := newMockStore(t)
+	agentID := uuid.New()
+
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectQuery(regexp.QuoteMeta(loadAgentQuery)).
+		WithArgs(agentID.String()).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(agentID.String(), int64(3), true, false, []byte(`[]`), []byte(`{}`), []byte(`{}`), int64(4)))
+	mock.ExpectCommit()
+
+	info, err := s.LoadAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if info.EscalateAt == nil || *info.EscalateAt != models.ActionTierDestructive {
+		t.Errorf("EscalateAt = %v, want DESTRUCTIVE", info.EscalateAt)
 	}
 
 	assertExpectationsMet(t, mock)

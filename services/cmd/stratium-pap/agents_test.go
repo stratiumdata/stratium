@@ -84,8 +84,8 @@ func TestUpdateAgent_Success(t *testing.T) {
 	// does not move, so the single audit insert below is still the whole
 	// sequence.
 	expectGrantWriteAndAudit(f.mock, "allowed_tools", `[]`, "UPDATE agents",
-		sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
-			AddRow(now, now, []byte(`{}`), []byte(`{}`)))
+		sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(now, now, []byte(`{}`), []byte(`{}`), nil))
 
 	body := models.Agent{Name: "renamed-bot", Provider: "anthropic", TrustTier: models.TrustTierRegistered, Suspended: true, AllowedTools: []string{}}
 	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/agents/"+id.String(), f.token(t, "org-admins"), body)

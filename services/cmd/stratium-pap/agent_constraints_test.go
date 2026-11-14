@@ -39,9 +39,9 @@ func expectAgentForConstraints(mock sqlmock.Sqlmock, id uuid.UUID, resourceConst
 	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("FROM agents").WillReturnRows(
 		sqlmock.NewRows([]string{"id", "tenant_id", "name", "provider", "model_id",
-			"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "created_at", "updated_at"}).
+			"trust_tier", "enabled", "suspended", "allowed_tools", "classification_caps", "resource_constraints", "created_at", "updated_at", "escalate_at"}).
 			AddRow(id.String(), "test-tenant", "scoped-bot", "anthropic", "claude-opus",
-				int64(models.TrustTierCertified), true, false, []byte(`null`), []byte(`{}`), constraintsJSON, now, now))
+				int64(models.TrustTierCertified), true, false, []byte(`null`), []byte(`{}`), constraintsJSON, now, now, nil))
 	mock.ExpectCommit()
 }
 

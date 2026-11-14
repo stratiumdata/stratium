@@ -60,8 +60,8 @@ with Client(pdp_addr) as client:
 ## What Stratium enforces
 
 - **The child may only narrow.** Tools, tier ceiling, classification caps,
-  workspace scope, and expiry must each be equal or tighter. Asking for a tool
-  the parent doesn't hold fails at creation:
+  workspace scope, escalation threshold, and expiry must each be equal or
+  tighter. Asking for a tool the parent doesn't hold fails at creation:
   `child tool "Write" not in parent approved_tools`.
 - **Expiry counts.** Give the child a shorter TTL than the parent. An identical
   TTL fails, because the child is created a moment later and would outlive it.
@@ -79,6 +79,13 @@ refused.
   no classification cap or workspace scope, a worker can't introduce one.
   Set the tightest dimensions you will need on the orchestrator's agent, so
   workers can narrow them further.
+- **Workers inherit the orchestrator's [approval threshold](require-approval.md)**
+  and may lower it (pass `escalate_at=` to `create_delegation`). A worker
+  whose own ceiling sits below the threshold drops it, since it could never
+  reach it, so handing a worker less authority never makes it ask for
+  approval more often. If the orchestrator has **no** threshold, a worker
+  can't add one (`child introduces escalate_at`), the same rule as caps and
+  scope: set it on the orchestrator's agent instead.
 - **Chains are capped in depth** (5 by default).
 - **Siblings aren't compared with each other.** Two workers can each be within
   bounds yet together reach more than either alone. Use

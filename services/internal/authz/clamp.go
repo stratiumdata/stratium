@@ -69,13 +69,22 @@ const (
 	// ClampReasonProbeError means the question could not be answered at
 	// all. Fail-closed: unanswerable is not a grant (spec §3.8 G6).
 	ClampReasonProbeError
+	// ClampReasonUnreachable means the dimension was dropped because the
+	// granted scope made it meaningless, not because anything said no: an
+	// escalation threshold above the granted ceiling can never fire.
+	// Dropping it grants nothing the delegation could otherwise reach.
+	ClampReasonUnreachable
 )
 
 func (r ClampReason) String() string {
-	if r == ClampReasonProbeError {
+	switch r {
+	case ClampReasonProbeError:
 		return "probe error"
+	case ClampReasonUnreachable:
+		return "unreachable"
+	default:
+		return "denied"
 	}
-	return "denied"
 }
 
 // Clamp narrows req to the intersection of what was requested and what

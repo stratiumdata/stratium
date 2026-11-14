@@ -318,8 +318,8 @@ func TestStore_UpdateAgent_AuditsAToolWidening(t *testing.T) {
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"allowed_tools"}).AddRow([]byte(`["Read"]`)))
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
-			AddRow(now, now, []byte(`{}`), []byte(`{}`)))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(now, now, []byte(`{}`), []byte(`{}`), nil))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).
@@ -357,8 +357,8 @@ func TestStore_UpdateAgent_NarrowingToolsAuditsOneRow(t *testing.T) {
 	expectSetTenant(mock)
 	expectAgentToolsBeforeRead(mock, `["Read","Bash","Write"]`)
 	mock.ExpectQuery(regexp.QuoteMeta(updateAgentQuery)).
-		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints"}).
-			AddRow(now, now, []byte(`{}`), []byte(`{}`)))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(now, now, []byte(`{}`), []byte(`{}`), nil))
 	expectAdvisoryLock(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).

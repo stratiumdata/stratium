@@ -49,6 +49,7 @@ class Session:
         max_action_tier: int, purpose: str, ttl_seconds: int,
         staleness_window: float = 30.0, approval_poll_interval: float = 2.0,
         approval_timeout: float = 120.0,
+        escalate_at: int | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -72,6 +73,7 @@ class Session:
         self._mint = dict(
             subject=subject, agent_id=agent_id, tools=list(tools),
             max_action_tier=max_action_tier, purpose=purpose, ttl_seconds=ttl_seconds,
+            escalate_at=escalate_at,
         )
         self._clock = clock
         self._sleep = sleep

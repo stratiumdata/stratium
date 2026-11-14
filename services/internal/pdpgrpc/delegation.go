@@ -3,6 +3,7 @@ package pdpgrpc
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -91,6 +92,17 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "requested_scope.max_action_tier: %s", err)
 	}
+	// A requested threshold is validated here with the rest of the request,
+	// before anything is loaded. Unset (nil) means nothing was requested,
+	// not "never escalate": see effectiveEscalateAt (escalate_at.go).
+	var requestedEscalateAt *models.ActionTier
+	if req.GetRequestedScope().EscalateAt != nil {
+		t, err := models.ParseActionTier(int(req.GetRequestedScope().GetEscalateAt()))
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "requested_scope.escalate_at: %s", err)
+		}
+		requestedEscalateAt = &t
+	}
 	tools := req.GetRequestedScope().GetTools()
 	if len(tools) == 0 {
 		return nil, status.Error(codes.InvalidArgument,
@@ -166,6 +178,19 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 			"none of the requested tools are held by this principal")
 	}
 
+	// The threshold starts from what the caller cannot write (the agent's,
+	// for a root; the parent's, for a child, which permset.Contains then
+	// holds the child to) and the request may only lower it. One that the
+	// granted ceiling can never reach is dropped and reported in Removed.
+	inheritedEscalateAt := agent.EscalateAt
+	if parent != nil {
+		inheritedEscalateAt = parent.EscalateAt
+	}
+	escalateAt, escalateRemoval := effectiveEscalateAt(inheritedEscalateAt, requestedEscalateAt, granted.MaxActionTier)
+	if escalateRemoval != nil {
+		granted.Removed = append(slices.Clone(granted.Removed), *escalateRemoval)
+	}
+
 	now := time.Now()
 	newID := uuid.New()
 	d := &models.Delegation{
@@ -185,6 +210,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		// chain; children below copy their parent and can only narrow.
 		// Exactly the path ClassificationCaps above takes.
 		ResourceConstraints: copyStringMap(agent.ResourceConstraints),
+		EscalateAt:          escalateAt,
 		Purpose:             req.GetPurpose(),
 		ExpiresAt:           now.Add(time.Duration(req.GetTtlSeconds()) * time.Second),
 		ParentDelegationID:  parentID,
@@ -214,6 +240,11 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		switch {
 		case errors.Is(err, store.ErrScopeWidens):
 			return nil, status.Errorf(codes.PermissionDenied, "create delegation: %s", err)
+		case errors.Is(err, store.ErrEscalateAtUnreachable):
+			// effectiveEscalateAt drops an unreachable threshold before it
+			// gets here, so this is defensive: if it ever fires it is a bad
+			// request shape, not a server fault.
+			return nil, status.Errorf(codes.InvalidArgument, "create delegation: %s", err)
 		case errors.Is(err, store.ErrNotFound):
 			return nil, status.Errorf(codes.NotFound, "create delegation: %s", err)
 		default:
@@ -248,9 +279,14 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}
 
+	grantedScope := toProtoGrantedScope(granted)
+	if d.EscalateAt != nil {
+		v := int32(*d.EscalateAt) //nolint:gosec // G115: models.ActionTier is a 0-4 enum
+		grantedScope.EscalateAt = &v
+	}
 	return &CreateDelegationResponse{
 		DelegationId: d.ID.String(),
-		GrantedScope: toProtoGrantedScope(granted),
+		GrantedScope: grantedScope,
 		Token:        tok,
 		Epoch:        epoch,
 	}, nil

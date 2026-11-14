@@ -60,13 +60,13 @@ var ErrAllowedToolsRequired = errors.New("store: allowed_tools is required (use 
 const insertAgentQuery = `INSERT INTO agents (tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints) ` +
 	`VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, created_at, updated_at`
 
-const getAgentQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints, created_at, updated_at ` +
+const getAgentQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints, created_at, updated_at, escalate_at ` +
 	`FROM agents WHERE id = $1`
 
 // listAgentsQuery orders by name, the PAP admin screen's natural order — see
 // policy.go's listPoliciesQuery for the identical reasoning against
 // LoadAllPolicies/LoadAgent's own ORDER BY id.
-const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints, created_at, updated_at ` +
+const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints, created_at, updated_at, escalate_at ` +
 	`FROM agents ORDER BY name`
 
 // updateAgentQuery leaves updated_at to Postgres (NOW()), returned via
@@ -92,9 +92,12 @@ const listAgentsQuery = `SELECT id, tenant_id, name, provider, model_id, trust_t
 // SetAgentResourceConstraints/ClearAgentResourceConstraints
 // (agent_constraints.go), and is still read back via RETURNING so
 // UpdateAgent's response reports the column's real, unchanged value.
+// escalate_at is ABSENT for the same reason again: removing or raising a
+// threshold widens a grant, and this route is RoleEditor. It is written only
+// by SetAgentEscalation/ClearAgentEscalation (agent_escalation.go).
 const updateAgentQuery = `UPDATE agents SET name = $1, provider = $2, model_id = $3, trust_tier = $4, ` +
 	`enabled = $5, suspended = $6, allowed_tools = $7, updated_at = NOW() ` +
-	`WHERE id = $8 RETURNING created_at, updated_at, classification_caps, resource_constraints`
+	`WHERE id = $8 RETURNING created_at, updated_at, classification_caps, resource_constraints, escalate_at`
 
 // loadAgentToolsForUpdateQuery reads the allowlist this update is about to
 // replace, and locks the row until the transaction ends -- the same
@@ -128,8 +131,10 @@ func scanFullAgent(row rowScanner) (models.Agent, error) {
 	var allowedTools []byte
 	var classificationCaps []byte
 	var resourceConstraints []byte
+	var escalateAt sql.NullInt16
 	err := row.Scan(&a.ID, &a.TenantID, &a.Name, &a.Provider, &modelID, &trustTier,
-		&a.Enabled, &a.Suspended, &allowedTools, &classificationCaps, &resourceConstraints, &a.CreatedAt, &a.UpdatedAt)
+		&a.Enabled, &a.Suspended, &allowedTools, &classificationCaps, &resourceConstraints, &a.CreatedAt, &a.UpdatedAt,
+		&escalateAt)
 	if err != nil {
 		return models.Agent{}, err
 	}
@@ -151,6 +156,9 @@ func scanFullAgent(row rowScanner) (models.Agent, error) {
 	}
 	if a.ResourceConstraints == nil {
 		a.ResourceConstraints = map[string]string{}
+	}
+	if a.EscalateAt, err = decodeEscalateAt(escalateAt); err != nil {
+		return models.Agent{}, fmt.Errorf("agent %s escalate_at decode: %w", a.ID, err)
 	}
 	return a, nil
 }
@@ -233,6 +241,10 @@ func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (
 	row := tx.QueryRowContext(ctx, insertAgentQuery,
 		s.tenantID, a.Name, a.Provider, a.ModelID, int64(a.TrustTier),
 		a.Enabled, a.Suspended, allowedTools, classificationCaps, resourceConstraints)
+	// escalate_at is never inserted (NULL: never escalate), so the response
+	// must not echo whatever the request body carried either. It is written
+	// only by SetAgentEscalation, like the two maps above.
+	a.EscalateAt = nil
 	if err := row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if isUniqueViolation(err) {
 			return models.Agent{}, fmt.Errorf("%w: agent named %q", ErrAlreadyExists, a.Name)
@@ -380,7 +392,8 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 		allowedTools, id.String())
 	var classificationCaps []byte
 	var resourceConstraints []byte
-	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt, &classificationCaps, &resourceConstraints); err != nil {
+	var escalateAt sql.NullInt16
+	if err := row.Scan(&a.CreatedAt, &a.UpdatedAt, &classificationCaps, &resourceConstraints, &escalateAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.Agent{}, fmt.Errorf("%w: agent %s", ErrNotFound, id)
 		}
@@ -400,6 +413,9 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 	}
 	if a.ResourceConstraints == nil {
 		a.ResourceConstraints = map[string]string{}
+	}
+	if a.EscalateAt, err = decodeEscalateAt(escalateAt); err != nil {
+		return models.Agent{}, fmt.Errorf("store: agent %s escalate_at decode: %w", id, err)
 	}
 	a.ID = id
 	a.TenantID = s.tenantID

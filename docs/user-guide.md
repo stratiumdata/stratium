@@ -436,6 +436,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_REQUESTED_TIER` | ● | — | — | — | — |
 | `STRATIUM_PEP_TTL_SECONDS` | ● | — | — | — | — |
 | `STRATIUM_PEP_PURPOSE` | ○ | — | — | — | — |
+| `STRATIUM_PEP_ESCALATE_AT` | ○ | — | — | — | — |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | — | ● | ● | — | ● |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | — | ● | ● | — | ● |
 | `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | — | ● | ● | — | — |
@@ -463,6 +464,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_REQUESTED_TIER` | session-start | `3` | Integer 0–4. Requested `max_action_tier`. Clamped downward if policy does not permit it. Range is validated by the PDP, not locally. |
 | `STRATIUM_PEP_TTL_SECONDS` | session-start | `3600` | Delegation lifetime in seconds. Must be positive. |
 | `STRATIUM_PEP_PURPOSE` | session-start | `nightly refactor` | Free text, recorded on the delegation and visible to policy. Optional. |
+| `STRATIUM_PEP_ESCALATE_AT` | session-start | `3` | Optional. Asks for a **lower** escalation threshold than the agent's (§5.5). It can never raise or remove the agent's threshold, so leaving it unset changes nothing. |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | hook, mcp, proxy | `2s` | How often to poll for a human's answer while an escalation is pending. |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | hook, mcp, proxy | `5m` | How long to wait before an unanswered escalation denies. **No safe default:** too short denies escalations no human could clear in time; too long leaves a tool call silently blocked. |
 | `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | hook, mcp | `30s` | Upper bound on how old a replayed decision may be. See [`docs/pep.md`](pep.md) § "Choosing a decision cache staleness window". |
@@ -749,6 +751,9 @@ Roles are ranked, so an admin satisfies every editor and viewer route.
 | `GET /v1/agents/{id}` | viewer | fetch one agent |
 | `PUT /v1/agents/{id}` | editor | full replace |
 | `DELETE /v1/agents/{id}` | **admin** | delete |
+| `GET /v1/agents/{id}/escalation` | viewer | read the agent's escalation threshold |
+| `PUT /v1/agents/{id}/escalation` | **admin** | set it |
+| `DELETE /v1/agents/{id}/escalation` | **admin** | remove it |
 | `GET /v1/tool-catalog` | viewer | list catalog entries |
 | `POST /v1/tool-catalog` | editor | register a tool |
 | `GET /v1/tool-catalog/{id}` | viewer | fetch one entry |
@@ -1080,6 +1085,41 @@ before you use it:
 A child delegation may narrow `id_prefix` further (`/workspace/service-a/`
 under a parent's `/workspace/`) but may not widen it or drop it — see
 [`concepts.md`](concepts.md) §7.
+
+**Escalation threshold: when a human must approve.** Admin-only, on
+`/v1/agents/{id}/escalation`. At or above this tier, a call waits for a human
+(§5.9) instead of being allowed outright.
+
+```bash
+curl -sS -X PUT "http://$PAP/v1/agents/$AGENT/escalation" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"escalate_at": 4}'
+```
+
+```json
+{"agent_id": "...", "escalate_at": 4, "live_delegations": 1, "applies": "at next issuance"}
+```
+
+1. **It applies at the next issuance,** like caps and scope. A root delegation
+   copies the agent's threshold when it is minted. Revoke live delegations to
+   apply a change now.
+2. **A session can only make it stricter.** `STRATIUM_PEP_ESCALATE_AT`, or the
+   SDK's `escalate_at=`, asks for a *lower* threshold. Asking for a higher one,
+   or for none, leaves the agent's in place: the caller is the party being
+   policed.
+3. **A threshold above the session's ceiling is dropped.** If policy clamps the
+   ceiling to `EXTERNAL_COMMS` and the threshold is `DESTRUCTIVE`, it could
+   never fire. The response names it in `removed` with reason `unreachable`.
+4. **Removing or raising it is audited as a widening** (§5.11): the agent can
+   now act unattended where a human was asked before.
+5. **A missing or `null` value is a `400`.** Neither may silently mean tier 0
+   (escalate on everything) or "no threshold". `DELETE` removes it.
+6. **Sub-agents inherit it** and may lower it. A child whose own ceiling sits
+   below the threshold may drop it, since it could never reach it.
+
+Escalation needs a person to approve, so it fits `hook`, `mcp`, and the SDK,
+which wait. `extauthz` and `proxy` turn an escalation into a denial naming the
+approval id (§6.1).
 
 ### 5.6 CRUD: Tools (the tool catalog)
 
@@ -1899,6 +1939,7 @@ Every denial carries a reason. Learning to read four shapes saves hours:
 | `agent trust tier X insufficient for action tier Y (requires Z)` | the agent's trust tier | raise it, deliberately |
 | `resource classification X exceeds delegation cap Y in hierarchy "h"` | a classification cap | §5.7 |
 | `resource declares no classification; … cannot be evaluated` | a cap is set and nothing labelled the resource | write a catch-all label rule |
+| `action tier X at or above delegation escalate_at Y` | **not a denial:** the call is waiting for a human approval (§5.9) | approve it, or lower the work's tier |
 | `default deny: no policy verdict allowed` | no policy allowed the principal | §5.4 |
 | `delegation … is revoked` / `expired at …` | exactly what it says | new session |
 

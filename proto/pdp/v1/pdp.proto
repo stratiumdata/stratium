@@ -334,6 +334,15 @@ message RequestedScope {
   // tool that exists." CreateDelegation rejects an empty list with
   // INVALID_ARGUMENT before any policy is consulted.
   repeated string tools = 2;
+
+  // escalate_at asks for an escalation threshold: at or above this tier a
+  // call waits for a human instead of being allowed. It can only make the
+  // delegation STRICTER. The effective threshold is the lower of this and the
+  // one the delegation would otherwise carry (the agent's, for a root; the
+  // parent's, for a child). It can never raise or remove that threshold,
+  // because the caller is the party being policed: omitting it changes
+  // nothing. Unset means "nothing requested", not "never escalate".
+  optional int32 escalate_at = 3;
 }
 
 // ScopeRemoval names one thing CreateDelegation took away from a
@@ -370,6 +379,11 @@ message GrantedScope {
   repeated string tools = 2;
 
   repeated ScopeRemoval removed = 3;
+
+  // escalate_at is the threshold the delegation was actually issued with.
+  // Unset means it never escalates: none was set, or the granted ceiling sits
+  // below it so it could never fire (removed then names it).
+  optional int32 escalate_at = 4;
 }
 
 // CreateDelegationRequest asks the PDP to mint a new delegation — a root
