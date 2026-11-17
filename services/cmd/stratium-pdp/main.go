@@ -105,7 +105,7 @@ func run(logger *slog.Logger) error {
 			"assuming an already-migrated schema")
 	}
 
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", config.WithApplicationName(cfg.DatabaseURL, "stratium-pdp"))
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -210,7 +210,7 @@ func run(logger *slog.Logger) error {
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
 
-	logger.Info("stratium-pdp starting", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr)
+	logger.Info("stratium-pdp starting: a call is allowed only when principal, agent, and delegation all agree", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr)
 	// registryLanguages(registry), not cfg.PolicyLanguages: this reports what
 	// actually got wired (registry's own keys), not the configured value that
 	// produced it — the two agree whenever config is well-formed (the only
@@ -231,7 +231,7 @@ func run(logger *slog.Logger) error {
 // connection and, eventually, start accepting RPCs. See the package doc for
 // why that separation matters.
 func runMigrations(logger *slog.Logger, cfg config.Config) error {
-	db, err := sql.Open("postgres", cfg.MigrationDatabaseURL)
+	db, err := sql.Open("postgres", config.WithApplicationName(cfg.MigrationDatabaseURL, "stratium-pdp-migrate"))
 	if err != nil {
 		return fmt.Errorf("open migration database: %w", err)
 	}

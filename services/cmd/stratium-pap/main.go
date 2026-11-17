@@ -30,6 +30,7 @@ import (
 
 	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
 
+	"github.com/stratiumdata/stratium/internal/config"
 	"github.com/stratiumdata/stratium/internal/store"
 )
 
@@ -90,7 +91,7 @@ func run(logger *slog.Logger) error {
 	// closed with a permission-denied error, not silently reuse a
 	// read-only grant, since stratium_app has no INSERT/UPDATE/DELETE on
 	// any of these tables (N3).
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", config.WithApplicationName(cfg.DatabaseURL, "stratium-pap"))
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -126,7 +127,7 @@ func run(logger *slog.Logger) error {
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
-	logger.Info("stratium-pap starting", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr,
+	logger.Info("stratium-pap starting: administration API for agents, delegations, and policy", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr,
 		"oidc_issuer", cfg.OIDCIssuer)
 	return serve(logger, httpServer)
 }
