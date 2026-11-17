@@ -45,6 +45,8 @@ STRATIUM_PEP_PROXY_PUBLIC_URI
 | `STRATIUM_PEP_AGENT_ID` | `0f8f833a-…` | |
 | `STRATIUM_PEP_SUBJECT` | `you@example.com` | |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | |
+| `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. Applies to the PDP connection only; the connection to `STRATIUM_PEP_PROXY_TARGET_ADDR` is unchanged. |
+| `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | `2s` | |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | `120s` | |
 
@@ -61,6 +63,7 @@ export STRATIUM_PEP_PROXY_LISTEN_ADDR="127.0.0.1:9292" \
        STRATIUM_PEP_PROXY_TARGET_ADDR="orders.internal:50051" \
        STRATIUM_PEP_PROXY_PUBLIC_URI="https://proxy.example.com" \
        STRATIUM_PEP_PDP_ADDR="localhost:50051" \
+       STRATIUM_PEP_PDP_INSECURE=true \
        STRATIUM_PEP_AGENT_ID="0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19" \
        STRATIUM_PEP_SUBJECT="agent-tester@example.com" \
        STRATIUM_PEP_CONNECT_TIMEOUT=5s \

@@ -52,6 +52,8 @@ crash — fail-closed is the whole design.
 | `STRATIUM_PEP_SUBJECT` | `you@example.com` | |
 | `STRATIUM_PEP_SESSION_FILE` | `/run/stratium/session.json` | Written by [`session-start`](session-start.md). |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | gRPC dial only. |
+| `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. |
+| `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | `2s` | How often to re-check a pending approval. |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | `120s` | How long to hold a call open awaiting one. |
 | `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | `30s` | How long a cached decision may keep being served. No default, deliberately. |

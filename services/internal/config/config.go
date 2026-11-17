@@ -24,6 +24,11 @@ type Config struct {
 	MaxDepth             int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
 	DBTimeout            time.Duration // STRATIUM_DB_TIMEOUT, default 5s
 
+	// gRPC transport (see tls.go). TLS is required unless GRPCInsecure is set.
+	TLSCertFile  string // STRATIUM_TLS_CERT_FILE, PEM certificate chain
+	TLSKeyFile   string // STRATIUM_TLS_KEY_FILE, PEM private key
+	GRPCInsecure bool   // STRATIUM_GRPC_INSECURE, serve plaintext (local development only)
+
 	// TokenSigningKeyPath is the filesystem path to a PEM-encoded EC private
 	// key: the PDP's current delegation-token signing key, which also
 	// verifies (STRATIUM_TOKEN_SIGNING_KEY_PATH, required). Spec §4.7.1 K1:
@@ -239,6 +244,9 @@ func Load() (Config, error) {
 		if c.PolicyLanguages, err = splitPolicyLanguages(v); err != nil {
 			return c, err
 		}
+	}
+	if err := loadTransport(&c); err != nil {
+		return c, err
 	}
 	return c, nil
 }

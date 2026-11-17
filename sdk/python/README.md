@@ -22,6 +22,9 @@ every tool call against it.
 ```python
 from stratium import Client, Session
 
+# TLS by default, verified against the system roots. For a private CA pass
+# ca_file="/path/to/ca.pem"; against the local Docker stack (plaintext) use
+# Client(pdp_addr, insecure=True).
 with Client(pdp_addr) as client:
     # Call one: get a token. Session's constructor makes it for you --
     # this is Client.create_delegation() under the hood.

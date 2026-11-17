@@ -130,6 +130,9 @@ def next_steps(events, agent="claude", binary="stratium-pep"):
         print(f"{len(gone)} of {len(need)} are missing here. In the launching shell:\n")
         if "STRATIUM_PEP_PDP_ADDR" in gone:
             print(f"  {DC}")
+        if not os.environ.get("STRATIUM_PEP_PDP_INSECURE"):
+            print("  export STRATIUM_PEP_PDP_INSECURE=true                    "
+                  "# the local stack serves plaintext")
         for v in gone:
             spec = EXAMPLES.get(v, '""')
             value, note = spec if isinstance(spec, tuple) else (spec, None)
@@ -508,7 +511,7 @@ def selftest(_args):
             text = open(os.path.join(src, name)).read()
             return set(re.findall(r'"(STRATIUM_PEP_[A-Z_]+)"', text))
 
-        want_ss = literals("session_start.go") - {"STRATIUM_PEP_PURPOSE"}  # optional
+        want_ss = literals("session_start.go") - {"STRATIUM_PEP_PURPOSE", "STRATIUM_PEP_ESCALATE_AT"}  # optional
         assert set(REQUIRED_ENV["SessionStart"]) == want_ss, (
             f"SessionStart drifted from session_start.go: "
             f"{want_ss ^ set(REQUIRED_ENV['SessionStart'])}")
@@ -787,6 +790,9 @@ def pep_env(state):
         "STRATIUM_PEP_REQUESTED_TIER": str(DEMO_TIER),
         "STRATIUM_PEP_TTL_SECONDS": str(DEMO_TTL),
         "STRATIUM_PEP_PURPOSE": "stratium quickstart",
+        # The compose stack's PDPs serve plaintext (STRATIUM_GRPC_INSECURE);
+        # the PEP defaults to TLS, so it has to be told.
+        "STRATIUM_PEP_PDP_INSECURE": "true",
     })
     return env
 

@@ -334,6 +334,7 @@ func startPDPCache(t *testing.T) {
 func cacheProofBaseEnv(agentID uuid.UUID, subject, sessionFile string) map[string]string {
 	return map[string]string{
 		"STRATIUM_PEP_PDP_ADDR":               cacheAddr,
+		"STRATIUM_PEP_PDP_INSECURE":           "true", // the compose PDPs serve plaintext
 		"STRATIUM_PEP_AGENT_ID":               agentID.String(),
 		"STRATIUM_PEP_SUBJECT":                subject,
 		"STRATIUM_PEP_SESSION_FILE":           sessionFile,

@@ -32,6 +32,11 @@ func setValidEnv(t *testing.T) {
 	// tests), so nothing here ever reads what this path names.
 	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/test/current-key.pem")
 	t.Setenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH", "")
+	// TLS is required by default; placeholders, since Load checks presence
+	// only and cmd/stratium-pdp is what reads the files.
+	t.Setenv("STRATIUM_TLS_CERT_FILE", "/test/tls.crt")
+	t.Setenv("STRATIUM_TLS_KEY_FILE", "/test/tls.key")
+	t.Setenv("STRATIUM_GRPC_INSECURE", "")
 }
 
 // TestLoad_AllFieldsFromEnvironment compares field by field, not the whole
@@ -51,6 +56,9 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_POLICY_LANGUAGES", "xacml,cedar")
 	t.Setenv("STRATIUM_TOKEN_SIGNING_KEY_PATH", "/keys/current.pem")
 	t.Setenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH", "/keys/previous.pem")
+	t.Setenv("STRATIUM_TLS_CERT_FILE", "/tls/pdp.crt")
+	t.Setenv("STRATIUM_TLS_KEY_FILE", "/tls/pdp.key")
+	t.Setenv("STRATIUM_GRPC_INSECURE", "")
 
 	got, err := Load()
 	if err != nil {
@@ -91,6 +99,9 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	}
 	if want := []string{"xacml", "cedar"}; !slices.Equal(got.PolicyLanguages, want) {
 		t.Errorf("PolicyLanguages = %v, want %v", got.PolicyLanguages, want)
+	}
+	if got.TLSCertFile != "/tls/pdp.crt" || got.TLSKeyFile != "/tls/pdp.key" || got.GRPCInsecure {
+		t.Errorf("transport = %q/%q insecure=%v", got.TLSCertFile, got.TLSKeyFile, got.GRPCInsecure)
 	}
 }
 

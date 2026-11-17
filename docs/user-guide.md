@@ -344,6 +344,9 @@ Three rules run through all three binaries:
 | `STRATIUM_MIGRATION_DATABASE_URL` | unset | a Postgres URL | Set it to apply embedded migrations at startup on a connection closed before serving. Unset means "skip migrations, assume an already-migrated schema", logged plainly. Use `stratium_migrate`. |
 | `STRATIUM_TOKEN_PREVIOUS_KEY_PATH` | unset | a file path | Verify-only key, for a rotation window. Unset is the steady state. |
 | `STRATIUM_LISTEN_ADDR` | `:50051` | `host:port` | gRPC listen address. |
+| `STRATIUM_TLS_CERT_FILE` | unset | a file path | PEM certificate chain the PDP serves. Set together with `STRATIUM_TLS_KEY_FILE`. **Required unless `STRATIUM_GRPC_INSECURE=true`:** with neither set, the PDP refuses to start. Loaded once at startup; rotating the certificate needs a restart. |
+| `STRATIUM_TLS_KEY_FILE` | unset | a file path | PEM private key for `STRATIUM_TLS_CERT_FILE`. Setting only one of the two is a startup failure. |
+| `STRATIUM_GRPC_INSECURE` | `false` | `true`, `false` | `true` serves plaintext gRPC. **Local development only**; the PDP logs a warning on every start. Setting it alongside the certificate variables is a startup failure. |
 | `STRATIUM_MAX_DELEGATION_DEPTH` | `5` | integer ≥ 1 | Longest delegation chain permitted. A chain deeper than this denies. |
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
 | `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long a pending approval stays valid. How long you can reasonably expect a human to answer an escalation. |
@@ -358,7 +361,19 @@ STRATIUM_TENANT_ID=acme-prod
 STRATIUM_TOKEN_SIGNING_KEY_PATH=/etc/stratium/keys/current.pem
 STRATIUM_DPOP_FRESHNESS_WINDOW=30s
 STRATIUM_LISTEN_ADDR=:50051
+STRATIUM_TLS_CERT_FILE=/etc/stratium/tls/pdp.crt
+STRATIUM_TLS_KEY_FILE=/etc/stratium/tls/pdp.key
 ```
+
+**Transport security.** gRPC between Stratium components is TLS by default
+(TLS 1.2 or later). The PDP serves the certificate above, and every PEP
+subcommand verifies it against the system roots, or against a private CA
+bundle named by `STRATIUM_PEP_PDP_CA_FILE` (§3.3). Plaintext needs an explicit
+opt-in on both sides (`STRATIUM_GRPC_INSECURE=true` on the PDP,
+`STRATIUM_PEP_PDP_INSECURE=true` on the PEP) and is for the local evaluation
+stack only, which sets both for you: delegation tokens are bearer credentials,
+and plaintext exposes them to anyone on the path. A PEP that cannot complete
+the handshake denies, like any other unreachable PDP.
 
 ### 3.2 `stratium-pap` — the admin plane
 
@@ -422,6 +437,8 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_AGENT_ID` | `50bdd8cc-377f-4135-818d-cfd30b206ce5` | The UUID returned when you created the agent (§5.4). |
 | `STRATIUM_PEP_SUBJECT` | `alice@example.com` | The **person** on whose behalf the agent acts. Must match what your policies condition on. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds every PDP call. Duration > 0. |
+| `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's certificate with, instead of the system roots. Use it when a private CA issued the PDP's certificate. |
+| `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for the local evaluation stack only. Setting it alongside `STRATIUM_PEP_PDP_CA_FILE` is an error, and the PEP denies. |
 
 #### Which subcommand needs what
 
@@ -431,6 +448,8 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_AGENT_ID` | ● | ● | ● | ● | ● |
 | `STRATIUM_PEP_SUBJECT` | ● | ● | ● | ● | ● |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | ● | ● | ● | ● | ● |
+| `STRATIUM_PEP_PDP_CA_FILE` | ○ | ○ | ○ | ○ | ○ |
+| `STRATIUM_PEP_PDP_INSECURE` | ○ | ○ | ○ | ○ | ○ |
 | `STRATIUM_PEP_SESSION_FILE` | ● | ● | ● | — | — |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | ● | — | — | — | — |
 | `STRATIUM_PEP_REQUESTED_TIER` | ● | — | — | — | — |
@@ -1628,8 +1647,12 @@ is the one everybody skips.
 
 ```bash
 export PDP=pdp.internal:50051
+export STRATIUM_PEP_PDP_CA_FILE=/etc/stratium/pdp-ca.pem   # only if a private CA issued the PDP's certificate
 which stratium-pep
 ```
+
+Against the local evaluation stack (§2.2), use its `$PDP` and
+`export STRATIUM_PEP_PDP_INSECURE=true` instead: that stack serves plaintext.
 
 #### Step 1 — Register the agent (PAP, §5.5)
 
@@ -1839,6 +1862,7 @@ the original into the upstream variables:
         "STRATIUM_PEP_MCP_UPSTREAM_COMMAND": "npx",
         "STRATIUM_PEP_MCP_UPSTREAM_ARGS": "-y,@modelcontextprotocol/server-filesystem,/srv/data",
         "STRATIUM_PEP_PDP_ADDR": "pdp.internal:50051",
+        "STRATIUM_PEP_PDP_CA_FILE": "/etc/stratium/pdp-ca.pem",
         "STRATIUM_PEP_AGENT_ID": "…",
         "STRATIUM_PEP_SUBJECT": "alice@example.com",
         "STRATIUM_PEP_SESSION_FILE": "/run/stratium/mcp-session.json",
@@ -1875,6 +1899,7 @@ http_filters:
 ```bash
 STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR=:9191
 STRATIUM_PEP_PDP_ADDR=pdp.internal:50051
+STRATIUM_PEP_PDP_CA_FILE=/etc/stratium/pdp-ca.pem
 STRATIUM_PEP_AGENT_ID=…
 STRATIUM_PEP_SUBJECT=alice@example.com
 STRATIUM_PEP_CONNECT_TIMEOUT=5s
@@ -1892,6 +1917,7 @@ STRATIUM_PEP_PROXY_LISTEN_ADDR=:9292
 STRATIUM_PEP_PROXY_TARGET_ADDR=payments.internal:50051
 STRATIUM_PEP_PROXY_PUBLIC_URI=https://tools.example.com
 STRATIUM_PEP_PDP_ADDR=pdp.internal:50051
+STRATIUM_PEP_PDP_CA_FILE=/etc/stratium/pdp-ca.pem
 STRATIUM_PEP_AGENT_ID=…
 STRATIUM_PEP_SUBJECT=alice@example.com
 STRATIUM_PEP_CONNECT_TIMEOUT=5s
@@ -1932,7 +1958,7 @@ Every denial carries a reason. Learning to read four shapes saves hours:
 | Reason begins with | Means | Fix |
 |---|---|---|
 | `stratium-pep: missing required configuration:` | the PEP is misconfigured — **not** a policy denial | add the named variables |
-| `stratium-pep: could not reach PDP` / `PDP did not respond in time` | network or PDP outage; the PEP failed closed | check the PDP |
+| `stratium-pep: could not reach PDP` / `PDP did not respond in time` | network or PDP outage, or a TLS mismatch; the PEP failed closed | check the PDP; for a TLS handshake error, see §3.1 "Transport security" |
 | `action tier X exceeds delegation max_action_tier Y at depth N` | the delegation's ceiling | raise `STRATIUM_PEP_REQUESTED_TIER` and restart the session, if policy permits it |
 | `tool "X" not in delegation approved_tools at depth N` | outside the granted scope | add it to `STRATIUM_PEP_REQUESTED_TOOLS` and restart the session |
 | `tool "X" not in agent allowed_tools` | the **agent record**, not the delegation | edit the agent (§5.5) |
@@ -1975,6 +2001,7 @@ classification, the system is working.
 | PDP: `serving identity holds membership in stratium_audit_owner` | the serving role has DDL rights over `audit_chain` | use a role that is a member of `stratium_app` only |
 | PDP: `stratium_audit_owner role does not exist` | migration `000004` was never applied | apply migrations (set `STRATIUM_MIGRATION_DATABASE_URL`) |
 | PDP: `STRATIUM_POLICY_LANGUAGES: …` | a name matching no engine, or a stray comma | use a subset of `cedar,json,rego,xacml` |
+| PDP: `STRATIUM_TLS_CERT_FILE and STRATIUM_TLS_KEY_FILE are required …` | no certificate configured | set both, or `STRATIUM_GRPC_INSECURE=true` for local development only |
 | PDP: `must be positive, got 0s` | a zero or negative duration | every duration must be > 0 |
 | PDP: `pattern dist: no matching files found` | you ran `go build` for the PAP without the UI | `make ui`, then use `make` |
 | PAP: `discover OIDC provider …` | issuer wrong or unreachable | `curl $ISSUER/.well-known/openid-configuration` |

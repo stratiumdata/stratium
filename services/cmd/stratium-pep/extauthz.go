@@ -172,7 +172,6 @@ import (
 	rpccode "google.golang.org/genproto/googleapis/rpc/code"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
@@ -310,7 +309,7 @@ func runExtauthzCmd(stderr io.Writer) int {
 	// Decide call denies on it, per the package doc's FAIL CLOSED section),
 	// not a startup failure, the same way hook's own dial never blocks
 	// startup on the PDP being up.
-	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUserAgent(pdpUserAgent))
+	conn, err := dialPDP(cfg.PDPAddr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
 		return 1

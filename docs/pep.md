@@ -46,6 +46,8 @@ Shared by all three subcommands (`session-start`, `hook`, `mcp`):
 | `STRATIUM_PEP_SUBJECT` | The principal the agent acts on behalf of (e.g. an email). |
 | `STRATIUM_PEP_SESSION_FILE` | Path to the session file. `session-start` writes it; `hook` and `mcp` read it fresh on every single tool call, so a revocation or a fresh session takes effect on the very next one. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | How long to wait for one PDP call before failing closed, e.g. `5s`. |
+| `STRATIUM_PEP_PDP_CA_FILE` (optional) | PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. Use it when a private CA issued the PDP's certificate. |
+| `STRATIUM_PEP_PDP_INSECURE` (optional) | `true` connects to the PDP in plaintext, for a local development stack only. The default is TLS. Setting it alongside `STRATIUM_PEP_PDP_CA_FILE` is an error, and the PEP denies. |
 
 `hook` and `mcp` only, in addition to the five above (`session-start` never
 polls, so it has no use for either):
@@ -81,6 +83,7 @@ scope (which may be narrower than what was requested) to
 `STRATIUM_PEP_SESSION_FILE`:
 
     STRATIUM_PEP_PDP_ADDR=localhost:50051 \
+    STRATIUM_PEP_PDP_INSECURE=true \
     STRATIUM_PEP_AGENT_ID=<agent-uuid> \
     STRATIUM_PEP_SUBJECT=alice@example.com \
     STRATIUM_PEP_SESSION_FILE=/tmp/stratium-pep-session.json \
@@ -324,6 +327,7 @@ location are your client's own, not something this project defines):
       "args": ["mcp"],
       "env": {
         "STRATIUM_PEP_PDP_ADDR": "localhost:50051",
+        "STRATIUM_PEP_PDP_INSECURE": "true",
         "STRATIUM_PEP_AGENT_ID": "<agent-uuid>",
         "STRATIUM_PEP_SUBJECT": "alice@example.com",
         "STRATIUM_PEP_SESSION_FILE": "/tmp/stratium-pep-session.json",
@@ -1017,6 +1021,7 @@ could not ask" matters, because the fix is different:
 | `re-issue token: ...` | The cached token was rejected, and the automatic re-issue attempt (see "Re-issue on expiry" above) also failed — the delegation itself is revoked or expired, or the PDP could not be reached for the re-issue call. | If the delegation is dead, run `session-start` again; otherwise treat the wrapped reason like `could not reach PDP`/`PDP returned an error` above. |
 | `retry after re-issuing token: ...` | Re-issuance itself succeeded, but the retried `Decide` call with the fresh token failed at the transport level (unreachable PDP, timeout). | Treat the wrapped reason like `could not reach PDP`/`PDP did not respond in time` above. |
 | `could not reach PDP` | Transport failure — the PDP process may be down or the address wrong. | Check the PDP is running and `STRATIUM_PEP_PDP_ADDR` is correct. |
+| `could not reach PDP` with a TLS error such as `tls: first record does not look like a TLS handshake` | The PEP speaks TLS (the default) and the PDP serves plaintext. | For a local stack, set `STRATIUM_PEP_PDP_INSECURE=true`; otherwise give the PDP a certificate (`STRATIUM_TLS_CERT_FILE`, `STRATIUM_TLS_KEY_FILE`). |
 | `PDP did not respond in time` | The PDP is reachable but did not answer inside `STRATIUM_PEP_CONNECT_TIMEOUT`. | Check PDP health/load, or raise the timeout. |
 | `PDP returned an error` | The PDP is up and answered, but the call itself failed server-side. | Check the PDP's own logs. |
 | `approval ... did not resolve within the escalation timeout` | The action required human approval, and nobody resolved it inside `STRATIUM_PEP_APPROVAL_TIMEOUT`. | Approve escalations faster, or raise the timeout — see "Grant discovery tools" above for the same "the grant is real but unusable" shape applied to timing instead of scope. |

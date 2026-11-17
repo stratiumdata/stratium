@@ -51,7 +51,7 @@ class Clock:
 
 def session(fake_pdp, clock, **kw):
     fake_pdp.delegation_responses.append(grant_resp())
-    c = Client(fake_pdp.addr)
+    c = Client(fake_pdp.addr, insecure=True)
     return Session(c, subject="s", agent_id="a", tools=["Read"],
                    max_action_tier=1, purpose="test", ttl_seconds=3600,
                    clock=clock, **kw)
@@ -201,7 +201,7 @@ def test_after_a_reissue_the_delegation_expiry_comes_from_the_new_token(fake_pdp
     fake_pdp.delegation_responses.append(grant_resp(token=_jwt(exp=50), did="d1"))
     fake_pdp.decide_responses.extend([deny("token expired"), allow(), allow()])
 
-    c = Client(fake_pdp.addr)
+    c = Client(fake_pdp.addr, insecure=True)
     s = Session(c, subject="s", agent_id="a", tools=["Read"], max_action_tier=1,
                 purpose="test", ttl_seconds=10, staleness_window=1e6, clock=clock)
     fake_pdp.delegation_responses.append(
@@ -291,7 +291,7 @@ def test_the_default_clock_shares_an_epoch_with_token_expiry(fake_pdp):
     fake_pdp.delegation_responses.append(grant_resp(token=expired))
     fake_pdp.decide_responses.extend([allow(), allow()])
 
-    c = Client(fake_pdp.addr)
+    c = Client(fake_pdp.addr, insecure=True)
     s = Session(c, subject="s", agent_id="a", tools=["Read"],
                 max_action_tier=1, purpose="test", ttl_seconds=3600)   # no clock=
 
@@ -346,7 +346,7 @@ def test_an_escalation_that_times_out_is_not_cached(fake_pdp):
     fake_pdp.approval_responses.extend(
         [pdp_pb2.GetApprovalResponse(status="pending")] * 40)
 
-    c = Client(fake_pdp.addr)
+    c = Client(fake_pdp.addr, insecure=True)
     s = Session(c, subject="s", agent_id="a", tools=["Read"], max_action_tier=1,
                 purpose="test", ttl_seconds=3600,
                 approval_poll_interval=0.005, approval_timeout=0.02)
@@ -413,7 +413,7 @@ def test_the_delegation_expiry_comes_from_the_token_not_the_requested_ttl(fake_p
     fake_pdp.delegation_responses.append(grant_resp(token=_jwt(exp=1000)))
     fake_pdp.decide_responses.extend([allow(), allow()])
 
-    c = Client(fake_pdp.addr)
+    c = Client(fake_pdp.addr, insecure=True)
     s = Session(c, subject="s", agent_id="a", tools=["Read"], max_action_tier=1,
                 purpose="test", ttl_seconds=10, staleness_window=1e6, clock=clock)
 

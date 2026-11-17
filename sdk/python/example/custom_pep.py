@@ -8,7 +8,7 @@ a call over tier is refused before its tool is ever looked up. Exits
 non-zero if any differs, and asserts on the PDP's own reason strings rather
 than on exit codes -- a denial for the wrong reason is a failure, not a pass.
 
-    python3 custom_pep.py --pdp localhost:56378 --agent <uuid> --subject you@example.com
+    python3 custom_pep.py --pdp localhost:56378 --agent <uuid> --subject you@example.com --insecure
 """
 
 import argparse
@@ -22,9 +22,11 @@ def main() -> int:
     ap.add_argument("--pdp", required=True, help="host:port of the PDP")
     ap.add_argument("--agent", required=True, help="an agent id in the PDP's tenant")
     ap.add_argument("--subject", required=True)
+    ap.add_argument("--ca-file", help="PEM CA bundle for the PDP's certificate (default: system roots)")
+    ap.add_argument("--insecure", action="store_true", help="plaintext, for the local Docker stack only")
     args = ap.parse_args()
 
-    with Client(args.pdp) as client:
+    with Client(args.pdp, insecure=args.insecure, ca_file=args.ca_file) as client:
         session = Session(
             client, subject=args.subject, agent_id=args.agent,
             tools=["Read"], max_action_tier=1,

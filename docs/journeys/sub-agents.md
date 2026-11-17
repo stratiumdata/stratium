@@ -36,6 +36,8 @@ creates sessions only.
 ```python
 from stratium import Client, Session
 
+# TLS by default. Private CA: Client(pdp_addr, ca_file="/path/to/ca.pem").
+# Local Docker stack (plaintext): Client(pdp_addr, insecure=True).
 with Client(pdp_addr) as client:
     orchestrator = Session(
         client, subject="you@example.com", agent_id=ORCHESTRATOR_ID,
