@@ -4,10 +4,13 @@ version = "0.1.0"
 description = "Build a Stratium policy enforcement point"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-dependencies = ["grpcio>=1.60"]
+# Floors match the generated code in stratium/_pdp, which checks them at
+# import: pdp_pb2.py needs protobuf 7.35.1+ within major 7, and
+# pdp_pb2_grpc.py needs grpcio 1.83.0+. Raise them when regenerating.
+dependencies = ["grpcio>=1.83.0", "protobuf>=7.35.1,<8"]
 
 [project.optional-dependencies]
-dev = ["grpcio-tools>=1.60", "pytest>=8"]
+dev = ["grpcio-tools>=1.83.0", "pytest>=8"]
 
 [build-system]
 requires = ["setuptools>=77"]
