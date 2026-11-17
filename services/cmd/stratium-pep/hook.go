@@ -166,7 +166,7 @@ func runHookCmd(stdin io.Reader, stdout io.Writer) int {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", err))
 	}
 
-	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUserAgent(pdpUserAgent))
 	if err != nil {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: could not create PDP client: %s", err))
 	}
@@ -316,6 +316,11 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		return writeDeny(stdout, resp.GetReason())
 	}
 }
+
+// pdpUserAgent identifies this PEP on every connection it opens to the PDP,
+// so a PDP operator reading gRPC metadata or proxy logs can tell which
+// client is calling. grpc-go appends its own version after it.
+const pdpUserAgent = "stratium-pep (+https://docs.stratium.dev)"
 
 // agentOrDelegationUnknownMsg is describeRPCError's notFoundMsg for every
 // Decide call this hook makes (the first ask and, from escalation.go, the

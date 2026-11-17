@@ -236,7 +236,7 @@ func runMCPCmd(stdin io.Reader, stdout, stderr io.Writer) int {
 	// grpc.NewClient dials lazily -- this succeeds for any syntactically valid target even if
 	// nothing is listening yet, exactly like runHookCmd's identical call. An actually-unreachable
 	// PDP is a per-Decide-call failure (decideAndRelay's describeRPCError path), not a startup one.
-	conn, err := grpc.NewClient(hookCfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(hookCfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUserAgent(pdpUserAgent))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
 		return 1

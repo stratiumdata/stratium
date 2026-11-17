@@ -25,7 +25,7 @@ func fullyPopulatedEvaluationInput() policy.EvaluationInput {
 		DerivedTier: models.ActionTierDestructive,
 		Resource:    map[string]string{"id": "res-1", "classification": "restricted"},
 		Agent: authz.AgentInfo{
-			ID:           uuid.MustParse("a5f1c2d3-0000-4000-8000-000000000099"),
+			ID:           uuid.MustParse("232bdc97-a502-4078-828c-a145915ed81d"),
 			TrustTier:    models.TrustTierCertified,
 			Enabled:      true,
 			Suspended:    true,
