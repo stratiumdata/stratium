@@ -45,6 +45,8 @@ STRATIUM_PEP_CONNECT_TIMEOUT, STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS
 | `STRATIUM_PEP_AGENT_ID` | `0f8f833a-…` | |
 | `STRATIUM_PEP_SUBJECT` | `you@example.com` | |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | |
+| `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. |
+| `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
 
 **No session file, no approval durations, no cache window.** Envoy's `ext_authz`
 budget is milliseconds, not minutes, so this surface cannot hold a request open
@@ -59,6 +61,7 @@ optional.
 export STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR="127.0.0.1:10000" \
        STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS="api.example.com" \
        STRATIUM_PEP_PDP_ADDR="localhost:50051" \
+       STRATIUM_PEP_PDP_INSECURE=true \
        STRATIUM_PEP_AGENT_ID="0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19" \
        STRATIUM_PEP_SUBJECT="agent-tester@example.com" \
        STRATIUM_PEP_CONNECT_TIMEOUT=5s

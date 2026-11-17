@@ -584,6 +584,8 @@ func TestRunMCPCmd_DeniedToolsCall_NeverReachesRealUpstreamSubprocess(t *testing
 		"STRATIUM_PEP_PDP_ADDR":     lis.Addr().String(),
 		"STRATIUM_PEP_SESSION_FILE": sessionPath,
 	})
+	// The fake PDP above serves plaintext; TLS is the PEP's default.
+	t.Setenv("STRATIUM_PEP_PDP_INSECURE", "true")
 
 	logPath := filepath.Join(t.TempDir(), "upstream-received.log")
 	t.Setenv("STRATIUM_PEP_MCP_UPSTREAM_COMMAND", os.Args[0])

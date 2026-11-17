@@ -68,6 +68,10 @@ There is no second decision implementation anywhere — `internal/authz`'s packa
 doc names "three parallel implementations drifting apart" as the specific failure
 it exists to prevent.
 
+PEP-to-PDP traffic is gRPC over TLS. Plaintext needs an explicit opt-in on both
+ends (`STRATIUM_GRPC_INSECURE` on the PDP, `STRATIUM_PEP_PDP_INSECURE` on the
+PEP), which only the local dev stack sets.
+
 The local dev stack (`deploy/docker/docker-compose.yml`) runs **18 services**:
 Postgres, eight differently-configured PDPs, two PEPs, Envoy with an upstream, a
 gRPC target, Keycloak, and two PAPs. Eight PDPs because each integration test

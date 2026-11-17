@@ -47,6 +47,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-one
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # Load-bearing as of Phase 9 Task 2: main.go now calls
       # internal/token.Load at startup, so this must name a real, readable
       # EC PEM or the container fails to start. The Dockerfile's builder
@@ -104,6 +105,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-narrow-registry-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # The ONLY service that overrides the 5m default, and it is not an
       # arbitrary choice of service: TestIntegration_SpentProofReaper_
       # RunsOnASchedule (internal/store) plants an already-expired row for
@@ -177,6 +179,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-resource-identity-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -221,6 +224,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-extauthz-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -270,6 +274,7 @@ services:
     environment:
       STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR: :9191
       STRATIUM_PEP_PDP_ADDR: pdp-extauthz:50051
+      STRATIUM_PEP_PDP_INSECURE: "true"
       STRATIUM_PEP_AGENT_ID: 72d38ebe-2e5c-4918-9e73-b0de3607fbfa
       STRATIUM_PEP_SUBJECT: extauthz-integration@example.com
       STRATIUM_PEP_CONNECT_TIMEOUT: 5s
@@ -361,6 +366,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-proxy-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -421,6 +427,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-epoch-e2e-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -537,6 +544,7 @@ services:
       # proxy_integration_test.go's proxyPublicURI is this string.
       STRATIUM_PEP_PROXY_PUBLIC_URI: http://proxy.stratium.test:9292
       STRATIUM_PEP_PDP_ADDR: pdp-proxy:50051
+      STRATIUM_PEP_PDP_INSECURE: "true"
       STRATIUM_PEP_AGENT_ID: 04ef809a-849f-404a-9a5c-015b7f73a014
       STRATIUM_PEP_SUBJECT: proxy-integration@example.com
       STRATIUM_PEP_CONNECT_TIMEOUT: 5s
@@ -617,6 +625,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-cache-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -674,6 +683,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-mcp-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -800,6 +810,7 @@ services:
       STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
       STRATIUM_TENANT_ID: tenant-pap-e2e-integration
       STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem

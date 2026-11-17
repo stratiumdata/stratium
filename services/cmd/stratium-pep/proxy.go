@@ -1286,7 +1286,7 @@ func runProxyCmd(stderr io.Writer) int {
 	// Dialed lazily the same way -- an unreachable PDP is an authorize-time failure (every call
 	// denies on it, per the package doc's FAIL CLOSED section), not a startup failure, the same
 	// way hook's and extauthz's own PDP dials never block startup on the PDP being up.
-	pdpConn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUserAgent(pdpUserAgent))
+	pdpConn, err := dialPDP(cfg.PDPAddr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
 		return 1

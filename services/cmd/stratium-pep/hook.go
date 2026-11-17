@@ -54,9 +54,7 @@ import (
 	"io"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
@@ -166,7 +164,7 @@ func runHookCmd(stdin io.Reader, stdout io.Writer) int {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", err))
 	}
 
-	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUserAgent(pdpUserAgent))
+	conn, err := dialPDP(cfg.PDPAddr)
 	if err != nil {
 		return writeDeny(stdout, fmt.Sprintf("stratium-pep: could not create PDP client: %s", err))
 	}

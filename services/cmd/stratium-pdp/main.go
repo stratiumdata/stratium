@@ -193,12 +193,17 @@ func run(logger *slog.Logger) error {
 	// need to be passed to NewServer a second time raw.
 	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg, signer)
 
+	transport, err := serverTransport(logger, cfg)
+	if err != nil {
+		return err
+	}
+
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(transport)
 	pdpgrpc.RegisterPDPServiceServer(grpcServer, srv)
 
 	// The standard health service, nothing else registered alongside it: no

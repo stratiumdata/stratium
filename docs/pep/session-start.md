@@ -40,6 +40,8 @@ STRATIUM_PEP_REQUESTED_TOOLS, STRATIUM_PEP_TTL_SECONDS
 | `STRATIUM_PEP_SUBJECT` | `you@example.com` | The principal delegating. A policy must name it, or issuance fails. |
 | `STRATIUM_PEP_SESSION_FILE` | `/run/stratium/session.json` | Where the delegation lands. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds the gRPC dial only. |
+| `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. |
+| `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
 | `STRATIUM_PEP_REQUESTED_TIER` | `3` | Ceiling on action tier, 0–4. |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | `Read,Grep,Glob` | Comma-separated. Empty is refused, not treated as "all". |
 | `STRATIUM_PEP_TTL_SECONDS` | `3600` | Delegation lifetime. |
@@ -63,6 +65,7 @@ the session file, under `granted_scope.escalate_at`.
 
 ```bash
 export STRATIUM_PEP_PDP_ADDR="localhost:50051" \
+       STRATIUM_PEP_PDP_INSECURE=true \
        STRATIUM_PEP_AGENT_ID="0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19" \
        STRATIUM_PEP_SUBJECT="agent-tester@example.com" \
        STRATIUM_PEP_SESSION_FILE="$PWD/.stratium-session.json" \

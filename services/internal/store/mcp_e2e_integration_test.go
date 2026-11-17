@@ -645,6 +645,7 @@ func (f mcpFixture) readDelegationID(t *testing.T) string {
 func (f mcpFixture) baseEnv() map[string]string {
 	return map[string]string{
 		"STRATIUM_PEP_PDP_ADDR":               mcpAddr,
+		"STRATIUM_PEP_PDP_INSECURE":           "true", // the compose PDPs serve plaintext
 		"STRATIUM_PEP_AGENT_ID":               f.agentID.String(),
 		"STRATIUM_PEP_SUBJECT":                f.subject,
 		"STRATIUM_PEP_SESSION_FILE":           f.sessionFile,

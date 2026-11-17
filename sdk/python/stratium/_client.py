@@ -19,10 +19,30 @@ from ._types import (
 
 
 class Client:
-    def __init__(self, pdp_addr: str, *, connect_timeout: float = 5.0) -> None:
+    def __init__(
+        self, pdp_addr: str, *, connect_timeout: float = 5.0,
+        insecure: bool = False, ca_file: str | None = None,
+    ) -> None:
+        """Connect to the PDP over TLS, verifying its certificate against
+        ca_file (a PEM bundle, for a private CA) or the system roots.
+
+        Plaintext needs insecure=True, for local development only: delegation
+        tokens ride on every call and are bearer credentials. A bad ca_file
+        raises here, at construction, before any decision could depend on it.
+        """
         self._addr = pdp_addr
         self._timeout = connect_timeout
-        self._channel = grpc.insecure_channel(pdp_addr)
+        if insecure:
+            if ca_file is not None:
+                raise ValueError("insecure=True conflicts with ca_file: choose one")
+            self._channel = grpc.insecure_channel(pdp_addr)
+        else:
+            roots = None
+            if ca_file is not None:
+                with open(ca_file, "rb") as f:
+                    roots = f.read()
+            self._channel = grpc.secure_channel(
+                pdp_addr, grpc.ssl_channel_credentials(root_certificates=roots))
         self._stub = pdp_pb2_grpc.PDPServiceStub(self._channel)
 
     def decide(

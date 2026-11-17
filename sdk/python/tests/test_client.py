@@ -9,7 +9,7 @@ def test_decide_allows_and_carries_the_pdps_reason(fake_pdp):
     fake_pdp.decide_responses.append(
         pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW, reason="permitted by policy p1")
     )
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         d = c.decide(agent_id="a", subject="s", tool="Read",
                      raw_input={"file_path": "/tmp/x"}, token="t")
     assert d
@@ -19,7 +19,7 @@ def test_decide_allows_and_carries_the_pdps_reason(fake_pdp):
 
 def test_decide_sends_the_fields_the_pdp_reads(fake_pdp):
     fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.decide(agent_id="a1", subject="s1", tool="Read",
                  raw_input={"b": 2, "a": 1}, token="tok",
                  resource={"id": "/tmp/x"})
@@ -40,7 +40,7 @@ def test_decide_sends_the_fields_the_pdp_reads(fake_pdp):
 # check tells "sent" from "not sent" apart.
 def test_decide_sends_approval_id_when_given(fake_pdp):
     fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}",
                  token="t", approval_id="ap-1")
     req = fake_pdp.decide_calls[0]
@@ -50,7 +50,7 @@ def test_decide_sends_approval_id_when_given(fake_pdp):
 
 def test_decide_leaves_approval_id_unset_by_default(fake_pdp):
     fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
     req = fake_pdp.decide_calls[0]
     assert not req.HasField("approval_id")
@@ -60,7 +60,7 @@ def test_decide_leaves_approval_id_unset_by_default(fake_pdp):
 # must never produce an allow, and must not claim the policy denied.
 def test_unreachable_pdp_denies_without_raising():
     closed = "127.0.0.1:1"  # nothing listens here
-    with Client(closed, connect_timeout=0.5) as c:
+    with Client(closed, connect_timeout=0.5, insecure=True) as c:
         d = c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
     assert d.allowed is False
     assert not d
@@ -76,7 +76,7 @@ def test_create_delegation_returns_the_granted_scope_not_the_requested_one(fake_
             granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"]),
         )
     )
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         g = c.create_delegation(subject="s", agent_id="a",
                                 tools=["Read", "Bash"], max_action_tier=4,
                                 purpose="p", ttl_seconds=60)
@@ -90,7 +90,7 @@ def test_create_delegation_returns_the_granted_scope_not_the_requested_one(fake_
 
 def test_a_pdp_error_status_is_also_not_a_policy_decision(fake_pdp):
     # No scripted response -> the servicer aborts with INTERNAL.
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         d = c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
     assert d.allowed is False
     assert d.effect is None
@@ -101,7 +101,7 @@ def test_create_delegation_sends_every_field(fake_pdp):
     fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
         delegation_id="d1", token="tok", epoch=1,
         granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.create_delegation(subject="you@example.com", agent_id="a1",
                             tools=["Read", "Grep"], max_action_tier=2,
                             purpose="a custom PEP", ttl_seconds=900)
@@ -121,7 +121,7 @@ def test_parent_delegation_id_is_forwarded_when_given(fake_pdp):
     fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
         delegation_id="d2", token="tok", epoch=1,
         granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.create_delegation(subject="s", agent_id="a", tools=["Read"],
                             max_action_tier=1, purpose="p", ttl_seconds=60,
                             parent_delegation_id="parent-1")
@@ -132,7 +132,7 @@ def test_a_root_delegation_sends_no_parent(fake_pdp):
     fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
         delegation_id="d3", token="tok", epoch=1,
         granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.create_delegation(subject="s", agent_id="a", tools=["Read"],
                             max_action_tier=1, purpose="p", ttl_seconds=60)
     assert fake_pdp.delegation_calls[0].parent_delegation_id == ""
@@ -142,7 +142,7 @@ def test_a_root_delegation_sends_no_parent(fake_pdp):
 # no authority" that a caller could mistake for permission, so this raises.
 def test_create_delegation_raises_rather_than_returning_an_empty_grant(fake_pdp):
     with pytest.raises(grpc.RpcError):          # no scripted response -> abort
-        with Client(fake_pdp.addr) as c:
+        with Client(fake_pdp.addr, insecure=True) as c:
             c.create_delegation(subject="s", agent_id="a", tools=["Read"],
                                 max_action_tier=1, purpose="p", ttl_seconds=60)
 
@@ -152,7 +152,7 @@ def test_create_delegation_raises_rather_than_returning_an_empty_grant(fake_pdp)
 # approved escalation into a deny.
 def test_get_approval_lowercases_the_status(fake_pdp):
     fake_pdp.approval_responses.append(pdp_pb2.GetApprovalResponse(status="APPROVED"))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         assert c.get_approval("ap-1") == "approved"
     assert fake_pdp.approval_calls[0].approval_id == "ap-1"
 
@@ -166,7 +166,7 @@ def test_leaving_the_context_manager_closes_the_channel(fake_pdp):
         pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW),
         pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW),
     ])
-    c = Client(fake_pdp.addr)
+    c = Client(fake_pdp.addr, insecure=True)
     with c:
         assert c.decide(agent_id="a", subject="s", tool="Read",
                         raw_input="{}", token="t")
@@ -187,7 +187,7 @@ def test_escalate_at_is_forwarded_only_when_given(fake_pdp):
         fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
             delegation_id="d4", token="tok", epoch=1,
             granted_scope=pdp_pb2.GrantedScope(max_action_tier=4, tools=["Bash"])))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
                             max_action_tier=4, purpose="p", ttl_seconds=60,
                             escalate_at=3)
@@ -206,7 +206,7 @@ def test_the_granted_threshold_is_reported(fake_pdp):
     fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
         delegation_id="d6", token="tok", epoch=1,
         granted_scope=pdp_pb2.GrantedScope(max_action_tier=3, tools=["Bash"])))
-    with Client(fake_pdp.addr) as c:
+    with Client(fake_pdp.addr, insecure=True) as c:
         with_threshold = c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
                                              max_action_tier=4, purpose="p", ttl_seconds=60)
         without = c.create_delegation(subject="s", agent_id="a", tools=["Bash"],
