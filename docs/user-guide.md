@@ -332,7 +332,7 @@ Three rules run through all three binaries:
 
 | Variable | Example | Notes |
 |---|---|---|
-| `STRATIUM_DATABASE_URL` | `postgres://stratium:pw@db:5432/stratium?sslmode=require` | The serving connection. Must authenticate as a member of `stratium_app` and **must not** be a superuser, hold `BYPASSRLS`, or be a member of `stratium_audit_owner`. The PDP verifies the last of these at boot and refuses to serve if it fails. |
+| `STRATIUM_DATABASE_URL` | `postgres://stratium:pw@db:5432/stratium?sslmode=require` | The serving connection. Must authenticate as a member of `stratium_app` and **must not** be a superuser, hold `BYPASSRLS`, or be a member of `stratium_audit_owner`. The PDP verifies the last of these at boot and refuses to serve if it fails. Connections identify as `stratium-pdp` (`application_name`, visible in `pg_stat_activity`) unless the URL sets its own. |
 | `STRATIUM_TENANT_ID` | `acme-prod` | Any non-empty string. Fixed for the process's lifetime; **no request can carry one**. Serving a second tenant means running a second PDP process. |
 | `STRATIUM_TOKEN_SIGNING_KEY_PATH` | `/etc/stratium/keys/current.pem` | Path to a PEM-encoded EC private key. Presence is checked here; readability and key validity are checked when the file is loaded, moments later. |
 | `STRATIUM_DPOP_FRESHNESS_WINDOW` | `30s` | How far a DPoP proof's `iat` may sit from the PDP's clock, in either direction. **No default on purpose:** too small denies an honest fleet with ordinary NTP drift; too large widens the window a stolen token and captured proof stay replayable in. `30s` suits containers sharing a host clock; tune to your own NTP discipline. |
@@ -367,7 +367,7 @@ STRATIUM_LISTEN_ADDR=:50051
 | Variable | Example | Notes |
 |---|---|---|
 | `STRATIUM_PAP_TENANT_ID` | `acme-prod` | Must match the PDP's `STRATIUM_TENANT_ID` for the tenant you are administering. One PAP process serves one tenant. |
-| `STRATIUM_PAP_DATABASE_URL` | `postgres://stratium_pap_login:pw@db:5432/stratium?sslmode=require` | Must authenticate as a member of `stratium_pap` — **not** `stratium_app`. A URL naming the wrong role fails closed on the first write. |
+| `STRATIUM_PAP_DATABASE_URL` | `postgres://stratium_pap_login:pw@db:5432/stratium?sslmode=require` | Must authenticate as a member of `stratium_pap` — **not** `stratium_app`. A URL naming the wrong role fails closed on the first write. Connections identify as `stratium-pap` unless the URL sets its own `application_name`. |
 | `STRATIUM_PAP_OIDC_ISSUER` | `https://login.example.com/realms/acme` | Your IdP's issuer URL. The PAP performs real OIDC discovery against `<issuer>/.well-known/openid-configuration` at startup and refuses to serve if it fails. |
 | `STRATIUM_PAP_OIDC_AUDIENCE` | `stratium-pap` | What this deployment accepts as its own `aud`. Tokens whose audience does not match are rejected. |
 | `STRATIUM_PAP_OIDC_CLIENT_ID` | `stratium-pap` | The public client the **admin UI** authenticates as, served to the browser at `GET /ui-config`. The PAP never uses it itself, and holds no client secret. |
