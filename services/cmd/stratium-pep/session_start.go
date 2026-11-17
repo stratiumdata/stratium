@@ -172,7 +172,7 @@ func runSessionStartCmd(stderr io.Writer) int {
 		return 1
 	}
 
-	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(cfg.PDPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUserAgent(pdpUserAgent))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not create PDP client: %s\n", err)
 		return 1

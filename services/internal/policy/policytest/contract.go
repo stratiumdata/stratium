@@ -331,7 +331,7 @@ func probeInputs() []probeInput {
 				// A fixed UUID, not uuid.New(): every other value in this probe is
 				// a stable literal, and a fixture that differs run to run makes a
 				// failure harder to reproduce than it needs to be.
-				ID:           uuid.MustParse("a5f1c2d3-0000-4000-8000-000000000001"),
+				ID:           uuid.MustParse("0e8e65a3-600f-44f9-a821-d0904df61be9"),
 				TrustTier:    models.TrustTierCertified,
 				Enabled:      true,
 				Suspended:    true,
