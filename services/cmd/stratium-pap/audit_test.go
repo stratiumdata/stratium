@@ -16,7 +16,7 @@ import (
 func auditQueryRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"seq", "prev_hash", "entry_hash", "occurred_at", "event_type", "actor",
-		"agent_id", "delegation_id", "tool_name", "derived_tier", "decision", "reason",
+		"agent_id", "delegation_id", "tool_name", "derived_tier", "decision", "reason", "action",
 	})
 }
 
@@ -107,7 +107,7 @@ func TestListAudit_CarriesTheHashesOnTheWire(t *testing.T) {
 	expectAuditList(f.mock, "containment", nil, int64(0), int64(50),
 		auditQueryRows().AddRow(int64(12), []byte("prev"), []byte("hash"), at, "containment",
 			"op@example.com", nil, nil, "", int16(0), "ALLOW",
-			"agent grant widened: child tool Write not in parent approved_tools"))
+			"agent grant widened: child tool Write not in parent approved_tools", ""))
 
 	rec := doRequest(t, f.server, http.MethodGet, "/v1/audit?event_type=containment",
 		f.token(t, "org-viewers"))

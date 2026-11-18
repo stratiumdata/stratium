@@ -947,3 +947,42 @@ func TestCreateDelegation_ChildStartsFromTheParentsThreshold(t *testing.T) {
 		t.Errorf("stored escalate_at = %v, want the parent's EXTERNAL_COMMS", row.EscalateAt)
 	}
 }
+
+// The delegation_created entry records the threshold the delegation actually
+// got, in Action: a field only the server writes. Reason carries the caller's
+// purpose, so a threshold written there could be forged by the caller.
+func TestCreateDelegation_AuditRecordsTheIssuedThreshold(t *testing.T) {
+	ceilingBelow := permissiveGrantSet()
+	ceilingBelow.maxTier = models.ActionTierExternalComms
+	tests := []struct {
+		name     string
+		agentEsc *models.ActionTier
+		grants   *grantSet
+		want     string
+	}{
+		{"inherited from the agent", tierPtr(models.ActionTierDestructive), permissiveGrantSet(), "escalate_at DESTRUCTIVE"},
+		{"agent has none", nil, permissiveGrantSet(), "escalate_at none"},
+		{"dropped as unreachable", tierPtr(models.ActionTierDestructive), ceilingBelow, "escalate_at none"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, req, _ := wellFormedDelegationFixture()
+			fs.agent.EscalateAt = tt.agentEsc
+			req.RequestedScope.MaxActionTier = int32(models.ActionTierDestructive)
+			req.Purpose = "escalate_at none" // a forged-looking purpose must not reach Action
+			if _, err := newDelegationServer(fs, tt.grants).CreateDelegation(context.Background(), req); err != nil {
+				t.Fatalf("CreateDelegation() error = %v", err)
+			}
+			if len(fs.appended) != 1 {
+				t.Fatalf("audit entries appended = %d, want 1", len(fs.appended))
+			}
+			e := fs.appended[0]
+			if e.Action != tt.want {
+				t.Errorf("audit Action = %q, want %q", e.Action, tt.want)
+			}
+			if e.Reason != req.Purpose {
+				t.Errorf("audit Reason = %q, want the purpose unchanged", e.Reason)
+			}
+		})
+	}
+}

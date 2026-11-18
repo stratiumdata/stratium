@@ -13,7 +13,7 @@ import (
 func auditReadRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"seq", "prev_hash", "entry_hash", "occurred_at", "event_type", "actor",
-		"agent_id", "delegation_id", "tool_name", "derived_tier", "decision", "reason",
+		"agent_id", "delegation_id", "tool_name", "derived_tier", "decision", "reason", "action",
 	})
 }
 
@@ -78,9 +78,9 @@ func TestStore_ListAudit_ReturnsRowsNewestFirstWithTheirHashes(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listAuditQuery)).
 		WillReturnRows(auditReadRows().
 			AddRow(int64(12), []byte("prev-12"), []byte("hash-12"), at, "containment", "op@example.com",
-				agentID, nil, "", int16(0), "ALLOW", "agent grant widened: child tool Write not in parent approved_tools").
+				agentID, nil, "", int16(0), "ALLOW", "agent grant widened: child tool Write not in parent approved_tools", "").
 			AddRow(int64(11), []byte("prev-11"), []byte("hash-11"), at, "agent_updated", "op@example.com",
-				agentID, nil, "", int16(0), "ALLOW", ""))
+				agentID, nil, "", int16(0), "ALLOW", "", ""))
 	mock.ExpectCommit()
 
 	page, err := s.ListAudit(t.Context(), AuditFilter{Limit: 50})
@@ -117,8 +117,8 @@ func TestStore_ListAudit_FullPageCarriesACursor(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(listAuditQuery)).
 		WillReturnRows(auditReadRows().
-			AddRow(int64(9), []byte("p"), []byte("h"), at, "decision", "a", nil, nil, "Read", int16(1), "ALLOW", "").
-			AddRow(int64(8), []byte("p"), []byte("h"), at, "decision", "a", nil, nil, "Read", int16(1), "ALLOW", ""))
+			AddRow(int64(9), []byte("p"), []byte("h"), at, "decision", "a", nil, nil, "Read", int16(1), "ALLOW", "", "read").
+			AddRow(int64(8), []byte("p"), []byte("h"), at, "decision", "a", nil, nil, "Read", int16(1), "ALLOW", "", "read"))
 	mock.ExpectCommit()
 
 	page, err := s.ListAudit(t.Context(), AuditFilter{Limit: 2})
@@ -130,6 +130,9 @@ func TestStore_ListAudit_FullPageCarriesACursor(t *testing.T) {
 	}
 	if *page.NextBeforeSeq != 8 {
 		t.Errorf("NextBeforeSeq = %d, want 8 (the smallest seq on the page)", *page.NextBeforeSeq)
+	}
+	if got := page.Entries[0].Action; got != "read" {
+		t.Errorf("Entries[0].Action = %q, want the selected action column", got)
 	}
 }
 

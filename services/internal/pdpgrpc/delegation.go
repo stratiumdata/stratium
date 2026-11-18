@@ -304,6 +304,12 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 // DerivedTier is the tier actually granted after clamping — the same
 // claim-vs-reality shape, one step removed.
 //
+// Action, unused by this event otherwise, records the approval threshold the
+// delegation was issued with ("escalate_at DESTRUCTIVE", or "escalate_at
+// none"), the same wording the agent-level escalation entries use. Not
+// Reason: that carries the caller-supplied purpose, so anything appended
+// there could be forged by the very caller the threshold supervises.
+//
 // PolicySource/PolicyID are left empty: no single verdict decided this
 // compound outcome the way one PolicyVerdict decides Decide's principal leg
 // — Clamp folds one probe per tier step and per requested tool, each
@@ -332,6 +338,7 @@ func (s *Server) appendDelegationAudit(
 		ChainDepth:       int16(depth),           //nolint:gosec // G115: 0 for a root or parent.Depth+1, the same bound store.maxChainWalk already places on any chain walk
 		DeclaredTier:     int16(requestedTier),   //nolint:gosec // G115: models.ActionTier is a 0-4 enum
 		DerivedTier:      int16(d.MaxActionTier), //nolint:gosec // G115: models.ActionTier is a 0-4 enum
+		Action:           escalateAtAuditValue(d.EscalateAt),
 		Decision:         "ALLOW",
 		DeniedAtDepth:    noDenial,
 		Reason:           d.Purpose,

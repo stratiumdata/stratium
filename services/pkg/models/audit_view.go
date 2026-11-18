@@ -43,6 +43,10 @@ type AuditEntryView struct {
 
 	Decision string `json:"decision"`
 	Reason   string `json:"reason"`
+	// Action is the action verb on a decision entry, and on a
+	// delegation_created entry the approval threshold the delegation was
+	// issued with ("escalate_at DESTRUCTIVE" or "escalate_at none").
+	Action string `json:"action"`
 }
 
 // AuditPage is one page of audit entries, newest first.
