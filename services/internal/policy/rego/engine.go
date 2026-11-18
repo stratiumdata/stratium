@@ -236,6 +236,7 @@ func (Engine) Prepare(ctx context.Context, policies []policy.StoredPolicy) (poli
 			regolib.Query(queryPath),
 			regolib.Module(sp.ID, sp.Text),
 			regolib.Schemas(inputSchemaSet),
+			regolib.Capabilities(policyCapabilities),
 		).PrepareForEval(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("rego: prepare policy %s (%q): %w", sp.ID, sp.Name, err)
@@ -265,6 +266,7 @@ func (Engine) Validate(ctx context.Context, text string) error {
 		regolib.Query(queryPath),
 		regolib.Module("validate", text),
 		regolib.Schemas(inputSchemaSet),
+		regolib.Capabilities(policyCapabilities),
 	).PrepareForEval(ctx); err != nil {
 		return fmt.Errorf("rego: validate: %w", err)
 	}

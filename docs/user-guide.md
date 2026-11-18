@@ -982,6 +982,20 @@ can never fire is exactly the failure the PAP exists to prevent.
 > (every policy's module must declare `package stratium.policy`)
 > ```
 
+> **Rego policies cannot reach outside the process.** A policy decides from
+> the request it is given. The built-ins `http.send`, `net.lookup_ip_addr`,
+> and `opa.runtime` are not available, so a policy cannot make network calls,
+> do DNS lookups, or read the host's environment. Using one is refused when
+> the policy is validated, saved, or loaded:
+>
+> ```
+> rego: validate: 1 error occurred: validate:3: rego_type_error: undefined function http.send
+> ```
+>
+> Everything else in Rego's standard library works, including `time.now_ns`
+> for time-based rules. If a decision needs outside data, put it in the
+> request (resource labels, principal attributes) or in the policy itself.
+
 **Test against sample input** — editor. Evaluates a **candidate** policy (stored
 or not) against a hypothetical request.
 
