@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,12 @@ func (f *fakeSigner) Sign(claims jwt.MapClaims) (string, error) {
 // empty token at all — see its own doc comment — so "" is covered the same
 // way), so a test that forgets to set req.Token to a real fixture id fails
 // loudly rather than silently verifying as some other delegation.
+// VerifySignature is Verify for this fake: a fixture "token" is a bare
+// delegation id with no expiry to relax.
+func (f *fakeSigner) VerifySignature(tokenString string) (jwt.MapClaims, error) {
+	return f.Verify(tokenString)
+}
+
 func (f *fakeSigner) Verify(tokenString string) (jwt.MapClaims, error) {
 	id, err := uuid.Parse(tokenString)
 	if err != nil {
@@ -390,6 +397,7 @@ func wellFormedFixture() (*fakeStore, *DecideRequest) {
 	root := &models.Delegation{
 		ID:               delegationID,
 		TenantID:         testTenant,
+		UserID:           "alice@example.com", // the request's subject below: Decide requires them to match
 		AgentID:          agentID,
 		RootDelegationID: delegationID,
 		Depth:            0,
@@ -1206,4 +1214,37 @@ func TestDecide_ConcurrentAuditAppend_Aborted(t *testing.T) {
 		t.Fatalf("Decide() response = %+v, want nil", resp)
 	}
 	wantCode(t, err, codes.Aborted)
+}
+
+// A token holder names a principal other than the one its delegation was
+// issued for. The policy here would allow anyone, so the only thing standing
+// between the caller and an ALLOW judged under someone else's name is the
+// subject binding. The denial is a decision, so it is audited.
+func TestDecide_SubjectOtherThanTheDelegationsPrincipalDenies(t *testing.T) {
+	fs, req := wellFormedFixture()
+	req.Subject = "ceo@example.com"
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v, want a decision", err)
+	}
+	if resp.GetEffect() != Effect_EFFECT_DENY || resp.GetDeniedLeg() != "delegation" {
+		t.Fatalf("got %v at leg %q (%s), want DENY at the delegation leg",
+			resp.GetEffect(), resp.GetDeniedLeg(), resp.GetReason())
+	}
+	if strings.Contains(resp.GetReason(), "alice@example.com") {
+		t.Errorf("Reason = %q leaks the real principal to a caller who guessed wrong", resp.GetReason())
+	}
+	if len(fs.appended) != 1 || fs.appended[0].Decision != "DENY" {
+		t.Fatalf("audit = %+v, want exactly one DENY entry", fs.appended)
+	}
+
+	// Control: the same request under its real principal is allowed, so the
+	// denial above is the binding and not the fixture.
+	fs2, req2 := wellFormedFixture()
+	resp2, err := NewServer(fs2, escalationPolicy(), testConfig(), &fakeSigner{}).Decide(context.Background(), req2)
+	if err != nil || resp2.GetEffect() != Effect_EFFECT_ALLOW {
+		t.Fatalf("control: got %v err=%v (%s), want ALLOW", resp2.GetEffect(), err, resp2.GetReason())
+	}
 }

@@ -364,6 +364,7 @@ func TestIssueToken_SignsWithCurrentKeyNotPrevious(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signerWithBothKeys, delegationID, ""),
 		TtlSeconds:   600,
 	})
 	if err != nil {
@@ -385,6 +386,7 @@ func TestIssueToken_ReturnsVerifiableTokenNamingTheDelegation(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signer, delegationID, ""),
 		TtlSeconds:   600,
 	})
 	if err != nil {
@@ -420,6 +422,7 @@ func TestIssueToken_ClampsExpiryToDelegationWhenRequestedTTLIsLonger(t *testing.
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signer, delegationID, ""),
 		TtlSeconds:   3600, // asks for an hour; the delegation only has 5 minutes left
 	})
 	if err != nil {
@@ -455,6 +458,7 @@ func TestIssueToken_RequestedTTLWithinDelegationLifetime_NotClamped(t *testing.T
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signer, delegationID, ""),
 		TtlSeconds:   60, // one minute, comfortably under the delegation's remaining hour
 	})
 	if err != nil {
@@ -484,6 +488,7 @@ func TestIssueToken_ClaimsTenantFromConfigNotDelegationRow(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signer, delegationID, ""),
 		TtlSeconds:   60,
 	})
 	if err != nil {
@@ -509,6 +514,7 @@ func TestIssueToken_RevokedDelegation_PermissionDenied(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   60,
 	})
 	if resp != nil {
@@ -527,6 +533,7 @@ func TestIssueToken_ExpiredDelegation_PermissionDenied(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   60,
 	})
 	if resp != nil {
@@ -547,6 +554,7 @@ func TestIssueToken_UnknownOrCrossTenantDelegation_NotFound(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   60,
 	})
 	if resp != nil {
@@ -562,6 +570,7 @@ func TestIssueToken_StoreLoadFailure_Internal(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   60,
 	})
 	if resp != nil {
@@ -614,6 +623,7 @@ func TestIssueToken_SigningFailure_Internal(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   60,
 	})
 	if resp != nil {
@@ -639,6 +649,7 @@ func issueTokenWithJWK(t *testing.T, jwk *string) (*IssueTokenResponse, *token.S
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signer, delegationID, ""),
 		TtlSeconds:   600,
 		DpopJwk:      jwk,
 	})
@@ -859,6 +870,7 @@ func TestIssueToken_UnboundTokenStillAuthenticatesAtDecide(t *testing.T) {
 
 	issued, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        priorToken(t, signer, delegationID, ""),
 		TtlSeconds:   600,
 		// No DpopJwk, deliberately: this is the existing caller's exact shape.
 	})

@@ -14,6 +14,7 @@ var authzNow = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 func delegation(depth int, maxTier models.ActionTier, tools []string) *models.Delegation {
 	return &models.Delegation{
 		ID:            uuid.New(),
+		UserID:        "alice@example.com", // request()'s principal (compound_test.go)
 		Depth:         depth,
 		MaxActionTier: maxTier,
 		ApprovedTools: tools,

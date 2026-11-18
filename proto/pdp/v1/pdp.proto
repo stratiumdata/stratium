@@ -513,6 +513,24 @@ message IssueTokenRequest {
   // to a thumbprint nobody can reproduce: that failure costs one call to
   // diagnose at issuance and every subsequent call to diagnose later.
   optional string dpop_jwk = 3;
+
+  // token is a token this PDP previously issued for delegation_id: the one
+  // being replaced. Required. It is what authenticates this call. A
+  // delegation id is not a secret (it appears in audit entries, admin
+  // listings, and session files), so an id alone must never be enough to
+  // mint a credential for it.
+  //
+  // Its signature must verify and it must name delegation_id. Its EXPIRY is
+  // deliberately not checked: replacing an expired token is what this RPC is
+  // for. The delegation's own revocation and expiry are still checked fresh,
+  // so an old token is only ever worth as much as the live delegation.
+  //
+  // If it is bound to a key (carries "cnf"), dpop_jwk must be present and
+  // name the SAME key. Re-issuing can never loosen or move a binding;
+  // otherwise whoever stole a bound token could trade it here for one bound
+  // to a key of their own. An unbound token may be re-issued bound or
+  // unbound: its holder already has a bearer credential.
+  string token = 4;
 }
 
 // IssueTokenResponse is the re-issued token and its actual, possibly

@@ -230,7 +230,12 @@ func run() int {
 	}
 
 	fmt.Println("stratium-example: minting a DPoP-bound token for the extauthz surface (K5)...")
-	key, boundToken, err := agent.MintBoundToken(pdpAddr, delegationID)
+	sessionToken, err := agent.ReadSessionToken(sessionFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "stratium-example:", err)
+		return 1
+	}
+	key, boundToken, err := agent.MintBoundToken(pdpAddr, delegationID, sessionToken)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example:", err)
 		return 1

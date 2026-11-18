@@ -116,6 +116,10 @@ func reissueAndRetryDecide(
 	issued, err := client.IssueToken(issueCtx, &pdpgrpc.IssueTokenRequest{
 		DelegationId: delegationID,
 		TtlSeconds:   reissueTTLSeconds,
+		// The token being replaced authenticates the request: the PDP will
+		// not mint for a bare delegation id. It checks this token's
+		// signature and delegation, not its expiry.
+		Token: req.GetToken(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("re-issue token: %s", describeRPCError(err, agentOrDelegationUnknownMsg))

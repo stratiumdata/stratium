@@ -247,6 +247,7 @@ func TestIssueToken_EpochRoundTripsIntoResponse(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   600,
 	})
 	if err != nil {
@@ -272,6 +273,7 @@ func TestIssueToken_EpochReadBeforeDelegationLoad(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   600,
 	})
 	if resp != nil {
@@ -297,6 +299,7 @@ func TestIssueToken_EpochReadFailure_Internal(t *testing.T) {
 
 	resp, err := srv.IssueToken(context.Background(), &IssueTokenRequest{
 		DelegationId: delegationID.String(),
+		Token:        delegationID.String(), // fakeSigner: a fixture token is the bare id
 		TtlSeconds:   600,
 	})
 	if resp != nil {

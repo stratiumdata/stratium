@@ -92,7 +92,7 @@ import (
 // left untouched — many existing subtests depend on its fixed two-row
 // shape, and this package's convention is many small, single-purpose
 // helpers, not one generalized enough to serve every caller retroactively.
-func epochE2EChain(t *testing.T, tenant string, agentID uuid.UUID, hops int) []*models.Delegation {
+func epochE2EChain(t *testing.T, subject, tenant string, agentID uuid.UUID, hops int) []*models.Delegation {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	rootID := uuid.New()
@@ -108,7 +108,7 @@ func epochE2EChain(t *testing.T, tenant string, agentID uuid.UUID, hops int) []*
 			chainAgentIDs[i] = agentID
 		}
 		d := seedDelegation(t, &models.Delegation{
-			ID: id, TenantID: tenant, UserID: "integration-test-user", AgentID: agentID,
+			ID: id, TenantID: tenant, UserID: subject, AgentID: agentID, // every Decide below sends this subject
 			ApprovedTools: []string{}, MaxActionTier: models.ActionTierInternalModify,
 			ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
 			Purpose:            fmt.Sprintf("integration test: epoch e2e chain, depth %d", depth),
@@ -142,7 +142,7 @@ func TestIntegration_RevocationEpoch_E2E_RevocationBumpsAndNextDecideDeniesAtDel
 	seedAgent(t, epochTenant, agentID, "integration-agent-epoch-proof1", models.TrustTierUnverified)
 	seedPolicy(t, epochTenant, "epoch-proof1-permit",
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
-	delegation := singleHopDelegation(t, epochTenant, agentID, models.ActionTierInternalModify,
+	delegation := singleHopDelegationFor(t, subject, epochTenant, agentID, models.ActionTierInternalModify,
 		"integration test: epoch e2e proof 1 (revocation cascade)")
 	token := mintToken(t, epochPdpClient, delegation.ID)
 
@@ -215,7 +215,7 @@ func TestIntegration_RevocationEpoch_E2E_GovernedWritesObservedAcrossLiveDecideC
 	seedAgent(t, epochTenant, agentID, "integration-agent-epoch-proof2", models.TrustTierUnverified)
 	policyID := seedPolicy(t, epochTenant, "epoch-proof2-permit",
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
-	delegation := singleHopDelegation(t, epochTenant, agentID, models.ActionTierInternalModify,
+	delegation := singleHopDelegationFor(t, subject, epochTenant, agentID, models.ActionTierInternalModify,
 		"integration test: epoch e2e proof 2 (governed writes)")
 	token := mintToken(t, epochPdpClient, delegation.ID)
 	decideReq := &pdpgrpc.DecideRequest{Token: token, AgentId: agentID.String(), Subject: subject, Tool: "Read"}
@@ -382,7 +382,7 @@ func TestIntegration_RevocationEpoch_E2E_RevokedRootBumpsOnceAndDeniesEveryDesce
 	seedPolicy(t, epochTenant, "epoch-proof4-permit",
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
 
-	chain := epochE2EChain(t, epochTenant, agentID, hops)
+	chain := epochE2EChain(t, subject, epochTenant, agentID, hops)
 	root := chain[0]
 
 	// Minted before revoking, not after: IssueToken re-issuance checks only

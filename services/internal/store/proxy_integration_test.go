@@ -149,6 +149,7 @@ func mintProxyBoundToken(t *testing.T, delegationID uuid.UUID, key *ecdsa.Privat
 		DelegationId: delegationID.String(),
 		TtlSeconds:   ttlSeconds,
 		DpopJwk:      &jwk,
+		Token:        seedPriorToken(t, delegationID),
 	})
 	if err != nil {
 		t.Fatalf("mint bound token for delegation %s: %v", delegationID, err)

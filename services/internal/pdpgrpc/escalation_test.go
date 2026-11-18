@@ -57,7 +57,7 @@ func escalationFixture() (*fakeStore, *DecideRequest, *models.Delegation) {
 		// "token" only for this fake.
 		Token:    delegationID.String(),
 		AgentId:  agentID.String(),
-		Subject:  "requesting-subject@example.com",
+		Subject:  "root-principal@example.com", // root.UserID: the only subject Decide accepts for this chain
 		Tool:     "Bash",
 		RawInput: "rm -rf /tmp/scratch",
 	}
@@ -212,7 +212,7 @@ func TestDecide_Escalation_RootPrincipalRoutesAroundIntermediateDelegate(t *test
 		// Token is the acting delegation id, spelled out — see fakeSigner's
 		// Verify (server_test.go).
 		Token: actingID.String(), AgentId: agentID.String(),
-		Subject: "requesting-subject@example.com", Tool: "Bash",
+		Subject: "root-human@example.com", Tool: "Bash", // root.UserID, not either later hop's
 		RawInput: "rm -rf /tmp/scratch",
 	}
 	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})

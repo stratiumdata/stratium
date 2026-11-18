@@ -159,7 +159,12 @@ A short-lived token can (and, over a long enough agent session, will)
 expire before the delegation behind it does. `hook` and `mcp` handle this
 themselves: when `Decide` denies a call, each surface asks the PDP for one
 fresh token (`IssueToken`, naming the delegation this session's file already
-recorded) and retries the SAME call exactly once before deciding anything.
+recorded and presenting the token being replaced) and retries the SAME call
+exactly once before deciding anything. The PDP does not re-issue for a
+delegation id alone, since ids appear in audit entries and admin listings: it
+needs a token it previously issued for that delegation. It checks that
+token's signature and delegation but not its expiry, and it re-issues a
+DPoP-bound token only for the same key.
 A re-issue that fails — the delegation was itself revoked or has expired,
 or the PDP could not be reached — denies the call; nothing here retries a
 second time or waits indefinitely, the same bounded-wait discipline this
@@ -894,7 +899,8 @@ therefore require **proof of possession** (RFC 9449 DPoP, spec §4.7.2). Two
 consequences an operator meets immediately:
 
 - **A bearer token is refused here, even when policy would allow the
-  call.** Mint tokens for this surface with `dpop_jwk` set on `IssueToken`,
+  call.** Mint tokens for this surface with `dpop_jwk` set on `IssueToken`
+  (which also needs `token`: the bearer token `CreateDelegation` returned),
   and send a proof on every call, in `dpop` gRPC metadata alongside
   `authorization`. A token minted without `dpop_jwk` is refused with a
   reason that says so; it is not a policy denial and no policy change fixes

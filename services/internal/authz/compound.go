@@ -43,7 +43,11 @@ func Decide(req Request, cfg Config) Result {
 		return res
 	}
 
-	if err := ValidateChain(req.Chain, req.TenantID, req.Agent.ID); err != nil {
+	err = ValidateChain(req.Chain, req.TenantID, req.Agent.ID)
+	if err == nil {
+		err = ValidateChainPrincipal(req.Chain, req.Principal.Subject)
+	}
+	if err != nil {
 		res.Effect = EffectDeny
 		res.DeniedLeg = "delegation"
 		res.Reason = err.Error()

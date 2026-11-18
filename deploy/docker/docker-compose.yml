@@ -966,6 +966,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+      # LiteLLM takes about a minute to start on its own and longer while the
+      # rest of the stack is starting too. Failures inside this window do not
+      # count against retries, so a slow start is not reported as unhealthy.
+      start_period: 180s
 
 volumes:
   pgdata:

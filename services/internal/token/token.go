@@ -98,12 +98,12 @@ func (s *Signer) Sign(claims jwt.MapClaims) (string, error) {
 // swapped the current key still verifies, without this package needing a
 // "kid" header or any other bookkeeping to know which key to try.
 func (s *Signer) Verify(tokenString string) (jwt.MapClaims, error) {
-	claims, err := s.verifyWith(tokenString, &s.current.PublicKey)
+	claims, err := s.verifyWith(tokenString, &s.current.PublicKey, jwt.WithExpirationRequired())
 	if err == nil {
 		return claims, nil
 	}
 	if s.previous != nil {
-		if prevClaims, prevErr := s.verifyWith(tokenString, s.previous); prevErr == nil {
+		if prevClaims, prevErr := s.verifyWith(tokenString, s.previous, jwt.WithExpirationRequired()); prevErr == nil {
 			return prevClaims, nil
 		}
 	}
@@ -117,13 +117,35 @@ func (s *Signer) Verify(tokenString string) (jwt.MapClaims, error) {
 // reusing one across the current/previous retry in Verify would let a
 // partially-populated map from a failed first attempt leak into the result
 // of a successful second one.
-func (s *Signer) verifyWith(tokenString string, pub *ecdsa.PublicKey) (jwt.MapClaims, error) {
+func (s *Signer) verifyWith(tokenString string, pub *ecdsa.PublicKey, opts ...jwt.ParserOption) (jwt.MapClaims, error) {
 	claims := jwt.MapClaims{}
 	_, err := jwt.ParseWithClaims(tokenString, claims, func(*jwt.Token) (interface{}, error) {
 		return pub, nil
-	}, jwt.WithValidMethods([]string{signingAlg}), jwt.WithExpirationRequired())
+	}, append([]jwt.ParserOption{jwt.WithValidMethods([]string{signingAlg})}, opts...)...)
 	if err != nil {
 		return nil, err
 	}
 	return claims, nil
+}
+
+// VerifySignature checks that tokenString was signed by this Signer's current
+// or previous key, with the one permitted algorithm, and returns its claims
+// WITHOUT validating them: an expired token passes.
+//
+// It exists for exactly one caller, token re-issuance, where the token being
+// replaced has usually expired and what matters is that this PDP once issued
+// it. Never use it to authorize a decision; that is Verify. Everything Verify
+// refuses other than expiry (unknown key, another algorithm, alg=none, a
+// tampered signature) is refused here too.
+func (s *Signer) VerifySignature(tokenString string) (jwt.MapClaims, error) {
+	claims, err := s.verifyWith(tokenString, &s.current.PublicKey, jwt.WithoutClaimsValidation())
+	if err == nil {
+		return claims, nil
+	}
+	if s.previous != nil {
+		if prevClaims, prevErr := s.verifyWith(tokenString, s.previous, jwt.WithoutClaimsValidation()); prevErr == nil {
+			return prevClaims, nil
+		}
+	}
+	return nil, fmt.Errorf("token: verify signature: %w", err)
 }

@@ -140,6 +140,18 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 			}
 			return nil, status.Errorf(codes.Internal, "load parent chain: %s", err)
 		}
+		// A child acts for the same principal as the chain it narrows. The
+		// root names that principal (authz.ValidateChainPrincipal's doc
+		// comment: later hops may carry another identity), and it is the
+		// subject every later Decide under this chain will be held to. The
+		// subject below also picks whose grants the clamp probes, so an
+		// unchecked one would let a caller holding any delegation id borrow
+		// a more privileged principal's policy. The error does not name the
+		// right principal, for the reason that function gives.
+		if chain[0].UserID != req.GetSubject() {
+			return nil, status.Error(codes.PermissionDenied,
+				"subject is not the principal the parent delegation's chain was issued for")
+		}
 		parent = chain[len(chain)-1]
 	}
 

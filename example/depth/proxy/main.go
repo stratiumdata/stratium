@@ -216,12 +216,12 @@ func run() int {
 	rep.Record(agent.ToolCall{Name: "create_delegation", Args: widenArgs}, widenResult)
 
 	fmt.Println("\nstratium-example: minting a DPoP-bound token for each hop (K5)...")
-	parentKey, parentToken, err := agent.MintBoundToken(pdpAddr, chain.Parent.DelegationID)
+	parentKey, parentToken, err := agent.MintBoundToken(pdpAddr, chain.Parent.DelegationID, chain.Parent.Token())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting the parent's bound token:", err)
 		return 1
 	}
-	childKey, childToken, err := agent.MintBoundToken(pdpAddr, chain.Child.DelegationID)
+	childKey, childToken, err := agent.MintBoundToken(pdpAddr, chain.Child.DelegationID, chain.Child.Token())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting the child's bound token:", err)
 		return 1

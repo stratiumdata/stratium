@@ -130,10 +130,31 @@ func ReadDelegationID(path string) (string, error) {
 	return resp.GetDelegationId(), nil
 }
 
+// ReadSessionToken returns the bearer token session-start wrote to path. It
+// is what authenticates a later IssueToken call for the same delegation.
+func ReadSessionToken(path string) (string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the example's own session file path
+	if err != nil {
+		return "", fmt.Errorf("read session file %s: %w", path, err)
+	}
+	var resp pdpgrpc.CreateDelegationResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("decode session file %s: %w", path, err)
+	}
+	if resp.GetToken() == "" {
+		return "", fmt.Errorf("session file %s holds no token", path)
+	}
+	return resp.GetToken(), nil
+}
+
 // MintBoundToken generates a fresh P-256 keypair and calls the PDP's
 // IssueToken RPC directly -- there is no session-start flag for this -- to
 // mint a token bound to that key's public half (RFC 9449 spec §4.7.2 K6).
-func MintBoundToken(pdpAddr, delegationID string) (*ecdsa.PrivateKey, string, error) {
+//
+// sessionToken is the bearer token CreateDelegation returned for the same
+// delegation (ReadSessionToken). The PDP requires it: a delegation id alone
+// does not authenticate a re-issue.
+func MintBoundToken(pdpAddr, delegationID, sessionToken string) (*ecdsa.PrivateKey, string, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, "", fmt.Errorf("generate dpop key: %w", err)
@@ -156,6 +177,7 @@ func MintBoundToken(pdpAddr, delegationID string) (*ecdsa.PrivateKey, string, er
 		DelegationId: delegationID,
 		TtlSeconds:   3600,
 		DpopJwk:      &jwk,
+		Token:        sessionToken,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("issue bound token: %w", err)
