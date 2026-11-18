@@ -95,7 +95,9 @@ pending still refuses.
 - **Unattended runs have no one to approve.** For overnight or CI agents, keep
   the session's ceiling below the threshold, or expect the run to stop there.
 - **Removing or raising a threshold is recorded as a widening** in the audit
-  log, with the operator who did it. See
+  log, with the operator who did it. Each session's `delegation_created`
+  entry also records the threshold it was issued with, so you can see which
+  sessions started before a change. See
   [Investigate what an agent did](investigate.md).
 
 ## Undo

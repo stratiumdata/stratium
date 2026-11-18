@@ -341,7 +341,7 @@ func scanAuditTail(row *sql.Row) (*audit.Entry, error) {
 // insertion-ordered, so paging by "seq < the smallest on the last page"
 // cannot skip or repeat a row even while new rows are being appended.
 const listAuditQuery = `SELECT seq, prev_hash, entry_hash, occurred_at, event_type, actor, ` +
-	`agent_id, delegation_id, tool_name, derived_tier, decision, reason ` +
+	`agent_id, delegation_id, tool_name, derived_tier, decision, reason, action ` +
 	`FROM audit_chain ` +
 	`WHERE ($1 = '' OR event_type = $1) ` +
 	`AND ($2::uuid IS NULL OR agent_id = $2::uuid) ` +
@@ -408,7 +408,7 @@ func (s *Store) ListAudit(ctx context.Context, f AuditFilter) (models.AuditPage,
 	for rows.Next() {
 		var e models.AuditEntryView
 		if err := rows.Scan(&e.Seq, &e.PrevHash, &e.EntryHash, &e.OccurredAt, &e.EventType, &e.Actor,
-			&e.AgentID, &e.DelegationID, &e.ToolName, &e.DerivedTier, &e.Decision, &e.Reason); err != nil {
+			&e.AgentID, &e.DelegationID, &e.ToolName, &e.DerivedTier, &e.Decision, &e.Reason, &e.Action); err != nil {
 			return models.AuditPage{}, fmt.Errorf("store: scan audit row: %w", err)
 		}
 		entries = append(entries, e)

@@ -38,7 +38,7 @@ reached the beginning.
 | Filter | Shows |
 |---|---|
 | `event_type=decision` | every allow and deny |
-| `event_type=delegation_created` | when sessions and sub-agent delegations were issued |
+| `event_type=delegation_created` | when sessions and sub-agent delegations were issued, and the [approval threshold](require-approval.md) each one got (`action`: `escalate_at DESTRUCTIVE`, or `escalate_at none`) |
 | `event_type=containment` | edits that widened an agent's grant |
 | `agent_id=…` | one agent |
 | `limit=…` | page size, up to 500 |

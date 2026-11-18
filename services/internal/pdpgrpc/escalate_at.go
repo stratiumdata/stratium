@@ -42,3 +42,14 @@ func effectiveEscalateAt(
 	}
 	return t, nil
 }
+
+// escalateAtAuditValue is the delegation_created audit entry's Action value
+// for a delegation's threshold. "none" is written out rather than left empty,
+// so an entry issued without a threshold is distinguishable from one written
+// before thresholds were recorded at all.
+func escalateAtAuditValue(t *models.ActionTier) string {
+	if t == nil {
+		return "escalate_at none"
+	}
+	return "escalate_at " + t.String()
+}
