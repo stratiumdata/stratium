@@ -232,6 +232,7 @@ func run() int {
 			Tools:         []string{"read_text_file", "search_files", "write_file"},
 		},
 		ParentDelegationId: chain.Parent.DelegationID,
+		ParentToken:        chain.Parent.Token(),
 		Purpose:            "stratium depth-mcp example (deliberately widening child, expected to be refused)",
 		TtlSeconds:         3600,
 	})

@@ -207,6 +207,7 @@ func run() int {
 			Tools:         []string{"Read", "Grep", "Write"},
 		},
 		ParentDelegationId: chain.Parent.DelegationID,
+		ParentToken:        chain.Parent.Token(),
 		Purpose:            "stratium depth-hook example (deliberately widening child, expected to be refused)",
 		TtlSeconds:         3600,
 	})

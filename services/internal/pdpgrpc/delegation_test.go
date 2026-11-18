@@ -265,6 +265,7 @@ func TestCreateDelegation_UnknownParentDelegation_NotFound(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
 	parentID := uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chainErr = fmt.Errorf("%w: delegation %s", store.ErrNotFound, parentID)
 	srv := newDelegationServer(fs, permissiveGrantSet())
 
@@ -287,6 +288,7 @@ func TestCreateDelegation_ChildWideningParent_PermissionDenied(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
 	parentID := uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chain = []*models.Delegation{{
 		ID: parentID, RootDelegationID: parentID, Depth: 0, UserID: "alice@example.com",
 		MaxActionTier: models.ActionTierReadOnly, ApprovedTools: []string{"Bash", "Read"},
@@ -527,6 +529,7 @@ func TestCreateDelegation_ChildInheritsParentClassificationAndChainAgentIDs(t *t
 	fs, req, agentID := wellFormedDelegationFixture()
 	parentID, parentAgentID, rootID := uuid.New(), uuid.New(), uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chain = []*models.Delegation{{
 		ID: parentID, RootDelegationID: rootID, Depth: 2,
 		UserID:              "alice@example.com",
@@ -651,7 +654,10 @@ func TestCreateDelegationRPC_CarriesNoClassificationCapField(t *testing.T) {
 		want []string
 	}{
 		{reflect.TypeOf(CreateDelegationRequest{}),
-			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds"}},
+			// ParentToken authenticates a child request (authorizeChild). It
+			// is a credential, not a scope field: it cannot set, raise, or
+			// remove a classification cap, which is what this guard protects.
+			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds", "ParentToken"}},
 		// EscalateAt is not a classification cap, and it can only LOWER a
 		// threshold (effectiveEscalateAt, escalate_at.go), so the docs/pep.md
 		// claim this guards is unchanged by it.
@@ -805,6 +811,7 @@ func TestCreateDelegation_ChildStillCopiesParentNotAgent(t *testing.T) {
 	fs.agent.ClassificationCaps = map[string]string{"nato": "TOP-SECRET"}
 	parentID := uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chain = []*models.Delegation{{
 		ID:                 parentID,
 		UserID:             "alice@example.com",
@@ -936,6 +943,7 @@ func TestCreateDelegation_ChildStartsFromTheParentsThreshold(t *testing.T) {
 	fs.agent.EscalateAt = tierPtr(models.ActionTierReadOnly) // must be ignored for a child
 	parentID, parentAgentID := uuid.New(), uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	req.RequestedScope.MaxActionTier = int32(models.ActionTierDestructive)
 	fs.chain = []*models.Delegation{{
 		ID: parentID, RootDelegationID: parentID, AgentID: parentAgentID, UserID: "alice@example.com",
@@ -997,6 +1005,7 @@ func TestCreateDelegation_ChildSubjectMustBeTheChainsRootPrincipal(t *testing.T)
 	fs, req, _ := wellFormedDelegationFixture()
 	rootID, parentID := uuid.New(), uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	req.Subject = "ceo@example.com"
 	fs.chain = []*models.Delegation{
 		{ID: rootID, RootDelegationID: rootID, Depth: 0, UserID: "alice@example.com",

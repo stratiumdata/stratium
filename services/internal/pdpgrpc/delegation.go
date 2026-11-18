@@ -87,6 +87,9 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 			return nil, status.Errorf(codes.InvalidArgument, "parent_delegation_id: %s", err)
 		}
 		parentID = &id
+	} else if req.GetParentToken() != "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"parent_token is set without parent_delegation_id: a root delegation has no parent")
 	}
 	tier, err := models.ParseActionTier(int(req.GetRequestedScope().GetMaxActionTier()))
 	if err != nil {
@@ -111,6 +114,14 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	}
 	if req.GetTtlSeconds() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl_seconds must be positive")
+	}
+
+	// A child is authorized by the parent's own token, checked before any
+	// store call: see authorizeChild.
+	if parentID != nil {
+		if err := s.authorizeChild(req.GetParentToken(), *parentID); err != nil {
+			return nil, err
+		}
 	}
 
 	epoch, err := s.loadEpochOrDeny(ctx)
@@ -397,4 +408,40 @@ func toProtoGrantedScope(g authz.GrantedScope) *GrantedScope {
 		Tools:         g.Tools,
 		Removed:       removed,
 	}
+}
+
+// authorizeChild checks that the caller holds the delegation it asks to
+// narrow, by the token it presents for it.
+//
+// Narrowing is the holder's act, and its result is a new credential (the
+// child's token). A delegation id is not a secret, so without this anyone
+// who had read one in an audit entry or a listing could mint themselves a
+// child of it with up to its scope: the same bare-id trust IssueToken
+// refuses (priorTokenBinding), reached by a different RPC.
+//
+// Unlike a re-issue, the token must be UNEXPIRED (authenticateToken, the
+// check Decide uses): a holder whose token has lapsed re-issues first, and
+// that path checks the delegation is still live.
+//
+// A token bound to a key is refused. CreateDelegation carries no proof of
+// possession, and a child's token is always issued unbound, so accepting
+// one would turn a stolen bound token, inert on its own, into a usable
+// bearer token for the child.
+func (s *Server) authorizeChild(parentToken string, parentID uuid.UUID) error {
+	if parentToken == "" {
+		return status.Error(codes.Unauthenticated,
+			"parent_token is required: present a current token for the parent delegation")
+	}
+	named, jkt, err := s.authenticateToken(parentToken)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "parent_token does not verify")
+	}
+	if named != parentID {
+		return status.Error(codes.PermissionDenied, "parent_token was not issued for the parent delegation")
+	}
+	if jkt != "" {
+		return status.Error(codes.PermissionDenied,
+			"parent_token is bound to a key: a child cannot be created from a bound token")
+	}
+	return nil
 }

@@ -153,6 +153,7 @@ func BuildChain(
 		AgentId:            childAgentID,
 		RequestedScope:     childScope,
 		ParentDelegationId: parentResp.GetDelegationId(),
+		ParentToken:        parentResp.GetToken(),
 		Purpose:            purpose,
 		TtlSeconds:         childTTL,
 	})

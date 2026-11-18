@@ -204,6 +204,7 @@ func run() int {
 			},
 		},
 		ParentDelegationId: chain.Parent.DelegationID,
+		ParentToken:        chain.Parent.Token(),
 		Purpose:            "stratium depth-proxy example (deliberately widening child, expected to be refused)",
 		TtlSeconds:         3600,
 	})

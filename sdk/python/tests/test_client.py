@@ -124,8 +124,24 @@ def test_parent_delegation_id_is_forwarded_when_given(fake_pdp):
     with Client(fake_pdp.addr, insecure=True) as c:
         c.create_delegation(subject="s", agent_id="a", tools=["Read"],
                             max_action_tier=1, purpose="p", ttl_seconds=60,
-                            parent_delegation_id="parent-1")
+                            parent_delegation_id="parent-1", parent_token="parent-tok")
     assert fake_pdp.delegation_calls[0].parent_delegation_id == "parent-1"
+    assert fake_pdp.delegation_calls[0].parent_token == "parent-tok"
+
+
+# A child request without the parent's token is one the PDP refuses. Raising
+# here names the missing argument instead of surfacing an Unauthenticated RPC.
+def test_child_without_parent_token_raises_before_any_call(fake_pdp):
+    with Client(fake_pdp.addr, insecure=True) as c:
+        with pytest.raises(ValueError, match="parent_token"):
+            c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                                max_action_tier=1, purpose="p", ttl_seconds=60,
+                                parent_delegation_id="parent-1")
+        with pytest.raises(ValueError, match="parent_token"):
+            c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                                max_action_tier=1, purpose="p", ttl_seconds=60,
+                                parent_token="parent-tok")
+    assert fake_pdp.delegation_calls == []
 
 
 def test_a_root_delegation_sends_no_parent(fake_pdp):
