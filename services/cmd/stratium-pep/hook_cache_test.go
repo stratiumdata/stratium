@@ -1,22 +1,25 @@
-// hook_cache_test.go tests the decision cache's wiring into runHook (Task 3,
-// spec §4.8.3 W6): hook is one of the two surfaces permitted to consult and
-// populate the cache at all. See local_cache.go's own package doc for why
-// that boundary sits at the type level, not merely in these tests'
-// behavior, and extauthz_test.go's/proxy_test.go's own W6 tests for the
-// other half of this property -- proving the two surfaces this file does
-// NOT touch never gain a cache path either.
+// hook_cache_test.go pins that hook has NO decision cache: every invocation
+// asks the PDP, and nothing on disk can stand in for the PDP's answer. See
+// cache.go's package doc, "Memory only," for why -- a hook is a new process
+// per tool call, and a decision may only be replayed from the memory of the
+// process that received it from the PDP.
 //
-// Every fixture below writes a REAL, parseable, signed JWT as the session
-// token (signedTestToken, cache_validity_test.go) rather than reusing
-// testCfg's own bare testSessionToken constant: tokenNotExpired/tokenExpiry
-// (cache.go, local_cache.go) both require a decodable "exp" claim, and
-// testSessionToken is not a JWT at all -- it would fail every cache-hit and
-// cache-store assertion below for a reason that has nothing to do with the
-// property under test.
+// The forged-file tests write a cache file in the exact format versions
+// before the in-memory cache read, beside the session file, naming exactly
+// the call the test then makes. A build that reads decisions from that file
+// again serves the forged ALLOW and fails them.
+//
+// Every fixture writes a REAL, parseable, signed JWT as the session token
+// (signedTestToken, cache_validity_test.go) rather than testCfg's bare
+// testSessionToken: the cache validity rules require a decodable "exp"
+// claim, so a forged entry paired with a non-JWT token would be refused for
+// a reason that has nothing to do with where it came from, and these tests
+// would pass vacuously.
 package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"strings"
@@ -24,282 +27,202 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
 // hookCacheFixture writes a session file naming a fresh delegation id and a
-// real signed token expiring at tokenExpiresAt -- everything a cache test
-// needs beyond testCfg's own baseline, which cannot be reused unmodified
-// here (see this file's own package doc). Deliberately does NOT set the
-// session file's own Epoch field: consultCache no longer reads it (see
-// local_cache.go's package doc, "WHERE THE EPOCH COMES FROM") -- lastKnownEpoch
-// comes from the cache file's own recorded entries, which each test below
-// controls directly by seeding whatever entries the property under test
-// needs, not by this fixture.
+// real signed token expiring at tokenExpiresAt -- what a cache-related test
+// needs beyond testCfg's own baseline (see this file's package doc).
 func hookCacheFixture(t *testing.T, tokenExpiresAt time.Time) (cfg hookConfig, delegationID, token string) {
 	t.Helper()
 	cfg = testCfg(t)
 	delegationID = uuid.NewString()
 	token = signedTestToken(t, tokenExpiresAt)
-	data, err := json.Marshal(&pdpgrpc.CreateDelegationResponse{DelegationId: delegationID, Token: token})
-	if err != nil {
-		t.Fatalf("marshal session fixture: %v", err)
-	}
-	if err := os.WriteFile(cfg.SessionFilePath, data, sessionFileMode); err != nil {
-		t.Fatalf("write session fixture: %v", err)
-	}
+	writeTestSessionFile(t, cfg.SessionFilePath, delegationID, token)
 	return cfg, delegationID, token
 }
 
-// seedHookCache writes entry into the cache file beside cfg's own session
-// file -- the exact path derivation runHook itself uses (cacheFilePathFor,
-// local_cache.go) -- so a test can construct a hit fixture without reaching
-// into runHook's own internals.
-func seedHookCache(t *testing.T, cfg hookConfig, entry cacheEntry) {
+// legacyCacheFileEntry is the on-disk shape of one entry in the cache file
+// older versions kept at <session file>.cache.json. Restated here, tags and
+// all, rather than derived from cacheEntry: production no longer has a JSON
+// form for a decision, and this fixture must keep matching what an old
+// build would have parsed.
+type legacyCacheFileEntry struct {
+	DelegationID        string    `json:"delegation_id"`
+	Tool                string    `json:"tool"`
+	InputDigest         [32]byte  `json:"input_digest"`
+	Decision            int32     `json:"decision"`
+	Epoch               int64     `json:"epoch"`
+	DelegationExpiresAt time.Time `json:"delegation_expires_at"`
+	CachedAt            time.Time `json:"cached_at"`
+}
+
+// writeForgedAllowCacheFile writes <sessionFilePath>.cache.json holding one
+// ALLOW for exactly (delegationID, tool, rawInput), fresh and unexpired --
+// an entry the old file-backed cache would have served without contacting
+// the PDP. Returns the file's path. The suffix is a literal on purpose, not
+// legacyCacheFileSuffix: the fixture must not move if that constant does.
+func writeForgedAllowCacheFile(t *testing.T, sessionFilePath, delegationID, tool, rawInput string) string {
 	t.Helper()
-	mustCachePut(t, cacheFilePathFor(cfg.SessionFilePath), entry)
-}
-
-// TestRunHook_CacheHit_Allow_ServesWithoutContactingPDP is the property this
-// whole task exists for: a valid cached ALLOW is served with the PDP never
-// dialed at all. fake would itself answer ALLOW if ever called, so a build
-// that ignored the cache entirely would still pass a bare "exit code == 0"
-// check -- requestCount() is the load-bearing assertion, per the task
-// brief's own "assert it directly: the PDP client must not be contacted"
-// instruction. This is also the mutation-testing anchor for "call the PDP
-// anyway on a hit."
-func TestRunHook_CacheHit_Allow_ServesWithoutContactingPDP(t *testing.T) {
 	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
-	seedHookCache(t, cfg, cacheEntry{
-		cacheKey:            cacheKeyFor(delegationID, "Bash", `{"command":"ls"}`),
-		Decision:            pdpgrpc.Effect_EFFECT_ALLOW,
+	data, err := json.Marshal([]legacyCacheFileEntry{{
+		DelegationID:        delegationID,
+		Tool:                tool,
+		InputDigest:         sha256.Sum256([]byte(rawInput)),
+		Decision:            int32(pdpgrpc.Effect_EFFECT_ALLOW),
 		Epoch:               42,
 		DelegationExpiresAt: now.Add(48 * time.Hour),
 		CachedAt:            now.Add(-time.Minute),
-	})
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
-	client := startFakePDP(t, fake)
-
-	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
-
-	if code != 0 {
-		t.Fatalf("runHook() = %d, want 0 (cached ALLOW); stdout: %s", code, stdout.String())
+	}})
+	if err != nil {
+		t.Fatalf("marshal forged cache file: %v", err)
 	}
-	if got := fake.requestCount(); got != 0 {
-		t.Errorf("PDP received %d Decide call(s), want 0 -- a cache hit must never contact the PDP "+
-			"(this is the outage tolerance this phase exists to buy)", got)
+	path := sessionFilePath + ".cache.json"
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write forged cache file: %v", err)
 	}
+	return path
 }
 
-// TestRunHook_CacheHit_Deny_ServesWithoutContactingPDP is the DENY twin of
-// the ALLOW test above: a cached DENY serves too, without contacting the
-// PDP, and with a reason that says so rather than fabricating a policy
-// explanation the cache never stored (cache.go's own cacheEntry carries no
-// Reason field at all -- local_cache.go's cacheHitDenyReason doc comment
-// explains why).
-func TestRunHook_CacheHit_Deny_ServesWithoutContactingPDP(t *testing.T) {
-	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
-	seedHookCache(t, cfg, cacheEntry{
-		cacheKey:            cacheKeyFor(delegationID, "Bash", `{"command":"rm -rf /"}`),
-		Decision:            pdpgrpc.Effect_EFFECT_DENY,
-		Epoch:               42,
-		DelegationExpiresAt: now.Add(48 * time.Hour),
-		CachedAt:            now.Add(-time.Minute),
-	})
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}} // would ALLOW if ever contacted
+// TestRunHook_ForgedCacheFile_PDPDenies_HookDeniesAndAsksPDPOnce is the
+// security property this file exists for: a cache file on disk holding an
+// ALLOW for exactly this call changes nothing. The PDP is asked, and its
+// DENY stands. Catches any build that reads a decision from disk in hook
+// mode.
+//
+// issueErr makes the one reissue attempt a DENY always triggers (reissue.go)
+// fail, so "exactly one Decide" is the whole expected count rather than
+// original-plus-retry.
+func TestRunHook_ForgedCacheFile_PDPDenies_HookDeniesAndAsksPDPOnce(t *testing.T) {
+	const tool, input, pdpReason = "Bash", `{"command":"rm -rf /"}`, "policy denies this call"
+	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
+	writeForgedAllowCacheFile(t, cfg.SessionFilePath, delegationID, tool, input)
+	fake := &fakePDP{
+		resp:     &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: pdpReason},
+		issueErr: status.Error(codes.PermissionDenied, "no reissue in this test"),
+	}
 	client := startFakePDP(t, fake)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"rm -rf /"}`), &stdout, client, cfg, testCacheCfg)
+	code := runHook(stdinBody(tool, input), &stdout, client, cfg)
 
 	if code != 2 {
-		t.Fatalf("runHook() = %d, want 2 (cached DENY)", code)
-	}
-	if got := fake.requestCount(); got != 0 {
-		t.Errorf("PDP received %d Decide call(s), want 0 -- a cache hit must never contact the PDP", got)
-	}
-	out := decodeHookOutput(t, stdout.Bytes())
-	if out.HookSpecificOutput.PermissionDecisionReason != cacheHitDenyReason {
-		t.Errorf("permissionDecisionReason = %q, want the cache-hit reason %q -- never a reason implying "+
-			"this process just computed a fresh policy verdict", out.HookSpecificOutput.PermissionDecisionReason, cacheHitDenyReason)
-	}
-}
-
-// TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP is the mutation-testing anchor for "serve a
-// hit without checking validity" (e.g. swapping cacheGetValid for a bare cacheGet inside
-// consultCache, local_cache.go): a SECOND, unrelated entry in the same cache file (a different
-// tool/input) proves this PEP has observed a newer epoch than the target entry was cached under --
-// exactly the "an entry stored before a bump is not served after it" property local_cache_test.go's
-// own TestConsultCache_EntryBelowFileMaxEpoch_IsNotServed defends directly, proven here end to end
-// through runHook. The two decisions are deliberately opposite (cached DENY vs. live ALLOW) so a
-// build that wrongly served the stale entry would flip the observable exit code, not just the
-// internal call count.
-func TestRunHook_CacheHit_StaleEpoch_FallsThroughToPDP(t *testing.T) {
-	now := time.Now()
-	cfg, delegationID, _ := hookCacheFixture(t, now.Add(time.Hour))
-	seedHookCache(t, cfg, cacheEntry{
-		cacheKey:            cacheKeyFor(delegationID, "Bash", `{"command":"ls"}`),
-		Decision:            pdpgrpc.Effect_EFFECT_DENY,
-		Epoch:               41, // computed before the bump
-		DelegationExpiresAt: now.Add(48 * time.Hour),
-		CachedAt:            now.Add(-time.Minute),
-	})
-	// A different tool/input, same delegation: proves this PEP has since observed epoch 42 --
-	// what makes 42, not 41, the cache file's own true max.
-	seedHookCache(t, cfg, cacheEntry{
-		cacheKey:            cacheKeyFor(delegationID, "OtherTool", "other input"),
-		Decision:            pdpgrpc.Effect_EFFECT_ALLOW,
-		Epoch:               42,
-		DelegationExpiresAt: now.Add(48 * time.Hour),
-		CachedAt:            now.Add(-time.Minute),
-	})
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Reason: "policy allows"}}
-	client := startFakePDP(t, fake)
-
-	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
-
-	if code != 0 {
-		t.Fatalf("runHook() = %d, want 0 -- the stale entry must be ignored and the PDP's live ALLOW must govern", code)
+		t.Fatalf("runHook() = %d, want 2 -- the PDP denied; a forged cache file must not turn that into an allow", code)
 	}
 	if got := fake.requestCount(); got != 1 {
-		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- an entry cached below the file's own "+
-			"max epoch is a miss, not a hit, so this must still ask the PDP (a mutation serving any cacheGet "+
-			"hit regardless of validity would leave this at 0 and the exit code at 2)", got)
+		t.Errorf("PDP received %d Decide call(s), want exactly 1 -- the hook must ask the PDP no matter what is on disk", got)
 	}
 }
 
-// TestRunHook_CacheMiss_CallsPDPAndStoresResult is the other property this
-// task exists for: a miss reaches the PDP exactly once, and the live
-// decision is written to the cache file afterward, keyed and valued so a
-// LATER identical call could find it.
-func TestRunHook_CacheMiss_CallsPDPAndStoresResult(t *testing.T) {
+// TestRunHook_ForgedCacheFile_PDPUnreachable_Denies: with the PDP down, the
+// same forged ALLOW still buys nothing -- the hook denies. Catches a build
+// that falls back to a file "only" when the PDP cannot be reached.
+func TestRunHook_ForgedCacheFile_PDPUnreachable_Denies(t *testing.T) {
+	const tool, input = "Bash", `{"command":"rm -rf /"}`
 	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
-	epoch := int64(42)
-	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Epoch: &epoch, Reason: "policy allows"}}
-	client := startFakePDP(t, fake)
-
-	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
-
-	if code != 0 {
-		t.Fatalf("runHook() = %d, want 0", code)
-	}
-	if got := fake.requestCount(); got != 1 {
-		t.Fatalf("PDP received %d Decide call(s), want exactly 1 -- a miss must ask the PDP", got)
-	}
-
-	stored, ok := cacheGet(cacheFilePathFor(cfg.SessionFilePath), cacheKeyFor(delegationID, "Bash", `{"command":"ls"}`))
-	if !ok {
-		t.Fatal("cacheGet() ok = false after a live ALLOW, want the decision to have been stored")
-	}
-	if stored.Decision != pdpgrpc.Effect_EFFECT_ALLOW {
-		t.Errorf("stored Decision = %v, want ALLOW", stored.Decision)
-	}
-	if stored.Epoch != 42 {
-		t.Errorf("stored Epoch = %d, want 42 (the PDP's own response epoch)", stored.Epoch)
-	}
-}
-
-// TestRunHook_CacheMissUnreachablePDP_DeniesWithDistinguishingReason is the
-// task brief's third required test: a miss with an unreachable PDP denies
-// with a reason distinguishing "no cached decision and the PDP is
-// unreachable" from an ordinary policy denial. Both phrases are checked
-// independently so a build reporting only one or the other still fails.
-func TestRunHook_CacheMissUnreachablePDP_DeniesWithDistinguishingReason(t *testing.T) {
-	cfg, _, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
+	writeForgedAllowCacheFile(t, cfg.SessionFilePath, delegationID, tool, input)
 	client := unreachablePDPClient(t)
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg, testCacheCfg)
+	code := runHook(stdinBody(tool, input), &stdout, client, cfg)
 
 	if code != 2 {
-		t.Fatalf("runHook() = %d, want 2", code)
+		t.Fatalf("runHook() = %d, want 2 -- an unreachable PDP denies, forged cache file or not", code)
 	}
-	out := decodeHookOutput(t, stdout.Bytes())
-	reason := out.HookSpecificOutput.PermissionDecisionReason
-	if !strings.Contains(reason, "no cached decision") {
-		t.Errorf("permissionDecisionReason = %q, want it to say no cached decision was available -- "+
-			"distinguishing this from an ordinary policy denial, per the task brief", reason)
+	reason := decodeHookOutput(t, stdout.Bytes()).HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(strings.ToLower(reason), "pdp") {
+		t.Errorf("permissionDecisionReason = %q, want it to say the PDP could not be reached", reason)
 	}
-	if !strings.Contains(strings.ToLower(reason), "could not reach") {
-		t.Errorf("permissionDecisionReason = %q, want it to also say the PDP could not be reached", reason)
+	// hook has no cache, so its deny reason must not send an operator
+	// looking for one.
+	if strings.Contains(strings.ToLower(reason), "cache") {
+		t.Errorf("permissionDecisionReason = %q, want no mention of a cache -- hook mode has none", reason)
 	}
 }
 
-// TestRunHook_Escalate_ApprovedOutcome_NeverStoredInCache is the task
-// brief's fourth required test, and the mutation-testing anchor for "store
-// an escalation": after an ESCALATE resolves -- here, all the way to an
-// approved ALLOW -- nothing is ever written to the cache for that key. This
-// is stricter than W4's literal text (which only bars caching the raw
-// ESCALATE value) on purpose: see local_cache.go's package doc, "WHY AN
-// ESCALATION IS NEVER CACHED, EVEN RESOLVED," for why the RESOLVED outcome
-// must not be cached either.
-func TestRunHook_Escalate_ApprovedOutcome_NeverStoredInCache(t *testing.T) {
+// TestRunHook_ForgedCacheFile_PDPErrors_Denies is the RPC-error twin of the
+// unreachable case: the PDP answers, with an error. Still a deny.
+func TestRunHook_ForgedCacheFile_PDPErrors_Denies(t *testing.T) {
+	const tool, input = "Bash", `{"command":"rm -rf /"}`
 	cfg, delegationID, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
-	approvalID := uuid.NewString()
-	fake := &fakePDP{
-		resp:                 escalateResp(approvalID),
-		getApprovalResponses: []*pdpgrpc.GetApprovalResponse{{Status: "approved"}},
-	}
+	writeForgedAllowCacheFile(t, cfg.SessionFilePath, delegationID, tool, input)
+	fake := &fakePDP{err: status.Error(codes.Internal, "boom")}
 	client := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
 
 	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"drop the prod table"}`), &stdout, wrapped, cfg, testCacheCfg)
-
-	if code != 0 {
-		t.Fatalf("runHook() = %d, want 0 (escalated, then approved)", code)
-	}
-	if _, ok := cacheGet(cacheFilePathFor(cfg.SessionFilePath), cacheKeyFor(delegationID, "Bash", `{"command":"drop the prod table"}`)); ok {
-		t.Error("cacheGet() found an entry after an escalation resolved to ALLOW, want nothing stored -- " +
-			"a human's approval is a decision about ONE moment, never a general, replayable verdict (W4)")
+	if code := runHook(stdinBody(tool, input), &stdout, client, cfg); code != 2 {
+		t.Fatalf("runHook() = %d, want 2 -- a PDP error denies, forged cache file or not", code)
 	}
 }
 
-// TestRunHook_CacheMiss_AfterReissue_StoresUnderReissuedTokenExpiry defends
-// storeCacheResult's own req.GetToken()-not-sess.GetToken() choice
-// (local_cache.go's own doc comment): the session file's ORIGINAL token
-// (soon-expiring, driving the first DENY) is replaced in place by
-// reissueAndRetryDecide before the retry succeeds, and the entry this call
-// stores must record the FRESH token's own expiry, not the stale original's
-// -- the two are set far enough apart here that a mixup fails obviously
-// rather than by coincidence.
-func TestRunHook_CacheMiss_AfterReissue_StoresUnderReissuedTokenExpiry(t *testing.T) {
-	now := time.Now()
-	staleExpiry := now.Add(time.Minute)
-	cfg, delegationID, _ := hookCacheFixture(t, staleExpiry)
-
-	// Truncated to whole seconds: a JWT "exp" claim is a Unix timestamp (signedTestToken's own
-	// expiresAt.Unix()), so tokenExpiry's decode can never return sub-second precision -- comparing
-	// against an untruncated now.Add(...) would fail this test on a precision mismatch that has
-	// nothing to do with the property under test (which token's expiry got stored).
-	freshExpiry := now.Add(6 * time.Hour).Truncate(time.Second)
-	reissuedToken := signedTestToken(t, freshExpiry)
-	fake := &fakePDP{
-		resp:      &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "token: verify: token is expired"},
-		issueResp: &pdpgrpc.IssueTokenResponse{Token: reissuedToken},
-	}
+// TestRunHook_IdenticalCalls_BothReachPDP pins "no caching in hook mode"
+// from the other side: nothing the first call does lets the second skip the
+// PDP, and neither call leaves a cache file behind. Catches a build that
+// starts persisting decisions again, in any format.
+func TestRunHook_IdenticalCalls_BothReachPDP(t *testing.T) {
+	const tool, input = "Bash", `{"command":"ls"}`
+	cfg, _, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
+	epoch := int64(42)
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW, Epoch: &epoch}}
 	client := startFakePDP(t, fake)
-	wrapped := &decideThenAllowClient{PDPServiceClient: client, first: fake.resp}
 
-	var stdout bytes.Buffer
-	code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, wrapped, cfg, testCacheCfg)
+	for i := 1; i <= 2; i++ {
+		var stdout bytes.Buffer
+		if code := runHook(stdinBody(tool, input), &stdout, client, cfg); code != 0 {
+			t.Fatalf("call %d: runHook() = %d, want 0; stdout: %s", i, code, stdout.String())
+		}
+		if got := fake.requestCount(); got != i {
+			t.Fatalf("after call %d the PDP had received %d Decide call(s), want %d -- every hook call asks the PDP", i, got, i)
+		}
+	}
 
-	if code != 0 {
-		t.Fatalf("runHook() = %d, want 0 (reissue then an allowing retry); stdout: %s", code, stdout.String())
+	entries, err := os.ReadDir(strings.TrimSuffix(cfg.SessionFilePath, "/session.json"))
+	if err != nil {
+		t.Fatalf("read session dir: %v", err)
 	}
-	stored, ok := cacheGet(cacheFilePathFor(cfg.SessionFilePath), cacheKeyFor(delegationID, "Bash", `{"command":"ls"}`))
-	if !ok {
-		t.Fatal("cacheGet() ok = false, want the post-reissue decision to have been stored")
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "cache") {
+			t.Errorf("hook left %q beside the session file, want no cache file written", e.Name())
+		}
 	}
-	if !stored.DelegationExpiresAt.Equal(freshExpiry) {
-		t.Errorf("stored DelegationExpiresAt = %v, want %v (the REISSUED token's own exp claim) -- "+
-			"sourcing it from sess.GetToken() instead of the token that actually produced this decision "+
-			"would record the stale original token's expiry here instead", stored.DelegationExpiresAt, freshExpiry)
+}
+
+// TestRunHookCmd_CacheStalenessWindow_NotRequiredAndIgnored drives the real
+// command entry point: STRATIUM_PEP_CACHE_STALENESS_WINDOW unset is not a
+// configuration error for hook, and a value left over from an older
+// configuration -- even one mcp would reject -- is ignored. Each case must
+// reach the PDP and return its ALLOW. Catches a build that requires or
+// parses the variable in hook mode again.
+func TestRunHookCmd_CacheStalenessWindow_NotRequiredAndIgnored(t *testing.T) {
+	for _, tt := range []struct{ name, value string }{
+		{"unset", ""},
+		{"set", "10m"},
+		{"set to a value mcp would reject", "not-a-duration"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			cfg, _, _ := hookCacheFixture(t, time.Now().Add(time.Hour))
+			clearHookEnv(t)
+			setAllHookEnv(t, map[string]string{
+				"STRATIUM_PEP_PDP_ADDR":     startFakePDPAddr(t, fake),
+				"STRATIUM_PEP_SESSION_FILE": cfg.SessionFilePath,
+			})
+			t.Setenv("STRATIUM_PEP_PDP_INSECURE", "true")
+			t.Setenv("STRATIUM_PEP_PDP_CA_FILE", "")
+			t.Setenv(cacheStalenessWindowEnv, tt.value)
+
+			var stdout bytes.Buffer
+			code := runHookCmd(stdinBody("Bash", `{"command":"ls"}`), &stdout)
+
+			if code != 0 {
+				t.Fatalf("runHookCmd() = %d, want 0 (the PDP allows); stdout: %s", code, stdout.String())
+			}
+			if got := fake.requestCount(); got != 1 {
+				t.Errorf("PDP received %d Decide call(s), want exactly 1", got)
+			}
+		})
 	}
 }

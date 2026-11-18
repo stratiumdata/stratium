@@ -488,7 +488,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_ESCALATE_AT` | ○ | — | — | — | — |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | — | ● | ● | — | ● |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | — | ● | ● | — | ● |
-| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | — | ● | ● | — | — |
+| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | — | — | ● | — | — |
 | `STRATIUM_PEP_MCP_UPSTREAM_COMMAND` | — | — | ● | — | — |
 | `STRATIUM_PEP_MCP_UPSTREAM_ARGS` | — | — | ○ | — | — |
 | `STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR` | — | — | — | ● | — |
@@ -517,7 +517,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_ESCALATE_AT` | session-start | `3` | Optional. Asks for a **lower** escalation threshold than the agent's (§5.5). It can never raise or remove the agent's threshold, so leaving it unset changes nothing. |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | hook, mcp, proxy | `2s` | How often to poll for a human's answer while an escalation is pending. |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | hook, mcp, proxy | `5m` | How long to wait before an unanswered escalation denies. **No safe default:** too short denies escalations no human could clear in time; too long leaves a tool call silently blocked. |
-| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | hook, mcp | `30s` | Upper bound on how old a replayed decision may be. See [`docs/pep.md`](pep.md) § "Choosing a decision cache staleness window". |
+| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | mcp | `30s` | Upper bound on how old a decision `mcp` replays from its in-memory cache may be. `hook` has no cache and ignores it. See [`docs/pep.md`](pep.md) § "The decision cache". |
 | `STRATIUM_PEP_MCP_UPSTREAM_COMMAND` | mcp | `npx` | The real MCP server's executable. Must not be blank. |
 | `STRATIUM_PEP_MCP_UPSTREAM_ARGS` | mcp | `-y,@modelcontextprotocol/server-filesystem,/srv/data` | **Comma-separated**, not shell-quoted. Optional. |
 | `STRATIUM_PEP_EXTAUTHZ_LISTEN_ADDR` | extauthz | `:9191` | Where Envoy's `ext_authz` filter reaches this server. |
@@ -1672,10 +1672,10 @@ Two rules that decide the rest of your design:
 > degrade an escalation to a denial that names the approval id, and the client
 > retries once it is approved.
 
-> **`hook` and `mcp` may serve a cached decision; `extauthz` and `proxy` never
-> may.** On the first two the caller is local and already holds a real session
-> file. On the last two the caller *is* the party being policed, so a forged
-> token must never be able to build a cache key and skip the PDP.
+> **Only `mcp` may serve a cached decision.** Its cache lives in the `mcp`
+> process's memory, so only decisions that process received from the PDP are
+> ever replayed. `hook` asks the PDP on every call. On `extauthz` and `proxy`
+> the caller *is* the party being policed, so every call goes to the PDP.
 
 ### 6.2 Creating a PEP for an agent — the complete recipe
 
@@ -1803,7 +1803,6 @@ hook() {
   STRATIUM_PEP_SUBJECT="alice@example.com" STRATIUM_PEP_SESSION_FILE="$SESSION" \
   STRATIUM_PEP_CONNECT_TIMEOUT=5s \
   STRATIUM_PEP_APPROVAL_POLL_INTERVAL=2s STRATIUM_PEP_APPROVAL_TIMEOUT=5m \
-  STRATIUM_PEP_CACHE_STALENESS_WINDOW=30s \
   stratium-pep hook
   echo "  exit=$?"
 }
@@ -1830,7 +1829,7 @@ with the *same delegation* — only the command text changed, and the tier was
 computed in the PDP.
 
 > **If every call denies with `missing required configuration: …`**, add the
-> variables it names. The `hook` surface needs **eight**, and a missing one
+> variables it names. The `hook` surface needs **seven**, and a missing one
 > **fails closed with the reason on stdout** rather than allowing. That is
 > correct behaviour, and it is why the reason text matters.
 
@@ -1853,7 +1852,7 @@ computed in the PDP.
 }
 ```
 
-The eight variables must be exported in the shell that launches Claude Code.
+The seven variables must be exported in the shell that launches Claude Code.
 **Keep the `timeout`** — every tool call becomes a synchronous round trip to the
 PDP, and without one an unreachable PDP hangs the session instead of failing.
 **Start with a narrow `matcher`** (`"Read"`) on a session you care about.
@@ -1993,6 +1992,7 @@ Ask the agent to do something it should be refused. The harness surfaces
 | `POST /v1/delegations/{id}/revoke` | the **next** tool call denies |
 | agent suspended or disabled | the next tool call denies |
 | any PAP write | the tenant epoch bumps, invalidating every cached decision fleet-wide |
+| `mcp` restarts | its decision cache starts empty; the next call asks the PDP |
 | session file deleted | the next tool call denies |
 | delegation TTL elapses | denies |
 
@@ -2031,10 +2031,13 @@ classification, the system is working.
 - **A denial costs two round trips and writes two audit rows.** On a first denial
   the PEP re-issues its token once and retries, because "the token expired" and
   "policy denied" arrive as the same wire shape. An allow costs one of each.
-- **The decision cache is what buys outage tolerance** on `hook` and `mcp`. An
-  entry is used only if the epoch still matches, the delegation and token have
-  not expired, and it is inside your staleness window. Everything else is a miss,
-  and a corrupt cache file is a miss, never an error.
+- **The decision cache is what buys outage tolerance** on `mcp`. It lives in
+  the `mcp` process's memory for the life of that process; nothing is ever read
+  from a cache file. An entry is used only if the epoch still matches, the
+  delegation and token have not expired, and it is inside your staleness window.
+  Everything else is a miss.
+- **`hook` has no decision cache.** It asks the PDP on every call, so a PDP
+  outage denies every hooked tool call immediately.
 - **The PEP never logs a token or key material**, on any path.
 - **Uninstalling:** remove the hook from `.claude/settings.json` or
   `~/.codex/hooks.json`, restore the real MCP command, and delete the session

@@ -195,6 +195,13 @@ func (f *fakePDP) lastGetApprovalRequest() *pdpgrpc.GetApprovalRequest {
 // t.Cleanup.
 func startFakePDP(t *testing.T, srv *fakePDP) pdpgrpc.PDPServiceClient {
 	t.Helper()
+	return dialTestClient(t, startFakePDPAddr(t, srv))
+}
+
+// startFakePDPAddr serves srv like startFakePDP but returns its address, for
+// a test that drives a real command entry point, which dials for itself.
+func startFakePDPAddr(t *testing.T, srv *fakePDP) string {
+	t.Helper()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -206,7 +213,7 @@ func startFakePDP(t *testing.T, srv *fakePDP) pdpgrpc.PDPServiceClient {
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 
-	return dialTestClient(t, lis.Addr().String())
+	return lis.Addr().String()
 }
 
 // unreachablePDPClient returns a client dialed to an address nothing is

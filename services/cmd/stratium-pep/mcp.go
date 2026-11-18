@@ -330,7 +330,9 @@ func runMCP(agentIn io.Reader, agentOut io.Writer, upstreamIn io.WriteCloser, up
 	// writers from interleaving mid-frame; see the package doc's CONCURRENCY note.
 	syncUpstreamIn := &syncWriter{w: upstreamIn}
 	syncAgentOut := &syncWriter{w: agentOut}
-	authz := &mcpAuthorizer{client: client, cfg: cfg, cacheCfg: cacheCfg, upstreamIn: syncUpstreamIn, agentOut: syncAgentOut}
+	// A new, empty decision cache per proxy run: it only ever holds decisions this process
+	// receives from the PDP from here on (cache.go's package doc, "Memory only").
+	authz := &mcpAuthorizer{client: client, cfg: cfg, cacheCfg: cacheCfg, cache: newDecisionCache(), upstreamIn: syncUpstreamIn, agentOut: syncAgentOut}
 
 	var wg sync.WaitGroup
 	var agentToUpstreamErr, upstreamToAgentErr error

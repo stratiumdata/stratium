@@ -253,7 +253,23 @@ func runSessionStart(client pdpgrpc.PDPServiceClient, cfg sessionStartConfig, st
 		return 1
 	}
 
+	removeLegacyCacheFile(cfg.SessionFilePath, stderr)
 	return 0
+}
+
+// legacyCacheFileSuffix names the decision cache file that versions before
+// the in-memory cache (cache.go) kept beside the session file. It exists
+// only for cleanup: nothing reads that file any more.
+const legacyCacheFileSuffix = ".cache.json"
+
+// removeLegacyCacheFile deletes a leftover legacy cache file, without
+// reading it. Best-effort hygiene only -- no PEP mode consults the file, so
+// a failure here is reported and never changes session-start's result.
+func removeLegacyCacheFile(sessionFilePath string, stderr io.Writer) {
+	path := sessionFilePath + legacyCacheFileSuffix
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not remove legacy cache file %s: %s\n", path, err)
+	}
 }
 
 // removeStaleSessionFile removes any session file left at path, reporting

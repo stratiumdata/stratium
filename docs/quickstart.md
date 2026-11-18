@@ -147,7 +147,7 @@ If you ran it **from inside a Claude Code or Codex session**, step 9 stopped:
 
 This is deliberate, and it is the trap most worth understanding. A `PreToolUse`
 hook with `matcher: "*"` takes effect in an already-running session **immediately**.
-That session was not launched with the eleven environment variables the hook
+That session was not launched with the ten environment variables the hook
 reads, so every tool call in it starts denying — including the ones you would use
 to undo it. Run the two commands from a plain terminal instead.
 
@@ -183,7 +183,7 @@ deploy/stratium run claude
 
 Anything you would pass to `claude` goes after it: `deploy/stratium run claude --resume`.
 
-The launcher resolves the Docker ports and the agent id fresh, exports the eleven
+The launcher resolves the Docker ports and the agent id fresh, exports the ten
 `STRATIUM_PEP_*` variables, and `exec`s the real binary. **Starting `claude`
 directly leaves it denying every tool call** for want of configuration.
 
@@ -290,8 +290,7 @@ else. That happened during development: a `Write` probe labelled "not in the
 grant" was actually denying on action tier, because of a stale `tier_overrides`
 row left on the shared tenant by an unrelated test suite.
 
-Each run uses a fresh uuid-tagged resource path, so the PDP's 30-second decision
-cache cannot answer for it.
+Each run uses a fresh uuid-tagged resource path.
 
 ---
 
@@ -424,10 +423,10 @@ delegation on every session start, discarding one you built by hand.
 
 - **A hook installed inside a running session takes effect immediately.** So does
   a removal. Do not install `matcher: "*"` from a session you are using.
-- **`session-start`'s eight variables are not `hook`'s eight.** They overlap in
+- **`session-start`'s eight variables are not `hook`'s seven.** They overlap in
   five. Export only the first set and every tool call denies with `missing
   required configuration` — a denial that reads exactly like a policy denial
-  until you open the reason. The launcher sets all eleven.
+  until you open the reason. The launcher sets all ten.
 - **Every tool call is denied until a session is started and a policy permits
   it.** Seeing everything denied after installing a hook is usually correct.
 - **Five tools can never satisfy a cap.** `Glob`, `Grep`, `WebFetch`, `WebSearch`

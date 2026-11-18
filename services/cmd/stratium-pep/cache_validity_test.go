@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/sha256"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -215,7 +214,7 @@ func TestTokenNotExpired_MissingExpClaimDenies(t *testing.T) {
 // guarantee directly: an ESCALATE entry that satisfies every W3 condition
 // -- current epoch, unexpired delegation, valid token, within the window --
 // must still never be served. Constructed by hand rather than via
-// cachePut, which already refuses to write one (TestCachePut_EscalationNotStored
+// put, which already refuses to store one (TestCachePut_EscalationNotStored
 // below): this is what proves the read side does not simply trust the
 // write side to have kept one out.
 func TestCacheEntryUsable_EscalationNeverServed(t *testing.T) {
@@ -226,48 +225,52 @@ func TestCacheEntryUsable_EscalationNeverServed(t *testing.T) {
 	}
 }
 
-// TestCachePut_EscalationNotStored defends W4's write-side guarantee: a Put
+// TestCachePut_EscalationNotStored defends W4's write-side guarantee: a put
 // carrying an ESCALATE decision must be refused outright, and must leave no
-// trace on disk for a later Get to ever find -- not stored with some
-// unservable marker, simply never written.
+// trace for a later get to ever find -- not stored with some unservable
+// marker, simply never stored.
 func TestCachePut_EscalationNotStored(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.json")
+	c := newDecisionCache()
 	entry, _, _, _, _ := validFixture(t)
 	entry.Decision = pdpgrpc.Effect_EFFECT_ESCALATE
 
-	err := cachePut(path, entry)
+	err := c.put(entry)
 	if !errors.Is(err, errEscalationNotCacheable) {
-		t.Fatalf("cachePut(ESCALATE) error = %v, want errEscalationNotCacheable", err)
+		t.Fatalf("put(ESCALATE) error = %v, want errEscalationNotCacheable", err)
 	}
-	if _, ok := cacheGet(path, entry.cacheKey); ok {
-		t.Error("cacheGet() found an entry after a refused ESCALATE Put, want nothing ever written")
+	if _, ok := c.get(entry.cacheKey); ok {
+		t.Error("get() found an entry after a refused ESCALATE put, want nothing ever stored")
 	}
 }
 
-// TestCacheGetValid_LayersUsabilityOverCacheGet proves cacheGetValid is
-// genuinely doing more than cacheGet: the same entry is a hit under the
-// bare store and a miss once validity fails, and a hit again once every
-// condition is satisfied -- not merely that cacheGetValid can return true
-// at all, but that it can also return false for something cacheGet itself
-// still finds.
-func TestCacheGetValid_LayersUsabilityOverCacheGet(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.json")
+// TestCacheGetValid_LayersUsabilityOverGet proves getValid is genuinely
+// doing more than get: the same entry is a hit while every W3 condition
+// holds and a miss once one stops holding (here the epoch: a second entry
+// raises the cache's own maxEpoch past it) -- while get itself still finds
+// it.
+func TestCacheGetValid_LayersUsabilityOverGet(t *testing.T) {
+	c := newDecisionCache()
 	entry, epoch, token, now, staleness := validFixture(t)
-	mustCachePut(t, path, entry)
+	mustCachePut(t, c, entry)
 
-	if _, ok := cacheGet(path, entry.cacheKey); !ok {
-		t.Fatalf("cacheGet() ok = false, want the seeded entry found by the bare store")
-	}
-	if _, ok := cacheGetValid(path, entry.cacheKey, epoch+1, token, now, staleness); ok {
-		t.Error("cacheGetValid() ok = true for an entry cacheGet finds but whose epoch mismatches, want a miss")
-	}
-
-	got, ok := cacheGetValid(path, entry.cacheKey, epoch, token, now, staleness)
+	got, ok := c.getValid(entry.cacheKey, token, now, staleness)
 	if !ok {
-		t.Fatalf("cacheGetValid() ok = false for a fully valid entry, want a hit")
+		t.Fatalf("getValid() ok = false for a fully valid entry, want a hit")
 	}
 	if got.Decision != entry.Decision {
-		t.Errorf("cacheGetValid() Decision = %v, want %v", got.Decision, entry.Decision)
+		t.Errorf("getValid() Decision = %v, want %v", got.Decision, entry.Decision)
+	}
+
+	newer := entry
+	newer.cacheKey = cacheKey{DelegationID: entry.DelegationID, Tool: "OtherTool", InputDigest: sha256.Sum256([]byte("other"))}
+	newer.Epoch = epoch + 1
+	mustCachePut(t, c, newer)
+
+	if _, ok := c.get(entry.cacheKey); !ok {
+		t.Fatalf("get() ok = false, want the seeded entry still found by the bare store")
+	}
+	if _, ok := c.getValid(entry.cacheKey, token, now, staleness); ok {
+		t.Error("getValid() ok = true for an entry get finds but whose epoch is below the cache's max, want a miss")
 	}
 }
 
@@ -346,8 +349,7 @@ func TestLoadCacheConfigFromEnv(t *testing.T) {
 // of "a missing required config value fails startup naming all missing
 // keys": cacheConfig alone has only one required variable, so it cannot
 // exercise the PLURAL case by itself. Composed with hookConfig's own
-// loader the same way Task 3 will need to (combineConfigErrors, mcp.go's
-// existing pattern for mcpConfig+hookConfig), a gap in EACH independently
+// loader the same way runMCPCmd does (combineConfigErrors, mcp.go), a gap in EACH independently
 // loaded config must be named in the one combined error together, not just
 // whichever loader happened to run first.
 func TestMissingConfig_NamesEveryMissingKeyAcrossLoaders(t *testing.T) {

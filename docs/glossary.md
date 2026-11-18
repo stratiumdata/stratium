@@ -154,8 +154,9 @@ two terms are commonly confused, the entry says so.
     write, that invalidates every cached decision at once.
 
 **Decision cache**
-:   Gives outage tolerance on the two surfaces whose caller is local (`hook`,
-    `mcp`). Never used for escalations, or on the network surfaces.
+:   Gives outage tolerance on `mcp`. It lives in the `mcp` process's memory for
+    the life of that process. Never used for escalations, on `hook`, or on the
+    network surfaces.
 
 **Tenant**
 :   Startup configuration, never a request field. Isolated by Postgres

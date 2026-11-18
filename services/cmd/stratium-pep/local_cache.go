@@ -1,143 +1,56 @@
-// local_cache.go is the shared logic hook.go's runHook and mcp_authorize.go's
-// decideAndRelay both call to consult and populate the decision cache
-// (cache.go, Phase 13 Tasks 1-2) -- and the ONLY two callers, by spec §4.8.3
-// W6: extauthz and proxy always call the PDP and never touch this file's own
-// functions.
+// local_cache.go is the logic mcp_authorize.go's decideAndRelay calls to
+// consult and populate the decision cache (cache.go) -- and its ONLY caller.
+// hook has no cache: it is a new process per tool call, and the cache lives
+// only in process memory (cache.go's package doc, "Memory only"), so a hook
+// would have nothing to consult. extauthz and proxy always call the PDP and
+// never touch this file's functions (spec §4.8.3 W6).
 //
-// THE BOUNDARY IS STRUCTURAL, NOT A COMMENT. consultCache requires sess
+// WHY MEMORY ONLY. A cache hit is defined by NOT calling the PDP, and the
+// PDP is the only component that ever verifies a token's signature (K2) --
+// this binary reads a token with jwt.ParseUnverified. A hit therefore
+// replays a verdict with nothing re-checking it, which is only sound if the
+// entry itself is known to have come from the PDP. The one place that holds
+// is this process's own memory: every entry in a decisionCache was put
+// there by storeCacheResult, from a Decide response this process received.
+// Nothing this binary can read from disk carries that guarantee, so no
+// decision is ever read from disk.
+//
+// WHY extauthz AND proxy STAY OUT, STRUCTURALLY. consultCache requires sess
 // *pdpgrpc.CreateDelegationResponse -- the exact value loadSessionFile
 // (session_file.go) returns -- as its source of the delegation id and token
-// a cache lookup needs (storeCacheResult takes the identical two values as
-// plain strings, extracted from that same sess by its only two callers).
-// That is deliberately not a bare (token, id) pair, which any caller could
-// assemble from anything: hook.go and mcp_authorize.go both already hold a
-// real *pdpgrpc.CreateDelegationResponse because both already call
-// loadSessionFile for unrelated reasons of their own (K4 -- authenticating
-// the call at all). extauthz.go and proxy.go structurally do not, and never
-// have -- see extauthz.go's own "NO SESSION FILE" section and proxy.go's
-// identical one, both there specifically because those surfaces' caller IS
-// the party being policed and must re-authenticate on every call (W6, and
-// A10 one layer up). A future reader wiring the cache into either would hit
-// a compile error reaching for a value that does not exist in scope, before
-// writing a single line of cache-consulting logic -- getting one means
-// first undoing "NO SESSION FILE" as a deliberate property those files
-// state at length, not a line that merely happens to compile by passing
-// something else in its place. This follows the precedent escalation.go's
-// own doc comment sets for resolveApproval's signature: a hookConfig value
-// "populated with only the fields this function actually reads" would be "a
-// lie wearing hookConfig's name" that compiles but misleads; a signature
-// that only accepts the real thing is what keeps a caller honest, here as
-// there.
+// a lookup needs. That is deliberately not a bare (token, id) pair, which
+// any caller could assemble from anything. extauthz.go and proxy.go have no
+// session file (see their own "NO SESSION FILE" sections): their caller IS
+// the party being policed and presents its own token on every call, so a
+// forged token -- arbitrary signature bytes, claims naming a known
+// delegation and a far-future expiry -- would decode cleanly, build a cache
+// key, satisfy every W3 condition, and be served a cached ALLOW with the
+// PDP never contacted. A future reader wiring the cache into either would
+// hit a compile error reaching for a value that does not exist in scope.
 //
-// The one value this boundary does NOT source from sess is the epoch --
-// see consultCache's own doc comment below, and "WHERE THE EPOCH COMES
-// FROM," for why sess.GetEpoch() turned out to be the wrong choice and what
-// replaced it. That correction does not weaken the boundary above: the
-// delegation id and token still come from nowhere but sess, on both
-// surfaces, for the identical reason.
-//
-// WHY THE BOUNDARY MATTERS (restated from spec §4.8.3, cache.go's own
-// package doc, and this project's git history -- see the plan's own "W6
-// RULING" entry for the full account): a cache hit is defined by NOT calling
-// the PDP, and the PDP is the only component that ever verifies a token's
-// signature (K2) -- this binary reads a token with jwt.ParseUnverified,
-// which cache.go's tokenNotExpired already does deliberately, on the
-// strength of a signature "already... checked elsewhere in the stack." A hit
-// removes the only place that check ever happens. On hook and mcp the caller
-// is local and already holds the session file containing a REAL token, so
-// serving from cache grants it nothing it did not already have. On extauthz
-// and proxy the caller IS the party being policed, so a forged token --
-// arbitrary signature bytes, claims naming a known delegation and a
-// far-future expiry -- would decode cleanly, build a cache key, satisfy
-// every W3 condition, and be served a cached ALLOW with the PDP never
-// contacted.
-//
-// WHERE THE CACHE FILE LIVES. cacheFilePathFor derives the cache's own path
-// from SessionFilePath -- a fixed suffix, in the same directory -- rather
-// than a second, independently configured env var: W5 already pins the
-// cache "on disk, beside the session file, with the same integrity
-// posture," a fixed relationship to the one path an operator already
-// configures, not a second location that could be pointed elsewhere by
-// mistake or left unset entirely for a location the spec does not leave
-// open to configure at all.
-//
-// WHERE THE EPOCH COMES FROM (corrected after this task's first pass shipped
-// with a real bug -- left here in full, not trimmed to the fixed version
-// alone, because the wrong answer was plausible enough to ship once and is
-// worth a future reader recognizing on sight). lastKnownEpoch is
-// maxCacheEpoch(cachePath): the highest Epoch already recorded among the
-// entries in the cache file, computed fresh on every consultCache call, not
-// tracked anywhere else.
-//
-// The first version used sess.GetEpoch() instead -- the value
-// CreateDelegationResponse carries and cacheGetValid's own doc comment
-// (cache.go) singles out as a natural source. It compiles, it is exactly
-// what W6's structural argument above already requires be in scope, and it
-// passed every test this task first wrote, because every one of those
-// tests' fixtures set the session epoch and the stored entry's epoch to the
-// same value -- the two sides agreed by construction, so no test could
-// ever have told the two apart (this project's now-familiar
-// fixture-makes-the-bug-invisible shape). It is wrong: sess.GetEpoch() is a
-// snapshot written exactly once, at session-start (writeSessionFile's only
-// caller -- session_file.go's own package doc), and never updated by hook
-// or mcp afterward on any later call. storeCacheResult (below) stamps each
-// entry's own Epoch from that SPECIFIC call's live Decide response. The
-// instant any control-plane write anywhere in the tenant bumps the epoch
-// once -- Phase 12's trigger fires on ordinary policy, agent, catalog, and
-// delegation writes, including ones from a completely different session --
-// every entry stored from then on carries the NEW epoch while
-// sess.GetEpoch() stays pinned to the OLD one for the rest of that
-// session's life. epochCurrent (cache.go) then fails for every entry,
-// permanently: not a slow degradation, a hard stop on the one property this
-// whole phase exists to buy, often within seconds in a tenant with any
-// other activity at all.
-//
-// maxCacheEpoch needs no new state to fix this, which is what makes it the
-// right level to fix it at: the newest entry already in the file was
-// written by SOME call that read a real, live epoch from the PDP, and the
-// epoch is monotonic (spec V1) -- so that newest entry's own Epoch already
-// IS "the last epoch this PEP has seen," with nothing extra to track or
-// keep in sync, on either surface, across however many cooperating hook
-// subprocesses W5 already has sharing one file. An entry whose Epoch equals
-// that max is current; one below it was computed before a bump this PEP has
-// since observed via some OTHER entry, and correctly misses; an outage with
-// no new writes leaves the max unchanged, so existing entries keep serving
-// exactly as long as their own staleness window (condition 4) allows --
-// which is precisely what that condition is for. sess.GetEpoch() is not
-// read anywhere in this file any longer.
+// WHERE THE EPOCH COMES FROM. The epoch an entry is judged against is the
+// cache's own maxEpoch (cache.go), never sess.GetEpoch(): the session
+// file's epoch is a snapshot written once, at session-start, while each
+// entry carries the epoch of its own live Decide response. Comparing the
+// two would fail every entry permanently the first time any control-plane
+// write anywhere in the tenant bumped the epoch.
 //
 // WHY AN ESCALATION IS NEVER CACHED, EVEN RESOLVED. W4 says an ESCALATE
-// decision is never cached; cache.go's cachePut and cacheEntryUsable each
-// already enforce the literal rule independently, on the write and read side
-// (its own package doc, "Validity") -- storeCacheResult's own check below,
-// which runs before either of those, is what keeps this file's one call to
-// cachePut from ever reaching a cache.go layer at all for that response,
-// rather than trusting cachePut's refusal alone. Both runHook and
-// decideAndRelay call storeCacheResult exactly once, UNCONDITIONALLY --
-// there is no second, matching check at either call site, deliberately: a
-// second identical check there would guard nothing storeCacheResult does
-// not already guard for the SAME two callers, which is a different shape of
-// redundancy than cache.go's own two guards (those protect genuinely
-// different paths -- a write cachePut itself performs, and a read of a file
-// that could hold an ESCALATE entry by some route OTHER than cachePut, e.g.
-// hand-edited -- see cache.go's own doc comment).
+// decision is never cached; cache.go's put and cacheEntryUsable each
+// enforce the literal rule, on the write and read side. storeCacheResult's
+// own check below runs before either. decideAndRelay calls storeCacheResult
+// exactly once, UNCONDITIONALLY, with no second matching check at the call
+// site.
 //
 // This file goes one step stricter than W4's literal text, by construction:
-// both callers place their one storeCacheResult call ONLY on the response
-// that settles BEFORE any escalation wait begins (the ordinary Decide call,
-// or a reissue retry) -- never on resolveApproval's own post-approval retry
-// response, even though that response is itself ALLOW or DENY, never
-// ESCALATE (resolveApproval's own doc comment). That stricter property is
-// NOT enforced by checking resp's effect at all -- it holds because there is
-// only one storeCacheResult call site in either function, positioned before
-// the switch that would otherwise reach awaitApproval/resolveApproval, and
-// no second call after either returns. A human approving one specific
-// pending action is not the PDP producing a general, replayable verdict
-// about every future identical call -- caching that outcome would let a
-// LATER, superficially identical call skip the human step the first one
-// required, which is exactly the "serves an approval that was never
-// granted" failure W4 names, just reached one step later than the literal
-// ESCALATE value.
+// that one storeCacheResult call sits ONLY on the response that settles
+// BEFORE any escalation wait begins (the ordinary Decide call, or a reissue
+// retry) -- never on resolveApproval's own post-approval retry response,
+// even though that response is itself ALLOW or DENY. A human approving one
+// specific pending action is not the PDP producing a general, replayable
+// verdict about every future identical call -- caching that outcome would
+// let a LATER, superficially identical call skip the human step the first
+// one required.
 package main
 
 import (
@@ -150,16 +63,8 @@ import (
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
-// cacheFilePathFor derives the decision cache's own file path from the
-// session file it sits beside -- see this file's own package doc, "WHERE THE
-// CACHE FILE LIVES."
-func cacheFilePathFor(sessionFilePath string) string {
-	return sessionFilePath + ".cache.json"
-}
-
-// cacheHitDenyReason is served for every cache-hit DENY, on both surfaces
-// this file wires the cache into. Never the original PDP's own reason text:
-// cache.go's cacheEntry (Task 1) deliberately never stores Reason at all --
+// cacheHitDenyReason is served for every cache-hit DENY. Never the original PDP's own reason text:
+// cache.go's cacheEntry deliberately never stores Reason at all --
 // this project's own binding "never log a cached decision's reason" rule --
 // so there is nothing to reproduce even if this text wanted to. Labelling
 // the denial as cache-served, explicitly, is what keeps it from being
@@ -171,17 +76,11 @@ const cacheHitDenyReason = "stratium-pep: cached decision: this exact request wa
 	"(served from cache, without contacting the PDP; the cache does not retain the original policy reason text)"
 
 // cacheMissUnreachableReason wraps describeRPCError's own text (hook.go)
-// with the one fact unique to a cache-wired surface: this denial follows a
-// cache MISS, not merely a failed RPC. Applied uniformly to every describeRPCError
-// outcome (Unavailable, DeadlineExceeded, NotFound, or a generic application
-// error), not only the literally-unreachable case: whichever way the call
-// then failed, "there was no cached fallback for this request" is equally
-// true and equally worth an operator knowing before they start debugging a
-// specific RPC failure mode. An operator debugging an outage needs to tell
-// this apart from an ordinary policy denial (the PDP's own reason, passed
-// through unprefixed elsewhere in both callers) -- the task brief's own
-// requirement -- and this prefix is what makes that distinction legible at a
-// glance rather than requiring the reader to already know the cache exists.
+// with the one fact unique to the cache-wired surface: this denial follows
+// a cache MISS, not merely a failed RPC. Applied uniformly to every
+// describeRPCError outcome: whichever way the call failed, "there was no
+// cached fallback for this request" is equally true and equally worth an
+// operator knowing. hook does not use this -- it has no cache to miss.
 func cacheMissUnreachableReason(rpcErr string) string {
 	return fmt.Sprintf("stratium-pep: no cached decision for this request, and %s", rpcErr)
 }
@@ -195,63 +94,22 @@ func cacheKeyFor(delegationID, tool, rawInput string) cacheKey {
 	return cacheKey{DelegationID: delegationID, Tool: tool, InputDigest: sha256.Sum256([]byte(rawInput))}
 }
 
-// maxCacheEpoch reads every entry currently in the cache file at path and
-// returns the highest Epoch among them -- see the package doc's "WHERE THE
-// EPOCH COMES FROM" for why this, not sess.GetEpoch(), is lastKnownEpoch:
-// every entry is written with the epoch it was computed under
-// (storeCacheResult), and the epoch is monotonic (spec V1), so the newest
-// entry already says what the oldest recorded belief could not.
-//
-// Returns 0 for an empty or unreadable file (loadCacheEntries's own
-// fail-closed "no data" case, cache.go). That value is inert either way:
-// cacheGetValid always calls cacheGet FIRST, and an empty or corrupt file
-// means that lookup already reports a miss -- for the identical reason this
-// function has nothing to compute a real max from -- before this return
-// value is ever compared against anything. 0 needs no special-casing at the
-// call site and matches every other "no data" default already in play here
-// (a zero-valued cacheEntry, Go's own int64 zero value) rather than
-// inventing a sentinel meaningful only to this one function.
-func maxCacheEpoch(path string) int64 {
-	entries, ok := loadCacheEntries(path)
-	if !ok {
-		return 0
-	}
-	var maxEpoch int64
-	for _, e := range entries {
-		if e.Epoch > maxEpoch {
-			maxEpoch = e.Epoch
-		}
-	}
-	return maxEpoch
-}
-
 // consultCache is the one cache READ this binary ever performs -- see this
 // file's own package doc for why its signature is what keeps extauthz.go and
 // proxy.go from being able to call it by accident.
 //
-// lastKnownEpoch is maxCacheEpoch(cachePath) -- the package doc's "WHERE THE
-// EPOCH COMES FROM" has the full account of why, including the wrong answer
-// this task shipped first. token is sess.GetToken(), still: condition 3
-// (cache.go's tokenNotExpired) is specifically about the CALLER'S OWN
-// currently-presented credential, which only the session file can supply,
-// re-read fresh on every call for hook (a subprocess with no memory between
-// calls) and for mcp (which re-reads the file per call regardless, for the
-// pre-existing revocation-latency reason mcp_authorize.go's own doc comment
-// on decideAndRelay already gives).
-func consultCache(cachePath string, staleness time.Duration, sess *pdpgrpc.CreateDelegationResponse, tool, rawInput string, now time.Time) (cacheEntry, bool) {
-	key := cacheKeyFor(sess.GetDelegationId(), tool, rawInput)
-	return cacheGetValid(cachePath, key, maxCacheEpoch(cachePath), sess.GetToken(), now, staleness)
+// token is sess.GetToken(): condition 3 (cache.go's tokenNotExpired) is
+// specifically about the CALLER'S OWN currently-presented credential, which
+// only the session file can supply, re-read fresh on every call
+// (mcp_authorize.go's own doc comment on decideAndRelay).
+func consultCache(cache *decisionCache, staleness time.Duration, sess *pdpgrpc.CreateDelegationResponse, tool, rawInput string, now time.Time) (cacheEntry, bool) {
+	return cache.getValid(cacheKeyFor(sess.GetDelegationId(), tool, rawInput), sess.GetToken(), now, staleness)
 }
 
 // storeCacheResult is the one cache WRITE this binary ever performs, called
-// by both runHook and decideAndRelay UNCONDITIONALLY, immediately after a
-// Decide call (or a reissue retry) settles on a final response -- see the
-// package doc's "WHY AN ESCALATION IS NEVER CACHED, EVEN RESOLVED" for why
-// neither caller needs its own matching check before calling this function:
-// the ESCALATE check below is the one and only place W4's literal "never
-// cache an ESCALATE" rule is enforced for a response this file ever
-// receives, and a caller-side copy of it would guard nothing this one does
-// not already guard for the same two call sites.
+// by decideAndRelay UNCONDITIONALLY, immediately after a Decide call (or a
+// reissue retry) settles on a final response -- see the package doc's "WHY
+// AN ESCALATION IS NEVER CACHED, EVEN RESOLVED."
 //
 // token is the credential that ACTUALLY produced resp -- req.Token at the
 // point resp was obtained, which reissueAndRetryDecide (reissue.go) may have
@@ -260,15 +118,7 @@ func consultCache(cachePath string, staleness time.Duration, sess *pdpgrpc.Creat
 // reissue. Sourcing DelegationExpiresAt from the wrong one would record an
 // expiry for a token that was never the one actually verified for this
 // decision.
-//
-// A write failure is silently discarded, the same "best-effort, not
-// reported anywhere" treatment mcp_authorize.go's forward already gives an
-// unwritable destination: the cache is an optimization a caller can always
-// fall back from (cacheGet's own doc comment, cache.go), and this call sits
-// after the real decision has already been made -- a failure here can only
-// cost a future call its chance at a hit, never change what this call
-// itself reports.
-func storeCacheResult(cachePath, delegationID, tool, rawInput, token string, resp *pdpgrpc.DecideResponse, now time.Time) {
+func storeCacheResult(cache *decisionCache, delegationID, tool, rawInput, token string, resp *pdpgrpc.DecideResponse, now time.Time) {
 	if resp.GetEffect() == pdpgrpc.Effect_EFFECT_ESCALATE {
 		return
 	}
@@ -293,16 +143,16 @@ func storeCacheResult(cachePath, delegationID, tool, rawInput, token string, res
 		DelegationExpiresAt: expiresAt,
 		CachedAt:            now,
 	}
-	_ = cachePut(cachePath, entry)
+	// put's only error is the ESCALATE refusal, already ruled out above.
+	_ = cache.put(entry)
 }
 
 // tokenExpiry decodes token's own "exp" claim without verifying its
 // signature -- the same unverified read cache.go's tokenNotExpired performs
 // on the read side, for the identical reason: spec K2 makes the PDP the sole
 // verifier, so the PEP has never held a key to check one with, on this path
-// or the ordinary forwarded-to-Decide one either. This resolves Task 1's own
-// flagged concern (neither DecideResponse nor CreateDelegationResponse
-// carries a delegation-expiry field) exactly as the plan predicted:
+// or the ordinary forwarded-to-Decide one either. Neither DecideResponse nor
+// CreateDelegationResponse carries a delegation-expiry field:
 // pdp.proto's CreateDelegationResponse.token comment states a delegation's
 // expiry IS its token's own exp claim, not a second copy this function could
 // read from anywhere else.

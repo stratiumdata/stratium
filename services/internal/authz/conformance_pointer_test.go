@@ -198,15 +198,22 @@ func TestVerifyPointer_FindsRealTestFunctions(t *testing.T) {
 		{"C23", "internal/store", []string{
 			"TestIntegration_Envoy_EscalateDeniesWithFindablePendingApproval_ApprovedRetrySucceeds",
 		}},
-		{"C19", "internal/store", []string{
-			"TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies",
-			"TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing",
+		{"C19/store", "internal/store", []string{
+			"TestIntegration_Hook_E2E_PDPStopped_DeniesACallAllowedWhileUp",
+			"TestIntegration_Hook_E2E_ForgedCacheFile_PDPStopped_Denies",
 		}},
-		{"C20", "internal/store", []string{
-			"TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry",
+		{"C19/pep", "cmd/stratium-pep", []string{
+			"TestDecideAndRelay_CacheMissUnreachablePDP_DeniesWithDistinguishingReason",
+			"TestConsultCache_OutageWithNoNewWrites_StillServesAtMaxUntilStalenessCloses",
 		}},
-		{"C24", "internal/store", []string{
-			"TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry",
+		{"C20", "cmd/stratium-pep", []string{
+			"TestConsultCache_EntryBelowMaxEpoch_IsNotServed",
+			"TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP",
+		}},
+		{"C24", "cmd/stratium-pep", []string{
+			"TestCacheEntryUsable_ExpiredTokenDenies",
+			"TestCacheEntryUsable_ExpiredDelegationDenies",
+			"TestConsultCache_UsesSessTokenNotEntryOrHardcoded",
 		}},
 		// C25 spans two packages -- the decision layer that produces the
 		// denial and the two live surfaces that deliver it. Separate rows for

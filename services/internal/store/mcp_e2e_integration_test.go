@@ -493,18 +493,18 @@ func assertDenied(t *testing.T, r mcpReply, wantReasonSubstrings ...string) {
 // cache.
 //
 // This is not a micro-optimisation, it is what keeps these proofs about the
-// thing they claim to be about. `mcp` is one of the two surfaces permitted to
-// consult the on-disk cache (spec §4.8.3 W6), keyed on
-// (delegation, tool, raw_input). Proof 7 sends the IDENTICAL frame twice,
+// thing they claim to be about. `mcp` keeps a decision cache in its own
+// process memory (spec §4.8.3 W6), keyed on (delegation, tool, raw_input). Proof 7 sends the IDENTICAL frame twice,
 // either side of a revocation, and proof 2's fetch/purge pair shares a
 // session file -- under any ordinary window the second call would be answered
 // from a cached ALLOW and never reach the PDP at all, so a proof about "the
 // full loop through a real PDP" would silently become a proof about the
 // cache. Nor would the epoch check save it: revoking bumps tenant_epoch, but
-// maxCacheEpoch is the max epoch in the cache FILE, which with one entry is
-// that entry's own -- so a stale entry reads as current by the cache's own
-// honest bookkeeping. The cache's real behaviour has its own live proofs, in
-// cache_e2e_integration_test.go, and they are not this file's job.
+// the epoch an entry is judged against is the highest one in that process's
+// cache, which with one entry is that entry's own -- so a stale entry reads
+// as current by the cache's own honest bookkeeping. The cache's real
+// behaviour is proven at the unit level in cmd/stratium-pep, and is not this
+// file's job.
 const mcpProofStaleness = "1ns"
 
 // mcpProofConnectTimeout is short enough that a genuinely unreachable pdp-mcp
@@ -513,9 +513,8 @@ const mcpProofStaleness = "1ns"
 const mcpProofConnectTimeout = "5s"
 
 // mcpFixture is one proof's own agent, subject, session file, and record
-// file. Every field is per-proof: the session file must be, because
-// cacheFilePathFor derives the PEP cache file from its path
-// (cmd/stratium-pep/local_cache.go), and the record file must be, because two
+// file. Every field is per-proof: the session file must be, because it names
+// one proof's own delegation, and the record file must be, because two
 // proofs sharing one would see each other's calls and turn every absence
 // assertion into a coin flip.
 type mcpFixture struct {

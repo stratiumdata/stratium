@@ -62,10 +62,10 @@ SESSION_START_TIMEOUT = 15
 PRE_TOOL_USE_TIMEOUT = 10
 
 
-# What each hook needs in its environment, per the binary's own loaders. Both
-# lists come to eight, but they are NOT the same eight: `hook` wants the two
-# approval durations and the cache staleness window, `session-start` wants what
-# the delegation is for. Exporting 1a's block satisfies session-start and leaves
+# What each hook needs in its environment, per the binary's own loaders: eight
+# for `session-start`, seven for `hook`. They share five and differ in the rest:
+# `hook` wants the two approval durations, `session-start` wants what the
+# delegation is for. Exporting 1a's block satisfies session-start and leaves
 # `hook` denying every call. selftest cross-checks these against the Go source.
 REQUIRED_ENV = {
     # services/cmd/stratium-pep/session_start.go (STRATIUM_PEP_PURPOSE is optional)
@@ -75,12 +75,11 @@ REQUIRED_ENV = {
         "STRATIUM_PEP_REQUESTED_TIER", "STRATIUM_PEP_REQUESTED_TOOLS",
         "STRATIUM_PEP_TTL_SECONDS",
     ),
-    # services/cmd/stratium-pep/hook.go, plus cache.go's cacheStalenessWindowEnv
+    # services/cmd/stratium-pep/hook.go
     "PreToolUse": (
         "STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
         "STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT",
         "STRATIUM_PEP_APPROVAL_POLL_INTERVAL", "STRATIUM_PEP_APPROVAL_TIMEOUT",
-        "STRATIUM_PEP_CACHE_STALENESS_WINDOW",
     ),
 }
 
@@ -101,7 +100,6 @@ EXAMPLES = {
     "STRATIUM_PEP_TTL_SECONDS": "3600",
     "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s",
     "STRATIUM_PEP_APPROVAL_TIMEOUT": "120s",
-    "STRATIUM_PEP_CACHE_STALENESS_WINDOW": "30s",
 }
 
 DC = 'dc() { docker compose -f deploy/docker/docker-compose.yml "$@"; }'
@@ -468,10 +466,10 @@ def selftest(_args):
                 os.environ[k] = "set"
             assert not missing_env("PreToolUse")
             assert status(b) == 0, "red with a complete environment and a real command"
-            del os.environ["STRATIUM_PEP_CACHE_STALENESS_WINDOW"]
-            assert missing_env("PreToolUse") == ["STRATIUM_PEP_CACHE_STALENESS_WINDOW"]
+            del os.environ["STRATIUM_PEP_APPROVAL_TIMEOUT"]
+            assert missing_env("PreToolUse") == ["STRATIUM_PEP_APPROVAL_TIMEOUT"]
             assert status(b) == 1, "green with one variable missing"
-            os.environ["STRATIUM_PEP_CACHE_STALENESS_WINDOW"] = "set"
+            os.environ["STRATIUM_PEP_APPROVAL_TIMEOUT"] = "set"
             os.unlink(stub)  # the command is gone; env is whole
             assert status(b) == 1, "green with a command that is not there"
         finally:
@@ -516,9 +514,9 @@ def selftest(_args):
         assert set(REQUIRED_ENV["SessionStart"]) == want_ss, (
             f"SessionStart drifted from session_start.go: "
             f"{want_ss ^ set(REQUIRED_ENV['SessionStart'])}")
-        want_h = literals("hook.go") | literals("cache.go")
+        want_h = literals("hook.go")
         assert set(REQUIRED_ENV["PreToolUse"]) == want_h, (
-            f"PreToolUse drifted from hook.go/cache.go: "
+            f"PreToolUse drifted from hook.go: "
             f"{want_h ^ set(REQUIRED_ENV['PreToolUse'])}")
 
     # the guidance has to cover every required variable, or it is worse than none
@@ -776,7 +774,7 @@ def save_state(**kw):
 
 
 def pep_env(state):
-    """The eleven variables, built fresh. Ports resolved now, not remembered."""
+    """The ten variables, built fresh. Ports resolved now, not remembered."""
     env = dict(os.environ)
     env.update({
         "STRATIUM_PEP_PDP_ADDR": port("pdp-pap", 50051),
@@ -786,7 +784,6 @@ def pep_env(state):
         "STRATIUM_PEP_CONNECT_TIMEOUT": "5s",
         "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s",
         "STRATIUM_PEP_APPROVAL_TIMEOUT": "120s",
-        "STRATIUM_PEP_CACHE_STALENESS_WINDOW": "30s",
         "STRATIUM_PEP_REQUESTED_TOOLS": state.get("tools", DEMO_TOOLS),
         "STRATIUM_PEP_REQUESTED_TIER": str(DEMO_TIER),
         "STRATIUM_PEP_TTL_SECONDS": str(DEMO_TTL),
@@ -1119,7 +1116,7 @@ def cmd_up(args):
     if inside and not args.wire_anyway:
         # Refusing rather than warning. A matcher:"*" hook takes effect in the
         # running session immediately, and that session was not launched with the
-        # eleven variables -- so every tool call denies, including the ones you
+        # ten variables -- so every tool call denies, including the ones you
         # would use to undo it. Everything above this line is already done.
         note(f"SKIPPED -- this is running inside a {inside} session.")
         note("Installing now would deny every tool call in it, including the ones")
@@ -1168,7 +1165,7 @@ def cmd_verify(args):
     if not resolves(PEP_BIN):
         raise Fail(f"{PEP_BIN} is not there -- run `deploy/stratium up` first")
 
-    tag = uuid.uuid4().hex[:8]   # fresh resource each run, so the 30s cache cannot answer
+    tag = uuid.uuid4().hex[:8]   # fresh resource each run
     cases = [
         # (tool, want exit, label, reason substring to require -- None skips that check)
         ("Read", 0, "granted -- must be allowed", None),
