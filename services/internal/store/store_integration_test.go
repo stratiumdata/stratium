@@ -3141,7 +3141,7 @@ func TestIntegration_Live_TokenKeyRotation(t *testing.T) {
 		t.Fatalf("token.Load(new, old) = %v, want success", err)
 	}
 	repo := store.New(testDB, tenant)
-	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour}
+	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour, PrincipalAuthInsecure: true}
 	rotatedServer := pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, rotatedSigner)
 
 	decide := func(t *testing.T, srv *pdpgrpc.Server, tok string) *pdpgrpc.DecideResponse {
@@ -3244,7 +3244,7 @@ func TestIntegration_Live_TokenCrossTenantNotFound(t *testing.T) {
 	seedAgent(t, tenantForeign, foreignAgentID, "cross-tenant-foreign-agent", models.TrustTierPlatformTrusted)
 
 	foreignRepo := store.New(testDB, tenantForeign)
-	foreignCfg := config.Config{TenantID: tenantForeign, MaxDepth: 5, ApprovalTTL: time.Hour}
+	foreignCfg := config.Config{TenantID: tenantForeign, MaxDepth: 5, ApprovalTTL: time.Hour, PrincipalAuthInsecure: true}
 	foreignServer := pdpgrpc.NewServer(foreignRepo, policy.NewMulti(foreignRepo, escalationRegistry()), foreignCfg, signer)
 
 	before := fetchAuditChain(t, tenantForeign)

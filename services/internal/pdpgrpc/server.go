@@ -192,6 +192,11 @@ type Server struct {
 	// sees it at all (that package stays pure: no cryptography, per the
 	// phase's global constraints).
 	signer TokenSigner
+
+	// principals authenticates a root delegation's principal. nil means the
+	// operator opted out (cfg.PrincipalAuthInsecure); see resolvePrincipal
+	// (delegation.go), which refuses nil without that opt-out.
+	principals PrincipalVerifier
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum

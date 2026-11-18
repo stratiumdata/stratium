@@ -229,3 +229,27 @@ def test_the_granted_threshold_is_reported(fake_pdp):
                                       max_action_tier=3, purpose="p", ttl_seconds=60)
     assert with_threshold.granted_scope.escalate_at == 4
     assert without.granted_scope.escalate_at is None
+
+
+# principal_token proves who a ROOT delegation is for. It must reach the PDP
+# on a root and be refused locally on a child, where it has no meaning.
+def test_principal_token_is_forwarded_on_a_root(fake_pdp):
+    fake_pdp.delegation_responses.append(pdp_pb2.CreateDelegationResponse(
+        delegation_id="d1", token="tok", epoch=1,
+        granted_scope=pdp_pb2.GrantedScope(max_action_tier=1, tools=["Read"])))
+    with Client(fake_pdp.addr, insecure=True) as c:
+        c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                            max_action_tier=1, purpose="p", ttl_seconds=60,
+                            principal_token="oidc-token")
+    assert fake_pdp.delegation_calls[0].principal_token == "oidc-token"
+
+
+def test_principal_token_on_a_child_raises_before_any_call(fake_pdp):
+    with Client(fake_pdp.addr, insecure=True) as c:
+        with pytest.raises(ValueError, match="principal_token"):
+            c.create_delegation(subject="s", agent_id="a", tools=["Read"],
+                                max_action_tier=1, purpose="p", ttl_seconds=60,
+                                parent_delegation_id="parent-1", parent_token="parent-tok",
+                                principal_token="oidc-token")
+    assert fake_pdp.delegation_calls == []
+

@@ -347,6 +347,11 @@ Three rules run through all three binaries:
 | `STRATIUM_TLS_CERT_FILE` | unset | a file path | PEM certificate chain the PDP serves. Set together with `STRATIUM_TLS_KEY_FILE`. **Required unless `STRATIUM_GRPC_INSECURE=true`:** with neither set, the PDP refuses to start. Loaded once at startup; rotating the certificate needs a restart. |
 | `STRATIUM_TLS_KEY_FILE` | unset | a file path | PEM private key for `STRATIUM_TLS_CERT_FILE`. Setting only one of the two is a startup failure. |
 | `STRATIUM_GRPC_INSECURE` | `false` | `true`, `false` | `true` serves plaintext gRPC. **Local development only**; the PDP logs a warning on every start. Setting it alongside the certificate variables is a startup failure. |
+| `STRATIUM_PRINCIPAL_OIDC_ISSUER` | unset | an issuer URL | OIDC issuer of the identity provider that signs principals' tokens. Discovered at startup; an unreachable or wrong issuer stops the PDP from starting. **Required, with the audience and claim below, unless `STRATIUM_PRINCIPAL_AUTH_INSECURE=true`:** with none of them set, the PDP refuses to start. |
+| `STRATIUM_PRINCIPAL_OIDC_AUDIENCE` | unset | a client id | The audience a principal's token must be issued for. |
+| `STRATIUM_PRINCIPAL_CLAIM` | unset | a claim name, for example `email` | The token claim that names the person. With `email`, the token must also carry `email_verified: true`. Must be the same claim, from the same identity provider, as the PAP's `STRATIUM_PAP_APPROVER_CLAIM` (§4.4). Prefer an immutable, provider-verified claim. |
+| `STRATIUM_PRINCIPAL_OIDC_TIMEOUT` | `5s` | duration > 0 | Deadline for issuer discovery at startup and for the provider calls that verifying a token needs. |
+| `STRATIUM_PRINCIPAL_AUTH_INSECURE` | `false` | `true`, `false` | `true` turns principal verification off: the PDP believes the `subject` a caller sends. **Local development only**; the PDP logs a warning on every start. Setting it alongside any of the issuer, audience, or claim variables is a startup failure. |
 | `STRATIUM_MAX_DELEGATION_DEPTH` | `5` | integer ≥ 1 | Longest delegation chain permitted. A chain deeper than this denies. |
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
 | `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long a pending approval stays valid. How long you can reasonably expect a human to answer an escalation. |
@@ -363,6 +368,9 @@ STRATIUM_DPOP_FRESHNESS_WINDOW=30s
 STRATIUM_LISTEN_ADDR=:50051
 STRATIUM_TLS_CERT_FILE=/etc/stratium/tls/pdp.crt
 STRATIUM_TLS_KEY_FILE=/etc/stratium/tls/pdp.key
+STRATIUM_PRINCIPAL_OIDC_ISSUER=https://idp.example.com/realms/acme
+STRATIUM_PRINCIPAL_OIDC_AUDIENCE=stratium
+STRATIUM_PRINCIPAL_CLAIM=email
 ```
 
 **Transport security.** gRPC between Stratium components is TLS by default
@@ -374,6 +382,27 @@ opt-in on both sides (`STRATIUM_GRPC_INSECURE=true` on the PDP,
 stack only, which sets both for you: delegation tokens are bearer credentials,
 and plaintext exposes them to anyone on the path. A PEP that cannot complete
 the handshake denies, like any other unreachable PDP.
+
+**Principal authentication.** By default the PDP authenticates who a new
+session is for. A root delegation (a session) must carry the principal's OIDC
+token, which `session-start` reads from the file named by
+`STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` (§3.3). The PDP verifies the token's
+signature, issuer, audience, and expiry, and reads the principal from
+`STRATIUM_PRINCIPAL_CLAIM` in the token, not from the request. A `subject` in
+the request is optional, and if sent it must equal the token's identity. A
+child delegation takes no principal token: its parent's own token authorizes
+it, and it always acts for the root principal of its chain.
+`STRATIUM_PRINCIPAL_CLAIM` must name the same claim, from the same identity
+provider, as the PAP's `STRATIUM_PAP_APPROVER_CLAIM`, because an approval is
+valid only when the approver the PAP identifies equals the principal the PDP
+recorded (§4.4). The opt-out, `STRATIUM_PRINCIPAL_AUTH_INSECURE=true`, is for
+the local evaluation stack only, which sets it for you.
+
+For an unattended agent (CI, a scheduled job), use a token for a service
+identity from the same identity provider (client credentials or workload
+identity), and write policy for that identity. If that token has no suitable
+`email` claim, set `STRATIUM_PRINCIPAL_CLAIM` to a claim it does have, and set
+the PAP's approver claim to match.
 
 ### 3.2 `stratium-pap` — the admin plane
 
@@ -435,7 +464,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 |---|---|---|
 | `STRATIUM_PEP_PDP_ADDR` | `pdp.internal:50051` | `host:port` of the PDP. |
 | `STRATIUM_PEP_AGENT_ID` | `50bdd8cc-377f-4135-818d-cfd30b206ce5` | The UUID returned when you created the agent (§5.4). |
-| `STRATIUM_PEP_SUBJECT` | `alice@example.com` | The **person** on whose behalf the agent acts. Must match what your policies condition on. The PDP holds every later call to it: a `Decide` whose subject is not the person the session's delegation was issued for is denied, and so is a child delegation requested under another subject. |
+| `STRATIUM_PEP_SUBJECT` | `alice@example.com` | The **person** on whose behalf the agent acts. Must match what your policies condition on. At `session-start` it must equal the identity in the principal's OIDC token (`STRATIUM_PEP_PRINCIPAL_TOKEN_FILE`, below). The PDP holds every later call to it: a `Decide` whose subject is not the person the session's delegation was issued for is denied, and so is a child delegation requested under another subject. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds every PDP call. Duration > 0. |
 | `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's certificate with, instead of the system roots. Use it when a private CA issued the PDP's certificate. |
 | `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for the local evaluation stack only. Setting it alongside `STRATIUM_PEP_PDP_CA_FILE` is an error, and the PEP denies. |
@@ -454,6 +483,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_REQUESTED_TOOLS` | ● | — | — | — | — |
 | `STRATIUM_PEP_REQUESTED_TIER` | ● | — | — | — | — |
 | `STRATIUM_PEP_TTL_SECONDS` | ● | — | — | — | — |
+| `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` | ○ | — | — | — | — |
 | `STRATIUM_PEP_PURPOSE` | ○ | — | — | — | — |
 | `STRATIUM_PEP_ESCALATE_AT` | ○ | — | — | — | — |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | — | ● | ● | — | ● |
@@ -482,6 +512,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_REQUESTED_TOOLS` | session-start | `Read,Write,Bash` | Comma-separated. What you are *asking* for. The PDP clamps this to what the principal actually holds; the session file records what was **granted**, which may be narrower. An empty list is a missing-configuration error. |
 | `STRATIUM_PEP_REQUESTED_TIER` | session-start | `3` | Integer 0–4. Requested `max_action_tier`. Clamped downward if policy does not permit it. Range is validated by the PDP, not locally. |
 | `STRATIUM_PEP_TTL_SECONDS` | session-start | `3600` | Delegation lifetime in seconds. Must be positive. |
+| `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` | session-start | `/run/secrets/principal.jwt` | Optional. Path to a file holding the principal's OIDC token; surrounding whitespace is trimmed. `session-start` sends it to the PDP as `principal_token`. Needed whenever the PDP verifies principals (the default, §3.1 "Principal authentication"); a PDP running with `STRATIUM_PRINCIPAL_AUTH_INSECURE=true` ignores it. A file, not a variable, so the token is not copied into child processes' environments. An unreadable or empty file fails `session-start`. The token is needed only at session start: it is typically short-lived, and that does not shorten the session, whose lifetime is `STRATIUM_PEP_TTL_SECONDS`. |
 | `STRATIUM_PEP_PURPOSE` | session-start | `nightly refactor` | Free text, recorded on the delegation and visible to policy. Optional. |
 | `STRATIUM_PEP_ESCALATE_AT` | session-start | `3` | Optional. Asks for a **lower** escalation threshold than the agent's (§5.5). It can never raise or remove the agent's threshold, so leaving it unset changes nothing. |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | hook, mcp, proxy | `2s` | How often to poll for a human's answer while an escalation is pending. |
@@ -653,7 +684,10 @@ Approving an escalation requires **two** things, and a role is only one of them:
 
 1. The `admin` role — enforced by the route.
 2. The operator's approver identity must **equal the approval's root
-   principal** — the `STRATIUM_PEP_SUBJECT` the PEP was configured with.
+   principal**: the person the PDP identified from the principal's OIDC token
+   when the session started (§3.1). On a PDP running with
+   `STRATIUM_PRINCIPAL_AUTH_INSECURE=true` it is the `STRATIUM_PEP_SUBJECT`
+   the PEP sent.
 
 That second check is why `STRATIUM_PAP_APPROVER_CLAIM` exists and is configured
 independently of `STRATIUM_PAP_ROLE_CLAIM`. The role claim answers "what may this
@@ -671,6 +705,11 @@ recorded by a PEP, so a second claim has to be nominated.
 Practical consequence: set `STRATIUM_PEP_SUBJECT` on each PEP to the exact
 string your approver claim will contain for the person who owns that agent
 session. If they do not match, escalations can never be approved by anyone.
+
+The PDP's `STRATIUM_PRINCIPAL_CLAIM` (§3.1) must name the same claim, from the
+same identity provider. The PDP records a session's root principal from that
+claim of the principal's token, and the PAP compares the approver claim against
+the recorded value, so two different claims never match.
 
 ### 4.5 Getting a token for scripting
 
@@ -1711,12 +1750,20 @@ STRATIUM_PEP_AGENT_ID="$AGENT" \
 STRATIUM_PEP_SUBJECT="alice@example.com" \
 STRATIUM_PEP_SESSION_FILE="$SESSION" \
 STRATIUM_PEP_CONNECT_TIMEOUT=5s \
+STRATIUM_PEP_PRINCIPAL_TOKEN_FILE=/run/secrets/principal.jwt \
 STRATIUM_PEP_REQUESTED_TOOLS="Read,Write,Bash" \
 STRATIUM_PEP_REQUESTED_TIER=3 \
 STRATIUM_PEP_PURPOSE="daily engineering session" \
 STRATIUM_PEP_TTL_SECONDS=3600 \
 stratium-pep session-start; echo "exit=$?"
 ```
+
+`STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` names a file holding alice's OIDC token.
+Get it from your identity provider: Stratium does not log in for you. The PDP
+reads the principal from it, and `STRATIUM_PEP_SUBJECT` must equal that
+identity.
+Against the local evaluation stack, leave the variable out: that stack's PDPs
+run with principal verification off.
 
 **Expected** — `exit=0` and a session file holding what was **granted**, which
 may be narrower than what you asked for:
@@ -1963,6 +2010,9 @@ Every denial carries a reason. Learning to read four shapes saves hours:
 | `tool "X" not in delegation approved_tools at depth N` | outside the granted scope | add it to `STRATIUM_PEP_REQUESTED_TOOLS` and restart the session |
 | `tool "X" not in agent allowed_tools` | the **agent record**, not the delegation | edit the agent (§5.5) |
 | `delegation chain is not well-formed: request subject is not the principal root delegation … was issued for` | `STRATIUM_PEP_SUBJECT` differs from the subject the session was started with | use the same subject for `session-start` and every later call, or start a new session |
+| `principal_token is required` | `session-start` sent no principal token to a PDP that verifies principals | set `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` to a file holding the person's OIDC token (§3.3) |
+| `principal_token does not identify a principal` | the token failed verification: expired, wrong audience or issuer, or an unverified email | get a fresh token from the identity provider and audience the PDP is configured for (§3.1 "Principal authentication") |
+| `subject is not the principal that principal_token identifies` | `STRATIUM_PEP_SUBJECT` differs from the identity in the token | set `STRATIUM_PEP_SUBJECT` to the value of the token's `STRATIUM_PRINCIPAL_CLAIM` claim |
 | `agent trust tier X insufficient for action tier Y (requires Z)` | the agent's trust tier | raise it, deliberately |
 | `resource classification X exceeds delegation cap Y in hierarchy "h"` | a classification cap | §5.7 |
 | `resource declares no classification; … cannot be evaluated` | a cap is set and nothing labelled the resource | write a catch-all label rule |
@@ -2003,6 +2053,7 @@ classification, the system is working.
 | PDP: `stratium_audit_owner role does not exist` | migration `000004` was never applied | apply migrations (set `STRATIUM_MIGRATION_DATABASE_URL`) |
 | PDP: `STRATIUM_POLICY_LANGUAGES: …` | a name matching no engine, or a stray comma | use a subset of `cedar,json,rego,xacml` |
 | PDP: `STRATIUM_TLS_CERT_FILE and STRATIUM_TLS_KEY_FILE are required …` | no certificate configured | set both, or `STRATIUM_GRPC_INSECURE=true` for local development only |
+| PDP: `missing principal authentication settings: …` | the issuer, audience, or claim for principal verification is unset | set `STRATIUM_PRINCIPAL_OIDC_ISSUER`, `STRATIUM_PRINCIPAL_OIDC_AUDIENCE`, and `STRATIUM_PRINCIPAL_CLAIM`, or `STRATIUM_PRINCIPAL_AUTH_INSECURE=true` for local development only |
 | PDP: `must be positive, got 0s` | a zero or negative duration | every duration must be > 0 |
 | PDP: `pattern dist: no matching files found` | you ran `go build` for the PAP without the UI | `make ui`, then use `make` |
 | PAP: `discover OIDC provider …` | issuer wrong or unreachable | `curl $ISSUER/.well-known/openid-configuration` |

@@ -73,9 +73,6 @@ const noDenial int16 = -1
 // Handling it here, at the RPC boundary, keeps the convention intact
 // everywhere else rather than special-casing the model types themselves.
 func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequest) (*CreateDelegationResponse, error) {
-	if req.GetSubject() == "" {
-		return nil, status.Error(codes.InvalidArgument, "subject is required")
-	}
 	agentID, err := parseNonNilUUID(req.GetAgentId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "agent_id: %s", err)
@@ -124,6 +121,14 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		}
 	}
 
+	// Who this delegation is for. Everything below uses subject and never
+	// the request's own field again: for a root it is what the principal
+	// token proved, which is the point (resolvePrincipal).
+	subject, err := s.resolvePrincipal(ctx, req, parentID == nil)
+	if err != nil {
+		return nil, err
+	}
+
 	epoch, err := s.loadEpochOrDeny(ctx)
 	if err != nil {
 		return nil, err
@@ -159,7 +164,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		// unchecked one would let a caller holding any delegation id borrow
 		// a more privileged principal's policy. The error does not name the
 		// right principal, for the reason that function gives.
-		if chain[0].UserID != req.GetSubject() {
+		if chain[0].UserID != subject {
 			return nil, status.Error(codes.PermissionDenied,
 				"subject is not the principal the parent delegation's chain was issued for")
 		}
@@ -183,7 +188,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "prepare policy set: %s", err)
 	}
-	principal := authz.Principal{Subject: req.GetSubject()}
+	principal := authz.Principal{Subject: subject}
 	granted, err := authz.Clamp(ctx, authz.RequestedScope{MaxActionTier: tier, Tools: tools},
 		func(tool string, t models.ActionTier) (bool, error) {
 			return policy.Probe(ctx, set, policy.GrantProbe{Principal: principal, Tool: tool, Tier: t})
@@ -218,7 +223,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	newID := uuid.New()
 	d := &models.Delegation{
 		ID:            newID,
-		UserID:        req.GetSubject(),
+		UserID:        subject,
 		AgentID:       agentID,
 		ApprovedTools: granted.Tools,
 		MaxActionTier: granted.MaxActionTier,
@@ -275,7 +280,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		}
 	}
 
-	if err := s.appendDelegationAudit(ctx, d, req.GetSubject(), tier, now, rootID, depth); err != nil {
+	if err := s.appendDelegationAudit(ctx, d, subject, tier, now, rootID, depth); err != nil {
 		return nil, err
 	}
 
@@ -444,4 +449,76 @@ func (s *Server) authorizeChild(parentToken string, parentID uuid.UUID) error {
 			"parent_token is bound to a key: a child cannot be created from a bound token")
 	}
 	return nil
+}
+
+// PrincipalVerifier turns a principal's OIDC token into the identity it
+// proves. *principal.Verifier in production.
+type PrincipalVerifier interface {
+	Identify(ctx context.Context, rawToken string) (string, error)
+}
+
+// WithPrincipalVerifier sets how root delegations authenticate their
+// principal, and returns s. cmd/stratium-pdp calls it unless the operator
+// opted out (config.PrincipalAuthInsecure).
+func (s *Server) WithPrincipalVerifier(v PrincipalVerifier) *Server {
+	s.principals = v
+	return s
+}
+
+// resolvePrincipal returns the principal a new delegation is for.
+//
+// ROOT. A root is the grant from a person, and that person's policy bounds
+// everything issued under it. The request's subject is a claim by the PEP,
+// the party being policed, so by default it is not believed: the caller
+// presents the principal's own OIDC token and the name is read from that.
+// The request's subject then only has to agree. It may be empty; if set and
+// different, the request is refused rather than quietly corrected, because a
+// caller that names one person while holding another's token is confused or
+// lying, and either deserves an error.
+//
+// The opt-out (config.PrincipalAuthInsecure) believes the subject, for local
+// development. A server with neither a verifier nor the opt-out refuses:
+// config.Load never produces that combination, but if wiring ever did, the
+// alternative would be believing the caller with nothing saying so.
+//
+// CHILD. A child acts for its chain's root principal (checked against the
+// loaded chain by the caller) and is authorized by parent_token. A principal
+// token is refused there instead of ignored, so nothing suggests it could
+// change who a child is for.
+func (s *Server) resolvePrincipal(ctx context.Context, req *CreateDelegationRequest, isRoot bool) (string, error) {
+	if !isRoot {
+		if req.GetPrincipalToken() != "" {
+			return "", status.Error(codes.InvalidArgument,
+				"principal_token is only for a root delegation: a child is authorized by parent_token")
+		}
+		if req.GetSubject() == "" {
+			return "", status.Error(codes.InvalidArgument, "subject is required")
+		}
+		return req.GetSubject(), nil
+	}
+
+	if s.principals == nil {
+		if !s.cfg.PrincipalAuthInsecure {
+			return "", status.Error(codes.FailedPrecondition,
+				"this PDP has no principal verification configured and has not opted out of it")
+		}
+		if req.GetSubject() == "" {
+			return "", status.Error(codes.InvalidArgument, "subject is required")
+		}
+		return req.GetSubject(), nil
+	}
+
+	if req.GetPrincipalToken() == "" {
+		return "", status.Error(codes.Unauthenticated,
+			"principal_token is required: present the principal's OIDC token to start a session")
+	}
+	identity, err := s.principals.Identify(ctx, req.GetPrincipalToken())
+	if err != nil || identity == "" {
+		return "", status.Error(codes.Unauthenticated, "principal_token does not identify a principal")
+	}
+	if sub := req.GetSubject(); sub != "" && sub != identity {
+		return "", status.Error(codes.PermissionDenied,
+			"subject is not the principal that principal_token identifies")
+	}
+	return identity, nil
 }

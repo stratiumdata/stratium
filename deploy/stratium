@@ -511,7 +511,8 @@ def selftest(_args):
             text = open(os.path.join(src, name)).read()
             return set(re.findall(r'"(STRATIUM_PEP_[A-Z_]+)"', text))
 
-        want_ss = literals("session_start.go") - {"STRATIUM_PEP_PURPOSE", "STRATIUM_PEP_ESCALATE_AT"}  # optional
+        want_ss = literals("session_start.go") - {  # optional
+            "STRATIUM_PEP_PURPOSE", "STRATIUM_PEP_ESCALATE_AT", "STRATIUM_PEP_PRINCIPAL_TOKEN_FILE"}
         assert set(REQUIRED_ENV["SessionStart"]) == want_ss, (
             f"SessionStart drifted from session_start.go: "
             f"{want_ss ^ set(REQUIRED_ENV['SessionStart'])}")

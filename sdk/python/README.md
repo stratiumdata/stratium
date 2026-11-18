@@ -28,6 +28,9 @@ from stratium import Client, Session
 with Client(pdp_addr) as client:
     # Call one: get a token. Session's constructor makes it for you --
     # this is Client.create_delegation() under the hood.
+    # A PDP verifies who the session is for by default: pass the person's OIDC
+    # token as principal_token=..., and subject must equal the identity in it.
+    # The local Docker stack has verification off, so it needs no token.
     session = Session(
         client, subject="you@example.com", agent_id=agent_id,
         tools=["Read"], max_action_tier=1,
@@ -51,6 +54,16 @@ problem. `stratium/_client.py`'s `Client.decide()` and
 for a caller that wants to manage its own delegation lifecycle instead
 (`example/custom_pep.py` uses `Session`, the recommended path — it is the only
 one exercised against a live PDP so far).
+
+`Session(..., principal_token=None)` and
+`Client.create_delegation(..., principal_token=None)` take the principal's OIDC
+token from your identity provider. A root delegation needs it unless the PDP
+runs with principal verification off, and the PDP reads the principal from the
+token. A child is authorized by its parent's token instead, so passing
+`principal_token` together with `parent_delegation_id` raises `ValueError`. A
+`Session` keeps the token to re-mint its delegation, so a re-mint long after
+construction fails at the PDP once the OIDC token has expired: build a new
+`Session` with a fresh token.
 
 ### What each step is bounded by
 

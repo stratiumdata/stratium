@@ -177,6 +177,7 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	pdp_cache_port=$$($(COMPOSE) port pdp-cache 50051 | sed -E 's/.*://'); \
 	pdp_mcp_port=$$($(COMPOSE) port pdp-mcp 50051 | sed -E 's/.*://'); \
 	pdp_pap_port=$$($(COMPOSE) port pdp-pap 50051 | sed -E 's/.*://'); \
+	pdp_oidc_port=$$($(COMPOSE) port pdp-oidc 50051 | sed -E 's/.*://'); \
 	pap_port=$$($(COMPOSE) port stratium-pap 8080 | sed -E 's/.*://'); \
 	pap_extauthz_port=$$($(COMPOSE) port pap-extauthz 8080 | sed -E 's/.*://'); \
 	keycloak_port=$$($(COMPOSE) port keycloak 8080 | sed -E 's/.*://'); \
@@ -209,6 +210,8 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	STRATIUM_IT_PAP_EXTAUTHZ_ADDR="localhost:$$pap_extauthz_port" \
 	STRATIUM_IT_KEYCLOAK_ADDR="localhost:$$keycloak_port" \
 	STRATIUM_IT_TOKEN_SIGNING_KEY_PATH="$$key_dir/token-signing.pem" \
+	STRATIUM_IT_PDP_OIDC_ADDR="localhost:$$pdp_oidc_port" \
+	STRATIUM_IT_OIDC_TENANT_ID="tenant-principal-oidc-integration" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
 .PHONY: help build test vet fmt lint proto proto-python proto-python-check conformance sdk-conformance integration ui ui-test ui-clean

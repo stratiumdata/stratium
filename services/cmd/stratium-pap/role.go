@@ -11,6 +11,8 @@ package main
 import (
 	"errors"
 	"fmt"
+
+	"github.com/stratiumdata/stratium/internal/principal"
 )
 
 // Role is an operator's authorization level on the PAP. The zero value ""
@@ -192,16 +194,10 @@ func resolveSubject(claims map[string]any) (string, error) {
 // doc comment (server.go) for why THAT refusal happens where it is used
 // (decideApproval), not universally in authorize the way an absent Role or
 // Subject claim does.
+//
+// The rule itself lives in internal/principal, shared with the PDP: the PDP
+// uses it to name a root delegation's principal, and an approval is valid
+// only when this function's answer equals that name.
 func resolveApproverIdentity(claims map[string]any, claimName string) string {
-	v, ok := claims[claimName].(string)
-	if !ok || v == "" {
-		return ""
-	}
-	if claimName == "email" {
-		verified, _ := claims["email_verified"].(bool)
-		if !verified {
-			return ""
-		}
-	}
-	return v
+	return principal.Identity(claims, claimName)
 }

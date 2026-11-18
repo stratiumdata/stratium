@@ -124,7 +124,7 @@ func escalationServer(t *testing.T, tenant string) (*pdpgrpc.Server, *token.Sign
 	t.Helper()
 	seedPolicy(t, tenant, "escalation-blanket-permit", escalationBlanketPermit, "allow")
 	repo := store.New(testDB, tenant)
-	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour}
+	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour, PrincipalAuthInsecure: true}
 	// The SAME signer instance both signs (below, via NewServer) and is
 	// handed back to the caller to mint tokens with: two independently
 	// generated keys would mean every token escalationToken mints fails
@@ -738,7 +738,7 @@ func TestIntegration_Escalation_CrossTenantCannotReadOrApprove(t *testing.T) {
 	// Server only ever calls GetApproval below — a plain read that never
 	// touches s.signer at all (GetApproval's own doc comment, approval.go).
 	srvB := pdpgrpc.NewServer(repoB, policy.NewMulti(repoB, escalationRegistry()),
-		config.Config{TenantID: tenantB, MaxDepth: 5, ApprovalTTL: time.Hour}, nil)
+		config.Config{TenantID: tenantB, MaxDepth: 5, ApprovalTTL: time.Hour, PrincipalAuthInsecure: true}, nil)
 	_, err = srvB.GetApproval(t.Context(), &pdpgrpc.GetApprovalRequest{ApprovalId: approvalID.String()})
 	if err == nil {
 		t.Fatal("GetApproval() from tenant B for tenant A's approval id succeeded, want NotFound")

@@ -37,6 +37,12 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("STRATIUM_TLS_CERT_FILE", "/test/tls.crt")
 	t.Setenv("STRATIUM_TLS_KEY_FILE", "/test/tls.key")
 	t.Setenv("STRATIUM_GRPC_INSECURE", "")
+	// Principal authentication is required by default too.
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_ISSUER", "https://idp.example/realms/test")
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_AUDIENCE", "stratium")
+	t.Setenv("STRATIUM_PRINCIPAL_CLAIM", "email")
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_TIMEOUT", "")
+	t.Setenv("STRATIUM_PRINCIPAL_AUTH_INSECURE", "")
 }
 
 // TestLoad_AllFieldsFromEnvironment compares field by field, not the whole
@@ -59,6 +65,11 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_TLS_CERT_FILE", "/tls/pdp.crt")
 	t.Setenv("STRATIUM_TLS_KEY_FILE", "/tls/pdp.key")
 	t.Setenv("STRATIUM_GRPC_INSECURE", "")
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_ISSUER", "https://idp.example/realms/prod")
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_AUDIENCE", "stratium-pdp")
+	t.Setenv("STRATIUM_PRINCIPAL_CLAIM", "preferred_username")
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_TIMEOUT", "9s")
+	t.Setenv("STRATIUM_PRINCIPAL_AUTH_INSECURE", "")
 
 	got, err := Load()
 	if err != nil {
@@ -99,6 +110,11 @@ func TestLoad_AllFieldsFromEnvironment(t *testing.T) {
 	}
 	if want := []string{"xacml", "cedar"}; !slices.Equal(got.PolicyLanguages, want) {
 		t.Errorf("PolicyLanguages = %v, want %v", got.PolicyLanguages, want)
+	}
+	if got.PrincipalOIDCIssuer != "https://idp.example/realms/prod" || got.PrincipalOIDCAudience != "stratium-pdp" ||
+		got.PrincipalClaim != "preferred_username" || got.PrincipalOIDCTimeout != 9*time.Second || got.PrincipalAuthInsecure {
+		t.Errorf("principal auth = %q/%q/%q/%s insecure=%v", got.PrincipalOIDCIssuer, got.PrincipalOIDCAudience,
+			got.PrincipalClaim, got.PrincipalOIDCTimeout, got.PrincipalAuthInsecure)
 	}
 	if got.TLSCertFile != "/tls/pdp.crt" || got.TLSKeyFile != "/tls/pdp.key" || got.GRPCInsecure {
 		t.Errorf("transport = %q/%q insecure=%v", got.TLSCertFile, got.TLSKeyFile, got.GRPCInsecure)

@@ -96,6 +96,12 @@ held by this principal"* — the delegation cannot be issued at all. Without the
 catalog in step 5 the PDP has no way to know which argument of a tool call names
 the resource, so nothing can be classified.
 
+> The local stack's PDPs run with principal verification off, so `session-start`
+> works with a bare subject. A production PDP also needs the person's OIDC token,
+> passed with `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE`: see the
+> [user guide](user-guide.md#31-stratium-pdp--the-decision-service), §3.1
+> "Principal authentication".
+
 Step 7 registers two label rules and caps the agent. The catch-all (`""` prefix →
 `nato UNCLASSIFIED`) matters more than it looks: **once any cap is set, a resource
 whose label cannot be resolved is denied.** Without a catch-all, capping an agent

@@ -192,6 +192,9 @@ func run(logger *slog.Logger) error {
 	// with a compiled set via PrepareAll, so repo and an engine no longer
 	// need to be passed to NewServer a second time raw.
 	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg, signer)
+	if err := configurePrincipalAuth(logger, cfg, srv); err != nil {
+		return err
+	}
 
 	transport, err := serverTransport(logger, cfg)
 	if err != nil {
