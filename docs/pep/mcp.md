@@ -25,7 +25,7 @@ stdio JSON-RPC framing on both sides; it is a man in the middle by design.
 
 ## Configuration
 
-Nine variables: `hook`'s eight, plus the upstream command. Observed with an
+Nine variables: `hook`'s seven, plus the upstream command and the cache window. Observed with an
 empty environment:
 
 ```
@@ -37,9 +37,15 @@ STRATIUM_PEP_APPROVAL_POLL_INTERVAL, STRATIUM_PEP_APPROVAL_TIMEOUT;
 missing required configuration: STRATIUM_PEP_CACHE_STALENESS_WINDOW
 ```
 
-Two loaders report separately — the MCP-specific one and the shared decision
-config — which is why the message has more than one `missing required
-configuration` clause. All of it must be satisfied.
+Three loaders report separately: the MCP-specific one, the shared decision
+config, and the cache window. That is why the message has more than one
+`missing required configuration` clause. All of it must be satisfied.
+
+`STRATIUM_PEP_CACHE_STALENESS_WINDOW` (for example `30s`) is how long `mcp` may
+answer a repeated `tools/call` from its decision cache without asking the PDP
+again. The cache is in memory only: `mcp` keeps one for the life of the process,
+it starts empty on every start, and nothing is ever read from a cache file. See
+[`docs/pep.md`](../pep.md) § "The decision cache".
 
 | Variable | Example | Notes |
 |---|---|---|

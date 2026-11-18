@@ -428,16 +428,18 @@ three legs would refuse, and a request above the ceiling denies before it can
 ever create an approval row.
 
 **The epoch and the cache.** Every tool call is a synchronous round trip, which
-is a problem the moment the PDP is unreachable. A decision cache buys outage
-tolerance, keyed on the delegation, the tool, and a hash of the exact arguments.
+is a problem the moment the PDP is unreachable. On `mcp`, a decision cache buys
+outage tolerance, keyed on the delegation, the tool, and a hash of the exact
+arguments. The cache lives in the `mcp` process's memory, so only decisions that
+process received from the PDP are ever replayed. `hook` has no cache and asks
+the PDP on every call.
 A per-tenant counter — bumped by a *database trigger* on every configuration
 write, never by application code — invalidates every cached entry the instant
 anything changes. Escalations are never cached; a pending human decision is not
-a verdict. Only the two surfaces whose caller is local may consult the cache at
-all, and that restriction is enforced by the type system rather than by a
-comment: on the network surfaces the caller *is* the party being policed, and a
-cache hit is by definition a decision made without asking the only component
-that verifies signatures.
+a verdict. The network surfaces never consult a cache, and that restriction is
+enforced by the type system rather than by a comment: there the caller *is* the
+party being policed, and a cache hit is by definition a decision made without
+asking the only component that verifies signatures.
 
 **Tenancy.** The tenant is never a request field — it is startup configuration.
 Isolation is Postgres row-level security, forced on every table, and the

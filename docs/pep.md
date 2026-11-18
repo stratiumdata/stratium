@@ -56,7 +56,12 @@ polls, so it has no use for either):
 |---|---|
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | How often to re-check a pending escalation, e.g. `2s`. |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | How long to wait for a human to resolve an escalation before failing closed, e.g. `5m`. Bounds the *whole* wait, independent of `STRATIUM_PEP_CONNECT_TIMEOUT`, which bounds only one RPC round trip. |
-| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | How long a decision may be served from the local cache without a fresh PDP round trip re-confirming it, e.g. `30s`. See "Choosing a decision cache staleness window" below before picking a value — there is no default. |
+
+`mcp` only:
+
+| Variable | Meaning |
+|---|---|
+| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | How long `mcp` may serve a decision from its in-memory cache without a fresh PDP round trip re-confirming it, e.g. `30s`. See "The decision cache" below before picking a value. There is no default. `hook` has no cache and ignores this variable. |
 
 `session-start` only, in addition to the five shared above:
 
@@ -214,17 +219,36 @@ If a scope must stay narrow enough to exclude discovery, expect to name every
 resource up front, and treat "the agent did nothing" as the predicted outcome
 rather than a bug.
 
-## Choosing a decision cache staleness window
+## The decision cache
 
-`hook` and `mcp` both keep a small local cache of recent PDP decisions, so a
-repeated tool call can be answered without a fresh round trip — this is an
-*outage-tolerance* feature, not a latency optimization (spec §4.8): most
-tool calls are not repeats of one already seen, so the cache's real job is
-letting a session keep working through a brief PDP outage, not making
-individual calls faster. `STRATIUM_PEP_CACHE_STALENESS_WINDOW` is what
-bounds that tolerance, and it is required config with **no default, on
-purpose** — no single value is right for every deployment, and getting it
-wrong is not a startup-time inconvenience but an ongoing, silent cost:
+The decision cache is in memory only. Nothing is ever read from a cache file,
+so the only decisions a PEP replays are ones that same process received from
+the PDP.
+
+- **`mcp` has a cache.** It is one long-running process, and it keeps one cache
+  for the life of that process. A repeated `tools/call` inside the staleness
+  window is answered from memory. The cache starts empty every time `mcp`
+  starts.
+- **`hook` has no cache.** It is a new process for each tool call, so it asks
+  the PDP on every call. If the PDP is unreachable, `hook` denies immediately.
+- **`extauthz` and `proxy` have no cache** and never did.
+
+Earlier versions kept a cache file beside the session file
+(`<session file>.cache.json`). No mode reads it any more, and `session-start`
+removes a leftover one when it writes a new session file.
+
+An escalation is never cached, pending or resolved.
+
+### Choosing a decision cache staleness window
+
+This applies to `mcp` only. The cache is an *outage-tolerance* feature, not a
+latency optimization (spec §4.8): most tool calls are not repeats of one
+already seen, so the cache's real job is letting a session keep working through
+a brief PDP outage, not making individual calls faster.
+`STRATIUM_PEP_CACHE_STALENESS_WINDOW` is what bounds that tolerance, and it is
+required config for `mcp` with **no default, on purpose**. No single value is
+right for every deployment, and getting it wrong is not a startup-time
+inconvenience but an ongoing, silent cost:
 
 - **Too long**, and the cache quietly becomes a revocation-tolerance
   feature instead of an outage-tolerance one: a policy change or a revoked

@@ -247,10 +247,11 @@ specifically, or to require roots to enumerate every dimension up front.
 
 ### J7. PDP outage
 
-`hook` and `mcp` degrade to the local decision cache inside the staleness
-window. `extauthz` and `proxy` have **no** fallback, by design — a cache hit is a
-decision made without the only component that verifies signatures, and on those
-surfaces the caller is the party being policed. **[traced, architecture.md §11]**
+`mcp` degrades to its in-memory decision cache inside the staleness window.
+`hook` has no cache and denies immediately. `extauthz` and `proxy` have **no**
+fallback, by design — a cache hit is a decision made without the only component
+that verifies signatures, and on those surfaces the caller is the party being
+policed. **[traced, architecture.md §11]**
 
 The consequence to validate is a business one, not a technical one: a PDP outage
 is a total outage of any API fronted by Envoy.

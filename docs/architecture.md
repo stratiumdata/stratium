@@ -483,6 +483,13 @@ degrades too, since it requires sender-constrained tokens.
 Every tool call is a synchronous PDP round trip, which is a problem the moment
 the PDP is unreachable. The cache buys outage tolerance without buying a bypass.
 
+**The cache lives in process memory only.** That way the only decisions ever
+replayed are ones this process received from the PDP. Nothing is ever read from
+a cache file. `mcp` is one long-running process, so it holds one cache for the
+life of that process, and the cache starts empty on every start. `hook` is a new
+process for each tool call, so it has no cache: it asks the PDP on every call,
+and a PDP outage denies immediately.
+
 **Key**: `(delegation_id, tool, sha256(raw_input))`.
 
 **An entry is usable only if all of these hold:**
@@ -490,14 +497,12 @@ the PDP is unreachable. The cache buys outage tolerance without buying a bypass.
 | Condition | Why |
 |---|---|
 | decision is not `ESCALATE` | a pending human decision is not a verdict — refused on both write and read |
-| `entry.epoch == last known tenant epoch` | any config change invalidates every entry |
+| `entry.epoch ==` the highest epoch this process has seen from the PDP | any config change invalidates every entry |
 | the delegation has not expired | |
 | the token has not expired | |
 | within the configured staleness window | an upper bound on how old a replayed verdict may be |
 
-Anything else is a **miss**, indistinguishable from a key that was never cached —
-a corrupt, truncated, or hand-edited cache file is a miss, never an error that
-propagates.
+Anything else is a **miss**, indistinguishable from a key that was never cached.
 
 The epoch itself is bumped by a **database trigger**, verified live:
 
@@ -515,16 +520,17 @@ decision made about a different one. Nothing in Go writes `tenant_epoch`, and
 nothing should ever be changed to: a PDP that bumped its own cache-invalidation
 counter would be a PDP writing authorization configuration.
 
-### W6 — only two surfaces may cache, and it is enforced by the type system
+### W6: only `mcp` may cache, and it is enforced by the type system
 
-`hook` and `mcp` may consult the cache. `extauthz` and `proxy` **never** may.
+`mcp` may consult the cache. `hook` has none. `extauthz` and `proxy` **never**
+may.
 
 The reason: a cache hit is defined by *not* calling the PDP, and the PDP is the
-only component that ever verifies a token's signature. On `hook`/`mcp` the caller
-is local and already holds a real session file, so a hit grants it nothing it did
-not have. On `extauthz`/`proxy` the caller **is the party being policed** — a
-forged token with arbitrary signature bytes would decode cleanly, build a valid
-cache key, and be served a cached ALLOW with the PDP never contacted.
+only component that ever verifies a token's signature. A hit is sound only when
+the entry is known to have come from the PDP, which holds for an entry in the
+memory of the process that received it. On `extauthz`/`proxy` the caller **is
+the party being policed** and presents its own token on every call, so those
+surfaces ask the PDP every time.
 
 This is not enforced by a comment. `consultCache` requires a
 `*pdpgrpc.CreateDelegationResponse` — the exact value `loadSessionFile` returns —
@@ -560,7 +566,7 @@ mean the proxy deciding what a tool *is* — D1 again.
 > mapping, DPoP, and escalation handling. The doc comment is stale; the files'
 > own package docs are current.
 
-For installation, the eight required environment variables, and how to read a
+For installation, the required environment variables, and how to read a
 denial, see [`docs/pep.md`](pep.md).
 
 ---
@@ -699,7 +705,7 @@ services/
   cmd/stratium-pep/           the four surfaces
     hook.go mcp.go extauthz.go proxy.go
     session_start.go session_file.go
-    cache.go local_cache.go reissue.go escalation.go
+    cache.go local_cache.go reissue.go escalation.go   (cache: mcp only, in memory)
 
   migrations/                 000001…000019, RLS at 000002
 deploy/docker/                the 18-service local stack
@@ -885,7 +891,7 @@ If you remember four sentences:
 3. `allow = principal ∧ agent ∧ delegation`, with the delegation as a structural
    ceiling no policy can raise.
 4. Every ambiguity denies: an unset effect, an unevaluable cap, an unrankable
-   label, a corrupt cache, a missing verdict, an unmapped tier.
+   label, a missing verdict, an unmapped tier.
 
 Design of record:
 `docs/superpowers/specs/2026-08-08-agent-authorization-redesign-design.md`.

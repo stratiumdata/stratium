@@ -118,6 +118,60 @@ func TestRunSessionStart_Success_WritesIDAndGrantedScope(t *testing.T) {
 	}
 }
 
+// TestRunSessionStart_RemovesLegacyCacheFile: a successful session-start
+// deletes a cache file an older version left beside the session file. No
+// mode reads that file any more; this is hygiene, so the leftover cannot be
+// mistaken for something that still matters. The path is a literal here, not
+// legacyCacheFileSuffix, so the test pins the name older versions used.
+func TestRunSessionStart_RemovesLegacyCacheFile(t *testing.T) {
+	fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
+		DelegationId: "deleg-cleanup",
+		GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"}},
+		Token:        "deleg-cleanup-token",
+	}}
+	client := startFakePDP(t, fake)
+	cfg := testSessionStartCfg(t)
+	legacy := cfg.SessionFilePath + ".cache.json"
+	if err := os.WriteFile(legacy, []byte(`[{"left":"over"}]`), 0o600); err != nil {
+		t.Fatalf("seed legacy cache file: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if code := runSessionStart(client, cfg, &stderr); code != 0 {
+		t.Fatalf("runSessionStart() = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("legacy cache file at %s: Stat error = %v, want it removed", legacy, err)
+	}
+	if got := readSessionFile(t, cfg.SessionFilePath).GetDelegationId(); got != "deleg-cleanup" {
+		t.Errorf("delegation_id = %q, want the new session file written as usual", got)
+	}
+}
+
+// TestRunSessionStart_LegacyCacheFileRemovalFails_StillSucceeds: the cleanup
+// is best-effort. Something undeletable at that path (a non-empty directory)
+// is reported on stderr and does not fail session-start.
+func TestRunSessionStart_LegacyCacheFileRemovalFails_StillSucceeds(t *testing.T) {
+	fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
+		DelegationId: "deleg-cleanup-fails",
+		GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"}},
+		Token:        "deleg-cleanup-fails-token",
+	}}
+	client := startFakePDP(t, fake)
+	cfg := testSessionStartCfg(t)
+	if err := os.MkdirAll(filepath.Join(cfg.SessionFilePath+".cache.json", "child"), 0o700); err != nil {
+		t.Fatalf("seed undeletable legacy path: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if code := runSessionStart(client, cfg, &stderr); code != 0 {
+		t.Fatalf("runSessionStart() = %d, want 0 -- a failed cleanup must not fail session-start; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "legacy cache file") {
+		t.Errorf("stderr = %q, want the failed cleanup reported", stderr.String())
+	}
+}
+
 // TestRunSessionStart_WritesToken_DistinctFromDelegationID is the task's own
 // required test, named for exactly the property it defends: as of Phase 9
 // Task 4, session-start caches the TOKEN CreateDelegation returned, not

@@ -77,7 +77,7 @@ A PDP with verification off ignores the token. The worked example below runs
 against the local stack, so it leaves the variable out. See the
 [user guide](../user-guide.md), §3.1 "Principal authentication".
 
-> **These eight are not `hook`'s eight.** They overlap in five. Exporting only
+> **These eight are not `hook`'s seven.** They overlap in five. Exporting only
 > this set and then launching an agent leaves every tool call denying with
 > `missing required configuration` — a denial that reads exactly like a policy
 > denial until you open the reason. See [`hook.md`](hook.md).

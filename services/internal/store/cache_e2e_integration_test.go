@@ -1,62 +1,48 @@
 //go:build integration
 
-// cache_e2e_integration_test.go is Task 4's live-stack proof for the PEP
-// decision cache (Phase 13 Tasks 1-3; spec §4.8, §4.8.2, §4.8.3 W6):
-// .superpowers/sdd/2026-08-14-phase-13-decision-cache/task-4-brief.md's six
-// numbered proofs, run against a REAL, containerized PDP (deploy/docker/
-// docker-compose.yml's pdp-cache service) and the REAL compiled stratium-pep
+// cache_e2e_integration_test.go is the live-stack proof that the "hook"
+// command has NO decision cache: every call is decided by the PDP, and
+// nothing on disk can stand in for it. It runs the REAL compiled stratium-pep
 // binary, exec'd as a subprocess exactly as Claude Code's PreToolUse hook and
-// a real session-start would run it -- not runHook called in-process against
-// a fake PDP (cmd/stratium-pep's own hook_cache_test.go/local_cache_test.go
-// already do that at the unit level, and Task 3's own report cites those as
-// the mutation-tested proof the WIRING is correct), and never a bad address
-// standing in for an outage, which proves the client's error path and
-// nothing about the feature itself (this task's own brief, restated at every
-// proof below that stops pdp-cache).
+// a real session-start would run it, against a REAL, containerized PDP
+// (deploy/docker/docker-compose.yml's pdp-cache service) -- and stops that
+// container for real where a proof needs an outage, never a bad address
+// standing in for one (stopPDPCache/startPDPCache).
+//
+// What it proves:
+//
+//   - PDP up, a cache file beside the session file holding an ALLOW for a call
+//     the PDP denies: the hook denies, and the PDP's own audit shows it made
+//     that decision.
+//   - A call allowed while the PDP is up is DENIED once the PDP is stopped --
+//     nothing is replayed -- and the hook never creates a cache file.
+//   - PDP stopped, a cache file holding an ALLOW for the call: denied.
+//
+// The cache that does exist -- mcp's, in process memory -- has its validity
+// rules (epoch, token expiry, staleness window) covered at the unit level in
+// cmd/stratium-pep; they have no hook-mode behavior left to prove here.
 //
 // package main (cmd/stratium-pep) cannot be imported -- Go forbids importing
-// package main from anywhere -- so exec'ing the real compiled artifact is not
-// a workaround, it is the only way anything in this package could drive
-// hook.go's runHook or session_start.go's runSessionStart at all. That also
-// means every fixture below is built through THIS package's own existing
-// seedAgent/seedPolicy/withTenantTx (store_integration_test.go), exactly like
-// every one of this file's seven sibling PDP instances -- no second, cache-
-// specific copy of any of them exists in cmd/stratium-pep.
+// package main from anywhere -- so exec'ing the real compiled artifact is the
+// only way anything in this package could drive hook.go's runHook or
+// session_start.go's runSessionStart at all. Every fixture below is built
+// through THIS package's own existing seedAgent/seedPolicy/withTenantTx
+// (store_integration_test.go).
 //
 // pdp-cache (docker-compose.yml) is the first PDP instance in this whole
 // stack any test is allowed to actually stop -- see that service's own
-// comment for why every PDP instance before it is off limits. Proofs 2, 3, 5,
-// and 6 below do exactly that, always via a real `docker compose stop`, never
-// a bad address (stopPDPCache/startPDPCache).
+// comment for why every PDP instance before it is off limits.
 //
-// Sorts before store_integration_test.go alphabetically, deliberately, for
-// the identical reason catalog_/escalation_/extauthz_/proxy_/revocation_epoch_e2e_
-// already do (see revocation_epoch_e2e_integration_test.go's own package doc
-// for the fullest account): TestEndToEnd's own last subtest permanently
-// revokes the serving role's INSERT on audit_chain for the rest of that
-// postgres instance's life -- role-level, not tenant-scoped -- which would
-// turn every live Decide/CreateDelegation call this file makes, on
-// tenant-cache-integration included, into an audit-write failure instead of a
-// real decision, if this file's name sorted after it.
-//
-// Phase 14 Task 8 removed that constraint: proof6 now restores both grants
-// in a t.Cleanup and verifies they came back (restoreAuditChainInsert,
-// store_integration_test.go), so the revoke lasts only for that subtest and
-// this file's name is no longer load-bearing. Kept as it is because there is
-// no reason to churn it.
-//
-// Every proof below uses tool "Read" only, deliberately, never a second tool
-// name: internal/authz's DefaultCatalog (catalog.go) fixes "Read" at
-// READ_ONLY regardless of RawInput content (the catalog step runs before
-// BuiltinTier in DeriveTier's resolution order), so every hook call below
-// derives the identical, known-safe tier no matter what tool_input JSON body
-// it carries -- a second cache key never needs a second tool, only a
-// different tool_input.
+// Every proof below uses tool "Read" only: internal/authz's DefaultCatalog
+// (catalog.go) fixes "Read" at READ_ONLY regardless of RawInput content, so
+// every hook call derives the identical, known-safe tier no matter what
+// tool_input JSON body it carries.
 package store_test
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -326,9 +312,7 @@ func startPDPCache(t *testing.T) {
 // common across every proof below: identity (agentID/subject), where to
 // reach pdp-cache (its HOST-published port, from STRATIUM_IT_PDP_CACHE_ADDR
 // -- see the Makefile's own integration target), the session file this proof
-// owns alone (t.TempDir(), so no proof's cache file -- cacheFilePathFor
-// derives it from the session file's own path, local_cache.go -- can ever
-// collide with another's), and a connect timeout short enough that a stopped
+// owns alone (t.TempDir()), and a connect timeout short enough that a stopped
 // pdp-cache fails fast rather than risking this test's own subprocess
 // budget.
 func cacheProofBaseEnv(agentID uuid.UUID, subject, sessionFile string) map[string]string {
@@ -345,9 +329,7 @@ func cacheProofBaseEnv(agentID uuid.UUID, subject, sessionFile string) map[strin
 }
 
 // newCacheSessionFile returns a fresh path for a session file this test
-// alone owns (t.TempDir(), so no proof's cache file -- cacheFilePathFor
-// derives it from the session file's own path, local_cache.go -- can ever
-// collide with another's), for the common case of one proof, one delegation.
+// alone owns (t.TempDir()).
 func newCacheSessionFile(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "session.json")
@@ -360,16 +342,6 @@ func newCacheSessionFile(t *testing.T) string {
 // main -- see the package doc for why that import is impossible, not merely
 // avoided).
 //
-// sessionFile is a caller-supplied path, not always a fresh one: proof 4
-// (TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry) deliberately
-// calls this TWICE at the SAME path, for two DIFFERENT delegations, and
-// needs its own doc comment there for why -- cacheFilePathFor derives the
-// cache file from this path alone, so two delegations sharing one path is
-// the only way to land both of their entries in the SAME cache file.
-//
-// ttlSeconds is a parameter, not a fixed constant: proof 5 (expired token)
-// needs a real, short-lived token that actually expires in wall-clock time;
-// every other proof needs one that outlives the whole test.
 // MaxActionTier/Tools match revocation_epoch_e2e_integration_test.go's own
 // proven-safe combination (models.ActionTierInternalModify, an agent seeded
 // at models.TrustTierUnverified, tool "Read") exactly, rather than a fresh
@@ -380,7 +352,7 @@ func startCacheSession(t *testing.T, sessionFile string, agentID uuid.UUID, subj
 	env["STRATIUM_PEP_REQUESTED_TIER"] = fmt.Sprintf("%d", int32(models.ActionTierInternalModify))
 	env["STRATIUM_PEP_REQUESTED_TOOLS"] = "Read"
 	env["STRATIUM_PEP_TTL_SECONDS"] = fmt.Sprintf("%d", ttlSeconds)
-	env["STRATIUM_PEP_PURPOSE"] = "integration test: Task 4 decision-cache live proof"
+	env["STRATIUM_PEP_PURPOSE"] = "integration test: hook has no decision cache"
 
 	stdout, stderr, code := runPEPSubcommand(t, "session-start", env, "")
 	if code != 0 {
@@ -404,13 +376,10 @@ func startCacheSession(t *testing.T, sessionFile string, agentID uuid.UUID, subj
 // callHook runs the real "hook" subcommand once, exactly as Claude Code's
 // PreToolUse contract does: JSON on stdin naming tool_name and tool_input,
 // exit 0 (ALLOW, nothing on stdout) or 2 (DENY, hookSpecificOutput JSON) on
-// stdout. staleness is a parameter for the identical reason ttlSeconds is on
-// startCacheSession above: proof 6 needs a staleness window short enough to
-// actually elapse in wall-clock time within this test.
-func callHook(t *testing.T, agentID uuid.UUID, subject, sessionFile, staleness, tool, input string) (exitCode int, reason string) {
+// stdout.
+func callHook(t *testing.T, agentID uuid.UUID, subject, sessionFile, tool, input string) (exitCode int, reason string) {
 	t.Helper()
 	env := cacheProofBaseEnv(agentID, subject, sessionFile)
-	env["STRATIUM_PEP_CACHE_STALENESS_WINDOW"] = staleness
 	stdin := fmt.Sprintf(`{"tool_name":%q,"tool_input":%s}`, tool, input)
 
 	stdout, stderr, code := runPEPSubcommand(t, "hook", env, stdin)
@@ -428,77 +397,130 @@ func callHook(t *testing.T, agentID uuid.UUID, subject, sessionFile, staleness, 
 	return code, out.HookSpecificOutput.PermissionDecisionReason
 }
 
-// ---------------------------------------------------------------------------
-// The six proofs (task-4-brief.md).
+// legacyCacheFilePath is where versions before the in-memory cache kept
+// decisions: beside the session file.
+func legacyCacheFilePath(sessionFile string) string {
+	return sessionFile + ".cache.json"
+}
 
-// TestIntegration_Cache_E2E_HitServesWithPDPStopped is proofs 1 AND 2
-// together. The task brief allows proof 1's "not merely that the answer
-// matched" bar to be met either by asserting the PDP's own call count or by
-// stopping its container -- and against a REAL pdp-cache, which exposes no
-// call-count instrumentation the way pdp_fake_test.go's fake PDP does for
-// cmd/stratium-pep's own unit-level cache tests, a stopped container is the
-// ONLY mechanism available here, which is exactly the mechanism proof 2
-// requires anyway (the brief's own words: "actually stopping the container
-// rather than simulating unreachability with a bad address"). One test
-// proves both, honestly, rather than manufacturing a second, weaker
-// mechanism (log scraping, say) for proof 1 alone just to keep the two
-// visibly separate.
-func TestIntegration_Cache_E2E_HitServesWithPDPStopped(t *testing.T) {
+// writeForgedAllowCacheFile writes a cache file, in the JSON shape those
+// older versions read, holding one fresh ALLOW for exactly (delegationID,
+// tool, input). Written AFTER session-start, which removes any such file.
+func writeForgedAllowCacheFile(t *testing.T, sessionFile, delegationID, tool, input string) {
+	t.Helper()
+	now := time.Now()
+	data, err := json.Marshal([]map[string]any{{
+		"delegation_id":         delegationID,
+		"tool":                  tool,
+		"input_digest":          sha256.Sum256([]byte(input)),
+		"decision":              int32(pdpgrpc.Effect_EFFECT_ALLOW),
+		"epoch":                 1,
+		"delegation_expires_at": now.Add(48 * time.Hour),
+		"cached_at":             now.Add(-time.Minute),
+	}})
+	if err != nil {
+		t.Fatalf("marshal forged cache file: %v", err)
+	}
+	if err := os.WriteFile(legacyCacheFilePath(sessionFile), data, 0o600); err != nil {
+		t.Fatalf("write forged cache file: %v", err)
+	}
+}
+
+// hookDecisions returns the decision the PDP itself recorded for each Decide
+// it received from agentID, oldest first -- the PDP's own account of what it
+// decided, independent of anything the hook reported.
+func hookDecisions(t *testing.T, agentID uuid.UUID) []string {
+	t.Helper()
+	var out []string
+	withTenantTx(t, cacheTenant, func(tx *sql.Tx) {
+		rows, err := tx.QueryContext(t.Context(),
+			`SELECT decision FROM audit_chain WHERE event_type = 'decision' AND agent_id = $1 ORDER BY seq ASC`,
+			agentID.String())
+		if err != nil {
+			t.Fatalf("query audit_chain: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var decision string
+			if err := rows.Scan(&decision); err != nil {
+				t.Fatalf("scan audit_chain row: %v", err)
+			}
+			out = append(out, decision)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate audit_chain: %v", err)
+		}
+	})
+	return out
+}
+
+// assertPDPUnreachableReason checks a deny reason names a PDP that could not
+// be consulted. It accepts both transport outcomes a stopped container
+// produces, because which one occurs depends on how Docker tears the socket
+// down, not on this system: a refused connection is codes.Unavailable ("could
+// not reach PDP"), a dropped one hangs until the PEP's ConnectTimeout and is
+// codes.DeadlineExceeded ("PDP did not respond in time"). Both were measured
+// on one host. Asserting a single wording made this flake on a real clock.
+// Anything else (an unknown agent, a generic application error) would mean
+// the call reached a PDP that ANSWERED.
+func assertPDPUnreachableReason(t *testing.T, reason string) {
+	t.Helper()
+	if !strings.Contains(reason, "could not reach PDP") && !strings.Contains(reason, "PDP did not respond in time") {
+		t.Errorf("reason = %q, want it to name a PDP that could not be reached or did not respond in time", reason)
+	}
+	if strings.Contains(strings.ToLower(reason), "cache") {
+		t.Errorf("reason = %q, want no mention of a cache -- hook mode has none", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The proofs.
+
+// TestIntegration_Hook_E2E_ForgedCacheFile_PDPUp_PDPDecides: the PDP denies
+// a call (its delegation is revoked -- a raw SQL UPDATE, the only way a real
+// revocation happens in this system today) while a cache file beside the
+// session file holds an ALLOW for exactly that call. The hook must deny, and
+// the PDP's own audit must show a DENY for this agent: the decision was the
+// PDP's, not the file's.
+func TestIntegration_Hook_E2E_ForgedCacheFile_PDPUp_PDPDecides(t *testing.T) {
 	const subject = "cache-proof-a@example.com"
 	agentID := uuid.New()
 	seedAgent(t, cacheTenant, agentID, "integration-agent-cache-proof-a", models.TrustTierUnverified)
 	seedPolicy(t, cacheTenant, "cache-proof-a-permit",
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
 	sessionFile := newCacheSessionFile(t)
-	startCacheSession(t, sessionFile, agentID, subject, 3600)
+	delegationID := startCacheSession(t, sessionFile, agentID, subject, 3600)
 	const input = `{"path":"/tmp/cache-proof-a.txt"}`
 
-	code, reason := callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
-	if code != 0 {
-		t.Fatalf("call 1 (PDP up, populates the cache) exit = %d, want 0 (ALLOW); reason: %q", code, reason)
+	withTenantTx(t, cacheTenant, func(tx *sql.Tx) {
+		if _, err := tx.ExecContext(t.Context(),
+			`UPDATE delegations SET revoked = true, revoked_at = NOW() WHERE id = $1`, delegationID); err != nil {
+			t.Fatalf("UPDATE delegations (revoke): %v", err)
+		}
+	})
+	writeForgedAllowCacheFile(t, sessionFile, delegationID, "Read", input)
+
+	code, reason := callHook(t, agentID, subject, sessionFile, "Read", input)
+	if code != 2 {
+		t.Fatalf("hook exit = %d, want 2 (DENY) -- the PDP denies this call, and a cache file holding an "+
+			"ALLOW for it must change nothing; reason: %q", code, reason)
 	}
-
-	stopPDPCache(t)
-
-	code, reason = callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
-	if code != 0 {
-		t.Fatalf("call 2 (SAME request, pdp-cache fully stopped) exit = %d, want 0 -- a valid cache entry "+
-			"must serve with the PDP genuinely unreachable, proving both that this call never contacted it "+
-			"(proof 1) and that the outage-tolerance promise holds (proof 2); reason: %q", code, reason)
+	decisions := hookDecisions(t, agentID)
+	if len(decisions) == 0 {
+		t.Fatalf("the PDP recorded no decision for this agent -- the hook denied without asking it")
+	}
+	for _, d := range decisions {
+		if d != "DENY" {
+			t.Errorf("the PDP recorded decision %q for this agent, want only DENY; all: %v", d, decisions)
+		}
 	}
 }
 
-// TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies is proof 3, and C19's
-// most direct live-stack evidence: a fresh delegation, a fresh (therefore
-// EMPTY) cache file, and pdp-cache stopped before the only hook call this
-// proof ever makes -- there is no entry to be valid or invalid, and no PDP to
-// fall back on either.
-//
-// WHAT THE TAIL OF THE REASON MAY SAY, and why this stopped asserting one
-// spelling of it (Phase 15 Task 7). Until now the second check required the
-// literal "could not reach", which is describeRPCError's (hook.go)
-// codes.Unavailable branch and only that branch. Which branch a stopped
-// container produces is not a property of this system: it depends on how
-// Docker tears the socket down. A listener that refuses immediately gives
-// grpc-go a connection-refused and therefore Unavailable; one whose packets
-// are dropped instead leaves the dial hanging until the PEP's own
-// ConnectTimeout elapses, which is codes.DeadlineExceeded and reads "PDP did
-// not respond in time". Measured on this host, both happen: ~1.2s for the
-// first, ~6.2s for the second. The test was passing or failing on a race
-// against a real clock, not on anything C19 says.
-//
-// So it now asserts the CLASSIFICATION, which is stable, instead of the prose
-// one of two racing branches happens to produce -- and it is not a weakening.
-// cacheMissUnreachableReason's prefix (local_cache.go) is applied uniformly to
-// every describeRPCError outcome, so "no cached decision for this request,
-// and ..." is what distinguishes "the PDP was never successfully consulted"
-// from an ordinary policy DENY, whose reason passes through unprefixed. The
-// two branches a stopped container can legitimately produce are named
-// explicitly and either is accepted; the two it cannot -- NotFound (the agent
-// or delegation is unknown to a PDP that ANSWERED) and a generic application
-// error -- are still rejected, because either arriving here would mean this
-// call reached something and this proof is about a call that reached nothing.
-func TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies(t *testing.T) {
+// TestIntegration_Hook_E2E_PDPStopped_DeniesACallAllowedWhileUp: the same
+// call the PDP allowed a moment ago is denied once the PDP is stopped.
+// Nothing is replayed, and the hook leaves no cache file behind to replay
+// from.
+func TestIntegration_Hook_E2E_PDPStopped_DeniesACallAllowedWhileUp(t *testing.T) {
 	const subject = "cache-proof-b@example.com"
 	agentID := uuid.New()
 	seedAgent(t, cacheTenant, agentID, "integration-agent-cache-proof-b", models.TrustTierUnverified)
@@ -506,233 +528,51 @@ func TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies(t *testing.T) {
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
 	sessionFile := newCacheSessionFile(t)
 	startCacheSession(t, sessionFile, agentID, subject, 3600)
+	const input = `{"path":"/tmp/cache-proof-b.txt"}`
+
+	code, reason := callHook(t, agentID, subject, sessionFile, "Read", input)
+	if code != 0 {
+		t.Fatalf("call 1 (PDP up) exit = %d, want 0 (ALLOW); reason: %q", code, reason)
+	}
+	entries, err := os.ReadDir(filepath.Dir(sessionFile))
+	if err != nil {
+		t.Fatalf("read session dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(sessionFile) {
+			t.Errorf("the hook left %q beside the session file, want nothing written -- hook mode keeps no cache", e.Name())
+		}
+	}
 
 	stopPDPCache(t)
 
-	code, reason := callHook(t, agentID, subject, sessionFile, "1h", "Read", `{"path":"/tmp/cache-proof-b.txt"}`)
+	code, reason = callHook(t, agentID, subject, sessionFile, "Read", input)
 	if code != 2 {
-		t.Fatalf("hook call (no cache entry, pdp-cache stopped) exit = %d, want 2 (DENY) -- C19: every surface "+
-			"must deny with the PDP unreachable and no valid cache entry; reason: %q", code, reason)
+		t.Fatalf("call 2 (SAME request, pdp-cache stopped) exit = %d, want 2 (DENY) -- a hook call is "+
+			"decided by the PDP or not at all; reason: %q", code, reason)
 	}
-	if !strings.Contains(reason, "no cached decision") {
-		t.Errorf("reason = %q, want it to say no cached decision was available", reason)
-	}
-	// Either transport outcome of a stopped container -- see this test's own
-	// doc comment. Both are describeRPCError branches, both fail closed, and
-	// neither is reachable from a PDP that actually answered.
-	unreachable := strings.Contains(reason, "could not reach PDP") ||
-		strings.Contains(reason, "PDP did not respond in time")
-	if !unreachable {
-		t.Errorf("reason = %q, want it to name a PDP that could not be reached or did not respond in time "+
-			"-- anything else (an unknown agent or delegation, a generic application error) would mean this "+
-			"call reached a PDP that ANSWERED, and this proof is about a call that reached nothing", reason)
-	}
+	assertPDPUnreachableReason(t, reason)
 }
 
-// TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry is proof 4 and
-// C20, end to end: a real control-plane write (revoking the one delegation
-// this proof's session presents -- a raw SQL UPDATE, the only way a real
-// revocation happens in this system today; see revocation_epoch_e2e_
-// integration_test.go's own proof1 for the identical technique) bumps
-// tenant-cache-integration's epoch. The revoke is deliberately what ALSO
-// flips the request's own answer from ALLOW to DENY: a stale-epoch cache
-// entry that were WRONGLY served would read back as the OLD value (exit 0),
-// not merely "some value" -- so the exit code itself, not only the reason
-// text, is the discriminator between "the stale entry served" and "the PDP
-// was asked fresh."
-//
-// Needs TWO cache keys, not one, to actually exercise epochCurrent:
-// local_cache.go's own package doc ("WHERE THE EPOCH COMES FROM") computes
-// lastKnownEpoch as the max epoch already recorded in the cache FILE, which
-// trivially equals a single entry's own epoch when that entry is the only
-// one present. A second entry, cached AFTER the revoke, is what makes the
-// file's own true max newer than the first entry -- the same shape
-// cmd/stratium-pep/hook_cache_test.go's own TestRunHook_CacheHit_StaleEpoch_
-// FallsThroughToPDP uses at the unit level (a different key, same
-// delegation, since its fake PDP enforces nothing and will answer anything
-// the test hands it).
-//
-// A live PDP will not: this proof's SECOND key belongs to a SECOND,
-// deliberately un-revoked delegation on the same tenant, not a second key on
-// the SAME (now-revoked) delegation -- found live, not assumed. Reusing the
-// revoked delegation for the second key looked equivalent on paper (call 2
-// still gets denied, exit 2, satisfying its own assertion) but silently
-// produces the WRONG cache state: hook.go's runHook attempts exactly one
-// reissueAndRetryDecide on any DENY (reissue.go's own doc comment -- it does
-// not distinguish "token expired" from "policy denied" first), and
-// IssueToken itself refuses a revoked delegation outright (internal/pdpgrpc/
-// token.go: "if d.Revoked { return ... PermissionDenied }") -- so
-// reissueAndRetryDecide returns an error, and runHook's own reissue-error
-// branch returns via writeDeny BEFORE ever reaching storeCacheResult. Call 2
-// still denies, correctly, but nothing is ever cached for it, so the cache
-// file never gains a second entry and maxCacheEpoch never moves past the
-// first one -- the stale K1 entry then reads back as current by the cache's
-// own honest bookkeeping (it has genuinely never observed a newer epoch),
-// and this proof would falsely appear to fail C20 for a reason that has
-// nothing to do with epoch invalidation. The epoch is tenant-wide, not
-// delegation-scoped, so a second, healthy delegation's own successful ALLOW
-// carries the identical post-revoke epoch just as well, without detouring
-// through a reissue path a revoked delegation can never complete.
-func TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry(t *testing.T) {
+// TestIntegration_Hook_E2E_ForgedCacheFile_PDPStopped_Denies: with the PDP
+// stopped, a cache file holding an ALLOW for the call still buys nothing.
+func TestIntegration_Hook_E2E_ForgedCacheFile_PDPStopped_Denies(t *testing.T) {
 	const subject = "cache-proof-c@example.com"
 	agentID := uuid.New()
 	seedAgent(t, cacheTenant, agentID, "integration-agent-cache-proof-c", models.TrustTierUnverified)
 	seedPolicy(t, cacheTenant, "cache-proof-c-permit",
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
-
-	// ONE session file path, TWO delegations in succession, deliberately:
-	// cacheFilePathFor derives the cache file from the session file's path
-	// alone (local_cache.go), so this is the only way to land two DIFFERENT
-	// delegations' own cache entries in the SAME file -- see the doc comment
-	// above for why a second delegation is unavoidable here, and why a
-	// second session file (its own, separate cache file) would not work
-	// either. sessionFileOneBytes backs up delegation one's own session data
-	// before it gets overwritten below, so it can be restored before call 3
-	// presents delegation one again.
 	sessionFile := newCacheSessionFile(t)
-	delegationOne := startCacheSession(t, sessionFile, agentID, subject, 3600)
-	sessionFileOneBytes, err := os.ReadFile(sessionFile) //nolint:gosec // G304: this test's own t.TempDir() path
-	if err != nil {
-		t.Fatalf("back up delegation one's session file: %v", err)
-	}
-
+	delegationID := startCacheSession(t, sessionFile, agentID, subject, 3600)
 	const input = `{"path":"/tmp/cache-proof-c.txt"}`
-	code, reason := callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
-	if code != 0 {
-		t.Fatalf("call 1 (before the revoke) exit = %d, want 0 (ALLOW); reason: %q", code, reason)
-	}
-
-	before, exists := readTenantEpoch(t, cacheTenant)
-	if !exists {
-		t.Fatalf("tenant_epoch row for %s does not exist before the revoke", cacheTenant)
-	}
-	withTenantTx(t, cacheTenant, func(tx *sql.Tx) {
-		if _, err := tx.ExecContext(t.Context(),
-			`UPDATE delegations SET revoked = true, revoked_at = NOW() WHERE id = $1`, delegationOne); err != nil {
-			t.Fatalf("UPDATE delegations (revoke): %v", err)
-		}
-	})
-	assertEpochBumped(t, cacheTenant, before)
-
-	// Delegation two, session-started at the SAME path: overwrites
-	// sessionFile with its own data. Its call below is un-revoked and
-	// ALLOWs, carrying the post-bump epoch into the SAME cache file
-	// delegation one's own (now stale) entry already lives in.
-	startCacheSession(t, sessionFile, agentID, subject, 3600)
-	code, reason = callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
-	if code != 0 {
-		t.Fatalf("call 2 (second, un-revoked delegation at the same session path, after the epoch bump) "+
-			"exit = %d, want 0 (ALLOW) -- this is what gives the cache file a newer-epoch entry to compare "+
-			"the stale one against; reason: %q", code, reason)
-	}
-
-	// Restore delegation one's own session data before presenting it again.
-	if err := os.WriteFile(sessionFile, sessionFileOneBytes, 0o600); err != nil {
-		t.Fatalf("restore delegation one's session file: %v", err)
-	}
-	code, reason = callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
-	if code != 2 {
-		t.Fatalf("call 3 (SAME request as call 1, after the epoch bump) exit = %d, want 2 (DENY) -- C20: the "+
-			"pre-revoke ALLOW cached at the old epoch must not be served; reason: %q", code, reason)
-	}
-	if strings.Contains(reason, "served from cache") {
-		t.Errorf("reason = %q, looks like the cache-hit reason -- the stale entry must fall through to a "+
-			"LIVE PDP call, not be served (even as a DENY, that would be the wrong mechanism producing the "+
-			"right-looking answer)", reason)
-	}
-	if !strings.Contains(reason, "revoked") {
-		t.Errorf("reason = %q, want it to name the real, live reason (the delegation is revoked) -- confirming "+
-			"call 3 actually reached the PDP rather than merely denying for some unrelated reason", reason)
-	}
-}
-
-// TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry is proof 5
-// and C24: a genuinely short-lived, real signed token (STRATIUM_PEP_TTL_SECONDS,
-// not a synthetic tampered claim) that actually passes its own real "exp" in
-// wall-clock time, checked against a cache entry that is otherwise valid on
-// every other axis (current epoch, delegation not revoked, well within the
-// staleness window). pdp-cache is stopped before the second call so there is
-// no possibility of a rescue: reissueAndRetryDecide (reissue.go) would
-// otherwise mint a fresh token on the fallback Decide call and this request
-// would come back ALLOWED again, which would prove nothing about the cache's
-// OWN token check -- see this file's own package doc, and the task brief's
-// identical reasoning for why proofs 2/3/6 also insist on a genuinely
-// stopped container rather than a bad address.
-func TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry(t *testing.T) {
-	const subject = "cache-proof-d@example.com"
-	agentID := uuid.New()
-	seedAgent(t, cacheTenant, agentID, "integration-agent-cache-proof-d", models.TrustTierUnverified)
-	seedPolicy(t, cacheTenant, "cache-proof-d-permit",
-		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
-	// A short but real TTL: session-start's own token is what tokenNotExpired
-	// (cache.go) later decodes -- there is no signature to forge or clock to
-	// fake here, only real wall-clock time to wait out below.
-	sessionFile := newCacheSessionFile(t)
-	startCacheSession(t, sessionFile, agentID, subject, 2)
-	const input = `{"path":"/tmp/cache-proof-d.txt"}`
-
-	code, reason := callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
-	if code != 0 {
-		t.Fatalf("call 1 (token still valid) exit = %d, want 0 (ALLOW); reason: %q", code, reason)
-	}
-
-	time.Sleep(4 * time.Second) // past the 2s TTL above -- the token has now genuinely expired
+	writeForgedAllowCacheFile(t, sessionFile, delegationID, "Read", input)
 
 	stopPDPCache(t)
 
-	code, reason = callHook(t, agentID, subject, sessionFile, "1h", "Read", input)
+	code, reason := callHook(t, agentID, subject, sessionFile, "Read", input)
 	if code != 2 {
-		t.Fatalf("call 2 (SAME request, token now expired, pdp-cache stopped) exit = %d, want 2 (DENY) -- "+
-			"C24: an expired token must deny despite an otherwise-valid cache entry; reason: %q", code, reason)
+		t.Fatalf("hook exit = %d, want 2 (DENY) -- pdp-cache is stopped, and a cache file holding an ALLOW "+
+			"for this call must not be served; reason: %q", code, reason)
 	}
-	if !strings.Contains(reason, "no cached decision") {
-		t.Errorf("reason = %q, want it to say no cached decision was available -- the entry is present but "+
-			"the caller's own token has expired, which must read as a miss, not a hit", reason)
-	}
-}
-
-// TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing is proof 6: a
-// cache entry that is valid on every axis EXCEPT staleness -- current epoch,
-// a long-lived token and delegation, pdp-cache stopped throughout -- serves
-// right up until a real staleness window (STRATIUM_PEP_CACHE_STALENESS_WINDOW,
-// waited out in real wall-clock time, not simulated) elapses, and denies the
-// instant after. cache.go's own doc ties withinStalenessWindow to C19
-// directly (its "required config, no default" clause) -- this is that
-// specific condition's own live-stack proof, distinct from proof 3's "no
-// entry at all" case above.
-func TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing(t *testing.T) {
-	const subject = "cache-proof-e@example.com"
-	agentID := uuid.New()
-	seedAgent(t, cacheTenant, agentID, "integration-agent-cache-proof-e", models.TrustTierUnverified)
-	seedPolicy(t, cacheTenant, "cache-proof-e-permit",
-		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
-	sessionFile := newCacheSessionFile(t)
-	startCacheSession(t, sessionFile, agentID, subject, 3600)
-	const staleness = "5s"
-	const input = `{"path":"/tmp/cache-proof-e.txt"}`
-
-	code, reason := callHook(t, agentID, subject, sessionFile, staleness, "Read", input)
-	if code != 0 {
-		t.Fatalf("call 1 (PDP up, populates the cache) exit = %d, want 0 (ALLOW); reason: %q", code, reason)
-	}
-
-	stopPDPCache(t)
-
-	code, reason = callHook(t, agentID, subject, sessionFile, staleness, "Read", input)
-	if code != 0 {
-		t.Fatalf("call 2 (within the staleness window, pdp-cache stopped) exit = %d, want 0 -- outage "+
-			"tolerance must still hold before the window elapses; reason: %q", code, reason)
-	}
-
-	time.Sleep(6 * time.Second) // past the 5s staleness window above
-
-	code, reason = callHook(t, agentID, subject, sessionFile, staleness, "Read", input)
-	if code != 2 {
-		t.Fatalf("call 3 (past the staleness window, pdp-cache still stopped) exit = %d, want 2 (DENY) -- an "+
-			"entry that is valid on every OTHER axis must still stop serving once the staleness window "+
-			"elapses; reason: %q", code, reason)
-	}
-	if !strings.Contains(reason, "no cached decision") {
-		t.Errorf("reason = %q, want it to say no cached decision was available", reason)
-	}
+	assertPDPUnreachableReason(t, reason)
 }

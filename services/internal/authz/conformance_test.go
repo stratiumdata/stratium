@@ -488,95 +488,61 @@ func TestC18_CrossTenantReadImpossible(t *testing.T) {
 //     for mcp, but through a real containerized PDP and a real child process
 //     rather than through a session of any kind.
 //
-//   - "no valid cache entry" (closed by Phase 13 Task 4, this correction):
-//     the PEP decision cache now exists (Phase 13 Tasks 1-3, spec §4.8) and
-//     is wired into exactly two of the four surfaces — hook and mcp — by a
-//     deliberate ruling (spec §4.8.3 W6, cache.go's own package doc): a
-//     cache hit is defined by NOT calling the PDP, and the PDP is the only
-//     component that ever verifies a token's signature (K2); on extauthz and
-//     proxy the caller IS the party being policed, so a forged token would
-//     satisfy every cache condition and be served without ever being
-//     checked. That ruling is exactly what keeps "every surface" literally
-//     true for all four, not just the two with a cache: on extauthz and
-//     proxy, "no valid cache entry" is unconditionally true — there is no
-//     code path on either that could ever populate one — so an unreachable
-//     PDP already denies by the SAME mechanism their own pre-existing live
-//     proofs establish (TestIntegration_Envoy_NoTokenDeniedNoFallback and
-//     TestIntegration_Proxy_NoTokenDeniesNoFallback, both internal/store,
-//     both unconditional denials with no fallback of any kind — proven
-//     before this phase existed, unaffected by anything it added). For hook
-//     and mcp the property is no longer vacuous:
-//     cache_e2e_integration_test.go (internal/store) proves it against a
-//     REAL, containerized PDP that is actually stopped (docker compose
-//     stop, never a bad address standing in for one) — once with no cache
-//     entry at all (TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies),
-//     and once with an entry present but past the required staleness
-//     window (TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing —
-//     cache.go's own doc comment ties withinStalenessWindow to this exact
-//     property, "required config, NO default"). Both deny, driven through
-//     the real "hook" subcommand exec'd as a subprocess exactly as Claude
-//     Code would run it, not runHook called in-process against a fake PDP.
+//   - "no valid cache entry": the PEP decision cache (spec §4.8) lives only
+//     in process memory, so that the only decisions ever replayed are ones
+//     that process itself received from the PDP (cmd/stratium-pep/cache.go's
+//     package doc, "Memory only"). That leaves exactly one surface with a
+//     cache: mcp, one long-running process. hook is a new process per tool
+//     call and has none; extauthz and proxy never had one (spec §4.8.3 W6).
+//     On those three, "no valid cache entry" is unconditionally true, so an
+//     unreachable PDP denies with no fallback of any kind. For hook that is
+//     proven against a REAL, containerized PDP that is actually stopped
+//     (docker compose stop, never a bad address standing in for one):
+//     TestIntegration_Hook_E2E_PDPStopped_DeniesACallAllowedWhileUp denies
+//     the very call the PDP allowed a moment earlier, and
+//     TestIntegration_Hook_E2E_ForgedCacheFile_PDPStopped_Denies denies even
+//     with a cache file on disk holding an ALLOW for the call (both
+//     internal/store/cache_e2e_integration_test.go). For mcp the property is
+//     proven at the unit level in cmd/stratium-pep: a miss with the PDP
+//     unreachable denies, and an entry past the required staleness window
+//     stops being served.
 //
-// mcp is not independently re-proven live here: consultCache/
-// storeCacheResult (cmd/stratium-pep/local_cache.go) are the ONLY cache
-// read and the ONLY cache write this binary ever performs, called
-// identically by runHook and decideAndRelay (mcp_authorize.go) — Task 3's
-// own report states decideAndRelay "mirrors runHook's consult/store wiring"
-// and every mutation applied to that shared logic was caught identically on
-// both surfaces' own unit tests. A live proof of the mechanism through one
-// of its two identical callers is a live proof of the mechanism itself;
-// repeating the identical container-stop choreography a second time through
-// mcp's own JSON-RPC transport would exercise the exact same consultCache/
-// cacheGetValid code path a second time, not a different one.
-//
-// Classified PROVEN ELSEWHERE, not a pass: this is a live-stack property —
-// a real subprocess, a real session file and cache file on disk, a real
-// containerized PDP actually stopped — none of which internal/authz's pure
-// Decide function has any way to exercise even in principle (this
-// package's own doc comment, types.go: "no database handles, no network
-// clients, no ambient clock"). Same shape as C16/C18/C21/C22/C23 above: the
-// property is real and now proven, just never provable at this layer.
+// Classified PROVEN ELSEWHERE, not a pass: a real subprocess, a real
+// containerized PDP actually stopped, and a PEP process's own memory are
+// none of them things internal/authz's pure Decide function has any way to
+// exercise even in principle (this package's own doc comment, types.go: "no
+// database handles, no network clients, no ambient clock").
 func TestC19_UnreachablePDPDenies(t *testing.T) {
 	markRan(19)
-	provenElsewhere(t, 19, in("internal/store",
-		"TestIntegration_Cache_E2E_NoEntry_PDPStopped_Denies",
-		"TestIntegration_Cache_E2E_PastStalenessWindow_StopsServing"))
+	provenElsewhere(t, 19,
+		in("internal/store",
+			"TestIntegration_Hook_E2E_PDPStopped_DeniesACallAllowedWhileUp",
+			"TestIntegration_Hook_E2E_ForgedCacheFile_PDPStopped_Denies"),
+		in("cmd/stratium-pep",
+			"TestDecideAndRelay_CacheMissUnreachablePDP_DeniesWithDistinguishingReason",
+			"TestConsultCache_OutageWithNoNewWrites_StillServesAtMaxUntilStalenessCloses"))
 }
 
 // TestC20_StaleEpochCacheEntryNotServed is C20: an entry cached before a
-// revocation epoch bump is not served after it. Skipped from Phase 3 onward
-// for the obvious reason — no PEP decision cache existed anywhere in this
-// tree to hold a stale entry in the first place — until Phase 13 built one
-// (Tasks 1-3, spec §4.8) with epochCurrent (cache.go) as exactly this
-// condition's own enforcement: a cached decision's own Epoch must equal
-// lastKnownEpoch, the highest epoch already recorded among this PEP's own
-// cache file (local_cache.go's maxCacheEpoch — corrected mid-phase from an
-// earlier, session-file-frozen source that this very property would have
-// caught immediately had a live proof existed at the time; see
-// local_cache.go's own "WHERE THE EPOCH COMES FROM" for the full account).
+// revocation epoch bump is not served after it. epochCurrent
+// (cmd/stratium-pep/cache.go) is this condition's own enforcement: a cached
+// decision's Epoch must equal the highest epoch among the entries in that
+// process's in-memory cache (decisionCache.maxEpoch).
 //
-// Phase 13 Task 4 is that live proof:
-// TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry
-// (internal/store/cache_e2e_integration_test.go) caches a real ALLOW under
-// a real delegation, revokes that SAME delegation with a raw SQL UPDATE —
-// the only way a real revocation happens in this system today, the same
-// technique revocation_epoch_e2e_integration_test.go's own proof1 uses to
-// bump the epoch in the first place (Phase 12) — and shows the very next
-// hook call for that exact request denies, not the stale ALLOW. The revoke
-// is deliberately what also flips the request's own real answer, so the
-// discriminator is the decision itself (exit code 0 vs. 2), not merely a
-// reason string a bug could coincidentally still get right.
+// The only surface with a cache is mcp, and its cache lives in process
+// memory, so the proof is at the unit level in cmd/stratium-pep: an entry
+// below the cache's max epoch misses (TestConsultCache_EntryBelowMaxEpoch_
+// IsNotServed), and through the full tools/call path the PDP's live answer
+// governs instead (TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP).
 //
 // Classified PROVEN ELSEWHERE, not a pass, for the identical reason C19
-// above is: a real cache file on disk, a real epoch read from a real
-// Postgres trigger (Phase 12), and a real subprocess are three things
-// internal/authz's pure Decide function has no way to touch, by design
-// (types.go's own package doc: "no database handles, no network clients, no
-// ambient clock"). The property is real and now proven, just never provable
-// at this layer.
+// above is: a PEP process's own memory is not something internal/authz's
+// pure Decide function has any way to touch.
 func TestC20_StaleEpochCacheEntryNotServed(t *testing.T) {
 	markRan(20)
-	provenElsewhere(t, 20, in("internal/store", "TestIntegration_Cache_E2E_EpochBumpInvalidatesCachedEntry"))
+	provenElsewhere(t, 20, in("cmd/stratium-pep",
+		"TestConsultCache_EntryBelowMaxEpoch_IsNotServed",
+		"TestDecideAndRelay_CacheHit_StaleEpoch_FallsThroughToPDP"))
 }
 
 // C21 reads "escalation routes to the root principal, not an intermediate
@@ -732,30 +698,25 @@ func TestC23_NonBlockingSurfaceDegradesToDeny(t *testing.T) {
 // otherwise-perfect hit, deliberately independent of delegationNotExpired
 // (W3's second condition, "C24's time half" per cache.go's own W3 table).
 //
-// Phase 13 Task 4 is the live proof:
-// TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry
-// (internal/store/cache_e2e_integration_test.go) mints a real, short-lived
-// signed token (a real TTL, not a tampered claim), lets it actually pass its
-// own "exp" in wall-clock time, and shows the SAME request that cached a
-// live ALLOW moments earlier now denies. pdp-cache is stopped before that
-// second call specifically so reissueAndRetryDecide (cmd/stratium-pep/
-// reissue.go) cannot mint a fresh token and rescue the call on the fallback
-// path — without that, a miss would still reach a live PDP and could come
-// back ALLOWED again, proving nothing about the cache's own token check.
+// The only surface with a cache is mcp, and its cache lives in process
+// memory, so the proof is at the unit level in cmd/stratium-pep:
+// TestCacheEntryUsable_ExpiredTokenDenies and
+// TestCacheEntryUsable_ExpiredDelegationDenies pin the two conditions, and
+// TestConsultCache_UsesSessTokenNotEntryOrHardcoded shows an otherwise
+// valid entry misses once the caller's own token has expired.
 //
 // Delegation expiry alone (the row itself, independent of any token or
 // cache) is covered separately by TestDelegationLeg_DeniesExpiredHop.
 //
 // Classified PROVEN ELSEWHERE, not a pass, for the identical reason C19 and
-// C20 above are: a real signed token actually expiring in wall-clock time,
-// a real cache file, and a real stopped container are not things
-// internal/authz's pure Decide function has any way to produce or observe
-// (types.go's own package doc: "no database handles, no network clients, no
-// ambient clock"). The property is real and now proven, just never provable
-// at this layer.
+// C20 above are: a PEP process's own memory is not something
+// internal/authz's pure Decide function has any way to produce or observe.
 func TestC24_ExpiredDelegationDenied(t *testing.T) {
 	markRan(24)
-	provenElsewhere(t, 24, in("internal/store", "TestIntegration_Cache_E2E_ExpiredTokenDeniedDespiteValidEntry"))
+	provenElsewhere(t, 24, in("cmd/stratium-pep",
+		"TestCacheEntryUsable_ExpiredTokenDenies",
+		"TestCacheEntryUsable_ExpiredDelegationDenies",
+		"TestConsultCache_UsesSessTokenNotEntryOrHardcoded"))
 }
 
 // C25's reason was re-checked the same way in Phase 14 Task 8 and REWRITTEN

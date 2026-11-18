@@ -93,8 +93,13 @@ type jsonrpcErrorObj struct {
 // own enforcement path already uses (cfg is a hookConfig value, not a parallel mcp-only shape --
 // see the task report for why reusing the type, rather than inventing a second one with the same
 // seven fields, was the right call), cacheCfg for how long a cached decision may still be served
-// (Task 3's own addition -- cache.go's cacheConfig, loaded once by runMCPCmd exactly like cfg
-// already is, not re-read per frame), and the two destinations a decision can write to.
+// (cache.go's cacheConfig, loaded once by runMCPCmd exactly like cfg already is, not re-read per
+// frame), cache for the decisions themselves, and the two destinations a decision can write to.
+//
+// cache is created empty by runMCP and lives exactly as long as this process: it holds only
+// decisions this process itself received from the PDP, and nothing is ever loaded into it from
+// disk (cache.go's package doc, "Memory only"). It is shared by every decideAndRelay goroutine and
+// does its own locking.
 //
 // Both writers are expected to already serialize concurrent callers (see mcp.go's syncWriter) --
 // this struct does not add its own locking, because relayDirection's own loop-driven writes to
@@ -104,6 +109,7 @@ type mcpAuthorizer struct {
 	client     pdpgrpc.PDPServiceClient
 	cfg        hookConfig
 	cacheCfg   cacheConfig
+	cache      *decisionCache
 	upstreamIn io.Writer
 	agentOut   io.Writer
 
@@ -160,9 +166,8 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	// takes effect only after this process restarts rather than on the very next tool call. sess
 	// stays in scope past this check, unlike before Phase 9 Task 4: it is now the only source for
 	// the token and delegation id the request below and a possible reissue use, not merely this
-	// binary's own local fail-closed gate on "a session was actually started" -- and, as of this
-	// task, the only source consultCache/storeCacheResult (local_cache.go) need too, for the
-	// identical reason and over the identical fresh-per-call read.
+	// binary's own local fail-closed gate on "a session was actually started" -- and the only
+	// source consultCache (local_cache.go) accepts for the cache key and the token-expiry check.
 	sess, err := loadSessionFile(a.cfg.SessionFilePath)
 	if err != nil {
 		a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", err))
@@ -170,26 +175,21 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	}
 	rawInput := string(frame.Params.Arguments)
 
-	// W6: mcp is the second of the two surfaces spec §4.8.3 permits to consult the cache -- see
-	// local_cache.go's own package doc for the boundary this call is part of enforcing
-	// structurally. now is captured once and reused below for storeCacheResult's own CachedAt. On a
-	// hit, a.client.Decide is never called at all -- deliberately NOT an in-memory tier ahead of
-	// this file check either (the task brief's own explicit "do not build one" for this
-	// long-lived surface): every call still re-reads the same on-disk cache hook.go does, so a
-	// revocation or an eviction from another process's write takes effect on the very next call
-	// here too, not only after this process restarts.
+	// mcp is the one surface that consults the decision cache -- see local_cache.go's own package
+	// doc for the boundary this call is part of enforcing structurally. now is captured once and
+	// reused below for storeCacheResult's own CachedAt. On a hit, a.client.Decide is never called
+	// at all. The cache is this process's own memory (a.cache); the session file above is still
+	// re-read per call, so an expired or replaced token takes effect on the very next call.
 	now := time.Now()
-	cachePath := cacheFilePathFor(a.cfg.SessionFilePath)
-	if entry, hit := consultCache(cachePath, a.cacheCfg.StalenessWindow, sess, frame.Params.Name, rawInput, now); hit {
+	if entry, hit := consultCache(a.cache, a.cacheCfg.StalenessWindow, sess, frame.Params.Name, rawInput, now); hit {
 		switch entry.Decision {
 		case pdpgrpc.Effect_EFFECT_ALLOW:
 			a.forward(line)
 		default:
-			// See runHook's identical default case (hook.go) for why this stays a
-			// default, not an explicit DENY, case: cacheEntryUsable already refuses
-			// to report a hit for an ESCALATE entry, so this is reached only by a
-			// cached DENY in practice, but nothing this function cannot positively
-			// identify as ALLOW may ever be treated as one.
+			// A default, not an explicit DENY, case: cacheEntryUsable already
+			// refuses to report a hit for an ESCALATE entry, so this is reached
+			// only by a cached DENY in practice, but nothing this function cannot
+			// positively identify as ALLOW may ever be treated as one.
 			a.deny(frame.ID, cacheHitDenyReason)
 		}
 		return
@@ -213,7 +213,7 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	resp, err := a.client.Decide(ctx, req)
 	if err != nil {
 		// cacheMissUnreachableReason (local_cache.go) prefixes describeRPCError's own text with the
-		// one fact unique to a cache-wired surface: this denial follows a MISS, not merely a failed
+		// one fact unique to this cache-wired surface: this denial follows a MISS, not merely a failed
 		// RPC -- the distinction an operator debugging an outage needs from an ordinary policy denial.
 		a.deny(frame.ID, cacheMissUnreachableReason(describeRPCError(err, agentOrDelegationUnknownMsg)))
 		return
@@ -233,15 +233,14 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		resp = reissued
 	}
 
-	// Called unconditionally, including when resp is itself an ESCALATE -- see hook.go's runHook,
-	// the identical call site one file over, for why storeCacheResult's own internal check is the
-	// only guard this needs and why the STRICTER "not even a resolved escalation" property holds by
-	// construction (this is the only storeCacheResult call site in this function, and it runs
-	// before the switch below ever reaches resolveApproval, never again afterward). req.GetToken(),
-	// not sess.GetToken(): the reissue branch above may have mutated req.Token in place to a freshly
-	// issued one, and storeCacheResult must record the expiry of whichever token actually produced
-	// resp.
-	storeCacheResult(cachePath, sess.GetDelegationId(), frame.Params.Name, rawInput, req.GetToken(), resp, now)
+	// Called unconditionally, including when resp is itself an ESCALATE: storeCacheResult's own
+	// internal check (local_cache.go) is the only guard this needs. The STRICTER "not even a
+	// resolved escalation" property holds by construction: this is the only storeCacheResult call
+	// site in this function, and it runs before the switch below ever reaches resolveApproval,
+	// never again afterward. req.GetToken(), not sess.GetToken(): the reissue branch above may have
+	// mutated req.Token in place to a freshly issued one, and storeCacheResult must record the
+	// expiry of whichever token actually produced resp.
+	storeCacheResult(a.cache, sess.GetDelegationId(), frame.Params.Name, rawInput, req.GetToken(), resp, now)
 
 	switch resp.GetEffect() {
 	case pdpgrpc.Effect_EFFECT_ALLOW:

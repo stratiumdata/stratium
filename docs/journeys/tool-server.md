@@ -49,7 +49,7 @@ the menu, so the agent finds its limits by being refused.
 | | `hook` / `mcp` | `extauthz` / `proxy` |
 |---|---|---|
 | Who's calling | a local agent you launched | any client on the network |
-| If the PDP is down | can use a recent cached decision | **refuses everything**, with no cache |
+| If the PDP is down | `mcp` can replay a recent decision from memory; `hook` refuses | **refuses everything**, with no cache |
 | Token | bearer, from the session file | sender-constrained (DPoP) |
 
 !!! warning "A PDP outage is an outage of what it guards"

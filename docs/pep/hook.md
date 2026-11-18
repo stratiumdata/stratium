@@ -27,7 +27,7 @@ comes from the environment and the session file.
 
 ## Configuration
 
-Eight variables. Run it with none and it tells you which — **observed**, and
+Seven variables. Run it with none and it tells you which — **observed**, and
 note the answer is a *deny*, not a crash:
 
 ```
@@ -36,8 +36,7 @@ $ echo '{}' | stratium-pep hook
 "permissionDecisionReason":"stratium-pep: missing required configuration:
 STRATIUM_PEP_PDP_ADDR, STRATIUM_PEP_AGENT_ID, STRATIUM_PEP_SUBJECT,
 STRATIUM_PEP_SESSION_FILE, STRATIUM_PEP_CONNECT_TIMEOUT,
-STRATIUM_PEP_APPROVAL_POLL_INTERVAL, STRATIUM_PEP_APPROVAL_TIMEOUT;
-missing required configuration: STRATIUM_PEP_CACHE_STALENESS_WINDOW"}}
+STRATIUM_PEP_APPROVAL_POLL_INTERVAL, STRATIUM_PEP_APPROVAL_TIMEOUT"}}
 $ echo $?
 2
 ```
@@ -56,13 +55,16 @@ crash — fail-closed is the whole design.
 | `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
 | `STRATIUM_PEP_APPROVAL_POLL_INTERVAL` | `2s` | How often to re-check a pending approval. |
 | `STRATIUM_PEP_APPROVAL_TIMEOUT` | `120s` | How long to hold a call open awaiting one. |
-| `STRATIUM_PEP_CACHE_STALENESS_WINDOW` | `30s` | How long a cached decision may keep being served. No default, deliberately. |
 
-> **These eight are not `session-start`'s eight.** They share five. The three
-> here that `session-start` does not want are the two approval durations and the
-> cache window; the three it wants that this does not are `REQUESTED_TIER`,
-> `REQUESTED_TOOLS` and `TTL_SECONDS`. Export both sets — eleven in total — in
-> whatever shell launches the agent.
+> **These seven are not `session-start`'s eight.** They share five. The two
+> here that `session-start` does not want are the approval durations; the three
+> it wants that this does not are `REQUESTED_TIER`, `REQUESTED_TOOLS` and
+> `TTL_SECONDS`. Export both sets (ten in total) in whatever shell launches
+> the agent.
+
+**`hook` has no decision cache.** It asks the PDP on every call, so a PDP
+outage denies immediately. It ignores `STRATIUM_PEP_CACHE_STALENESS_WINDOW` if
+that is set; only [`mcp`](mcp.md) reads it.
 
 ---
 
