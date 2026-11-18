@@ -29,6 +29,14 @@ type Config struct {
 	TLSKeyFile   string // STRATIUM_TLS_KEY_FILE, PEM private key
 	GRPCInsecure bool   // STRATIUM_GRPC_INSECURE, serve plaintext (local development only)
 
+	// Principal authentication for root delegations (see principal.go). An
+	// OIDC token is required unless PrincipalAuthInsecure is set.
+	PrincipalOIDCIssuer   string        // STRATIUM_PRINCIPAL_OIDC_ISSUER
+	PrincipalOIDCAudience string        // STRATIUM_PRINCIPAL_OIDC_AUDIENCE
+	PrincipalClaim        string        // STRATIUM_PRINCIPAL_CLAIM, the claim naming the person (match the PAP's approver claim)
+	PrincipalOIDCTimeout  time.Duration // STRATIUM_PRINCIPAL_OIDC_TIMEOUT, default 5s
+	PrincipalAuthInsecure bool          // STRATIUM_PRINCIPAL_AUTH_INSECURE, trust the request's subject (local development only)
+
 	// TokenSigningKeyPath is the filesystem path to a PEM-encoded EC private
 	// key: the PDP's current delegation-token signing key, which also
 	// verifies (STRATIUM_TOKEN_SIGNING_KEY_PATH, required). Spec §4.7.1 K1:
@@ -246,6 +254,9 @@ func Load() (Config, error) {
 		}
 	}
 	if err := loadTransport(&c); err != nil {
+		return c, err
+	}
+	if err := loadPrincipalAuth(&c); err != nil {
 		return c, err
 	}
 	return c, nil

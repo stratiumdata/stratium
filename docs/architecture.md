@@ -72,10 +72,18 @@ PEP-to-PDP traffic is gRPC over TLS. Plaintext needs an explicit opt-in on both
 ends (`STRATIUM_GRPC_INSECURE` on the PDP, `STRATIUM_PEP_PDP_INSECURE` on the
 PEP), which only the local dev stack sets.
 
-The local dev stack (`deploy/docker/docker-compose.yml`) runs **18 services**:
-Postgres, eight differently-configured PDPs, two PEPs, Envoy with an upstream, a
-gRPC target, Keycloak, and two PAPs. Eight PDPs because each integration test
-family needs its own tenant and config.
+The PDP authenticates who a new session is for. A root delegation's principal
+comes from an OIDC token the PDP verifies (`STRATIUM_PRINCIPAL_OIDC_ISSUER`,
+`STRATIUM_PRINCIPAL_OIDC_AUDIENCE`, `STRATIUM_PRINCIPAL_CLAIM`), not from the
+request. A child delegation is authorized by its parent's token and acts for
+its chain's root principal. Turning this off needs an explicit opt-in
+(`STRATIUM_PRINCIPAL_AUTH_INSECURE`), which only the local dev stack sets.
+
+The local dev stack (`deploy/docker/docker-compose.yml`) runs **21 services**:
+Postgres, ten differently-configured PDPs, two PEPs, Envoy with an upstream, a
+gRPC target, Keycloak, three PAPs, and LiteLLM. Ten PDPs because each
+integration test family needs its own tenant and config; one of them,
+`pdp-oidc`, verifies principals against the stack's Keycloak.
 
 ---
 
@@ -95,7 +103,11 @@ and an optional tool allowlist.
 `max_action_tier`, `approved_tools`, `resource_constraints`,
 `classification_caps`, `expires_at`, and an optional `escalate_at`. Delegations
 form a **chain**: a child may only ever narrow its parent
-(`permset.ScopeNarrows`). The acting delegation is the last hop.
+(`permset.ScopeNarrows`). The acting delegation is the last hop. The principal
+of a chain is *never* taken from the request: `CreateDelegation` reads a root
+delegation's principal from a verified OIDC token (`principal_token`), and a
+child, authorized by its parent's token (`parent_token`), always acts for its
+chain's root principal.
 
 **Action tier** — how dangerous the action is, derived server-side:
 
@@ -532,7 +544,8 @@ All four are subcommands of one binary, and all four classify nothing.
 | `extauthz` | gRPC `envoy.service.auth.v3.Authorization/Check` | any HTTP API you front with Envoy |
 | `proxy` | transparent gRPC proxy — the agent points its own client at it, unchanged | gRPC tools |
 
-`session-start` is not an enforcement surface. It calls `CreateDelegation` once
+`session-start` is not an enforcement surface. It calls `CreateDelegation` once,
+presenting the principal's OIDC token (`STRATIUM_PEP_PRINCIPAL_TOKEN_FILE`),
 and caches what was **granted** — never what was requested — for `hook` and `mcp`
 to read. `extauthz` and `proxy` read no session file at all: their caller is the
 party being policed and must re-authenticate on every call.

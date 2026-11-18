@@ -37,11 +37,12 @@ STRATIUM_PEP_REQUESTED_TOOLS, STRATIUM_PEP_TTL_SECONDS
 |---|---|---|
 | `STRATIUM_PEP_PDP_ADDR` | `localhost:50051` | The PDP's gRPC address. Ephemeral under Docker — resolve it, don't store it. |
 | `STRATIUM_PEP_AGENT_ID` | `0f8f833a-…` | An agent row's uuid, from `POST /v1/agents`. |
-| `STRATIUM_PEP_SUBJECT` | `you@example.com` | The principal delegating. A policy must name it, or issuance fails. |
+| `STRATIUM_PEP_SUBJECT` | `you@example.com` | The principal delegating. A policy must name it, or issuance fails. Must equal the identity in the principal's token. |
 | `STRATIUM_PEP_SESSION_FILE` | `/run/stratium/session.json` | Where the delegation lands. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds the gRPC dial only. |
 | `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. |
 | `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
+| `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` | `/run/secrets/principal.jwt` | Optional. Path to a file holding the principal's OIDC token. Needed whenever the PDP verifies principals, which is the default. See below. |
 | `STRATIUM_PEP_REQUESTED_TIER` | `3` | Ceiling on action tier, 0–4. |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | `Read,Grep,Glob` | Comma-separated. Empty is refused, not treated as "all". |
 | `STRATIUM_PEP_TTL_SECONDS` | `3600` | Delegation lifetime. |
@@ -53,6 +54,28 @@ delegation and shown in audit.
 threshold than the agent's own, so more calls wait for a human. It can never
 raise or remove the agent's threshold. The threshold actually granted is in
 the session file, under `granted_scope.escalate_at`.
+
+### The principal's token
+
+A PDP verifies who a session is for unless it runs with
+`STRATIUM_PRINCIPAL_AUTH_INSECURE=true`, as the local Docker stack does. Point
+`STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` at a file holding the person's OIDC token;
+`session-start` trims it and sends it as `principal_token`. The PDP verifies
+the token and reads the principal from it, so `STRATIUM_PEP_SUBJECT` must equal
+the identity the token carries. An unreadable or empty file fails
+`session-start`.
+
+The token comes from your identity provider: Stratium does not log in for you.
+Obtain it however your provider issues tokens for the audience the PDP expects
+(`STRATIUM_PRINCIPAL_OIDC_AUDIENCE`), and write it to a file only the session's
+user can read. It is a file, not a variable, so the token is not copied into
+child processes' environments. Only `session-start` reads it.
+
+The token is needed only at session start. It is typically short-lived, and
+that does not shorten the session, whose lifetime is `STRATIUM_PEP_TTL_SECONDS`.
+A PDP with verification off ignores the token. The worked example below runs
+against the local stack, so it leaves the variable out. See the
+[user guide](../user-guide.md), §3.1 "Principal authentication".
 
 > **These eight are not `hook`'s eight.** They overlap in five. Exporting only
 > this set and then launching an agent leaves every tool call denying with
@@ -95,6 +118,18 @@ principal holds none of what you asked for — see the first failure below.
 ---
 
 ## Failures you will actually hit
+
+**`principal_token is required`**, **`principal_token does not identify a principal`**
+
+The PDP verifies principals. The first means `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE`
+is unset. The second means the token failed verification: it has expired, was
+issued for another audience or issuer, or carries an unverified email. Get a
+fresh token and run `session-start` again.
+
+**`subject is not the principal that principal_token identifies`**
+
+`STRATIUM_PEP_SUBJECT` differs from the identity in the token. Set it to the
+value the token carries.
 
 **`none of the requested tools are held by this principal`**
 

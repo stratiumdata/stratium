@@ -449,7 +449,7 @@ func clearSessionStartEnv(t *testing.T) {
 		"STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_AGENT_ID", "STRATIUM_PEP_SUBJECT",
 		"STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT", "STRATIUM_PEP_REQUESTED_TIER",
 		"STRATIUM_PEP_REQUESTED_TOOLS", "STRATIUM_PEP_TTL_SECONDS", "STRATIUM_PEP_PURPOSE",
-		"STRATIUM_PEP_ESCALATE_AT",
+		"STRATIUM_PEP_ESCALATE_AT", "STRATIUM_PEP_PRINCIPAL_TOKEN_FILE",
 	} {
 		t.Setenv(k, "")
 	}
@@ -676,4 +676,79 @@ func TestSessionStart_EscalateAt(t *testing.T) {
 			t.Errorf("requested_scope.escalate_at = %v, want 3", got.EscalateAt)
 		}
 	})
+}
+
+// STRATIUM_PEP_PRINCIPAL_TOKEN_FILE is optional at load: when set, the file's
+// contents (trimmed) are the principal's OIDC token and reach the PDP as
+// principal_token. A path that cannot be read, or an empty file, fails the
+// load: silently starting a session without the token the operator
+// configured would surface later as an unexplained refusal.
+func TestSessionStart_PrincipalTokenFile(t *testing.T) {
+	setRequired := func(t *testing.T) {
+		clearSessionStartEnv(t)
+		t.Setenv("STRATIUM_PEP_PDP_ADDR", "localhost:50051")
+		t.Setenv("STRATIUM_PEP_AGENT_ID", "agent-1")
+		t.Setenv("STRATIUM_PEP_SUBJECT", "alice@example.com")
+		t.Setenv("STRATIUM_PEP_SESSION_FILE", filepath.Join(t.TempDir(), "session.json"))
+		t.Setenv("STRATIUM_PEP_CONNECT_TIMEOUT", "5s")
+		t.Setenv("STRATIUM_PEP_REQUESTED_TIER", "1")
+		t.Setenv("STRATIUM_PEP_REQUESTED_TOOLS", "Read")
+		t.Setenv("STRATIUM_PEP_TTL_SECONDS", "3600")
+	}
+
+	t.Run("unset sends no token", func(t *testing.T) {
+		setRequired(t)
+		cfg, err := loadSessionStartConfigFromEnv()
+		if err != nil || cfg.PrincipalToken != "" {
+			t.Fatalf("cfg.PrincipalToken = %q, err = %v; want empty, nil", cfg.PrincipalToken, err)
+		}
+	})
+	t.Run("file contents are trimmed and forwarded", func(t *testing.T) {
+		setRequired(t)
+		path := filepath.Join(t.TempDir(), "principal.jwt")
+		if err := os.WriteFile(path, []byte("  header.payload.sig\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("STRATIUM_PEP_PRINCIPAL_TOKEN_FILE", path)
+		cfg, err := loadSessionStartConfigFromEnv()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.PrincipalToken != "header.payload.sig" {
+			t.Fatalf("cfg.PrincipalToken = %q, want the trimmed file contents", cfg.PrincipalToken)
+		}
+		fake := &fakePDP{createResp: &pdpgrpc.CreateDelegationResponse{
+			DelegationId: "deleg-principal",
+			GrantedScope: &pdpgrpc.GrantedScope{MaxActionTier: 1, Tools: []string{"Read"}},
+			Token:        "deleg-principal-token",
+		}}
+		var stderr bytes.Buffer
+		if code := runSessionStart(startFakePDP(t, fake), cfg, &stderr); code != 0 {
+			t.Fatalf("runSessionStart exit = %d, stderr: %s", code, stderr.String())
+		}
+		if got := fake.lastCreateRequest().GetPrincipalToken(); got != "header.payload.sig" {
+			t.Errorf("principal_token sent = %q, want the file's token", got)
+		}
+		if strings.Contains(stderr.String(), "header.payload.sig") {
+			t.Error("stderr contains the principal token")
+		}
+	})
+	for name, write := range map[string]func(t *testing.T) string{
+		"missing file": func(t *testing.T) string { return filepath.Join(t.TempDir(), "nope.jwt") },
+		"empty file": func(t *testing.T) string {
+			p := filepath.Join(t.TempDir(), "empty.jwt")
+			if err := os.WriteFile(p, []byte("\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		},
+	} {
+		t.Run(name+" fails the load", func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("STRATIUM_PEP_PRINCIPAL_TOKEN_FILE", write(t))
+			if _, err := loadSessionStartConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "STRATIUM_PEP_PRINCIPAL_TOKEN_FILE") {
+				t.Fatalf("err = %v, want one naming STRATIUM_PEP_PRINCIPAL_TOKEN_FILE", err)
+			}
+		})
+	}
 }

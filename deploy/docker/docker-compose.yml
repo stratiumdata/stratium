@@ -53,6 +53,7 @@ services:
       STRATIUM_TENANT_ID: tenant-one
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # Load-bearing as of Phase 9 Task 2: main.go now calls
       # internal/token.Load at startup, so this must name a real, readable
       # EC PEM or the container fails to start. The Dockerfile's builder
@@ -111,6 +112,7 @@ services:
       STRATIUM_TENANT_ID: tenant-narrow-registry-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # The ONLY service that overrides the 5m default, and it is not an
       # arbitrary choice of service: TestIntegration_SpentProofReaper_
       # RunsOnASchedule (internal/store) plants an already-expired row for
@@ -185,6 +187,7 @@ services:
       STRATIUM_TENANT_ID: tenant-resource-identity-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -230,6 +233,7 @@ services:
       STRATIUM_TENANT_ID: tenant-extauthz-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above — same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -372,6 +376,7 @@ services:
       STRATIUM_TENANT_ID: tenant-proxy-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -433,6 +438,7 @@ services:
       STRATIUM_TENANT_ID: tenant-epoch-e2e-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -631,6 +637,7 @@ services:
       STRATIUM_TENANT_ID: tenant-cache-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -689,6 +696,7 @@ services:
       STRATIUM_TENANT_ID: tenant-mcp-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -816,6 +824,7 @@ services:
       STRATIUM_TENANT_ID: tenant-pap-e2e-integration
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_AUTH_INSECURE: "true"  # local stack only; see pdp-oidc for the verified path
       # See the "pdp" service's own comment on this variable above -- same
       # build-time-generated key, same path, same reason.
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
@@ -975,6 +984,39 @@ services:
       # rest of the stack is starting too. Failures inside this window do not
       # count against retries, so a slow start is not reported as unhealthy.
       start_period: 180s
+
+  # Tenth PDP instance, and the only one that authenticates principals: every
+  # PDP above sets STRATIUM_PRINCIPAL_AUTH_INSECURE and believes the subject a
+  # caller sends, which keeps their proofs about what they are about. This one
+  # is configured the way a production PDP is, against the stack's own
+  # Keycloak, so the integration suite can prove with real tokens that a root
+  # delegation's principal comes from the token and that a session cannot be
+  # started without one. Same realm, audience, and claim as stratium-pap
+  # (STRATIUM_PAP_APPROVER_CLAIM), which is the requirement in production
+  # too: an approval is valid only when the approver the PAP identifies is
+  # the principal this PDP identified. Its own tenant, like every PDP here.
+  pdp-oidc:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:stratium_migrate_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:stratium_local_dev_only@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: tenant-principal-oidc-integration
+      STRATIUM_LISTEN_ADDR: :50051
+      STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
+      STRATIUM_PRINCIPAL_OIDC_ISSUER: http://keycloak:8080/realms/stratium
+      STRATIUM_PRINCIPAL_OIDC_AUDIENCE: stratium-pap
+      STRATIUM_PRINCIPAL_CLAIM: email
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
+    ports:
+      - "50051"
 
 volumes:
   pgdata:

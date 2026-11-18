@@ -432,3 +432,10 @@ def test_a_session_forwards_its_escalation_threshold(fake_pdp):
     asked, not_asked = fake_pdp.delegation_calls
     assert asked.requested_scope.escalate_at == 2
     assert not not_asked.requested_scope.HasField("escalate_at")
+
+
+# A Session mints a ROOT delegation, so the principal's token it was given
+# has to reach the PDP with that request.
+def test_session_sends_the_principal_token_when_minting(fake_pdp):
+    session(fake_pdp, Clock(), principal_token="oidc-token")
+    assert fake_pdp.delegation_calls[0].principal_token == "oidc-token"

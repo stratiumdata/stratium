@@ -50,6 +50,7 @@ class Session:
         staleness_window: float = 30.0, approval_poll_interval: float = 2.0,
         approval_timeout: float = 120.0,
         escalate_at: int | None = None,
+        principal_token: str | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -74,6 +75,10 @@ class Session:
             subject=subject, agent_id=agent_id, tools=list(tools),
             max_action_tier=max_action_tier, purpose=purpose, ttl_seconds=ttl_seconds,
             escalate_at=escalate_at,
+            # Kept because a re-mint (below) needs it again. An OIDC token is
+            # short-lived, so a re-mint long after construction fails at the
+            # PDP unless the caller builds a new Session with a fresh one.
+            principal_token=principal_token,
         )
         self._clock = clock
         self._sleep = sleep

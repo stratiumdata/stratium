@@ -430,6 +430,22 @@ message CreateDelegationRequest {
   // accepting one would let a stolen bound token be traded for an unbound
   // child token.
   string parent_token = 7;
+
+  // principal_token is an OIDC token from the operator's identity provider,
+  // proving who this ROOT delegation is for. The PDP verifies it (signature,
+  // issuer, audience, expiry) and reads the principal from the claim it is
+  // configured with. `subject` above then only has to agree: it may be empty,
+  // but if set and different, the request is refused.
+  //
+  // This is what stops a PEP from starting a session for a principal of its
+  // choosing. `subject` on its own is a claim by the party being policed.
+  //
+  // Required for a root unless the PDP runs with
+  // STRATIUM_PRINCIPAL_AUTH_INSECURE=true (local development), in which case
+  // it is ignored and `subject` is believed. Not accepted on a child: a child
+  // is authorized by parent_token and always acts for its chain's root
+  // principal.
+  string principal_token = 8;
 }
 
 // CreateDelegationResponse is the new delegation's id and what it was

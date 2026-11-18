@@ -25,6 +25,14 @@ plane (PAP), then sets up a working tenant:
 - caps the agent at `CONFIDENTIAL`,
 - starts a session granting `Read`, `Grep`, and `Glob`.
 
+!!! note "A production PDP also needs the person's OIDC token"
+    The local stack's PDPs run with principal verification off, so a bare
+    subject starts a session. A production PDP verifies who the session is for:
+    give `session-start` the person's OIDC token with
+    `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE`. See the
+    [user guide](../user-guide.md#31-stratium-pdp--the-decision-service), §3.1
+    "Principal authentication".
+
 !!! warning "Run it from a plain terminal"
     If you run `up` from inside an agent session, it skips installing the hook,
     because the hook would take effect in that session immediately and deny

@@ -66,6 +66,7 @@ polls, so it has no use for either):
 | `STRATIUM_PEP_REQUESTED_TOOLS` | Comma-separated tool names to request, e.g. `Read,Grep,Bash`. Must not be empty. Include discovery tools — see below. |
 | `STRATIUM_PEP_TTL_SECONDS` | How long the new delegation is valid for, in seconds. |
 | `STRATIUM_PEP_PURPOSE` (optional) | Free-text reason for the delegation, for audit legibility. |
+| `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` (optional) | Path to a file holding the principal's OIDC token, sent to the PDP as `principal_token`. Needed whenever the PDP verifies principals, which is the default; a PDP running with `STRATIUM_PRINCIPAL_AUTH_INSECURE=true` (the local stack) ignores it. An unreadable or empty file fails `session-start`. |
 | `STRATIUM_PEP_ESCALATE_AT` (optional) | A lower escalation threshold than the agent's own, `0`–`4`. It can only make the session stricter, so leaving it unset changes nothing. |
 
 `mcp` only, in addition to the seven shared by `hook` and `mcp` above:
@@ -97,6 +98,14 @@ Exit 0 means a session file now exists at that path. A non-zero exit means
 it does not (and any stale file at that path was removed) — check stderr
 for why before starting the agent: PDP unreachable, the requested scope
 denied outright, etc.
+
+The example above targets the local stack, whose PDPs do not verify
+principals. A PDP verifies them by default: add
+`STRATIUM_PEP_PRINCIPAL_TOKEN_FILE=/run/secrets/principal.jwt`, a file holding
+the person's OIDC token from your identity provider. The PDP reads the
+principal from that token, and `STRATIUM_PEP_SUBJECT` must equal it. The token
+is needed only at session start; its expiry does not shorten the session. See
+[`pep/session-start.md`](pep/session-start.md).
 
 ### The session file is bearer authority, not a label
 

@@ -82,8 +82,14 @@ class Client:
         parent_delegation_id: str | None = None,
         escalate_at: int | None = None,
         parent_token: str | None = None,
+        principal_token: str | None = None,
     ) -> Grant:
         """Mint a delegation.
+
+        A root (no parent_delegation_id) needs principal_token unless the PDP
+        runs with principal verification off: the principal's own OIDC token,
+        which the PDP verifies and reads the principal from. `subject` must
+        then agree with it.
 
         A child (parent_delegation_id set) also needs parent_token: the
         parent grant's own current token. The PDP will not narrow a
@@ -109,6 +115,12 @@ class Client:
             req.parent_token = parent_token
         elif parent_token:
             raise ValueError("parent_token is set without parent_delegation_id")
+        if principal_token:
+            if parent_delegation_id:
+                raise ValueError(
+                    "principal_token is only for a root delegation: "
+                    "a child is authorized by parent_token")
+            req.principal_token = principal_token
         # Only ever LOWERS the threshold the delegation would carry anyway
         # (the agent's, or the parent's). None asks for nothing; it does not
         # mean "never escalate", and cannot remove an inherited threshold.

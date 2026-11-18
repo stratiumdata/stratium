@@ -73,7 +73,7 @@ func tierOverrideServer(t *testing.T, tenant string) (*pdpgrpc.Server, *token.Si
 	t.Helper()
 	seedPolicy(t, tenant, "tier-override-blanket-permit", escalationBlanketPermit, "allow")
 	repo := store.New(servingDB, tenant)
-	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour}
+	cfg := config.Config{TenantID: tenant, MaxDepth: 5, ApprovalTTL: time.Hour, PrincipalAuthInsecure: true}
 	signer := escalationSigner(t)
 	return pdpgrpc.NewServer(repo, policy.NewMulti(repo, escalationRegistry()), cfg, signer), signer
 }

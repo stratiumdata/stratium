@@ -85,7 +85,8 @@ two terms are commonly confused, the entry says so.
 **Root delegation**
 :   The first hop, minted from an authenticated human and clamped to what that
     person's own policies show they hold. Copies the agent's classification
-    caps.
+    caps. The PDP verifies the person's OIDC token at session start and reads
+    the principal from it, not from the request.
 
 **Delegation chain**
 :   Root → child → grandchild, each a subset of the one above. Verified

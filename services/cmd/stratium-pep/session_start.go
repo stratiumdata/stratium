@@ -68,6 +68,14 @@ type sessionStartConfig struct {
 	Purpose         string
 	TTLSeconds      int64
 
+	// PrincipalToken is the principal's OIDC token, read from the file named
+	// by STRATIUM_PEP_PRINCIPAL_TOKEN_FILE. Optional here: a PDP that
+	// verifies principals (the default) refuses a session without it, and a
+	// PDP running with that check off ignores it. A file, not an environment
+	// variable, so the token is not copied into every child process's
+	// environment or a crash report. Never logged.
+	PrincipalToken string
+
 	// EscalateAt is optional (STRATIUM_PEP_ESCALATE_AT). nil asks for
 	// nothing, which leaves the agent's own threshold in force: a request can
 	// only LOWER it (internal/pdpgrpc/escalate_at.go), never remove it.
@@ -142,6 +150,16 @@ func loadSessionStartConfigFromEnv() (sessionStartConfig, error) {
 		cfg.EscalateAt = &esc
 	}
 
+	if path := os.Getenv("STRATIUM_PEP_PRINCIPAL_TOKEN_FILE"); path != "" {
+		data, err := os.ReadFile(path) //nolint:gosec // G304: operator configuration, the same trust boundary as STRATIUM_PEP_SESSION_FILE
+		if err != nil {
+			return sessionStartConfig{}, fmt.Errorf("STRATIUM_PEP_PRINCIPAL_TOKEN_FILE: %w", err)
+		}
+		cfg.PrincipalToken = strings.TrimSpace(string(data))
+		if cfg.PrincipalToken == "" {
+			return sessionStartConfig{}, fmt.Errorf("STRATIUM_PEP_PRINCIPAL_TOKEN_FILE: %s is empty", path)
+		}
+	}
 	return cfg, nil
 }
 
@@ -195,8 +213,9 @@ func runSessionStart(client pdpgrpc.PDPServiceClient, cfg sessionStartConfig, st
 			Tools:         cfg.RequestedTools,
 			EscalateAt:    cfg.EscalateAt,
 		},
-		Purpose:    cfg.Purpose,
-		TtlSeconds: cfg.TTLSeconds,
+		Purpose:        cfg.Purpose,
+		TtlSeconds:     cfg.TTLSeconds,
+		PrincipalToken: cfg.PrincipalToken,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
