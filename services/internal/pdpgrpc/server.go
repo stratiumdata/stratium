@@ -137,6 +137,11 @@ type TokenSigner interface {
 	// to ES256, expiry required and checked) — this interface adds nothing
 	// beyond naming the method Decide calls.
 	Verify(tokenString string) (jwt.MapClaims, error)
+
+	// VerifySignature checks the signature and algorithm only, so an expired
+	// token passes. IssueToken's one use for it: authenticating a re-issue
+	// request by the token being replaced. Never a basis for a decision.
+	VerifySignature(tokenString string) (jwt.MapClaims, error)
 }
 
 // eventTypeDecision is the audit_chain event_type recorded for every Decide

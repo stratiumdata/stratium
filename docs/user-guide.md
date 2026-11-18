@@ -435,7 +435,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 |---|---|---|
 | `STRATIUM_PEP_PDP_ADDR` | `pdp.internal:50051` | `host:port` of the PDP. |
 | `STRATIUM_PEP_AGENT_ID` | `50bdd8cc-377f-4135-818d-cfd30b206ce5` | The UUID returned when you created the agent (§5.4). |
-| `STRATIUM_PEP_SUBJECT` | `alice@example.com` | The **person** on whose behalf the agent acts. Must match what your policies condition on. |
+| `STRATIUM_PEP_SUBJECT` | `alice@example.com` | The **person** on whose behalf the agent acts. Must match what your policies condition on. The PDP holds every later call to it: a `Decide` whose subject is not the person the session's delegation was issued for is denied, and so is a child delegation requested under another subject. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds every PDP call. Duration > 0. |
 | `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's certificate with, instead of the system roots. Use it when a private CA issued the PDP's certificate. |
 | `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for the local evaluation stack only. Setting it alongside `STRATIUM_PEP_PDP_CA_FILE` is an error, and the PEP denies. |
@@ -1962,6 +1962,7 @@ Every denial carries a reason. Learning to read four shapes saves hours:
 | `action tier X exceeds delegation max_action_tier Y at depth N` | the delegation's ceiling | raise `STRATIUM_PEP_REQUESTED_TIER` and restart the session, if policy permits it |
 | `tool "X" not in delegation approved_tools at depth N` | outside the granted scope | add it to `STRATIUM_PEP_REQUESTED_TOOLS` and restart the session |
 | `tool "X" not in agent allowed_tools` | the **agent record**, not the delegation | edit the agent (§5.5) |
+| `delegation chain is not well-formed: request subject is not the principal root delegation … was issued for` | `STRATIUM_PEP_SUBJECT` differs from the subject the session was started with | use the same subject for `session-start` and every later call, or start a new session |
 | `agent trust tier X insufficient for action tier Y (requires Z)` | the agent's trust tier | raise it, deliberately |
 | `resource classification X exceeds delegation cap Y in hierarchy "h"` | a classification cap | §5.7 |
 | `resource declares no classification; … cannot be evaluated` | a cap is set and nothing labelled the resource | write a catch-all label rule |

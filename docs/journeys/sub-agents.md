@@ -50,6 +50,7 @@ with Client(pdp_addr) as client:
         tools=["Read"], max_action_tier=1,
         purpose="summarise logs", ttl_seconds=1800,
         parent_delegation_id=orchestrator.grant.delegation_id,
+        parent_token=orchestrator.grant.token,
     )
 
     decision = client.decide(
@@ -71,6 +72,9 @@ with Client(pdp_addr) as client:
   delegation immediately denies every worker below it.
 - **Each hop is held by its own agent.** A worker can't present the
   orchestrator's delegation, or another worker's.
+- **Only the holder can narrow a delegation.** Creating a child needs the
+  parent's own current token (`parent_token`), not just its id, and the child
+  must be for the same person as the chain.
 
 Denials from a worker say `at depth 1` (or deeper), so you can tell which hop
 refused.

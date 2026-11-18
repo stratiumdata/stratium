@@ -159,9 +159,11 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	@command -v docker >/dev/null 2>&1 || { \
 		echo "docker not found: https://docs.docker.com/get-docker/"; exit 1; }
 	@$(COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
-	trap '$(COMPOSE) down -v --remove-orphans' EXIT; \
+	key_dir=$$(mktemp -d); \
+	trap '$(COMPOSE) down -v --remove-orphans; rm -rf "$$key_dir"' EXIT; \
 	set -e; \
 	$(COMPOSE) up -d --build --wait --wait-timeout 300; \
+	$(COMPOSE) cp pdp:/etc/stratium/keys/current.pem "$$key_dir/token-signing.pem" >/dev/null; \
 	pg_port=$$($(COMPOSE) port postgres 5432 | sed -E 's/.*://'); \
 	pdp_port=$$($(COMPOSE) port pdp 50051 | sed -E 's/.*://'); \
 	pdp_narrow_port=$$($(COMPOSE) port pdp-narrow 50051 | sed -E 's/.*://'); \
@@ -206,6 +208,7 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	STRATIUM_IT_PAP_ADDR="localhost:$$pap_port" \
 	STRATIUM_IT_PAP_EXTAUTHZ_ADDR="localhost:$$pap_extauthz_port" \
 	STRATIUM_IT_KEYCLOAK_ADDR="localhost:$$keycloak_port" \
+	STRATIUM_IT_TOKEN_SIGNING_KEY_PATH="$$key_dir/token-signing.pem" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
 .PHONY: help build test vet fmt lint proto proto-python proto-python-check conformance sdk-conformance integration ui ui-test ui-clean

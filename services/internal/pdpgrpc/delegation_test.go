@@ -7,6 +7,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -264,6 +265,7 @@ func TestCreateDelegation_UnknownParentDelegation_NotFound(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
 	parentID := uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chainErr = fmt.Errorf("%w: delegation %s", store.ErrNotFound, parentID)
 	srv := newDelegationServer(fs, permissiveGrantSet())
 
@@ -286,8 +288,9 @@ func TestCreateDelegation_ChildWideningParent_PermissionDenied(t *testing.T) {
 	fs, req, _ := wellFormedDelegationFixture()
 	parentID := uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chain = []*models.Delegation{{
-		ID: parentID, RootDelegationID: parentID, Depth: 0,
+		ID: parentID, RootDelegationID: parentID, Depth: 0, UserID: "alice@example.com",
 		MaxActionTier: models.ActionTierReadOnly, ApprovedTools: []string{"Bash", "Read"},
 	}}
 	fs.createErr = fmt.Errorf("%w: child max_action_tier INTERNAL_MODIFY exceeds parent READ_ONLY", store.ErrScopeWidens)
@@ -526,8 +529,10 @@ func TestCreateDelegation_ChildInheritsParentClassificationAndChainAgentIDs(t *t
 	fs, req, agentID := wellFormedDelegationFixture()
 	parentID, parentAgentID, rootID := uuid.New(), uuid.New(), uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chain = []*models.Delegation{{
 		ID: parentID, RootDelegationID: rootID, Depth: 2,
+		UserID:              "alice@example.com",
 		AgentID:             parentAgentID,
 		MaxActionTier:       models.ActionTierDestructive,
 		ApprovedTools:       []string{"Bash", "Read"},
@@ -649,7 +654,10 @@ func TestCreateDelegationRPC_CarriesNoClassificationCapField(t *testing.T) {
 		want []string
 	}{
 		{reflect.TypeOf(CreateDelegationRequest{}),
-			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds"}},
+			// ParentToken authenticates a child request (authorizeChild). It
+			// is a credential, not a scope field: it cannot set, raise, or
+			// remove a classification cap, which is what this guard protects.
+			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds", "ParentToken"}},
 		// EscalateAt is not a classification cap, and it can only LOWER a
 		// threshold (effectiveEscalateAt, escalate_at.go), so the docs/pep.md
 		// claim this guards is unchanged by it.
@@ -803,8 +811,10 @@ func TestCreateDelegation_ChildStillCopiesParentNotAgent(t *testing.T) {
 	fs.agent.ClassificationCaps = map[string]string{"nato": "TOP-SECRET"}
 	parentID := uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	fs.chain = []*models.Delegation{{
 		ID:                 parentID,
+		UserID:             "alice@example.com",
 		AgentID:            agentID,
 		MaxActionTier:      models.ActionTierDestructive,
 		ApprovedTools:      []string{"Bash", "Read"},
@@ -933,9 +943,10 @@ func TestCreateDelegation_ChildStartsFromTheParentsThreshold(t *testing.T) {
 	fs.agent.EscalateAt = tierPtr(models.ActionTierReadOnly) // must be ignored for a child
 	parentID, parentAgentID := uuid.New(), uuid.New()
 	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
 	req.RequestedScope.MaxActionTier = int32(models.ActionTierDestructive)
 	fs.chain = []*models.Delegation{{
-		ID: parentID, RootDelegationID: parentID, AgentID: parentAgentID,
+		ID: parentID, RootDelegationID: parentID, AgentID: parentAgentID, UserID: "alice@example.com",
 		MaxActionTier: models.ActionTierDestructive, ApprovedTools: []string{"Bash", "Read"},
 		EscalateAt: tierPtr(models.ActionTierExternalComms), ChainAgentIDs: []uuid.UUID{parentAgentID},
 	}}
@@ -984,5 +995,36 @@ func TestCreateDelegation_AuditRecordsTheIssuedThreshold(t *testing.T) {
 				t.Errorf("audit Reason = %q, want the purpose unchanged", e.Reason)
 			}
 		})
+	}
+}
+
+// A child is issued on behalf of the same principal as the chain it narrows.
+// Without this a caller holding any delegation id could mint a child under a
+// more privileged subject, and that subject's grants would drive the clamp.
+func TestCreateDelegation_ChildSubjectMustBeTheChainsRootPrincipal(t *testing.T) {
+	fs, req, _ := wellFormedDelegationFixture()
+	rootID, parentID := uuid.New(), uuid.New()
+	req.ParentDelegationId = parentID.String()
+	req.ParentToken = parentID.String() // fakeSigner: a fixture token is the bare id
+	req.Subject = "ceo@example.com"
+	fs.chain = []*models.Delegation{
+		{ID: rootID, RootDelegationID: rootID, Depth: 0, UserID: "alice@example.com",
+			MaxActionTier: models.ActionTierDestructive},
+		// The parent hop carries the requested subject: only the ROOT names
+		// the principal, so matching a later hop must not be enough.
+		{ID: parentID, ParentDelegationID: &rootID, RootDelegationID: rootID, Depth: 1,
+			UserID: "ceo@example.com", MaxActionTier: models.ActionTierDestructive},
+	}
+
+	resp, err := newDelegationServer(fs, permissiveGrantSet()).CreateDelegation(context.Background(), req)
+	if resp != nil {
+		t.Fatalf("CreateDelegation() response = %+v, want nil", resp)
+	}
+	wantCode(t, err, codes.PermissionDenied)
+	if strings.Contains(err.Error(), "alice@example.com") {
+		t.Errorf("error %q leaks the chain's real principal", err)
+	}
+	if len(fs.created) != 0 || len(fs.appended) != 0 {
+		t.Errorf("rows created = %d, audit entries = %d, want 0 and 0", len(fs.created), len(fs.appended))
 	}
 }

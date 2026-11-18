@@ -19,7 +19,12 @@ services:
     ports:
       - "5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      # Over TCP (-h), not the default local socket. On first start the image
+      # runs a temporary server to execute init-db.sql, then stops it and
+      # starts the real one. The temporary server listens on the socket only,
+      # so a socket check reports healthy too early and services that start
+      # in the gap get "connection refused" and exit.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -966,6 +971,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+      # LiteLLM takes about a minute to start on its own and longer while the
+      # rest of the stack is starting too. Failures inside this window do not
+      # count against retries, so a slow start is not reported as unhealthy.
+      start_period: 180s
 
 volumes:
   pgdata:

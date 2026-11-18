@@ -122,6 +122,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -978,12 +979,18 @@ func seedDelegation(t *testing.T, d *models.Delegation) *models.Delegation {
 // than any fixture delegation's remaining lifetime, so IssueToken's own
 // clamp (internal/pdpgrpc/token.go's clampTokenExpiry) is always what
 // actually decides the token's expiry, not a duration this helper guessed.
+//
+// IssueToken no longer mints for a bare delegation id: it needs a token this
+// PDP issued for the same delegation. A row seeded straight into Postgres
+// has none, so seedPriorToken signs one with the stack's own key, which
+// `make integration` copies out of the pdp container for exactly this.
 func mintToken(t *testing.T, client pdpgrpc.PDPServiceClient, delegationID uuid.UUID) string {
 	t.Helper()
 	const ttlSeconds = 10 * 365 * 24 * 60 * 60 // 10 years; always clamped down to the delegation's own remaining life
 	resp, err := client.IssueToken(t.Context(), &pdpgrpc.IssueTokenRequest{
 		DelegationId: delegationID.String(),
 		TtlSeconds:   ttlSeconds,
+		Token:        seedPriorToken(t, delegationID),
 	})
 	if err != nil {
 		t.Fatalf("mint token for delegation %s: %v", delegationID, err)
@@ -1000,18 +1007,26 @@ func mintToken(t *testing.T, client pdpgrpc.PDPServiceClient, delegationID uuid.
 // alone, not to some other leg that happened to deny first.
 func twoHopChain(t *testing.T, tenant string, agentID uuid.UUID) (root, child *models.Delegation) {
 	t.Helper()
+	return twoHopChainFor(t, "integration-test-user", tenant, agentID)
+}
+
+// twoHopChainFor is twoHopChain issued for subject. Decide only accepts the
+// root delegation's principal as a request's subject, so a test that sends a
+// particular subject (one its policies are written for) seeds its chain here.
+func twoHopChainFor(t *testing.T, subject, tenant string, agentID uuid.UUID) (root, child *models.Delegation) {
+	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	rootID, childID := uuid.New(), uuid.New()
 
 	root = seedDelegation(t, &models.Delegation{
-		ID: rootID, TenantID: tenant, UserID: "integration-test-user", AgentID: agentID,
+		ID: rootID, TenantID: tenant, UserID: subject, AgentID: agentID,
 		ApprovedTools: []string{}, MaxActionTier: models.ActionTierInternalModify,
 		ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
 		Purpose: "integration test: root grant", ExpiresAt: now.Add(time.Hour),
 		RootDelegationID: rootID, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
 	})
 	child = seedDelegation(t, &models.Delegation{
-		ID: childID, TenantID: tenant, UserID: "integration-test-user", AgentID: agentID,
+		ID: childID, TenantID: tenant, UserID: subject, AgentID: agentID,
 		ApprovedTools: []string{}, MaxActionTier: models.ActionTierInternalModify,
 		ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
 		Purpose: "integration test: re-delegated one hop deeper", ExpiresAt: now.Add(time.Hour),
@@ -1031,10 +1046,17 @@ func twoHopChain(t *testing.T, tenant string, agentID uuid.UUID) (root, child *m
 // noise.
 func singleHopDelegation(t *testing.T, tenant string, agentID uuid.UUID, maxTier models.ActionTier, purpose string) *models.Delegation {
 	t.Helper()
+	return singleHopDelegationFor(t, "integration-test-user", tenant, agentID, maxTier, purpose)
+}
+
+// singleHopDelegationFor is singleHopDelegation issued for subject; see
+// twoHopChainFor for why a test names one.
+func singleHopDelegationFor(t *testing.T, subject, tenant string, agentID uuid.UUID, maxTier models.ActionTier, purpose string) *models.Delegation {
+	t.Helper()
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
 	return seedDelegation(t, &models.Delegation{
-		ID: id, TenantID: tenant, UserID: "integration-test-user", AgentID: agentID,
+		ID: id, TenantID: tenant, UserID: subject, AgentID: agentID,
 		ApprovedTools: []string{}, MaxActionTier: maxTier,
 		ClassificationCaps: map[string]string{}, ResourceConstraints: map[string]string{},
 		Purpose: purpose, ExpiresAt: now.Add(time.Hour),
@@ -1840,7 +1862,7 @@ func TestIntegration_Live_OrphanLanguageDeniesNamingIt(t *testing.T) {
 
 	agentID := uuid.New()
 	seedAgent(t, narrowTenant, agentID, "integration-agent-narrow-registry", models.TrustTierUnverified)
-	acting := singleHopDelegation(t, narrowTenant, agentID, models.ActionTierInternalModify, purpose)
+	acting := singleHopDelegationFor(t, "live-orphan-subject@example.com", narrowTenant, agentID, models.ActionTierInternalModify, purpose)
 
 	// An unconditional forbid: pdp-narrow registers cedar, so this is
 	// actually evaluated and actually denies — the decision this whole
@@ -1970,7 +1992,7 @@ func TestIntegration_Live_ResourceIdentityEnforcement(t *testing.T) {
 	newDelegation := func(purpose string, caps, constraints map[string]string) *models.Delegation {
 		id := uuid.New()
 		return seedDelegation(t, &models.Delegation{
-			ID: id, TenantID: resourceTenant, UserID: "integration-test-user", AgentID: agentID,
+			ID: id, TenantID: resourceTenant, UserID: subject, AgentID: agentID,
 			ApprovedTools: []string{}, MaxActionTier: models.ActionTierInternalModify,
 			ClassificationCaps: caps, ResourceConstraints: constraints,
 			Purpose: purpose, ExpiresAt: time.Now().Add(time.Hour),
@@ -2245,7 +2267,7 @@ func TestIntegration_Live_ToolCatalogEnforcement(t *testing.T) {
 	newDelegation := func(purpose string, maxTier models.ActionTier, constraints map[string]string) *models.Delegation {
 		id := uuid.New()
 		return seedDelegation(t, &models.Delegation{
-			ID: id, TenantID: resourceTenant, UserID: "integration-test-user", AgentID: agentID,
+			ID: id, TenantID: resourceTenant, UserID: subject, AgentID: agentID,
 			ApprovedTools: []string{}, MaxActionTier: maxTier,
 			ResourceConstraints: constraints,
 			Purpose:             purpose, ExpiresAt: time.Now().Add(time.Hour),
@@ -2487,7 +2509,7 @@ func TestIntegration_Live_ResourceLabelling(t *testing.T) {
 	newDelegation := func(purpose string, caps map[string]string) *models.Delegation {
 		id := uuid.New()
 		return seedDelegation(t, &models.Delegation{
-			ID: id, TenantID: resourceTenant, UserID: "integration-test-user", AgentID: agentID,
+			ID: id, TenantID: resourceTenant, UserID: subject, AgentID: agentID,
 			ApprovedTools: []string{}, MaxActionTier: models.ActionTierReadOnly,
 			ClassificationCaps: caps, Purpose: purpose, ExpiresAt: time.Now().Add(time.Hour),
 			RootDelegationID: id, Depth: 0, ChainAgentIDs: []uuid.UUID{agentID},
@@ -3473,7 +3495,7 @@ allow if {
 func TestEndToEnd(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "integration-agent-tenant-one", models.TrustTierUnverified)
-	_, acting := twoHopChain(t, configuredTenant, agentID)
+	_, acting := twoHopChainFor(t, "alice@example.com", configuredTenant, agentID)
 	// Minted once, up front, and reused by every subtest below that shares
 	// this outer `acting` (proof2, proof4, the two latency/concurrency
 	// measurements, and proof6): the two measurement subtests need a token
@@ -3773,7 +3795,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("proof7_cedar_permit_allows_principal_leg", func(t *testing.T) {
 		agentID := uuid.New()
 		seedAgent(t, configuredTenant, agentID, "integration-agent-carol", models.TrustTierUnverified)
-		acting := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierInternalModify, "cedar permit proof")
+		acting := singleHopDelegationFor(t, "carol@example.com", configuredTenant, agentID, models.ActionTierInternalModify, "cedar permit proof")
 		proof7PolicyID = seedPolicy(t, configuredTenant, "permit-carol",
 			`permit(principal == User::"carol@example.com", action, resource);`, "allow")
 
@@ -3872,7 +3894,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("proof8_cedar_forbid_denies_attributed_to_policy", func(t *testing.T) {
 		agentID := uuid.New()
 		seedAgent(t, configuredTenant, agentID, "integration-agent-dave", models.TrustTierUnverified)
-		acting := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierInternalModify, "cedar forbid proof")
+		acting := singleHopDelegationFor(t, "dave@example.com", configuredTenant, agentID, models.ActionTierInternalModify, "cedar forbid proof")
 		forbidPolicyID := seedPolicy(t, configuredTenant, "forbid-dave",
 			`forbid(principal == User::"dave@example.com", action, resource);`, "deny")
 
@@ -3931,7 +3953,7 @@ func TestEndToEnd(t *testing.T) {
 		seedAgent(t, configuredTenant, agentID, "integration-agent-erin", models.TrustTierPlatformTrusted)
 		// A low cap (READ_ONLY); the request below derives to DESTRUCTIVE,
 		// well above it.
-		acting := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierReadOnly, "cedar ceiling proof")
+		acting := singleHopDelegationFor(t, "erin@example.com", configuredTenant, agentID, models.ActionTierReadOnly, "cedar ceiling proof")
 		permitPolicyID := seedPolicy(t, configuredTenant, "permit-erin-unconditional",
 			`permit(principal == User::"erin@example.com", action, resource);`, "allow")
 
@@ -4239,7 +4261,7 @@ func TestEndToEnd(t *testing.T) {
 		const subject = "heidi@example.com"
 		heidiAgentID := uuid.New()
 		seedAgent(t, configuredTenant, heidiAgentID, "integration-agent-heidi", models.TrustTierUnverified)
-		heidiActing := singleHopDelegation(t, configuredTenant, heidiAgentID, models.ActionTierInternalModify, "cedar+rego deny-overrides proof")
+		heidiActing := singleHopDelegationFor(t, subject, configuredTenant, heidiAgentID, models.ActionTierInternalModify, "cedar+rego deny-overrides proof")
 
 		seedPolicy(t, configuredTenant, "heidi-cedar-permit",
 			fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, subject), "allow")
@@ -4309,7 +4331,7 @@ deny if {
 	ivanAgentID := uuid.New()
 	seedAgent(t, configuredTenant, ivanAgentID, "integration-agent-ivan", models.TrustTierUnverified)
 	const ivanPurpose = "four-engine end-to-end latency proof"
-	ivanActing := singleHopDelegation(t, configuredTenant, ivanAgentID, models.ActionTierInternalModify, ivanPurpose)
+	ivanActing := singleHopDelegationFor(t, "ivan@example.com", configuredTenant, ivanAgentID, models.ActionTierInternalModify, ivanPurpose)
 	// Pre-minted, same reasoning as actingToken above: both subtests below
 	// share this token, one to keep the latency measurement to a single
 	// Decide call and the other because it fires from ten concurrent
@@ -5103,4 +5125,34 @@ func restoreAuditChainInsert(t *testing.T, roles []string) {
 				"depending on which role their connection inherits INSERT through", role)
 		}
 	}
+}
+
+// seedPriorToken signs the token a re-issue request must present for a
+// delegation these tests inserted directly, using the compose stack's own
+// signing key (STRATIUM_IT_TOKEN_SIGNING_KEY_PATH; every PDP service is built
+// from one image, so they share it). A real caller gets this token from
+// CreateDelegation instead. Unbound and short-lived: all IssueToken reads
+// from it is the signature and the delegation it names.
+//
+// If a PDP answers "token does not verify", that service was built with a
+// different key than the pdp service the Makefile copied this one from.
+func seedPriorToken(t *testing.T, delegationID uuid.UUID) string {
+	t.Helper()
+	path := os.Getenv("STRATIUM_IT_TOKEN_SIGNING_KEY_PATH")
+	if path == "" {
+		t.Fatal("STRATIUM_IT_TOKEN_SIGNING_KEY_PATH is not set: run through `make integration`, " +
+			"which copies the stack's signing key out of the pdp container")
+	}
+	signer, err := token.Load(path, "")
+	if err != nil {
+		t.Fatalf("load the stack's signing key from %s: %v", path, err)
+	}
+	tok, err := signer.Sign(jwt.MapClaims{
+		"sub": delegationID.String(),
+		"exp": time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("sign prior token for delegation %s: %v", delegationID, err)
+	}
+	return tok
 }

@@ -81,3 +81,29 @@ func ValidateChain(chain []*models.Delegation, tenantID string, actingAgent uuid
 
 	return nil
 }
+
+// ValidateChainPrincipal checks that subject is the principal the chain's
+// root delegation was issued for.
+//
+// The principal leg is evaluated for whatever subject the request names, and
+// the request comes from the PEP: the party being policed. Without this
+// check a token holder could name a more privileged principal and be judged
+// by that principal's policy, with the false name in the audit trail.
+//
+// Only the root is compared. It is the grant from a person; a later hop's
+// UserID may be another identity (the delegating agent's), which is also why
+// approvals route to the root's principal and never an intermediate's. An
+// empty subject never matches, even against a root that somehow has none.
+//
+// The reason does not echo the root's principal: the caller is the one who
+// got it wrong, and naming the right answer would hand it over.
+func ValidateChainPrincipal(chain []*models.Delegation, subject string) error {
+	if len(chain) == 0 || chain[0] == nil {
+		return fmt.Errorf("%w: empty", ErrChainInvalid)
+	}
+	if root := chain[0]; subject == "" || root.UserID != subject {
+		return fmt.Errorf("%w: request subject is not the principal root delegation %s was issued for",
+			ErrChainInvalid, root.ID)
+	}
+	return nil
+}

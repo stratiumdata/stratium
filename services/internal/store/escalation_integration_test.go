@@ -669,7 +669,7 @@ func TestIntegration_Escalation_DepthTwoChainRoutesApprovalToRoot(t *testing.T) 
 		ParentDelegationID: &intermediateID, RootDelegationID: rootID, Depth: 2, ChainAgentIDs: []uuid.UUID{agentID, agentID, agentID},
 	})
 
-	resp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, acting.ID, agentID, "requesting-subject@example.com", nil))
+	resp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, acting.ID, agentID, rootPrincipal, nil))
 	if err != nil {
 		t.Fatalf("Decide() error = %v, want a response", err)
 	}

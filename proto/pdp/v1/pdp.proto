@@ -416,6 +416,20 @@ message CreateDelegationRequest {
   // ttl_seconds is how long the new delegation is valid for, measured from
   // the instant the server creates it. Must be positive.
   int64 ttl_seconds = 6;
+
+  // parent_token is a current token this PDP issued for parent_delegation_id.
+  // Required whenever parent_delegation_id is set, and it is what authorizes
+  // the request: narrowing a delegation is something only its holder may do.
+  // A delegation id is not a secret (it appears in audit entries, admin
+  // listings, and session files), so an id alone must never be enough to
+  // obtain a credential derived from it, which a child's token is.
+  //
+  // Unlike IssueTokenRequest.token, this one must be UNEXPIRED: a holder
+  // whose token has lapsed re-issues first. A token bound to a key ("cnf")
+  // is refused here. This request carries no proof of possession, so
+  // accepting one would let a stolen bound token be traded for an unbound
+  // child token.
+  string parent_token = 7;
 }
 
 // CreateDelegationResponse is the new delegation's id and what it was
@@ -513,6 +527,24 @@ message IssueTokenRequest {
   // to a thumbprint nobody can reproduce: that failure costs one call to
   // diagnose at issuance and every subsequent call to diagnose later.
   optional string dpop_jwk = 3;
+
+  // token is a token this PDP previously issued for delegation_id: the one
+  // being replaced. Required. It is what authenticates this call. A
+  // delegation id is not a secret (it appears in audit entries, admin
+  // listings, and session files), so an id alone must never be enough to
+  // mint a credential for it.
+  //
+  // Its signature must verify and it must name delegation_id. Its EXPIRY is
+  // deliberately not checked: replacing an expired token is what this RPC is
+  // for. The delegation's own revocation and expiry are still checked fresh,
+  // so an old token is only ever worth as much as the live delegation.
+  //
+  // If it is bound to a key (carries "cnf"), dpop_jwk must be present and
+  // name the SAME key. Re-issuing can never loosen or move a binding;
+  // otherwise whoever stole a bound token could trade it here for one bound
+  // to a key of their own. An unbound token may be re-issued bound or
+  // unbound: its holder already has a bearer credential.
+  string token = 4;
 }
 
 // IssueTokenResponse is the re-issued token and its actual, possibly

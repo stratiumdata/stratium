@@ -369,3 +369,50 @@ func TestDeriveTierDenial(t *testing.T) {
 		t.Errorf("Deciding = %+v, want nil: no policy verdict was ever consulted on this path", got.Deciding)
 	}
 }
+
+// The principal leg is evaluated for the subject the request names, so that
+// subject has to be the person the chain's root delegation was issued for.
+// Otherwise a token holder could name a more privileged principal and be
+// judged by that principal's policy. (SECURITY.md: a PEP must not get a
+// better answer by lying.)
+func TestDecide_SubjectMustBeTheRootDelegationsPrincipal(t *testing.T) {
+	for name, subject := range map[string]string{
+		"a different principal": "mallory@example.com",
+		"no subject at all":     "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := request()
+			req.Principal = Principal{Subject: subject}
+			got := Decide(req, config())
+			if got.Effect != EffectDeny || got.DeniedLeg != "delegation" {
+				t.Fatalf("got %v denied at %q (%s), want DENY at the delegation leg", got.Effect, got.DeniedLeg, got.Reason)
+			}
+			if got.Reason == "" {
+				t.Error("a subject mismatch must carry a reason")
+			}
+		})
+	}
+}
+
+// Only the root names the principal. An intermediate hop may carry another
+// identity (the delegating agent's), and that must neither be required to
+// match nor be accepted as the subject.
+func TestDecide_SubjectIsCheckedAgainstTheRootNotLaterHops(t *testing.T) {
+	agent := agentInfo(models.TrustTierPlatformTrusted, nil)
+	root := delegation(0, models.ActionTierDestructive, nil)
+	child := delegation(1, models.ActionTierDestructive, nil)
+	linkChain("tenant-a", agent.ID, root, child)
+	root.UserID = "alice@example.com"
+	child.UserID = "delegating-agent-identity"
+
+	req := request()
+	req.Agent = agent
+	req.Chain = []*models.Delegation{root, child}
+	if got := Decide(req, config()); got.Effect != EffectAllow {
+		t.Fatalf("root principal as subject: got %v (%s), want ALLOW", got.Effect, got.Reason)
+	}
+	req.Principal = Principal{Subject: "delegating-agent-identity"}
+	if got := Decide(req, config()); got.Effect != EffectDeny {
+		t.Fatalf("a later hop's identity as subject: got %v, want DENY", got.Effect)
+	}
+}

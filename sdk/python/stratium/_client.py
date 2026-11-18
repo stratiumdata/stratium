@@ -81,8 +81,13 @@ class Client:
         max_action_tier: int, purpose: str, ttl_seconds: int,
         parent_delegation_id: str | None = None,
         escalate_at: int | None = None,
+        parent_token: str | None = None,
     ) -> Grant:
         """Mint a delegation.
+
+        A child (parent_delegation_id set) also needs parent_token: the
+        parent grant's own current token. The PDP will not narrow a
+        delegation for a caller that only knows its id.
 
         Raises on failure, unlike decide(): there is no safe fallback value
         for "you have no authority" that a caller could mistake for one, and a
@@ -96,7 +101,14 @@ class Client:
             ),
         )
         if parent_delegation_id:
+            if not parent_token:
+                raise ValueError(
+                    "parent_token is required with parent_delegation_id: "
+                    "pass the parent grant's token")
             req.parent_delegation_id = parent_delegation_id
+            req.parent_token = parent_token
+        elif parent_token:
+            raise ValueError("parent_token is set without parent_delegation_id")
         # Only ever LOWERS the threshold the delegation would carry anyway
         # (the agent's, or the parent's). None asks for nothing; it does not
         # mean "never escalate", and cannot remove an inherited threshold.

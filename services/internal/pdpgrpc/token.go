@@ -161,6 +161,12 @@ func (s *Server) mintToken(
 // on this call, from this tenant's own row (RLS — no WHERE tenant_id, see
 // the package doc) is what re-earns the check CreateDelegation's own audit
 // already recorded once and IssueToken cannot simply assume still holds.
+//
+// AUTHENTICATION. The caller must present a token this PDP issued for the
+// same delegation (IssueTokenRequest.token). A delegation id is not a secret
+// — it is in audit entries, admin listings, and session files — so a
+// version of this method that took the id alone let anyone who had read one
+// mint a working credential for it, bound to a key of their choosing.
 func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*IssueTokenResponse, error) {
 	id, err := parseNonNilUUID(req.GetDelegationId())
 	if err != nil {
@@ -195,11 +201,26 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 	// document with a private "d" member, which is one of the things
 	// Thumbprint refuses, and the refusal must not echo it back into a log
 	// line (the phase's "never log a token or a key" constraint).
+	// Authenticate the call before anything else it asks for is looked at,
+	// including its JWK: see priorTokenBinding.
+	priorJKT, err := s.priorTokenBinding(req.GetToken(), id)
+	if err != nil {
+		return nil, err
+	}
+
 	var jkt string
 	if req.DpopJwk != nil {
 		if jkt, err = dpop.Thumbprint([]byte(req.GetDpopJwk())); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "dpop_jwk: %s", err)
 		}
+	}
+	// A bound token is re-issued for the same key or not at all. jkt == ""
+	// here would downgrade it to a bearer token, and any other value would
+	// move the binding to a key of the caller's choosing: either way, a
+	// stolen bound token (inert on its own) would become a usable one.
+	if priorJKT != "" && jkt != priorJKT {
+		return nil, status.Error(codes.PermissionDenied,
+			"token is bound to a key: dpop_jwk must be present and name the same key")
 	}
 
 	epoch, err := s.loadEpochOrDeny(ctx)
@@ -249,4 +270,36 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 		ClampedToDelegationExpiry: clamped,
 		Epoch:                     epoch,
 	}, nil
+}
+
+// priorTokenBinding authenticates a re-issue request by the token it
+// replaces, and returns that token's key binding ("" if it is a bearer
+// token).
+//
+// The signature must verify and the token must name delegationID. Expiry is
+// NOT checked (TokenSigner.VerifySignature): an expired token is the
+// ordinary reason to be here, and the delegation's own revocation and expiry
+// are checked fresh by the caller, so an old token is worth exactly as much
+// as the live delegation and no more.
+//
+// Unauthenticated for a missing or unverifiable token, PermissionDenied for
+// a genuine token that names another delegation. Neither message says more
+// than that: it is the caller who has it wrong.
+func (s *Server) priorTokenBinding(tokenString string, delegationID uuid.UUID) (string, error) {
+	if tokenString == "" {
+		return "", status.Error(codes.Unauthenticated,
+			"token is required: present a token previously issued for this delegation")
+	}
+	claims, err := s.signer.VerifySignature(tokenString)
+	if err != nil {
+		return "", status.Error(codes.Unauthenticated, "token does not verify")
+	}
+	if sub, _ := claims[subjectClaim].(string); sub != delegationID.String() {
+		return "", status.Error(codes.PermissionDenied, "token was not issued for this delegation")
+	}
+	jkt, err := tokenThumbprint(claims)
+	if err != nil {
+		return "", status.Error(codes.Unauthenticated, "token does not verify")
+	}
+	return jkt, nil
 }

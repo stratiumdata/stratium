@@ -232,3 +232,49 @@ func TestSigner_ExactlyOnePrivateKeyField(t *testing.T) {
 			len(privateFields), privateFields)
 	}
 }
+
+// VerifySignature exists for re-issuance, where the token being replaced has
+// usually expired. It must relax exactly one check, expiry, and nothing else.
+func TestVerifySignature_AcceptsExpiredButNothingElseVerifyRejects(t *testing.T) {
+	currentKey, previousKey, strangerKey := generateECKey(t), generateECKey(t), generateECKey(t)
+	signer, err := Load(writeECKeyPEM(t, currentKey), writeECKeyPEM(t, previousKey))
+	if err != nil {
+		t.Fatalf("Load() = %v, want success", err)
+	}
+	expired := jwt.MapClaims{"sub": "delegation-abc-123", "exp": time.Now().Add(-time.Hour).Unix()}
+
+	tok := signRaw(t, currentKey, expired)
+	if _, err := signer.Verify(tok); err == nil {
+		t.Fatal("Verify() accepted an expired token: this test's premise is broken")
+	}
+	claims, err := signer.VerifySignature(tok)
+	if err != nil {
+		t.Fatalf("VerifySignature() of an expired, correctly signed token = %v, want success", err)
+	}
+	if claims["sub"] != "delegation-abc-123" {
+		t.Errorf("claims[sub] = %v, want the token's own", claims["sub"])
+	}
+	if _, err := signer.VerifySignature(signRaw(t, previousKey, expired)); err != nil {
+		t.Errorf("VerifySignature() of a previous-key token = %v, want success (rotation)", err)
+	}
+
+	if _, err := signer.VerifySignature(signRaw(t, strangerKey, expired)); err == nil {
+		t.Error("VerifySignature() accepted a token signed by an unknown key")
+	}
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"delegation-abc-123","exp":1}`))
+	if _, err := signer.VerifySignature(header + "." + payload + "."); err == nil {
+		t.Error("VerifySignature() accepted an alg=none token")
+	}
+	hs := jwt.NewWithClaims(jwt.SigningMethodHS256, expired)
+	hsTok, err := hs.SignedString([]byte("shared-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.VerifySignature(hsTok); err == nil {
+		t.Error("VerifySignature() accepted an HS256 token")
+	}
+	if _, err := signer.VerifySignature(tok[:len(tok)-4] + "AAAA"); err == nil {
+		t.Error("VerifySignature() accepted a token with a tampered signature")
+	}
+}
