@@ -228,9 +228,11 @@ func TestJourney1_AFieldedToolHasAPathToAnAllowThatAFieldlessOneDoesNot(t *testi
 // J2 — denial recovery, and what the agent's second attempt costs
 // ---------------------------------------------------------------------------
 
-// TestJourney2_ADeniedDestructiveCommandHasAReadOnlyEquivalent pins the
-// route-around in J2: the command an agent reaches for after `rm -rf` is
-// denied achieves the same effect three tiers lower.
+// TestJourney2_ADeniedDestructiveCommandHasALowerTierEquivalent pins the
+// route-around in J2: after `rm -rf` is denied, an interpreter one-liner
+// achieves the same effect two tiers lower. It is no longer READ_ONLY --
+// `find ... -delete`, the form this test first pinned, now rates DESTRUCTIVE,
+// and READ_ONLY is an allowlist of plain commands (tier.go, isReadOnlyCommand).
 //
 // This is not a claim that the classifier is bad — tier.go's own RESIDUAL
 // RISK note already concedes a static matcher cannot win, and the real
@@ -242,15 +244,16 @@ func TestJourney1_AFieldedToolHasAPathToAnAllowThatAFieldlessOneDoesNot(t *testi
 // WHEN THIS FAILS: the classifier learned one of these forms. Good — add the
 // next form an agent would reach for rather than deleting the test, and
 // update J2's route-around discussion.
-func TestJourney2_ADeniedDestructiveCommandHasAReadOnlyEquivalent(t *testing.T) {
+func TestJourney2_ADeniedDestructiveCommandHasALowerTierEquivalent(t *testing.T) {
 	cases := []struct {
 		name    string
 		command string
 		want    models.ActionTier
 	}{
 		{"the denied form", "rm -rf node_modules", models.ActionTierDestructive},
-		{"the equivalent an agent reaches for next", "find . -name node_modules -delete", models.ActionTierReadOnly},
+		{"the form this test first pinned, since learned", "find . -name node_modules -delete", models.ActionTierDestructive},
 		{"and another", "find . -type d -name dist -exec rm -r {} +", models.ActionTierDestructive},
+		{"the equivalent an agent reaches for next", `perl -e 'use File::Path; remove_tree(q(node_modules))'`, models.ActionTierInternalModify},
 	}
 
 	for _, tc := range cases {

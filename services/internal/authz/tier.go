@@ -78,7 +78,16 @@ type TierTable struct {
 // or *casually* under-rated, not to withstand a determined attacker.
 // See spec §4.4.
 var (
-	reDestructive = regexp.MustCompile(`(?i)\brm\s+-[a-z]*[rf]|\bmkfs\b|\bdd\s+if=|\bshred\b|` +
+	reDestructive = regexp.MustCompile(`(?i)` +
+		// rm with a recursive or force flag in any spelling and any position:
+		// -rf, -fR, --recursive, --force, and after the operands (rm dir -rf).
+		`\brm\s+(?:\S+\s+)*?-(?:[a-z]*[rf]|-recursive\b|-force\b)|` +
+		`\bfind\b.*\s-delete\b|\brmtree\b|` +
+		`\bmkfs\b|\bdd\s+if=|\bshred\b|` +
+		// Git commands that discard work with no way back from the command
+		// itself: uncommitted changes, untracked files, an unmerged branch.
+		`\bgit\s+reset\s+(?:\S+\s+)*?--hard\b|\bgit\s+clean\s+(?:\S+\s+)*?-[a-z]*f|` +
+		`\bgit\s+branch\s+(?:\S+\s+)*?(?:(?-i:-D\b)|--delete\s+(?:\S+\s+)*?--force\b|--force\s+(?:\S+\s+)*?--delete\b)|` +
 		// DROP must cover every object type, not just the three that store rows.
 		// DROP TRIGGER audit_chain_no_truncate is exactly the statement that
 		// defeats the audit table's append-only protection, and it was rated
@@ -105,15 +114,188 @@ var (
 	reExternal = regexp.MustCompile(`(?i)\b(curl|wget|ssh|scp|rsync|nc|telnet)\b|` +
 		`\bgit\s+push\b|\bdocker\s+push\b|\bnpm\s+publish\b|\b(aws|gcloud|az)\s`)
 
-	reReadOnly = regexp.MustCompile(`(?i)^\s*(cat|ls|pwd|head|tail|wc|grep|find|file|stat|` +
-		`echo|which|whoami|date|df|du|ps|env|` +
-		`git\s+(log|status|diff|show|branch)|docker\s+ps|kubectl\s+get)\b`)
-
 	// A string containing any of these is not a single command, so its leading
 	// token says nothing about what it does. `ls; "rm" -rf /` led with `ls` and
 	// was rated READ_ONLY — three tiers below the truth.
 	reCompound = regexp.MustCompile("[;&|\n\r`]|\\$\\(")
+
+	// Shell syntax that can write a file or change what a command's words
+	// are: redirection, any expansion, brace expansion. A command containing
+	// one is never READ_ONLY, wherever in the string it appears. That refuses
+	// some harmless commands (`ls $HOME`, `grep 'a>b' f`), which then rate
+	// INTERNAL_MODIFY; the alternative is a shell parser.
+	reNotPlain = regexp.MustCompile(`[<>${}]`)
 )
+
+// READ_ONLY is an allowlist in two parts.
+//
+// readOnlyAnyArgs are commands that read and print whatever their arguments
+// are: none has an option that writes a file or runs a program.
+//
+// readOnlyChecked are commands that read by default but have arguments that
+// write, run something, or talk to a different system. Each entry says whether
+// a given argument list keeps the command read-only. These checks are written
+// as allowlists wherever the command's own option parser accepts clustered
+// short options (-us) or abbreviated long ones (--se for --set): refusing a
+// list of spellings cannot keep up with a parser that accepts others.
+var readOnlyAnyArgs = []string{
+	"cat", "ls", "pwd", "head", "tail", "wc", "grep", "stat", "echo", "which",
+	"whoami", "df", "du", "ps",
+}
+
+var readOnlyChecked = map[string]func(args []string) bool{
+	// env with arguments runs a program; alone it prints the environment.
+	"env": func(args []string) bool { return len(args) == 0 },
+	// find can delete, run a program, or write a file. Its predicates are
+	// whole words, never clustered or abbreviated, so refusing them by prefix
+	// is exact ("-fprint" also covers -fprint0 and -fprintf).
+	"find": withoutPrefixes("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"),
+	// file -C compiles a magic file: operands only.
+	"file": func(args []string) bool { return withoutPrefixes("-")(args) },
+	// date -s sets the clock: a +FORMAT and -u only.
+	"date": func(args []string) bool {
+		for _, a := range args {
+			if a != "-u" && !strings.HasPrefix(a, "+") {
+				return false
+			}
+		}
+		return true
+	},
+	"docker":  func(args []string) bool { return len(args) > 0 && args[0] == "ps" },
+	"kubectl": kubectlGetReadOnly,
+	"git":     gitReadOnly,
+}
+
+// withoutPrefixes accepts an argument list in which no argument starts with
+// any of prefixes, compared case-insensitively.
+func withoutPrefixes(prefixes ...string) func([]string) bool {
+	return func(args []string) bool {
+		for _, a := range args {
+			a = strings.ToLower(a)
+			for _, p := range prefixes {
+				if strings.HasPrefix(a, p) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+}
+
+// gitBranchListFlags are the `git branch` arguments that only list. Anything
+// else, including a bare name (which creates a branch), is not read-only.
+var gitBranchListFlags = []string{
+	"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-l", "--list", "--show-current",
+}
+
+func gitReadOnly(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "status":
+		return true
+	case "log", "diff", "show":
+		// --output writes the result to a file and --ext-diff runs a
+		// configured program. Git accepts any unambiguous abbreviation, so
+		// the refused prefixes are the shortest ones git would accept.
+		return withoutPrefixes("--ou", "--ext")(args[1:])
+	case "branch":
+		for _, a := range args[1:] {
+			if !slices.Contains(gitBranchListFlags, a) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// kubectlGetFlags are the `kubectl get` flags that choose what to show. Every
+// other flag is refused, which covers the ones that choose which cluster to
+// ask and as whom (--server, --kubeconfig, --token, --as, --context, --raw).
+var kubectlGetFlags = []string{
+	"-n", "--namespace", "-o", "--output", "-A", "--all-namespaces", "-l", "--selector",
+	"--show-labels", "--no-headers", "-w", "--watch",
+}
+
+func kubectlGetReadOnly(args []string) bool {
+	if len(args) == 0 || args[0] != "get" {
+		return false
+	}
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, _, _ := strings.Cut(a, "=")
+		if !slices.Contains(kubectlGetFlags, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// plainWordChars are the characters a checked command may contain outside
+// quotes. None of them makes a shell rewrite a word: no glob (* ? [), no
+// extended glob or grouping ( ( ) ^ ! ), no comment (#). ~ stays because
+// HEAD~1 is ordinary, and a leading ~ expands to a path, never to a flag.
+const plainWordChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/=:,%+@~- \t"
+
+// hasUnquotedSpecial reports whether s contains, outside quotes, any
+// character not in plainWordChars. Written as an allowlist because the set
+// of characters a shell treats specially depends on the shell and its
+// options. Only meaningful for a string already known to contain no $ or
+// backtick.
+func hasUnquotedSpecial(s string) bool {
+	var quote rune
+	escaped := false
+	for _, r := range s {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && quote != '\'':
+			escaped = true
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case !strings.ContainsRune(plainWordChars, r):
+			return true
+		}
+	}
+	return false
+}
+
+// isReadOnlyCommand reports whether s is one plain command from the READ_ONLY
+// allowlist whose arguments keep it read-only.
+//
+// The words come from normalizeCommand, which removes quotes and backslashes
+// instead of parsing them. That can split or join words differently from a
+// shell, and every such difference makes this stricter, not looser: a flag
+// the shell would see is always seen here (`find . "-delete"`, `-d\elete`),
+// while a quoted word that only looks like a flag is refused too.
+//
+// A glob is expanded by the shell after this check, and a file can be named
+// like a flag. So a checked command with an unquoted glob, or any other
+// unquoted character outside plainWordChars, is refused; for an any-arguments
+// command no flag matters, and globs are allowed.
+func isReadOnlyCommand(s string) bool {
+	if reCompound.MatchString(s) || reNotPlain.MatchString(s) {
+		return false
+	}
+	argv := strings.Fields(normalizeCommand(s))
+	if len(argv) == 0 {
+		return false
+	}
+	name := strings.ToLower(argv[0])
+	if slices.Contains(readOnlyAnyArgs, name) {
+		return true
+	}
+	accepts, ok := readOnlyChecked[name]
+	return ok && !hasUnquotedSpecial(s) && accepts(argv[1:])
+}
 
 // normalizeCommand strips the punctuation an attacker uses to break token
 // adjacency, so `"rm" -rf /` and `rm${IFS}-rf /` match the same patterns as
@@ -229,7 +411,7 @@ func classifyInput(s string) (tier models.ActionTier, matched bool) {
 		// Compound: the leading token is not the whole story, so READ_ONLY
 		// is not available. Destructive and external already had their say.
 		return models.ActionTierInternalModify, true
-	case reReadOnly.MatchString(s):
+	case isReadOnlyCommand(s):
 		return models.ActionTierReadOnly, true
 	default:
 		// An unrecognized string is assumed to modify. It is not read-only

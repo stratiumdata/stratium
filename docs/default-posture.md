@@ -206,11 +206,13 @@ Two constraints on where this works:
 
 Stated plainly, so it is not discovered later:
 
-- **A capable agent routes around a denial.** `rm -rf node_modules` denies at
-  tier 4; `find . -name node_modules -delete` is `READ_ONLY` and proceeds. The
-  classifier is a heuristic and says so in its own source. The controls that
-  actually hold are the ceiling, the tool list, and escalation — not the
-  classifier.
+- **A capable agent routes around a denial.** `rm -rf node_modules` and
+  `find . -name node_modules -delete` deny at tier 4; an interpreter one-liner
+  that deletes the same directory is `INTERNAL_MODIFY` and proceeds under a
+  tier-2 ceiling. The classifier is a heuristic and says so in its own source.
+  The controls that actually hold are the ceiling, the tool list, and
+  escalation — not the classifier. A tier-1 (`READ_ONLY`) ceiling is the
+  exception: `READ_ONLY` is an allowlist of plain commands, not a guess.
 - **The tier ladder itself still cannot constrain *what* an action touches**,
   only how dangerous it is. `resource_constraints` (§4a) narrows *where* an
   agent may act, but a `DESTRUCTIVE` delegation scoped to `/workspace/` is

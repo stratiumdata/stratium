@@ -420,6 +420,15 @@ defeats any static matcher. The classifier's job is to stop an action being
 *accidentally* or *casually* under-rated; the real controls are the delegation
 ceiling, the trust tier, the allowlist, and escalation.
 
+**`READ_ONLY` is the one tier that is an allowlist.** A shell command rates
+`READ_ONLY` only if it is a single plain command from a short list (`ls`, `cat`,
+`grep`, `find`, `git log`, and similar) with no argument that makes it write or
+run something else, and no redirection, pipe, or expansion (`>`, `|`, `$`, `{`).
+`find . -delete`, `env python3 x.py`, `git branch -D main`, and
+`cat a > b` are not `READ_ONLY`. Anything the classifier does not recognise is
+assumed to modify. The cost is that some harmless commands, `ls $HOME` for one,
+rate `INTERNAL_MODIFY`.
+
 **Escalation.** A delegation can carry a band — at or above tier X, don't allow,
 ask a human. An escalation creates a pending approval that a human resolves in
 the PAP. The invariant: an approval is layered *on top of* a fresh three-leg
