@@ -235,10 +235,18 @@ func kubectlGetReadOnly(args []string) bool {
 	return true
 }
 
-// hasUnquotedGlob reports whether s contains *, ? or [ outside quotes, where
-// a shell would expand it against file names. Only meaningful for a string
-// already known to contain no $ or backtick.
-func hasUnquotedGlob(s string) bool {
+// plainWordChars are the characters a checked command may contain outside
+// quotes. None of them makes a shell rewrite a word: no glob (* ? [), no
+// extended glob or grouping ( ( ) ^ ! ), no comment (#). ~ stays because
+// HEAD~1 is ordinary, and a leading ~ expands to a path, never to a flag.
+const plainWordChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/=:,%+@~- \t"
+
+// hasUnquotedSpecial reports whether s contains, outside quotes, any
+// character not in plainWordChars. Written as an allowlist because the set
+// of characters a shell treats specially depends on the shell and its
+// options. Only meaningful for a string already known to contain no $ or
+// backtick.
+func hasUnquotedSpecial(s string) bool {
 	var quote rune
 	escaped := false
 	for _, r := range s {
@@ -253,7 +261,7 @@ func hasUnquotedGlob(s string) bool {
 			}
 		case r == '\'' || r == '"':
 			quote = r
-		case r == '*' || r == '?' || r == '[':
+		case !strings.ContainsRune(plainWordChars, r):
 			return true
 		}
 	}
@@ -270,8 +278,9 @@ func hasUnquotedGlob(s string) bool {
 // while a quoted word that only looks like a flag is refused too.
 //
 // A glob is expanded by the shell after this check, and a file can be named
-// like a flag. So a checked command with an unquoted glob is refused; for an
-// any-arguments command no flag matters, and globs are allowed.
+// like a flag. So a checked command with an unquoted glob, or any other
+// unquoted character outside plainWordChars, is refused; for an any-arguments
+// command no flag matters, and globs are allowed.
 func isReadOnlyCommand(s string) bool {
 	if reCompound.MatchString(s) || reNotPlain.MatchString(s) {
 		return false
@@ -285,7 +294,7 @@ func isReadOnlyCommand(s string) bool {
 		return true
 	}
 	accepts, ok := readOnlyChecked[name]
-	return ok && !hasUnquotedGlob(s) && accepts(argv[1:])
+	return ok && !hasUnquotedSpecial(s) && accepts(argv[1:])
 }
 
 // normalizeCommand strips the punctuation an attacker uses to break token

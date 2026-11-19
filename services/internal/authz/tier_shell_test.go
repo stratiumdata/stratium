@@ -54,6 +54,11 @@ func TestBuiltinTier_ReadOnlyIsStrict(t *testing.T) {
 		"find . -name *.go",
 		"git log *",
 		"date *",
+		"find @(a)",
+		"find . ^keep",
+		"git log (x)",
+		"find . !x",
+		"find . # -print",
 		// kubectl get pointed somewhere else, or with other credentials
 		"kubectl get pods --server=https://example.invalid",
 		"kubectl get pods -s https://example.invalid",
