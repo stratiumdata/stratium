@@ -42,7 +42,7 @@ Six of these journeys have executable coverage, in two files:
 | Journey | Unit | Live |
 |---|---|---|
 | J1 — caps vs. tools naming no resource | `TestJourney1_FieldlessToolsCanNeverSatisfyAClassificationCap`, `TestJourney1_ACommandFieldToolNowYieldsAResourceIdentity`, `TestJourney1_AFieldedToolHasAPathToAnAllowThatAFieldlessOneDoesNot` | `TestIntegration_Journey1_AClassificationCapDeniesEveryFieldlessToolCall`, `TestIntegration_Journey1_AShellCommandIsLabelledByEveryPathItNames` |
-| J2 — denial route-around | `TestJourney2_ADeniedDestructiveCommandHasAReadOnlyEquivalent` | — |
+| J2 — denial route-around | `TestJourney2_ADeniedDestructiveCommandHasALowerTierEquivalent` | — |
 | J6 — sub-delegation narrowing | `TestJourney6_AChildCannotAddAConstraintItsParentLeftOpen` | — |
 | J10 — concurrent decisions | — | `TestIntegration_Journey10_ConcurrentDecideDoesNotDenyOnAnAuditCollision` |
 | §4.1 — tier coarseness | `TestJourney41_TheTierLadderCannotDistinguishRoutineFromCatastrophic`, `TestJourney41_PermittingTheRoutineCasePermitsTheCatastrophicOne` | — |
@@ -138,17 +138,22 @@ hypothesis any more.
 **Flow.** Give an agent a delegation that denies `DESTRUCTIVE`. Ask it to clean a
 build directory. Watch three attempts, not one.
 
-**Expected.** `rm -rf node_modules` denies at tier 4. A capable agent then tries
-`find . -name node_modules -delete`, which rates **READ_ONLY** and is allowed.
-**[traced]**
+**Expected.** `rm -rf node_modules` denies at tier 4. So does
+`find . -name node_modules -delete`. A capable agent then tries an interpreter
+one-liner such as `perl -e 'use File::Path; remove_tree(q(node_modules))'`, which
+rates **INTERNAL_MODIFY** and is allowed under a tier-2 ceiling. **[traced]**
 
-**Evidence.** `reDestructive` (`services/internal/authz/tier.go:81`) matches
-`rm -[a-z]*[rf]` anywhere in the input, so the first form is tier 4 regardless of
-target. The second form matches nothing in `reDestructive` or `reExternal`; for a
-catalogued `Bash` call the extracted command becomes `NormalizedInput`
-(`services/internal/authz/extract.go:165`), and `BuiltinTier`'s step 2 classifies
-it against `reReadOnly`, which is anchored at `^\s*` and lists `find`
-(`tier.go:108`). Result: READ_ONLY, positively matched.
+**Evidence.** `reDestructive` (`services/internal/authz/tier.go`) matches `rm`
+with a recursive or force flag and `find ... -delete` anywhere in the input, so
+the first two forms are tier 4 regardless of target. The third matches nothing in
+`reDestructive` or `reExternal`, and it is not on the read-only allowlist
+(`isReadOnlyCommand`), so it falls to the classifier's default for a command it
+does not recognise: INTERNAL_MODIFY.
+
+**What changed.** `find ... -delete` used to rate READ_ONLY, because READ_ONLY
+was decided by a command's first word. READ_ONLY is now an allowlist of plain
+commands checked argument by argument, so the route-around no longer reaches an
+agent held to tier 1. It still reaches one allowed to modify.
 
 **The general shape.** The adversary in the agent era is not usually malicious —
 it is goal-directed and inventive, and it will do gradient descent on the

@@ -78,7 +78,16 @@ type TierTable struct {
 // or *casually* under-rated, not to withstand a determined attacker.
 // See spec §4.4.
 var (
-	reDestructive = regexp.MustCompile(`(?i)\brm\s+-[a-z]*[rf]|\bmkfs\b|\bdd\s+if=|\bshred\b|` +
+	reDestructive = regexp.MustCompile(`(?i)` +
+		// rm with a recursive or force flag in any spelling and any position:
+		// -rf, -fR, --recursive, --force, and after the operands (rm dir -rf).
+		`\brm\s+(?:\S+\s+)*?-(?:[a-z]*[rf]|-recursive\b|-force\b)|` +
+		`\bfind\b.*\s-delete\b|\brmtree\b|` +
+		`\bmkfs\b|\bdd\s+if=|\bshred\b|` +
+		// Git commands that discard work with no way back from the command
+		// itself: uncommitted changes, untracked files, an unmerged branch.
+		`\bgit\s+reset\s+(?:\S+\s+)*?--hard\b|\bgit\s+clean\s+(?:\S+\s+)*?-[a-z]*f|` +
+		`\bgit\s+branch\s+(?:\S+\s+)*?(?:(?-i:-D\b)|--delete\s+(?:\S+\s+)*?--force\b|--force\s+(?:\S+\s+)*?--delete\b)|` +
 		// DROP must cover every object type, not just the three that store rows.
 		// DROP TRIGGER audit_chain_no_truncate is exactly the statement that
 		// defeats the audit table's append-only protection, and it was rated
@@ -105,15 +114,118 @@ var (
 	reExternal = regexp.MustCompile(`(?i)\b(curl|wget|ssh|scp|rsync|nc|telnet)\b|` +
 		`\bgit\s+push\b|\bdocker\s+push\b|\bnpm\s+publish\b|\b(aws|gcloud|az)\s`)
 
-	reReadOnly = regexp.MustCompile(`(?i)^\s*(cat|ls|pwd|head|tail|wc|grep|find|file|stat|` +
-		`echo|which|whoami|date|df|du|ps|env|` +
-		`git\s+(log|status|diff|show|branch)|docker\s+ps|kubectl\s+get)\b`)
-
 	// A string containing any of these is not a single command, so its leading
 	// token says nothing about what it does. `ls; "rm" -rf /` led with `ls` and
 	// was rated READ_ONLY — three tiers below the truth.
 	reCompound = regexp.MustCompile("[;&|\n\r`]|\\$\\(")
+
+	// Shell syntax that can write a file or change what a command's words
+	// are: redirection, any expansion, brace expansion. A command containing
+	// one is never READ_ONLY, wherever in the string it appears. That refuses
+	// some harmless commands (`ls $HOME`, `grep 'a>b' f`), which then rate
+	// INTERNAL_MODIFY; the alternative is a shell parser.
+	reNotPlain = regexp.MustCompile(`[<>${}]`)
 )
+
+// readOnlyCommands is the allowlist behind READ_ONLY. Each entry says, for
+// one command name, whether a given argument list keeps it read-only. A
+// command is on this list only if it reads and prints; the check exists for
+// the arguments that make an otherwise-reading command write a file or run
+// another program.
+var readOnlyCommands = map[string]func(args []string) bool{
+	"cat": anyArgs, "ls": anyArgs, "pwd": anyArgs, "head": anyArgs, "tail": anyArgs,
+	"wc": anyArgs, "grep": anyArgs, "stat": anyArgs, "echo": anyArgs, "which": anyArgs,
+	"whoami": anyArgs, "df": anyArgs, "du": anyArgs, "ps": anyArgs,
+
+	// env with arguments runs a program; alone it prints the environment.
+	"env": func(args []string) bool { return len(args) == 0 },
+	// find can delete, run a program, or write a file.
+	"find": withoutFlags("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"),
+	// file -C compiles a magic file; date -s sets the clock.
+	"file": withoutFlags("-c", "--compile"),
+	"date": withoutFlags("-s", "--set"),
+
+	"docker":  func(args []string) bool { return len(args) > 0 && args[0] == "ps" },
+	"kubectl": func(args []string) bool { return len(args) > 0 && args[0] == "get" },
+	"git":     gitReadOnly,
+}
+
+func anyArgs([]string) bool { return true }
+
+// withoutFlags accepts an argument list in which no argument starts with any
+// of prefixes, compared case-insensitively. Prefix, so "-fprint" also refuses
+// -fprint0 and -fprintf, and "--set" refuses --set=VALUE.
+func withoutFlags(prefixes ...string) func([]string) bool {
+	return func(args []string) bool {
+		for _, a := range args {
+			a = strings.ToLower(a)
+			for _, p := range prefixes {
+				if strings.HasPrefix(a, p) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+}
+
+// gitBranchListFlags are the `git branch` arguments that only list. Anything
+// else, including a bare name (which creates a branch), is not read-only.
+var gitBranchListFlags = []string{
+	"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-l", "--list", "--show-current",
+}
+
+func gitReadOnly(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "status":
+		return true
+	case "log", "diff", "show":
+		// --output writes the result to a file.
+		return withoutFlags("--output")(args[1:])
+	case "branch":
+		for _, a := range args[1:] {
+			if !slices.Contains(gitBranchListFlags, a) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// isReadOnlyCommand reports whether s is one plain command from
+// readOnlyCommands whose arguments keep it read-only.
+//
+// The words come from normalizeCommand, which removes quotes and backslashes
+// instead of parsing them. That can split or join words differently from a
+// shell, and every such difference makes this stricter, not looser: a flag
+// the shell would see is always seen here (`find . "-delete"`, `-d\elete`),
+// while a quoted word that only looks like a flag is refused too.
+//
+// What this does not see: a glob that expands to a file literally named like
+// a flag. A flag written with glob characters is refused; an operand is not.
+func isReadOnlyCommand(s string) bool {
+	if reCompound.MatchString(s) || reNotPlain.MatchString(s) {
+		return false
+	}
+	argv := strings.Fields(normalizeCommand(s))
+	if len(argv) == 0 {
+		return false
+	}
+	accepts, ok := readOnlyCommands[strings.ToLower(argv[0])]
+	if !ok {
+		return false
+	}
+	for _, a := range argv[1:] {
+		if strings.HasPrefix(a, "-") && strings.ContainsAny(a, "*?[") {
+			return false
+		}
+	}
+	return accepts(argv[1:])
+}
 
 // normalizeCommand strips the punctuation an attacker uses to break token
 // adjacency, so `"rm" -rf /` and `rm${IFS}-rf /` match the same patterns as
@@ -229,7 +341,7 @@ func classifyInput(s string) (tier models.ActionTier, matched bool) {
 		// Compound: the leading token is not the whole story, so READ_ONLY
 		// is not available. Destructive and external already had their say.
 		return models.ActionTierInternalModify, true
-	case reReadOnly.MatchString(s):
+	case isReadOnlyCommand(s):
 		return models.ActionTierReadOnly, true
 	default:
 		// An unrecognized string is assumed to modify. It is not read-only
