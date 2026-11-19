@@ -42,6 +42,25 @@ func TestBuiltinTier_ReadOnlyIsStrict(t *testing.T) {
 		"find . -name '-delete*'",
 		"X=1 ls",
 		"/bin/ls",
+		// options spelled the way getopt also accepts: clustered, abbreviated
+		"date -us 2020-01-01",
+		"date --se=2020-01-01",
+		"file -zC -m magic",
+		"file --comp -m magic",
+		"git diff --outp=/tmp/out",
+		"git log --ext-diff -p",
+		// a glob the shell may expand into a flag, for a command whose flags matter
+		"find *",
+		"find . -name *.go",
+		"git log *",
+		"date *",
+		// kubectl get pointed somewhere else, or with other credentials
+		"kubectl get pods --server=https://example.invalid",
+		"kubectl get pods -s https://example.invalid",
+		"kubectl get pods --kubeconfig /tmp/other",
+		"kubectl get pods --token abc",
+		"kubectl get --raw /api/v1/secrets",
+		"kubectl get pods --as admin",
 	}
 	for _, cmd := range notReadOnly {
 		if got := shellTier(cmd); got <= models.ActionTierReadOnly {
@@ -56,7 +75,10 @@ func TestBuiltinTier_ReadOnlyIsStrict(t *testing.T) {
 		"df -h", "du -sh .", "ps aux", "env",
 		"git log --oneline -5", "git status", "git diff HEAD~1", "git show HEAD",
 		"git branch", "git branch -a", "git branch -vv", "git branch --show-current",
-		"docker ps -a", "kubectl get pods -n kube-system",
+		"docker ps -a", "kubectl get pods -n kube-system", "kubectl get pods -A -o wide",
+		"kubectl get deploy --namespace=prod --output=yaml -l app=web",
+		"date -u", "date -u +%FT%TZ", "git log --oneline --stat", "ls *.go", "grep -c x *.md",
+		`find . -name "*.md" -newer a.txt`,
 	}
 	for _, cmd := range readOnly {
 		if got := shellTier(cmd); got != models.ActionTierReadOnly {

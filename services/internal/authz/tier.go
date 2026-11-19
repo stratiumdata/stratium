@@ -127,35 +127,48 @@ var (
 	reNotPlain = regexp.MustCompile(`[<>${}]`)
 )
 
-// readOnlyCommands is the allowlist behind READ_ONLY. Each entry says, for
-// one command name, whether a given argument list keeps it read-only. A
-// command is on this list only if it reads and prints; the check exists for
-// the arguments that make an otherwise-reading command write a file or run
-// another program.
-var readOnlyCommands = map[string]func(args []string) bool{
-	"cat": anyArgs, "ls": anyArgs, "pwd": anyArgs, "head": anyArgs, "tail": anyArgs,
-	"wc": anyArgs, "grep": anyArgs, "stat": anyArgs, "echo": anyArgs, "which": anyArgs,
-	"whoami": anyArgs, "df": anyArgs, "du": anyArgs, "ps": anyArgs,
+// READ_ONLY is an allowlist in two parts.
+//
+// readOnlyAnyArgs are commands that read and print whatever their arguments
+// are: none has an option that writes a file or runs a program.
+//
+// readOnlyChecked are commands that read by default but have arguments that
+// write, run something, or talk to a different system. Each entry says whether
+// a given argument list keeps the command read-only. These checks are written
+// as allowlists wherever the command's own option parser accepts clustered
+// short options (-us) or abbreviated long ones (--se for --set): refusing a
+// list of spellings cannot keep up with a parser that accepts others.
+var readOnlyAnyArgs = []string{
+	"cat", "ls", "pwd", "head", "tail", "wc", "grep", "stat", "echo", "which",
+	"whoami", "df", "du", "ps",
+}
 
+var readOnlyChecked = map[string]func(args []string) bool{
 	// env with arguments runs a program; alone it prints the environment.
 	"env": func(args []string) bool { return len(args) == 0 },
-	// find can delete, run a program, or write a file.
-	"find": withoutFlags("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"),
-	// file -C compiles a magic file; date -s sets the clock.
-	"file": withoutFlags("-c", "--compile"),
-	"date": withoutFlags("-s", "--set"),
-
+	// find can delete, run a program, or write a file. Its predicates are
+	// whole words, never clustered or abbreviated, so refusing them by prefix
+	// is exact ("-fprint" also covers -fprint0 and -fprintf).
+	"find": withoutPrefixes("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"),
+	// file -C compiles a magic file: operands only.
+	"file": func(args []string) bool { return withoutPrefixes("-")(args) },
+	// date -s sets the clock: a +FORMAT and -u only.
+	"date": func(args []string) bool {
+		for _, a := range args {
+			if a != "-u" && !strings.HasPrefix(a, "+") {
+				return false
+			}
+		}
+		return true
+	},
 	"docker":  func(args []string) bool { return len(args) > 0 && args[0] == "ps" },
-	"kubectl": func(args []string) bool { return len(args) > 0 && args[0] == "get" },
+	"kubectl": kubectlGetReadOnly,
 	"git":     gitReadOnly,
 }
 
-func anyArgs([]string) bool { return true }
-
-// withoutFlags accepts an argument list in which no argument starts with any
-// of prefixes, compared case-insensitively. Prefix, so "-fprint" also refuses
-// -fprint0 and -fprintf, and "--set" refuses --set=VALUE.
-func withoutFlags(prefixes ...string) func([]string) bool {
+// withoutPrefixes accepts an argument list in which no argument starts with
+// any of prefixes, compared case-insensitively.
+func withoutPrefixes(prefixes ...string) func([]string) bool {
 	return func(args []string) bool {
 		for _, a := range args {
 			a = strings.ToLower(a)
@@ -183,8 +196,10 @@ func gitReadOnly(args []string) bool {
 	case "status":
 		return true
 	case "log", "diff", "show":
-		// --output writes the result to a file.
-		return withoutFlags("--output")(args[1:])
+		// --output writes the result to a file and --ext-diff runs a
+		// configured program. Git accepts any unambiguous abbreviation, so
+		// the refused prefixes are the shortest ones git would accept.
+		return withoutPrefixes("--ou", "--ext")(args[1:])
 	case "branch":
 		for _, a := range args[1:] {
 			if !slices.Contains(gitBranchListFlags, a) {
@@ -196,8 +211,57 @@ func gitReadOnly(args []string) bool {
 	return false
 }
 
-// isReadOnlyCommand reports whether s is one plain command from
-// readOnlyCommands whose arguments keep it read-only.
+// kubectlGetFlags are the `kubectl get` flags that choose what to show. Every
+// other flag is refused, which covers the ones that choose which cluster to
+// ask and as whom (--server, --kubeconfig, --token, --as, --context, --raw).
+var kubectlGetFlags = []string{
+	"-n", "--namespace", "-o", "--output", "-A", "--all-namespaces", "-l", "--selector",
+	"--show-labels", "--no-headers", "-w", "--watch",
+}
+
+func kubectlGetReadOnly(args []string) bool {
+	if len(args) == 0 || args[0] != "get" {
+		return false
+	}
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, _, _ := strings.Cut(a, "=")
+		if !slices.Contains(kubectlGetFlags, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasUnquotedGlob reports whether s contains *, ? or [ outside quotes, where
+// a shell would expand it against file names. Only meaningful for a string
+// already known to contain no $ or backtick.
+func hasUnquotedGlob(s string) bool {
+	var quote rune
+	escaped := false
+	for _, r := range s {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && quote != '\'':
+			escaped = true
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '*' || r == '?' || r == '[':
+			return true
+		}
+	}
+	return false
+}
+
+// isReadOnlyCommand reports whether s is one plain command from the READ_ONLY
+// allowlist whose arguments keep it read-only.
 //
 // The words come from normalizeCommand, which removes quotes and backslashes
 // instead of parsing them. That can split or join words differently from a
@@ -205,8 +269,9 @@ func gitReadOnly(args []string) bool {
 // the shell would see is always seen here (`find . "-delete"`, `-d\elete`),
 // while a quoted word that only looks like a flag is refused too.
 //
-// What this does not see: a glob that expands to a file literally named like
-// a flag. A flag written with glob characters is refused; an operand is not.
+// A glob is expanded by the shell after this check, and a file can be named
+// like a flag. So a checked command with an unquoted glob is refused; for an
+// any-arguments command no flag matters, and globs are allowed.
 func isReadOnlyCommand(s string) bool {
 	if reCompound.MatchString(s) || reNotPlain.MatchString(s) {
 		return false
@@ -215,16 +280,12 @@ func isReadOnlyCommand(s string) bool {
 	if len(argv) == 0 {
 		return false
 	}
-	accepts, ok := readOnlyCommands[strings.ToLower(argv[0])]
-	if !ok {
-		return false
+	name := strings.ToLower(argv[0])
+	if slices.Contains(readOnlyAnyArgs, name) {
+		return true
 	}
-	for _, a := range argv[1:] {
-		if strings.HasPrefix(a, "-") && strings.ContainsAny(a, "*?[") {
-			return false
-		}
-	}
-	return accepts(argv[1:])
+	accepts, ok := readOnlyChecked[name]
+	return ok && !hasUnquotedGlob(s) && accepts(argv[1:])
 }
 
 // normalizeCommand strips the punctuation an attacker uses to break token
