@@ -92,7 +92,7 @@ delegation allows. Both checks apply; neither substitutes for the other.
 
 | Requirement | Version | Needed for |
 |---|---|---|
-| **Go** | 1.25+ | building any binary |
+| **Go** | 1.26+ | building any binary |
 | **Node + npm** | any current LTS | building the admin UI, which is embedded into `stratium-pap` |
 | **Docker + Compose** | any current | the local evaluation stack, and `make integration` |
 | **PostgreSQL** | 16 | the database (supplied by Docker in the local stack) |

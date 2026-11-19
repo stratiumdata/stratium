@@ -16,7 +16,7 @@
 # there is no reason to pay for a distroless runtime stage for a component
 # that carries no secret and needs no minimal attack surface the way the two
 # binaries this repo actually ships do.
-FROM golang:1.25-alpine
+FROM golang:1.26-alpine
 WORKDIR /src/services
 COPY services/go.mod services/go.sum ./
 RUN go mod download

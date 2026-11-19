@@ -12,7 +12,7 @@ judgement into the PEP will not be merged.
 
 ## Setup
 
-Needs Go 1.25+, Node 22+, and Docker (for `make integration` only).
+Needs Go 1.26+, Node 22+, and Docker (for `make integration` only).
 
     make build        # builds the admin UI, then the Go binaries
     make test         # Go tests with -race, plus the UI's lint and tests

@@ -3,7 +3,7 @@
 # Builder: compiles a static stratium-pdp binary. Needs the full Go
 # toolchain, so nothing from this stage ships — only /out/stratium-pdp is
 # copied into the runtime stage below.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src/services
 COPY services/go.mod services/go.sum ./

@@ -13,7 +13,7 @@
 # doc, "NO SESSION FILE") -- so folding the two into one parameterized file
 # would carry pdp-only steps (openssl, key generation) into an image that
 # has no use for either.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src/services
 COPY services/go.mod services/go.sum ./
