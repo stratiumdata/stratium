@@ -48,6 +48,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -164,7 +165,55 @@ func runHookCmd(stdin io.Reader, stdout io.Writer) int {
 	}
 	defer func() { _ = conn.Close() }()
 
-	return runHook(stdin, stdout, pdpgrpc.NewPDPServiceClient(conn), cfg)
+	client := pdpgrpc.NewPDPServiceClient(conn)
+	return runWithDeadline(hookBudget(cfg), stdout, func(w io.Writer) int {
+		return runHook(stdin, w, client, cfg)
+	})
+}
+
+// hookBudget is the longest one hook run may take before it answers: the
+// approval wait plus the four PDP calls a run can make, each bounded by
+// ConnectTimeout (Decide, IssueToken and the Decide after it when the token
+// had expired, and the Decide after an approval).
+//
+// The harness has its own timeout for the hook process, and a harness that
+// gives up on a hook runs the tool call anyway (observed with Claude Code).
+// So the harness timeout must be LARGER than this value. docs/pep/hook.md
+// states the rule, and deploy/stratium computes the installed timeout from
+// the same formula (its hook_timeout()).
+func hookBudget(cfg hookConfig) time.Duration {
+	return cfg.ApprovalTimeout + 4*cfg.ConnectTimeout
+}
+
+// runWithDeadline runs one hook invocation and denies if it has not answered
+// within budget. Every step inside run is already bounded; this makes the
+// total a number an operator can configure the harness against, and covers
+// anything that is not a PDP call, such as a stdin that never closes.
+//
+// run writes to a buffer that reaches stdout only if run finishes in time,
+// so a late answer can never follow, or interleave with, the deny written
+// here. The abandoned goroutine ends with the process: main exits with the
+// code this returns.
+func runWithDeadline(budget time.Duration, stdout io.Writer, run func(io.Writer) int) int {
+	type result struct {
+		code int
+		out  []byte
+	}
+	done := make(chan result, 1)
+	go func() {
+		var buf bytes.Buffer
+		code := run(&buf)
+		done <- result{code, buf.Bytes()}
+	}()
+
+	select {
+	case r := <-done:
+		_, _ = stdout.Write(r.out)
+		return r.code
+	case <-time.After(budget):
+		return writeDeny(stdout, fmt.Sprintf(
+			"stratium-pep: no decision within %s (approval timeout plus four connect timeouts); denying", budget))
+	}
 }
 
 // runHook is the hook's decision logic end to end: read stdin, build a

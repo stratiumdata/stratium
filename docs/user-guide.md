@@ -1858,7 +1858,7 @@ computed in the PDP.
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "stratium-pep hook", "timeout": 10 }
+          { "type": "command", "command": "stratium-pep hook", "timeout": 330 }
         ]
       }
     ]
@@ -1867,8 +1867,10 @@ computed in the PDP.
 ```
 
 The seven variables must be exported in the shell that launches Claude Code.
-**Keep the `timeout`** — every tool call becomes a synchronous round trip to the
-PDP, and without one an unreachable PDP hangs the session instead of failing.
+**Keep the `timeout` above the hook's time budget.** The hook answers within
+`STRATIUM_PEP_APPROVAL_TIMEOUT` + 4 × `STRATIUM_PEP_CONNECT_TIMEOUT` (320s with
+the values on this page: 5m + 4 × 5s) and denies at that point. A harness that gives up on a
+hook sooner runs the tool call, so the `timeout` must be the larger number.
 **Start with a narrow `matcher`** (`"Read"`) on a session you care about.
 
 **Codex** — `~/.codex/hooks.json`, plus a small shim:
@@ -1880,7 +1882,7 @@ PDP, and without one an unreachable PDP hangs the session instead of failing.
       { "matcher": "*",
         "hooks": [ { "type": "command",
                      "command": "/usr/local/bin/stratium-codex-hook",
-                     "timeout": 10 } ] }
+                     "timeout": 330 } ] }
     ]
   }
 }

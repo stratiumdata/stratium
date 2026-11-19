@@ -38,7 +38,7 @@ So instead this directory ships three things:
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 10 } ] }
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150 } ] }
     ]
   }
 }

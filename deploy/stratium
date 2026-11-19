@@ -36,7 +36,9 @@ run — until then every tool call is denied for want of a session.
 
 import argparse
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,11 +57,12 @@ MARKERS = ("stratium-pep", "stratium-codex-hook")
 def ours(hook):
     return any(m in str(hook.get("command", "")) for m in MARKERS)
 
-# Timeouts are Claude Code's own hook-execution budget, in seconds, and are
-# deliberately larger than STRATIUM_PEP_CONNECT_TIMEOUT so a slow-but-answering
-# PDP finishes before Claude Code gives up on the process. See docs/pep.md.
+# Timeouts are the harness's own hook-execution budget, in seconds.
+# SessionStart's is deliberately larger than STRATIUM_PEP_CONNECT_TIMEOUT so a
+# slow-but-answering PDP finishes before the harness gives up on the process.
+# PreToolUse's is computed: see hook_timeout().
 SESSION_START_TIMEOUT = 15
-PRE_TOOL_USE_TIMEOUT = 10
+HOOK_TIMEOUT_MARGIN = 10
 
 
 # What each hook needs in its environment, per the binary's own loaders: eight
@@ -149,6 +152,43 @@ def next_steps(events, agent="claude", binary="stratium-pep"):
           "status   # 0 when the command resolves and the environment is whole")
 
 
+def go_seconds(text, default):
+    """Seconds in a Go duration string such as "120s", "5m" or "1m30s".
+
+    Anything that does not parse gives `default`: the binary itself rejects a
+    bad duration and denies, so this only has to size a timeout, not validate.
+    """
+    units = {"h": 3600, "m": 60, "s": 1, "ms": 0.001}
+    parts = re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", text or "")
+    if not parts or "".join(n + u for n, u in parts) != text:
+        return default
+    return sum(float(n) * units[u] for n, u in parts)
+
+
+def hook_timeout():
+    """The PreToolUse `timeout` to install, in seconds.
+
+    A harness that gives up on a hook runs the tool call anyway, so this must be
+    larger than the longest the hook can take to answer. That is hookBudget in
+    services/cmd/stratium-pep/hook.go: the approval timeout plus four connect
+    timeouts. Read from this shell's environment, else the quickstart values.
+    """
+    approval = go_seconds(os.environ.get("STRATIUM_PEP_APPROVAL_TIMEOUT"), 120)
+    connect = go_seconds(os.environ.get("STRATIUM_PEP_CONNECT_TIMEOUT"), 5)
+    return math.ceil(approval + 4 * connect) + HOOK_TIMEOUT_MARGIN
+
+
+def timeout_too_short(event, timeout):
+    """True if an installed PreToolUse timeout would expire before the hook answers."""
+    if event != "PreToolUse":
+        return False
+    return not isinstance(timeout, (int, float)) or timeout < hook_timeout()
+
+
+TIMEOUT_FIX = ("the harness would stop waiting before the hook answers, and then "
+               "run the tool call; re-run install")
+
+
 def missing_env(event):
     return [v for v in REQUIRED_ENV.get(event, ()) if not os.environ.get(v)]
 
@@ -173,7 +213,7 @@ def entries(binary, matcher, only=None, hook_arg="hook"):
             "hooks": [{
                 "type": "command",
                 "command": f"{binary} {hook_arg}".strip(),
-                "timeout": PRE_TOOL_USE_TIMEOUT,
+                "timeout": hook_timeout(),
             }],
         },
     }
@@ -319,7 +359,10 @@ def status(args):
             print(f"  env: missing {', '.join(gone)}")
         elif REQUIRED_ENV.get(event):
             print(f"  env: all {len(REQUIRED_ENV[event])} set")
-        incomplete = incomplete or gone or not runnable
+        short = timeout_too_short(event, timeout)
+        if short:
+            print(f"  timeout: TOO SHORT — needs at least {hook_timeout()}; {TIMEOUT_FIX}")
+        incomplete = incomplete or gone or not runnable or short
     if incomplete:
         next_steps([e for e, _, _, _ in found],
                    "codex" if args.harness == "codex" else "claude",
@@ -438,6 +481,28 @@ def selftest(_args):
         assert cx["PreToolUse"]["hooks"][0]["command"] == "stratium-codex-hook", cx
         assert entries("stratium-pep", "*", ["PreToolUse"])["PreToolUse"]["hooks"][0][
             "command"] == "stratium-pep hook"
+
+        # the PreToolUse timeout outlasts the hook: approval + 4 x connect + margin
+        assert go_seconds("120s", 0) == 120 and go_seconds("1m30s", 0) == 90
+        assert go_seconds("500ms", 0) == 0.5 and go_seconds("set", 7) == 7
+        assert go_seconds(None, 7) == 7 and go_seconds("5 minutes", 7) == 7
+        kept = {k: os.environ.pop(k, None) for k in
+                ("STRATIUM_PEP_APPROVAL_TIMEOUT", "STRATIUM_PEP_CONNECT_TIMEOUT")}
+        try:
+            assert hook_timeout() == 150, hook_timeout()
+            os.environ["STRATIUM_PEP_APPROVAL_TIMEOUT"] = "5m"
+            os.environ["STRATIUM_PEP_CONNECT_TIMEOUT"] = "2s"
+            assert hook_timeout() == 318, hook_timeout()
+            assert entries("x", "*")["PreToolUse"]["hooks"][0]["timeout"] == 318
+            assert timeout_too_short("PreToolUse", 10)
+            assert timeout_too_short("PreToolUse", None)
+            assert not timeout_too_short("PreToolUse", 318)
+            assert not timeout_too_short("SessionStart", 15)
+        finally:
+            for k, v in kept.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
 
         # a full round trip against a Codex file, including that uninstall finds
         # the shim — MARKERS has to cover a name that does not contain "stratium-pep"
@@ -812,7 +877,7 @@ def hook_scopes():
 
 
 def scan_hooks():
-    """Every Stratium hook entry across every scope: (scope, path, event, command)."""
+    """Every Stratium hook entry across every scope: (scope, path, event, command, timeout)."""
     found = []
     for label, path in hook_scopes():
         if not os.path.exists(path):
@@ -820,7 +885,7 @@ def scan_hooks():
         try:
             settings = json.loads(open(path).read() or "{}")
         except json.JSONDecodeError:
-            found.append((label, path, "UNREADABLE", None))
+            found.append((label, path, "UNREADABLE", None, None))
             continue
         for event, groups in (settings.get("hooks") or {}).items():
             if not isinstance(groups, list):
@@ -828,7 +893,7 @@ def scan_hooks():
             for group in groups:
                 for h in (group.get("hooks", []) if isinstance(group, dict) else []):
                     if ours(h):
-                        found.append((label, path, event, h.get("command")))
+                        found.append((label, path, event, h.get("command"), h.get("timeout")))
     return found
 
 
@@ -1290,12 +1355,15 @@ def cmd_doctor(args):
               "           observed. If a session still denies with clean scopes here,\n"
               "           the hook is defined somewhere this list does not cover --\n"
               "           check `/hooks` inside that session, then restart it.")
-    for scope, path, event, command in found:
+    for scope, path, event, command, timeout in found:
         runnable = command and resolves(command)
         line("OK" if runnable else "XX", "hooks",
              f"{scope:<20} {event:<12} {command}",
              None if runnable else f"that command does not resolve; re-run install "
                                    f"with --bin {PEP_BIN}")
+        if timeout_too_short(event, timeout):
+            line("XX", "hooks", f"{scope:<20} timeout {timeout} is below {hook_timeout()}",
+                 TIMEOUT_FIX)
 
     if state.get("agent_id"):
         gone = [v for v in sorted(set(REQUIRED_ENV["SessionStart"]) |
@@ -1332,7 +1400,7 @@ def cmd_down(args):
     that is no longer listening, and the session cannot recover without a restart.
     """
     step("Unwire the hooks (before the stack, deliberately)")
-    for scope, path, event, command in scan_hooks():
+    for scope, path, event, command, _timeout in scan_hooks():
         note(f"{scope}: {event} {command}")
     for harness in ("claude", "codex"):
         for scope_path in {harness_path(harness), harness_path(harness, user=True)}:
