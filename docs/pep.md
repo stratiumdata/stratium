@@ -303,7 +303,7 @@ and `hook` to run before every single tool call:
           {
             "type": "command",
             "command": "stratium-pep hook",
-            "timeout": 10
+            "timeout": 150
           }
         ]
       }
@@ -327,10 +327,13 @@ the entire point of this system is that the PEP itself never decides which
 tools are "obviously safe" enough to skip.
 
 `timeout` here is Claude Code's own hook-execution timeout, in seconds —
-distinct from `STRATIUM_PEP_CONNECT_TIMEOUT`, which bounds only the gRPC
-call to the PDP. Keep Claude Code's `timeout` comfortably larger than
-`STRATIUM_PEP_CONNECT_TIMEOUT` so a slow-but-still-answering PDP gets to
-finish before Claude Code gives up on the hook process itself.
+distinct from `STRATIUM_PEP_CONNECT_TIMEOUT`, which bounds one gRPC call to
+the PDP. When Claude Code gives up on a hook it runs the tool call, so the
+`PreToolUse` `timeout` must be larger than the longest the hook can take:
+`STRATIUM_PEP_APPROVAL_TIMEOUT` plus four times
+`STRATIUM_PEP_CONNECT_TIMEOUT`. The hook denies if it reaches that point
+without a decision. The `150` above fits a 120s approval timeout and a 5s
+connect timeout (140s). See [the hook page](pep/hook.md) for the arithmetic.
 
 ## Installing the `mcp` proxy
 
@@ -1064,6 +1067,7 @@ could not ask" matters, because the fix is different:
 | `PDP did not respond in time` | The PDP is reachable but did not answer inside `STRATIUM_PEP_CONNECT_TIMEOUT`. | Check PDP health/load, or raise the timeout. |
 | `PDP returned an error` | The PDP is up and answered, but the call itself failed server-side. | Check the PDP's own logs. |
 | `approval ... did not resolve within the escalation timeout` | The action required human approval, and nobody resolved it inside `STRATIUM_PEP_APPROVAL_TIMEOUT`. | Approve escalations faster, or raise the timeout — see "Grant discovery tools" above for the same "the grant is real but unusable" shape applied to timing instead of scope. |
+| `no decision within ... (approval timeout plus four connect timeouts); denying` | The hook reached its whole-run time budget without an answer from the PDP. | Check PDP health. The budget is `STRATIUM_PEP_APPROVAL_TIMEOUT` + 4 × `STRATIUM_PEP_CONNECT_TIMEOUT`; the harness's hook `timeout` must be larger than it. |
 | `approval ... was denied` | The action required human approval, and a human explicitly denied it. | Not a bug — this is the intended outcome of a reviewed escalation. |
 | `approval ... is unknown to the PDP` | The PDP no longer recognizes the approval this session was waiting on. | Unusual; retry the tool call (a fresh escalation will be created) and check the PDP's own logs if it recurs. |
 | `resource declares no classification; the delegation's classification cap cannot be evaluated and therefore denies` | The delegation has a classification cap configured and **the resource ended up unlabelled**, so the cap could not be checked and it denies (spec §3.9, R2). Three different causes produce this one text: (a) no rule covers the resource; (b) the tool's `tool_catalog` row names no `resource_field`, so the PDP had no id to resolve rules against; (c) the row *does* name one, but this call's `raw_input` omitted that field, spelled it differently, or carried it as a non-string or an empty string — all of which read as no id. | Fixable, but not by retrying — retrying reproduces it exactly. The three causes have three different fixes: (a) register a rule, or an empty-prefix catch-all; (b) give the tool a `resource_field`, or accept it is unusable under a cap; (c) fix the **call** or the catalogued field *name* — the rule set is not the problem, and editing it will not help. Distinguish them by checking the tool's catalog row first, then a sample `raw_input` against it. See "Labelling resources for classification caps" above. |

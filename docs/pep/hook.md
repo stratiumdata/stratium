@@ -82,7 +82,7 @@ that is set; only [`mcp`](mcp.md) reads it.
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 10 } ] }
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150 } ] }
     ]
   }
 }
@@ -96,9 +96,23 @@ exactly that block, merging into whatever the file already holds.
 error — the tool call proceeds unchecked. A hook that cannot run is not a broken
 enforcement point, it is **no enforcement point**.
 
-**Keep the `timeout`,** and keep it comfortably above
-`STRATIUM_PEP_CONNECT_TIMEOUT`. It is the harness's own budget for the hook
-process; the connect timeout bounds only the PDP dial.
+**Set the `PreToolUse` `timeout` above the hook's own time budget.** The
+`timeout` is the harness's budget for the hook process, in seconds. A harness
+that gives up on a hook treats it as a non-blocking error and **runs the tool
+call**, so a `timeout` that expires while the hook is still waiting for an
+approval lets the call through.
+
+The hook always answers within
+
+```text
+STRATIUM_PEP_APPROVAL_TIMEOUT + 4 × STRATIUM_PEP_CONNECT_TIMEOUT
+```
+
+and denies if it reaches that point without a decision. With the values above
+that is 120s + 4 × 5s = 140s, so `150` leaves a margin. If you raise either
+variable, raise the `timeout` with it. `deploy/stratium install` computes the
+value from the two variables in its environment, and `status` and `doctor`
+report a `timeout` that is too short.
 
 `SessionStart` carries no `matcher` on purpose, so it runs for every session
 source — `startup`, `resume`, `clear`, `compact`, `fork`. A resumed session gets
