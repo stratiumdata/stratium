@@ -32,7 +32,7 @@
 # already done exactly that work. A missing dist fails loudly at `go build`
 # with a message that names the problem, which is the failure mode this
 # choice trades for.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src/services
 COPY services/go.mod services/go.sum ./

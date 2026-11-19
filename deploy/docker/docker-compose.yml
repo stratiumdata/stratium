@@ -3,9 +3,11 @@
 # fresh volumes up, integration tests against the running stack, volumes
 # torn down again — see that target for the exact sequence.
 #
-# Ports are published without a fixed host port ("5432", not "5432:5432")
-# so this doesn't collide with a developer's own Postgres or a previous run;
-# `docker compose port <service> <port>` resolves the actual mapping.
+# Ports are published without a fixed host port ("127.0.0.1::5432", not
+# "5432:5432") so this doesn't collide with a developer's own Postgres or a
+# previous run; `docker compose port <service> <port>` resolves the actual
+# mapping. Every port is bound to 127.0.0.1: Docker's default is every
+# interface, and this stack's credentials are committed development values.
 services:
   postgres:
     image: postgres:16
@@ -17,7 +19,7 @@ services:
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432"
+      - "127.0.0.1::5432"
     healthcheck:
       # Over TCP (-h), not the default local socket. On first start the image
       # runs a temporary server to execute init-db.sql, then stops it and
@@ -79,7 +81,7 @@ services:
       # 5m default rather than a value only this file uses.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # Second PDP instance, wired for one purpose: internal/store/
   # store_integration_test.go's TestIntegration_Live_OrphanLanguageDeniesNamingIt
@@ -145,7 +147,7 @@ services:
       # mismatch, not pass by accident.
       STRATIUM_POLICY_LANGUAGES: cedar,json,xacml
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # Third PDP instance, wired for one purpose: internal/store/
   # store_integration_test.go's resource-identity live proofs (Phase 7 Task
@@ -195,7 +197,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # Fourth PDP instance, wired for one purpose: Task 4's real-Envoy proof
   # (services/internal/store/extauthz_integration_test.go) needs a PDP that
@@ -241,7 +243,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # stratium-pep, running in extauthz mode: the ext_authz service the envoy
   # service below calls on every request it fronts. Built from a separate
@@ -344,7 +346,7 @@ services:
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
     ports:
-      - "10000"
+      - "127.0.0.1::10000"
 
   # Sixth PDP instance, wired for one purpose: Task 4's real-gRPC-service
   # proxy proof (services/internal/store/proxy_integration_test.go) needs a
@@ -384,7 +386,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # Seventh PDP instance, wired for one purpose: Phase 12 Task 3's live-stack
   # revocation-epoch proofs (services/internal/store/revocation_epoch_e2e_
@@ -446,7 +448,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # The real gRPC service Task 4's proxy proof puts stratium-pep proxy in
   # front of. Unlike echo-upstream (deploy/docker/echo-upstream/main.go,
@@ -472,7 +474,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.grpc-target
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # stratium-pep, running in proxy mode: Task 4's own real-gRPC-service
   # proof. Built from Dockerfile.pep, the same image pep-extauthz already
@@ -562,7 +564,7 @@ services:
       STRATIUM_PEP_APPROVAL_POLL_INTERVAL: 200ms
       STRATIUM_PEP_APPROVAL_TIMEOUT: 30s
     ports:
-      - "9292"
+      - "127.0.0.1::9292"
 
   # A second PAP, bound to pdp-proxy's own tenant (tenant-proxy-integration),
   # modelled directly on pap-extauthz below: stratium-pap serves
@@ -594,7 +596,7 @@ services:
       STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers,all-staff
       STRATIUM_PAP_LISTEN_ADDR: :8080
     ports:
-      - "8080"
+      - "127.0.0.1::8080"
 
   # Eighth PDP instance, wired for one purpose: Task 4's live-stack decision-
   # cache proofs (services/internal/store/cache_e2e_integration_test.go) need
@@ -645,7 +647,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # The PDP behind the `mcp` enforcement surface's live proofs
   # (internal/store/mcp_e2e_integration_test.go) -- the LAST of the four
@@ -704,7 +706,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # A REAL IdP, and the first component in this stack that authenticates a
   # human. Phase 14 Task 8's proofs need one because N2 (spec §8) leaves
@@ -779,12 +781,9 @@ services:
       # also needs `127.0.0.1 keycloak` in the host's /etc/hosts; the two go
       # together, and neither alone is enough.
       #
-      # Bound to 127.0.0.1 explicitly. Docker's default is 0.0.0.0, and this
-      # is the only FIXED port in this file -- the other seventeen services
-      # take an ephemeral one -- so a bare "8080:8080" would put a guessable
-      # IdP holding this stack's seeded admin credentials on every interface
-      # of the host, LAN included. The hosts entry above maps keycloak to
-      # 127.0.0.1, so loopback is exactly where the browser looks.
+      # The only FIXED host port in this file; every other one is ephemeral.
+      # Bound to 127.0.0.1 like the rest. The hosts entry above maps keycloak
+      # to 127.0.0.1, so loopback is exactly where the browser looks.
       - "127.0.0.1:8080:8080"
     healthcheck:
       test:
@@ -832,7 +831,7 @@ services:
       # makes it required, so every PDP service sets one.
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
   # The admin plane itself, live, for the first time: the most privileged
   # component in this system and the only internet-facing one, holding
@@ -889,7 +888,7 @@ services:
       STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers,all-staff
       STRATIUM_PAP_LISTEN_ADDR: :8080
     ports:
-      - "8080"
+      - "127.0.0.1::8080"
 
   # A SECOND stratium-pap, on the extauthz proof's own tenant. Not
   # redundancy: N1 makes the tenant startup configuration and forbids any
@@ -937,7 +936,7 @@ services:
       STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers,all-staff
       STRATIUM_PAP_LISTEN_ADDR: :8080
     ports:
-      - "8080"
+      - "127.0.0.1::8080"
 
   # LiteLLM, fronted by Envoy for the extauthz PEP example: which model an
   # agent may call becomes a policy decision at the ext_authz filter, not
@@ -974,7 +973,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "4000"
+      - "127.0.0.1::4000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"]
       interval: 5s
@@ -1016,7 +1015,7 @@ services:
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
     ports:
-      - "50051"
+      - "127.0.0.1::50051"
 
 volumes:
   pgdata:

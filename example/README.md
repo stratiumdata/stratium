@@ -150,7 +150,7 @@ All three runnable examples need:
   instance for all three.
 - **Node.js**, for `mcp` only — it launches the real
   `@modelcontextprotocol/server-filesystem` via `npx`.
-- **Go 1.25+** to build and run any of the three programs:
+- **Go 1.26+** to build and run any of the three programs:
   `cd example && go build ./... && go vet ./...`.
 
 `example/hook` needs none of this to *read* — it ships a configuration and an
