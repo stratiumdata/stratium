@@ -9,7 +9,8 @@
 // write. The file is then the whole configuration: every STRATIUM_PEP_*
 // variable already in the environment is dropped first, so an optional
 // setting the file leaves out (STRATIUM_PEP_PDP_INSECURE, say) cannot be
-// supplied from the environment either.
+// supplied from the environment either. The proxy and certificate-trust
+// variables the Go runtime and grpc-go read for themselves go with them.
 package main
 
 import (
@@ -20,8 +21,37 @@ import (
 
 const configKeyPrefix = "STRATIUM_PEP_"
 
+// ambientNetworkEnv names the variables, outside the STRATIUM_PEP_ prefix,
+// that change where a connection goes or whose certificate it accepts. Go's
+// TLS and proxy support and grpc-go read them straight from the environment,
+// so a pinned configuration has to drop them too; GRPC_-prefixed variables are
+// dropped as a group (see pinnedEnvDropped). Matched without regard to case,
+// because the proxy variables are honoured in both spellings.
+var ambientNetworkEnv = []string{
+	"SSL_CERT_FILE", "SSL_CERT_DIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"GODEBUG",
+}
+
+// pinnedEnvDropped reports whether --config removes key from the environment.
+func pinnedEnvDropped(key string) bool {
+	if strings.HasPrefix(key, configKeyPrefix) {
+		return true
+	}
+	upper := strings.ToUpper(key)
+	if strings.HasPrefix(upper, "GRPC_") {
+		return true
+	}
+	for _, name := range ambientNetworkEnv {
+		if upper == name {
+			return true
+		}
+	}
+	return false
+}
+
 // applyConfigFile looks for `--config <file>` in a subcommand's arguments and,
-// when present, clears every STRATIUM_PEP_* variable from the process
+// when present, clears every variable pinnedEnvDropped names from the process
 // environment and sets each KEY=value line of that file in its place. Blank lines and lines starting with # are skipped; a value is
 // everything after the first "=", trimmed of surrounding space, taken
 // literally (no quoting, no expansion). Any error leaves the caller unable to
@@ -37,7 +67,7 @@ func applyConfigFile(args []string) error {
 		return fmt.Errorf("--config: %w", err)
 	}
 	for _, kv := range os.Environ() {
-		if key, _, _ := strings.Cut(kv, "="); strings.HasPrefix(key, configKeyPrefix) {
+		if key, _, _ := strings.Cut(kv, "="); pinnedEnvDropped(key) {
 			if err := os.Unsetenv(key); err != nil {
 				return fmt.Errorf("--config: clearing %s: %w", key, err)
 			}

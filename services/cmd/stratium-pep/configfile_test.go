@@ -21,6 +21,11 @@ func TestApplyConfigFile_FileReplacesEnvironment(t *testing.T) {
 	t.Setenv("STRATIUM_PEP_PDP_ADDR", "from-env:1")
 	t.Setenv("STRATIUM_PEP_PDP_INSECURE", "true")
 	t.Setenv("HOME_GROWN", "untouched")
+	ambient := []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "no_proxy",
+		"SSL_CERT_FILE", "SSL_CERT_DIR", "GODEBUG", "GRPC_PROXY_EXP", "grpc_proxy"}
+	for _, k := range ambient {
+		t.Setenv(k, "from-env")
+	}
 	path := writeConfig(t, "# pinned\n\nSTRATIUM_PEP_PDP_ADDR = pinned:50051\nSTRATIUM_PEP_PURPOSE=a=b\n")
 
 	for _, args := range [][]string{{"--config", path}, {"--config=" + path}} {
@@ -38,8 +43,13 @@ func TestApplyConfigFile_FileReplacesEnvironment(t *testing.T) {
 	if got, set := os.LookupEnv("STRATIUM_PEP_PDP_INSECURE"); set {
 		t.Errorf("PDP_INSECURE = %q, a setting the file leaves out must not come from the environment", got)
 	}
+	for _, k := range ambient {
+		if got, set := os.LookupEnv(k); set {
+			t.Errorf("%s = %q, proxy and trust variables must not survive --config", k, got)
+		}
+	}
 	if got := os.Getenv("HOME_GROWN"); got != "untouched" {
-		t.Errorf("HOME_GROWN = %q, only STRATIUM_PEP_* variables are cleared", got)
+		t.Errorf("HOME_GROWN = %q, unrelated variables are left alone", got)
 	}
 }
 

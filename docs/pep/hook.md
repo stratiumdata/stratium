@@ -65,7 +65,9 @@ crash — fail-closed is the whole design.
 **`--config <file>` pins the configuration.** `stratium-pep hook --config
 /etc/stratium/pep.env` reads `STRATIUM_PEP_NAME=value` lines from the file and
 ignores every `STRATIUM_PEP_*` variable in the environment, including optional
-ones the file leaves out. `session-start` takes the same
+ones the file leaves out. It also drops the proxy and certificate-trust
+variables (`HTTPS_PROXY`, `SSL_CERT_FILE` and the like, `GODEBUG`, `GRPC_*`),
+so the PDP connection goes where the file says and trusts what the file says. `session-start` takes the same
 flag. A file that is missing or malformed is a deny. See
 [What the install protects](#what-the-install-protects) for why you would want
 it.
