@@ -40,6 +40,7 @@ reached the beginning.
 | `event_type=decision` | every allow and deny |
 | `event_type=delegation_created` | when sessions and sub-agent delegations were issued, and the [approval threshold](require-approval.md) each one got (`action`: `escalate_at DESTRUCTIVE`, or `escalate_at none`) |
 | `event_type=containment` | edits that widened an agent's grant |
+| `event_type=unmatched_tool_use` | tool calls that ran with [no decision on record](../pep/hook.md#reporting-tool-calls) |
 | `agent_id=…` | one agent |
 | `limit=…` | page size, up to 500 |
 

@@ -1861,6 +1861,14 @@ computed in the PDP.
           { "type": "command", "command": "stratium-pep hook", "timeout": 330, "onFailure": "block" }
         ]
       }
+    ],
+    "PostToolUse": [
+      { "matcher": "*",
+        "hooks": [ { "type": "command", "command": "stratium-pep report", "timeout": 15 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*",
+        "hooks": [ { "type": "command", "command": "stratium-pep report", "timeout": 15 } ] }
     ]
   }
 }

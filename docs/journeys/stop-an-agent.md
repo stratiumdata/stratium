@@ -48,6 +48,11 @@ Set `suspended` back to `false` to resume. Nothing else needs to change.
 
 ## Afterwards
 
+If you are here because the Delegations screen marked a session `N undecided`,
+revoking does not stop it: that session's tool calls are running without
+asking. Stop the agent process itself, then find out why its decision hook is
+not running ([Reporting tool calls](../pep/hook.md#reporting-tool-calls)).
+
 Revocations and suspensions are recorded in the audit log, attributed to the
 operator who made them. Continue with
 [Investigate what an agent did](investigate.md).

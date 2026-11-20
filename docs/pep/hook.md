@@ -93,6 +93,16 @@ that is set; only [`mcp`](mcp.md) reads it.
       { "matcher": "*",
         "hooks": [
           { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150, "onFailure": "block" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep report", "timeout": 15 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep report", "timeout": 15 } ] }
     ]
   }
 }
@@ -231,6 +241,49 @@ exit 2
 Point the hook at the shim, with no subcommand — the shim supplies it. Every
 non-zero becomes `2`, so a crashed or missing binary denies rather than falling
 through: **the allow case is the only one that exits 0.**
+
+---
+
+## Reporting tool calls
+
+`stratium-pep hook` asks the PDP before a tool call. `stratium-pep report`
+tells the PDP after one that it ran. It is installed on Claude Code's
+`PostToolUse` and `PostToolUseFailure` events (a tool call that fails still
+ran) and needs three of the hook's variables: `STRATIUM_PEP_PDP_ADDR`,
+`STRATIUM_PEP_SESSION_FILE` and `STRATIUM_PEP_CONNECT_TIMEOUT`.
+
+The PDP looks for the ALLOW it recorded for that session, that tool and
+exactly that input. If there is one, nothing happens. If there is none, the
+tool call ran without being decided, and the PDP:
+
+- appends an audit entry with `event_type` `unmatched_tool_use`, naming the
+  delegation, the agent, the tool and the input's fingerprint;
+- logs `tool call ran without an ALLOW decision` at error level;
+- counts it against the delegation: `GET /v1/delegations` returns
+  `unmatched_tool_uses`, and the Delegations screen marks the session
+  `N undecided`.
+
+A session that is governed properly produces none. One or more means the
+decision hook did not run for a call that went ahead: its entry was removed or
+narrowed, the harness gave up on it, or something changed the input after the
+decision. [Stop the session](../journeys/stop-an-agent.md), then
+[investigate](../journeys/investigate.md).
+
+`report` never blocks and never changes a decision; the call it describes is
+over. If it cannot reach the PDP it prints one line to stderr and exits `0`.
+
+What it does not tell you:
+
+- **Nothing, if neither hook runs.** An agent that can remove the decision hook
+  can remove this one too. Only an install the agent cannot edit
+  ([What the install protects](#what-the-install-protects)) keeps both.
+- **A report is lost** if the PDP is unreachable when the tool finishes.
+- **Keep the two matchers the same.** A `PostToolUse` matcher wider than the
+  `PreToolUse` one reports calls the decision hook was never asked about.
+  `deploy/stratium install` writes the same matcher to both.
+- **The reporter holds the session's token**, so an agent can file reports for
+  calls that never ran. That can only raise the count, never lower it.
+- **Claude Code only.** Codex and the [`mcp`](mcp.md) surface do not report.
 
 ---
 

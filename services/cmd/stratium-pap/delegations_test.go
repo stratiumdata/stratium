@@ -116,6 +116,19 @@ func expectDelegationList(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
 	mock.ExpectCommit()
 }
 
+// expectUnmatchedCounts is the second read GET /v1/delegations makes: the
+// per-delegation count of reported tool calls with no ALLOW on record.
+func expectUnmatchedCounts(mock sqlmock.Sqlmock, counts map[uuid.UUID]int) {
+	rows := sqlmock.NewRows([]string{"delegation_id", "count"})
+	for id, n := range counts {
+		rows.AddRow(id.String(), int64(n))
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("unmatched_tool_use").WillReturnRows(rows)
+	mock.ExpectCommit()
+}
+
 // TestListDelegations_ViewerRole_ReturnsRows: the route the revoke action was
 // missing, at RoleViewer like every other list route. Revoked rows come back
 // too — an operator who cannot see a revoked delegation cannot confirm their
@@ -141,14 +154,30 @@ func TestListDelegations_ViewerRole_ReturnsRows(t *testing.T) {
 			revoked.String(), int64(0), []byte(`[]`), nil,
 		)
 	expectDelegationList(f.mock, rows)
+	expectUnmatchedCounts(f.mock, map[uuid.UUID]int{live: 3})
 
 	rec := doRequest(t, f.server, http.MethodGet, "/v1/delegations", f.token(t, "org-viewers"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	got := decodeBody[[]models.Delegation](t, rec)
+	body := rec.Body.String() // decodeBody drains the recorder
+	got := decodeBody[[]listedDelegation](t, rec)
 	if len(got) != 2 {
 		t.Fatalf("GET /v1/delegations returned %d delegations, want 2 (a live one AND a revoked one)", len(got))
+	}
+	// The count rides on the delegation it belongs to, and a delegation with
+	// no reports says 0 rather than omitting the field.
+	for _, d := range got {
+		want := 0
+		if d.ID == live {
+			want = 3
+		}
+		if d.UnmatchedToolUses != want {
+			t.Errorf("delegation %s: unmatched_tool_uses = %d, want %d", d.ID, d.UnmatchedToolUses, want)
+		}
+	}
+	if !strings.Contains(body, `"unmatched_tool_uses":0`) {
+		t.Error("a delegation with no unmatched tool uses must still carry the field")
 	}
 	var sawRevoked bool
 	for _, d := range got {
@@ -169,6 +198,7 @@ func TestListDelegations_ViewerRole_ReturnsRows(t *testing.T) {
 func TestListDelegations_Empty_IsEmptyArrayNotNull(t *testing.T) {
 	f := newTestServerFixture(t)
 	expectDelegationList(f.mock, sqlmock.NewRows(delegationRowColumns()))
+	expectUnmatchedCounts(f.mock, nil)
 
 	rec := doRequest(t, f.server, http.MethodGet, "/v1/delegations", f.token(t, "org-viewers"))
 	if rec.Code != http.StatusOK {
@@ -205,6 +235,7 @@ func TestViewer_CanListButCannotRevoke(t *testing.T) {
 	}
 
 	expectDelegationList(f.mock, sqlmock.NewRows(delegationRowColumns()))
+	expectUnmatchedCounts(f.mock, nil)
 	rec = doRequest(t, f.server, http.MethodGet, "/v1/delegations", tok)
 	if rec.Code != http.StatusOK {
 		t.Errorf("GET /v1/delegations as a viewer: status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())

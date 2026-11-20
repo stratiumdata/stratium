@@ -76,6 +76,17 @@ describe('DelegationsScreen', () => {
     expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument()
   })
 
+  it('marks a delegation with tool calls that ran undecided, and no other', async () => {
+    vi.spyOn(api, 'delegations').mockResolvedValue([
+      delegation({ unmatched_tool_uses: 2 }),
+      delegation({ id: '33333333-3333-3333-3333-333333333333', unmatched_tool_uses: 0 }),
+    ])
+
+    render(<DelegationsScreen />)
+    expect(await screen.findByText('2 undecided')).toBeInTheDocument()
+    expect(screen.getAllByText(/undecided/)).toHaveLength(1)
+  })
+
   it('renders an empty tool list as unrestricted', async () => {
     vi.spyOn(api, 'delegations').mockResolvedValue([delegation({ approved_tools: [] })])
     render(<DelegationsScreen />)

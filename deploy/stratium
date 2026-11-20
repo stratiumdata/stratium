@@ -64,6 +64,7 @@ def ours(hook):
 # slow-but-answering PDP finishes before the harness gives up on the process.
 # PreToolUse's is computed: see hook_timeout().
 SESSION_START_TIMEOUT = 15
+REPORT_TIMEOUT = 15
 HOOK_TIMEOUT_MARGIN = 10
 
 
@@ -72,6 +73,8 @@ HOOK_TIMEOUT_MARGIN = 10
 # `hook` wants the two approval durations, `session-start` wants what the
 # delegation is for. Exporting 1a's block satisfies session-start and leaves
 # `hook` denying every call. selftest cross-checks these against the Go source.
+REPORT_ENV = ("STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_SESSION_FILE",
+              "STRATIUM_PEP_CONNECT_TIMEOUT")
 REQUIRED_ENV = {
     # services/cmd/stratium-pep/session_start.go (STRATIUM_PEP_PURPOSE is optional)
     "SessionStart": (
@@ -86,6 +89,9 @@ REQUIRED_ENV = {
         "STRATIUM_PEP_SESSION_FILE", "STRATIUM_PEP_CONNECT_TIMEOUT",
         "STRATIUM_PEP_APPROVAL_POLL_INTERVAL", "STRATIUM_PEP_APPROVAL_TIMEOUT",
     ),
+    # services/cmd/stratium-pep/report.go -- a subset of PreToolUse's
+    "PostToolUse": REPORT_ENV,
+    "PostToolUseFailure": REPORT_ENV,
 }
 
 
@@ -209,18 +215,31 @@ def missing_env(event, env=os.environ):
     return [v for v in REQUIRED_ENV.get(event, ()) if not env.get(v)]
 
 
-def entries(binary, matcher, only=None, hook_arg="hook"):
-    """The two groups to install, in docs/pep.md's shape.
+def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
+    """The groups to install, in docs/pep.md's shape. `tail` is appended to
+    every command (the system install's ` --config <file>`).
 
     SessionStart carries no matcher on purpose: it must fire for every session
     source (startup, resume, clear, compact, fork), so a resumed session gets a
     fresh delegation rather than whatever `hook` finds left over.
+
+    The two PostToolUse events run `report`, which tells the PDP a tool call
+    ran so it can spot one it never allowed. They take PreToolUse's matcher: a
+    wider one would report calls the decision hook was never asked about.
     """
+    report = {
+        "matcher": matcher,
+        "hooks": [{
+            "type": "command",
+            "command": f"{binary} report{tail}",
+            "timeout": REPORT_TIMEOUT,
+        }],
+    }
     all_events = {
         "SessionStart": {
             "hooks": [{
                 "type": "command",
-                "command": f"{binary} session-start",
+                "command": f"{binary} session-start{tail}",
                 "timeout": SESSION_START_TIMEOUT,
             }],
         },
@@ -228,10 +247,13 @@ def entries(binary, matcher, only=None, hook_arg="hook"):
             "matcher": matcher,
             "hooks": [{
                 "type": "command",
-                "command": f"{binary} {hook_arg}".strip(),
+                "command": f"{binary} {hook_arg}".strip() + tail,
                 "timeout": hook_timeout(),
             }],
         },
+        # A tool call that fails still ran, and arrives on its own event.
+        "PostToolUse": report,
+        "PostToolUseFailure": json.loads(json.dumps(report)),
     }
     if hook_arg:
         # Claude Code only (the Codex shim takes no argument): a hook that
@@ -438,8 +460,7 @@ def install_system(args):
     command = f"{binary} --config {conf}"
     if " " in command.replace(" --config ", ""):
         sys.exit("stratium: the install path must not contain spaces")
-    wanted = entries(binary, args.matcher, None, f"hook --config {conf}")
-    wanted["SessionStart"]["hooks"][0]["command"] = f"{binary} session-start --config {conf}"
+    wanted = entries(binary, args.matcher, tail=f" --config {conf}")
     body = "".join(f"{k}={v}\n" for k, v in pinned.items())
     if args.dry_run:
         print(f"--- would copy {src} to {binary} ---")
@@ -662,6 +683,11 @@ def selftest(_args):
             "command"] == "stratium-pep hook"
         assert entries("stratium-pep", "*")["PreToolUse"]["hooks"][0]["onFailure"] == "block"
         assert "onFailure" not in cx["PreToolUse"]["hooks"][0], cx
+        # report rides on both post-tool events with the decision hook's matcher
+        both = entries("stratium-pep", "Bash")
+        for ev in ("PostToolUse", "PostToolUseFailure"):
+            assert both[ev]["matcher"] == "Bash", both
+            assert both[ev]["hooks"][0]["command"] == "stratium-pep report", both
 
         # --system: three files under a relocated root, and uninstall removes them
         sroot = os.path.join(d, "sysroot")
@@ -686,6 +712,9 @@ def selftest(_args):
                     == f"{sbin} hook --config {sconf}"), sset
             assert (sset["hooks"]["SessionStart"][0]["hooks"][0]["command"]
                     == f"{sbin} session-start --config {sconf}"), sset
+            for ev in ("PostToolUse", "PostToolUseFailure"):
+                assert (sset["hooks"][ev][0]["hooks"][0]["command"]
+                        == f"{sbin} report --config {sconf}"), sset
             # the relocated root is ours, so every one of the three reads as exposed
             assert [w for w, _ in exposed(f"{sbin} hook --config {sconf}")] == [
                 "binary", "configuration"]
@@ -808,6 +837,8 @@ def selftest(_args):
         assert set(REQUIRED_ENV["SessionStart"]) == want_ss, (
             f"SessionStart drifted from session_start.go: "
             f"{want_ss ^ set(REQUIRED_ENV['SessionStart'])}")
+        assert set(REPORT_ENV) == literals("report.go"), (
+            f"REPORT_ENV drifted from report.go: {literals('report.go') ^ set(REPORT_ENV)}")
         want_h = literals("hook.go")
         assert set(REQUIRED_ENV["PreToolUse"]) == want_h, (
             f"PreToolUse drifted from hook.go: "
@@ -858,7 +889,8 @@ def selftest(_args):
 #   - only PreToolUse is wired; session-start is run by hand (§2e, last para).
 HARNESS = {
     "claude": {"path": ".claude/settings.json", "user_path": "~/.claude/settings.json",
-               "bin": "stratium-pep", "events": ("SessionStart", "PreToolUse"),
+               "bin": "stratium-pep",
+               "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
                "hook_arg": "hook"},
     # hook_arg is empty for Codex: 2e's shim IS the hook, and calls
     # `stratium-pep hook` itself. Passing "hook" to the shim would be a stray arg.
@@ -1708,7 +1740,8 @@ def add_options(p, suppress=False):
                         "under --codex; the test plan builds /tmp/stratium-pep)")
     p.add_argument("--matcher", default=d("*"),
                    help="PreToolUse matcher (default: *; 'Read' to start narrow)")
-    p.add_argument("--only", action="append", choices=["SessionStart", "PreToolUse"],
+    p.add_argument("--only", action="append",
+                   choices=["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"],
                    default=d(None),
                    help="install just this event, repeatable (default: every event the "
                         "harness wires). Use --only PreToolUse when a delegation already "

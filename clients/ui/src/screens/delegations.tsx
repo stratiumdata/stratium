@@ -230,6 +230,15 @@ export function DelegationsScreen() {
                   ) : (
                     <Badge tone="good">active</Badge>
                   )}
+                  {d.unmatched_tool_uses ? (
+                    <Badge
+                      tone="warn"
+                      className="ml-1"
+                      title="Tool calls that ran in this session with no ALLOW decision on record"
+                    >
+                      {d.unmatched_tool_uses} undecided
+                    </Badge>
+                  ) : null}
                 </TCell>
                 <TCell>
                   {d.revoked ? null : (

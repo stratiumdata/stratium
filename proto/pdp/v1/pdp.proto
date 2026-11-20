@@ -634,6 +634,31 @@ message GetApprovalResponse {
   google.protobuf.Timestamp expires_at = 2;
 }
 
+// ReportToolUseRequest tells the PDP that a tool call has run. A PEP sends it
+// from a point AFTER the tool call (Claude Code's PostToolUse hook), on a
+// separate path from the Decide that should have preceded it, so the PDP can
+// notice a tool call it was never asked about.
+message ReportToolUseRequest {
+  // token is the delegation's token, the same credential Decide takes. It
+  // identifies which delegation the tool call ran under. No proof of
+  // possession accompanies it: this RPC authorizes nothing.
+  string token = 1;
+
+  // tool and raw_input are the tool call that ran, in the exact form
+  // DecideRequest.tool and DecideRequest.raw_input carried for it. The match
+  // is on the tool name and a digest of raw_input's bytes, so a PEP must
+  // forward raw_input untouched, as it does for Decide.
+  string tool = 2;
+  string raw_input = 3;
+}
+
+message ReportToolUseResponse {
+  // matched is true when the PDP holds an ALLOW decision for this
+  // delegation, tool and raw_input. When false the PDP has recorded an
+  // "unmatched_tool_use" audit entry.
+  bool matched = 1;
+}
+
 service PDPService {
   rpc Decide(DecideRequest) returns (DecideResponse);
   rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
@@ -660,4 +685,10 @@ service PDPService {
   // polling after an ESCALATE response. See GetApprovalResponse's own doc
   // comment for why this RPC has no path to write anything.
   rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
+
+  // ReportToolUse checks a tool call that has already run against the
+  // decisions recorded for its delegation. It never changes a decision and
+  // is not part of authorization: it exists so that a tool call which ran
+  // without an ALLOW leaves an audit entry. See ReportToolUseRequest.
+  rpc ReportToolUse(ReportToolUseRequest) returns (ReportToolUseResponse);
 }

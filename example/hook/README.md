@@ -19,7 +19,7 @@ demo. Here, the harness is not this suite's to invent or to fake.
 
 So instead this directory ships three things:
 
-- **`settings.json`** — the two-hook block, ready to merge into a real
+- **`settings.json`** — the hook block, ready to merge into a real
   `.claude/settings.json`.
 - **`transcript.md`** — a real, captured Claude Code session hitting the deny
   path, with the actual refusal and the actual model reaction. Not a
@@ -39,6 +39,16 @@ So instead this directory ships three things:
       { "matcher": "*",
         "hooks": [
           { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150, "onFailure": "block" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep report", "timeout": 15 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep report", "timeout": 15 } ] }
     ]
   }
 }
