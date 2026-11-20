@@ -247,6 +247,11 @@ export interface Delegation {
    *  the agent's caps now does not change these. */
   classification_caps: Record<string, string>
   resource_constraints: Record<string, string>
+
+  /** Tool calls the harness reported as having run under this delegation
+   *  for which the PDP holds no ALLOW decision. Anything above zero means a
+   *  call ran without being decided. Only GET /v1/delegations sends it. */
+  unmatched_tool_uses?: number
 }
 
 /** An HTTP error carrying the status so a screen can say WHY it failed —

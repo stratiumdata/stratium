@@ -8,6 +8,8 @@ package main
 import (
 	"net/http"
 	"time"
+
+	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // listDelegations returns every delegation the tenant has, revoked and
@@ -20,7 +22,28 @@ func listDelegations(s *Server, w http.ResponseWriter, r *http.Request, _ Operat
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, delegations)
+	// One grouped read rather than a column on the delegation: the count
+	// lives in the audit log, which is the only place an unmatched tool use
+	// is recorded.
+	unmatched, err := s.store.CountUnmatchedToolUses(r.Context())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	out := make([]listedDelegation, len(delegations))
+	for i, d := range delegations {
+		out[i] = listedDelegation{Delegation: d, UnmatchedToolUses: unmatched[d.ID]}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// listedDelegation is a delegation as GET /v1/delegations returns it: the row
+// itself plus how many tool calls were reported under it with no ALLOW
+// decision on record (the PDP's ReportToolUse). Anything above zero means a
+// tool call ran in that session without being decided.
+type listedDelegation struct {
+	models.Delegation
+	UnmatchedToolUses int `json:"unmatched_tool_uses"`
 }
 
 // revokeDelegation sets revoked and revoked_at on the id delegation.

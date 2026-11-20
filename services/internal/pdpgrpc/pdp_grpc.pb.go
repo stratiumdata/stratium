@@ -29,6 +29,7 @@ const (
 	PDPService_CreateDelegation_FullMethodName = "/stratium.pdp.v1.PDPService/CreateDelegation"
 	PDPService_IssueToken_FullMethodName       = "/stratium.pdp.v1.PDPService/IssueToken"
 	PDPService_GetApproval_FullMethodName      = "/stratium.pdp.v1.PDPService/GetApproval"
+	PDPService_ReportToolUse_FullMethodName    = "/stratium.pdp.v1.PDPService/ReportToolUse"
 )
 
 // PDPServiceClient is the client API for PDPService service.
@@ -58,6 +59,11 @@ type PDPServiceClient interface {
 	// polling after an ESCALATE response. See GetApprovalResponse's own doc
 	// comment for why this RPC has no path to write anything.
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
+	// ReportToolUse checks a tool call that has already run against the
+	// decisions recorded for its delegation. It never changes a decision and
+	// is not part of authorization: it exists so that a tool call which ran
+	// without an ALLOW leaves an audit entry. See ReportToolUseRequest.
+	ReportToolUse(ctx context.Context, in *ReportToolUseRequest, opts ...grpc.CallOption) (*ReportToolUseResponse, error)
 }
 
 type pDPServiceClient struct {
@@ -108,6 +114,16 @@ func (c *pDPServiceClient) GetApproval(ctx context.Context, in *GetApprovalReque
 	return out, nil
 }
 
+func (c *pDPServiceClient) ReportToolUse(ctx context.Context, in *ReportToolUseRequest, opts ...grpc.CallOption) (*ReportToolUseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportToolUseResponse)
+	err := c.cc.Invoke(ctx, PDPService_ReportToolUse_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PDPServiceServer is the server API for PDPService service.
 // All implementations must embed UnimplementedPDPServiceServer
 // for forward compatibility.
@@ -135,6 +151,11 @@ type PDPServiceServer interface {
 	// polling after an ESCALATE response. See GetApprovalResponse's own doc
 	// comment for why this RPC has no path to write anything.
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
+	// ReportToolUse checks a tool call that has already run against the
+	// decisions recorded for its delegation. It never changes a decision and
+	// is not part of authorization: it exists so that a tool call which ran
+	// without an ALLOW leaves an audit entry. See ReportToolUseRequest.
+	ReportToolUse(context.Context, *ReportToolUseRequest) (*ReportToolUseResponse, error)
 	mustEmbedUnimplementedPDPServiceServer()
 }
 
@@ -156,6 +177,9 @@ func (UnimplementedPDPServiceServer) IssueToken(context.Context, *IssueTokenRequ
 }
 func (UnimplementedPDPServiceServer) GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetApproval not implemented")
+}
+func (UnimplementedPDPServiceServer) ReportToolUse(context.Context, *ReportToolUseRequest) (*ReportToolUseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportToolUse not implemented")
 }
 func (UnimplementedPDPServiceServer) mustEmbedUnimplementedPDPServiceServer() {}
 func (UnimplementedPDPServiceServer) testEmbeddedByValue()                    {}
@@ -250,6 +274,24 @@ func _PDPService_GetApproval_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PDPService_ReportToolUse_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportToolUseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDPServiceServer).ReportToolUse(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PDPService_ReportToolUse_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDPServiceServer).ReportToolUse(ctx, req.(*ReportToolUseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PDPService_ServiceDesc is the grpc.ServiceDesc for PDPService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -272,6 +314,10 @@ var PDPService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetApproval",
 			Handler:    _PDPService_GetApproval_Handler,
+		},
+		{
+			MethodName: "ReportToolUse",
+			Handler:    _PDPService_ReportToolUse_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

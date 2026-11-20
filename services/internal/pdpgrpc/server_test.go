@@ -106,6 +106,9 @@ type fakeStore struct {
 	appendErr error
 	appended  []audit.Entry
 
+	allowed        map[allowKey]bool
+	allowLookupErr error
+
 	// createErr/created back CreateDelegation (delegation_test.go). created
 	// only grows on a nil createErr, mirroring *store.Store's own
 	// transactional all-or-nothing behavior: a failed CreateDelegation
@@ -228,6 +231,21 @@ func (f *fakeStore) LoadChain(context.Context, uuid.UUID) ([]*models.Delegation,
 		return nil, f.chainErr
 	}
 	return f.chain, nil
+}
+
+// HasAllowDecision backs ReportToolUse (tool_use_test.go): allowed is the set
+// of (tool, digest) pairs the fake treats as having an ALLOW on record.
+func (f *fakeStore) HasAllowDecision(_ context.Context, _ uuid.UUID, tool string, digest [32]byte) (bool, error) {
+	f.calls++
+	if f.allowLookupErr != nil {
+		return false, f.allowLookupErr
+	}
+	return f.allowed[allowKey{tool, digest}], nil
+}
+
+type allowKey struct {
+	tool   string
+	digest [32]byte
 }
 
 func (f *fakeStore) AppendAudit(_ context.Context, e audit.Entry) error {

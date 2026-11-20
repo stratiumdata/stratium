@@ -308,6 +308,22 @@ and `hook` to run before every single tool call:
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "stratium-pep report", "timeout": 15 }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "stratium-pep report", "timeout": 15 }
+        ]
+      }
     ]
   }
 }
@@ -338,6 +354,10 @@ connect timeout (140s). See [the hook page](pep/hook.md) for the arithmetic.
 
 `"onFailure": "block"` makes Claude Code block the call, not run it, when the
 hook times out or cannot run.
+
+The two `PostToolUse` entries run `stratium-pep report` after every tool call,
+so the PDP can record a call that ran without an ALLOW. See
+[Reporting tool calls](pep/hook.md#reporting-tool-calls).
 
 This block lives in a file the agent can edit. For an install the agent's own
 user cannot change, see

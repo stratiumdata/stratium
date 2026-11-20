@@ -41,6 +41,10 @@ type Store interface {
 	LoadChain(ctx context.Context, actingDelegationID uuid.UUID) ([]*models.Delegation, error)
 	AppendAudit(ctx context.Context, e audit.Entry) error
 
+	// HasAllowDecision backs ReportToolUse (tool_use.go): is there an ALLOW
+	// decision on record for this delegation, tool and input digest.
+	HasAllowDecision(ctx context.Context, delegationID uuid.UUID, tool string, inputDigest [32]byte) (bool, error)
+
 	// CreateDelegation persists a new delegation, used by CreateDelegation
 	// (delegation.go). *store.Store's own doc comment covers ScopeNarrows
 	// enforcement and why root_delegation_id/depth are computed server-side
@@ -148,7 +152,7 @@ type TokenSigner interface {
 // call. Not a documented convention anywhere else in the schema, but it is
 // the value pkg/audit, internal/store's, and internal/authz's own tests all
 // already use for a decision entry — matched here rather than invented anew.
-const eventTypeDecision = "decision"
+const eventTypeDecision = store.EventTypeDecision
 
 // auditDeclaredTierAbsent is stored in an audit entry's DeclaredTier when the
 // request did not declare one. audit_chain.declared_tier is a plain SMALLINT
