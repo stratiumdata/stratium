@@ -303,7 +303,8 @@ and `hook` to run before every single tool call:
           {
             "type": "command",
             "command": "stratium-pep hook",
-            "timeout": 150
+            "timeout": 150,
+            "onFailure": "block"
           }
         ]
       }
@@ -334,6 +335,13 @@ the PDP. When Claude Code gives up on a hook it runs the tool call, so the
 `STRATIUM_PEP_CONNECT_TIMEOUT`. The hook denies if it reaches that point
 without a decision. The `150` above fits a 120s approval timeout and a 5s
 connect timeout (140s). See [the hook page](pep/hook.md) for the arithmetic.
+
+`"onFailure": "block"` makes Claude Code block the call, not run it, when the
+hook times out or cannot run.
+
+This block lives in a file the agent can edit. For an install the agent's own
+user cannot change, see
+[What the install protects](pep/hook.md#what-the-install-protects).
 
 ## Installing the `mcp` proxy
 

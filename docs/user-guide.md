@@ -1858,7 +1858,7 @@ computed in the PDP.
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "stratium-pep hook", "timeout": 330 }
+          { "type": "command", "command": "stratium-pep hook", "timeout": 330, "onFailure": "block" }
         ]
       }
     ]
@@ -2055,6 +2055,11 @@ classification, the system is working.
 - **`hook` has no decision cache.** It asks the PDP on every call, so a PDP
   outage denies every hooked tool call immediately.
 - **The PEP never logs a token or key material**, on any path.
+- **A per-project hook install can be undone by the agent it governs.** The
+  hook entry, the binary and the hook's environment all sit where the agent
+  can write. `sudo -E deploy/stratium --claude install --system` puts them
+  out of its reach; see
+  [What the install protects](pep/hook.md#what-the-install-protects).
 - **Uninstalling:** remove the hook from `.claude/settings.json` or
   `~/.codex/hooks.json`, restore the real MCP command, and delete the session
   file. A hook left installed against a stopped PDP denies every tool call.

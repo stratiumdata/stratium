@@ -62,6 +62,16 @@ crash — fail-closed is the whole design.
 > `TTL_SECONDS`. Export both sets (ten in total) in whatever shell launches
 > the agent.
 
+**`--config <file>` pins the configuration.** `stratium-pep hook --config
+/etc/stratium/pep.env` reads `STRATIUM_PEP_NAME=value` lines from the file and
+ignores every `STRATIUM_PEP_*` variable in the environment, including optional
+ones the file leaves out. It also drops the proxy and certificate-trust
+variables (`HTTPS_PROXY`, `SSL_CERT_FILE` and the like, `GODEBUG`, `GRPC_*`),
+so the PDP connection goes where the file says and trusts what the file says. `session-start` takes the same
+flag. A file that is missing or malformed is a deny. See
+[What the install protects](#what-the-install-protects) for why you would want
+it.
+
 **`hook` has no decision cache.** It asks the PDP on every call, so a PDP
 outage denies immediately. It ignores `STRATIUM_PEP_CACHE_STALENESS_WINDOW` if
 that is set; only [`mcp`](mcp.md) reads it.
@@ -82,7 +92,7 @@ that is set; only [`mcp`](mcp.md) reads it.
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150 } ] }
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150, "onFailure": "block" } ] }
     ]
   }
 }
@@ -114,6 +124,11 @@ variable, raise the `timeout` with it. `deploy/stratium install` computes the
 value from the two variables in its environment, and `status` and `doctor`
 report a `timeout` that is too short.
 
+**Keep `"onFailure": "block"`.** With it, Claude Code blocks the tool call when
+the hook times out or fails to run, instead of letting it through (observed on
+Claude Code 2.1.329). It is a second line behind the two rules above, not a
+replacement for them.
+
 `SessionStart` carries no `matcher` on purpose, so it runs for every session
 source — `startup`, `resume`, `clear`, `compact`, `fork`. A resumed session gets
 a fresh delegation rather than trusting whatever the file holds.
@@ -121,6 +136,74 @@ a fresh delegation rather than trusting whatever the file holds.
 > Installing `SessionStart` re-issues a delegation on every session start. If you
 > are testing a delegation you built by hand, install `--only PreToolUse` — the
 > `SessionStart` half will discard your work at the next launch.
+
+---
+
+## What the install protects
+
+The hook governs an agent that runs as you. Anything you can write, the agent
+can write. A per-project or per-user install therefore leaves three things
+within the agent's reach:
+
+| What | Where a per-project install puts it | What changing it does |
+|---|---|---|
+| The hook entry | `.claude/settings.json` | Removing it removes enforcement, immediately. |
+| The binary | wherever `--bin` points | Replacing it replaces the decision. |
+| The configuration | the environment, which a project settings file can set | Pointing `STRATIUM_PEP_PDP_ADDR` elsewhere changes who decides. |
+
+A per-project install is the right choice for trying Stratium out, and for an
+agent you trust not to edit its own guard rails. It does not hold against an
+agent that is trying to get out. `deploy/stratium status` and `doctor` print a
+warning naming each of the three that the current user can change.
+
+**The system install** puts all three where only root can write:
+
+```sh
+# with the STRATIUM_PEP_* variables exported, as for a per-project install
+sudo -E deploy/stratium --claude install --system --bin ./bin/stratium-pep
+```
+
+| What | Where |
+|---|---|
+| The binary | `/opt/stratium/bin/stratium-pep` |
+| The configuration | `/etc/stratium/pep.env`, read through `--config` |
+| The hook entry | Claude Code's managed settings: `/Library/Application Support/ClaudeCode/managed-settings.d/50-stratium.json` on macOS, `/etc/claude-code/managed-settings.d/50-stratium.json` on Linux |
+
+Claude Code merges hooks from managed settings with every other scope, and a
+user or project settings file cannot remove or disable them. **Observed** on
+Claude Code 2.1.329 (macOS), with the system install in place the hook still
+decided the call when:
+
+- a project `.claude/settings.json` set `"disableAllHooks": true` and its own
+  `STRATIUM_PEP_PDP_ADDR`;
+- the session was launched with `--settings '{"disableAllHooks": true}'`;
+- the session was launched with `--setting-sources ""`;
+- the session was launched with `--safe-mode`.
+
+`--bare` was not tested. `sudo
+deploy/stratium --claude uninstall --system` removes the three files, and
+`deploy/stratium --claude status --system` reports on them.
+
+What the system install does not change:
+
+- **The session file stays writable by you.** It holds the agent's own
+  delegation, which the PDP checks on every call. Deleting or corrupting it
+  denies every call; it cannot widen what the agent may do.
+- **The configuration is machine-wide.** Every user of the machine gets the
+  agent id and subject recorded in `pep.env`.
+- **Another policy source can displace the file.** When a device-management
+  profile or server-managed settings are also present, Claude Code may use that
+  source and ignore the file. Run `/status` in a session and check that the
+  managed settings are listed.
+- **A user with `sudo` can undo it**, and so can an agent that is given `sudo`.
+- **It covers Claude Code only.** Codex reads a system hook file as well; this
+  installer does not write it yet.
+- **A hook is a guard rail the harness chooses to run.** Launch options that
+  skip hooks are the harness's to define, and the list above is what was
+  tested, not a guarantee. A boundary that does not depend on
+  the harness needs the thing being protected to be out of the agent's reach:
+  run [`proxy`](proxy.md) or [`extauthz`](extauthz.md) as a different user or
+  on a different host, in front of a service the agent has no other route to.
 
 ---
 
@@ -174,7 +257,8 @@ Four unrelated causes all exit `2`, so read the reason, never the code:
 - **Everything denies until a session exists.** Installing the hook and seeing
   every call refused is usually correct behaviour, not a bug.
 - **Installation takes effect in a running session immediately** — so does
-  removal. Installing a `matcher: "*"` hook from inside a session you are using
+  removal, by you or by the agent: see
+  [What the install protects](#what-the-install-protects). Installing a `matcher: "*"` hook from inside a session you are using
   gags it on the next call.
 - **Fieldless tools deny under any cap.** `Glob`, `Grep`, `WebFetch`,
   `WebSearch` and `TodoWrite` declare no resource field, so nothing can be
