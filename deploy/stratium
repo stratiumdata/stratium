@@ -35,6 +35,8 @@ run — until then every tool call is denied for want of a session.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
@@ -165,7 +167,21 @@ def go_seconds(text, default):
     return sum(float(n) * units[u] for n, u in parts)
 
 
-def hook_timeout():
+def hook_env(command):
+    """The settings a hook command will see: its --config file if it names one
+    (the binary then ignores the environment), else this shell's environment."""
+    words = (command or "").split()
+    if "--config" not in words[:-1]:
+        return os.environ
+    try:
+        with open(words[words.index("--config") + 1]) as f:
+            return dict(l.strip().split("=", 1) for l in f
+                        if "=" in l and not l.lstrip().startswith("#"))
+    except OSError:
+        return {}
+
+
+def hook_timeout(env=os.environ):
     """The PreToolUse `timeout` to install, in seconds.
 
     A harness that gives up on a hook runs the tool call anyway, so this must be
@@ -173,24 +189,24 @@ def hook_timeout():
     services/cmd/stratium-pep/hook.go: the approval timeout plus four connect
     timeouts. Read from this shell's environment, else the quickstart values.
     """
-    approval = go_seconds(os.environ.get("STRATIUM_PEP_APPROVAL_TIMEOUT"), 120)
-    connect = go_seconds(os.environ.get("STRATIUM_PEP_CONNECT_TIMEOUT"), 5)
+    approval = go_seconds(env.get("STRATIUM_PEP_APPROVAL_TIMEOUT"), 120)
+    connect = go_seconds(env.get("STRATIUM_PEP_CONNECT_TIMEOUT"), 5)
     return math.ceil(approval + 4 * connect) + HOOK_TIMEOUT_MARGIN
 
 
-def timeout_too_short(event, timeout):
+def timeout_too_short(event, timeout, env=os.environ):
     """True if an installed PreToolUse timeout would expire before the hook answers."""
     if event != "PreToolUse":
         return False
-    return not isinstance(timeout, (int, float)) or timeout < hook_timeout()
+    return not isinstance(timeout, (int, float)) or timeout < hook_timeout(env)
 
 
 TIMEOUT_FIX = ("the harness would stop waiting before the hook answers, and then "
                "run the tool call; re-run install")
 
 
-def missing_env(event):
-    return [v for v in REQUIRED_ENV.get(event, ()) if not os.environ.get(v)]
+def missing_env(event, env=os.environ):
+    return [v for v in REQUIRED_ENV.get(event, ()) if not env.get(v)]
 
 
 def entries(binary, matcher, only=None, hook_arg="hook"):
@@ -217,6 +233,10 @@ def entries(binary, matcher, only=None, hook_arg="hook"):
             }],
         },
     }
+    if hook_arg:
+        # Claude Code only (the Codex shim takes no argument): a hook that
+        # times out or crashes then blocks the call instead of letting it run.
+        all_events["PreToolUse"]["hooks"][0]["onFailure"] = "block"
     return {e: g for e, g in all_events.items() if not only or e in only}
 
 
@@ -293,6 +313,8 @@ def resolves(binary):
 
 
 def install(args):
+    if getattr(args, "system", False):
+        return install_system(args)
     if not args.force and not resolves(args.bin):
         # Refusing rather than warning, because the failure is fail-open, not
         # broken: a PreToolUse hook whose command is missing exits 127, and
@@ -323,7 +345,151 @@ def install(args):
         next_steps(list(wanted), "codex" if args.harness == "codex" else "claude", args.bin)
 
 
+# --system: where an administrator's install lives. A per-project install puts
+# the hook entry, the binary and the hook's configuration where the governed
+# agent can write; these three paths are writable by root alone.
+SYSTEM_BIN = "/opt/stratium/bin/stratium-pep"
+SYSTEM_CONF = "/etc/stratium/pep.env"
+MANAGED_DIR = ("/Library/Application Support/ClaudeCode" if sys.platform == "darwin"
+               else "/etc/claude-code")
+MANAGED_SETTINGS = MANAGED_DIR + "/managed-settings.d/50-stratium.json"
+
+
+def under(root, path):
+    """`path` relocated beneath `root` ("/" in real use, a temp dir in selftest)."""
+    return os.path.join(root, path.lstrip("/"))
+
+
+def writable_here(path):
+    """The first of `path` and the directories above it that this user can change.
+
+    A writable directory counts even when the file itself is read-only: whoever
+    can write a directory can replace what is in it. A sticky directory (/tmp)
+    does not, since it lets you replace only your own files.
+    """
+    p = os.path.realpath(path)
+    first = True
+    while True:
+        if os.path.exists(p) and os.access(p, os.W_OK) and (
+                first or not os.stat(p).st_mode & 0o1000):
+            return p
+        first = False
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
+def not_root_only(path):
+    """The first of `path` and the directories above it a non-root user can change."""
+    p = os.path.realpath(path)
+    while True:
+        st = os.stat(p)
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            return p
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
+def exposed(command):
+    """Files behind a hook command that this user can change: [(what, path)]."""
+    words = (command or "").split()
+    if not words:
+        return []
+    files = [("binary", words[0] if os.sep in words[0] else shutil.which(words[0]))]
+    if "--config" in words[:-1]:
+        files.append(("configuration", words[words.index("--config") + 1]))
+    return [(what, hit) for what, f in files if f
+            for hit in [writable_here(f)] if hit]
+
+
+EXPOSED_FIX = ("the agent runs as you, so it can change this and stop being governed; "
+               "`sudo -E deploy/stratium --claude install --system` puts it out of reach")
+
+
+def install_system(args):
+    """Install where only root can write: binary, configuration, managed hook entry."""
+    root = args.system_root
+    if args.harness != "claude":
+        sys.exit("stratium: --system covers Claude Code only")
+    real = root == "/" and not args.dry_run
+    if real and os.geteuid() != 0:
+        sys.exit("stratium: --system writes root-owned files; run it with sudo -E "
+                 "(-E keeps the STRATIUM_PEP_* variables it records)")
+    src = shutil.which(args.bin) if os.sep not in args.bin else args.bin
+    if not src or not resolves(src):
+        sys.exit(f"stratium: {args.bin!r} is not runnable; pass --bin with the path "
+                 "of a built stratium-pep")
+    pinned = {k: v for k, v in sorted(os.environ.items())
+              if k.startswith("STRATIUM_PEP_") and v}
+    need = [v for e in ("SessionStart", "PreToolUse") for v in REQUIRED_ENV[e]]
+    gone = sorted({v for v in need if v not in pinned})
+    if gone:
+        sys.exit(f"stratium: --system records the hook's configuration in {SYSTEM_CONF}, "
+                 f"and {len(gone)} required values are not set here: {', '.join(gone)}. "
+                 "Export them, then use sudo -E so they survive sudo.")
+    if any("\n" in v for v in pinned.values()):
+        sys.exit("stratium: a STRATIUM_PEP_* value contains a newline")
+
+    binary, conf = under(root, SYSTEM_BIN), under(root, SYSTEM_CONF)
+    settings = under(root, MANAGED_SETTINGS)
+    command = f"{binary} --config {conf}"
+    if " " in command.replace(" --config ", ""):
+        sys.exit("stratium: the install path must not contain spaces")
+    wanted = entries(binary, args.matcher, None, f"hook --config {conf}")
+    wanted["SessionStart"]["hooks"][0]["command"] = f"{binary} session-start --config {conf}"
+    body = "".join(f"{k}={v}\n" for k, v in pinned.items())
+    if args.dry_run:
+        print(f"--- would copy {src} to {binary} ---")
+        print(f"--- would write {conf} ---\n{body}", end="")
+        save(settings, {"hooks": {e: [g] for e, g in wanted.items()}}, True)
+        return 0
+
+    for path, mode in ((binary, 0o755), (conf, 0o644), (settings, 0o644)):
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+        os.close(fd)
+        if path == binary:
+            shutil.copyfile(src, tmp)
+        else:
+            with open(tmp, "w") as f:
+                f.write(body if path == conf else json.dumps(
+                    {"hooks": {e: [g] for e, g in wanted.items()}}, indent=2) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        if real:
+            open_to = not_root_only(path)
+            if open_to:
+                sys.exit(f"stratium: {open_to} can be changed by a non-root user, so "
+                         f"{path} is not protected. Fix its owner and mode, then re-run.")
+        print(f"wrote {path}")
+    print("\nNEXT — restart any running Claude Code session, then check that `/status` "
+          "lists the managed settings\nas a source: when another policy source (MDM, "
+          "server-managed settings) is present, Claude Code\nmay use that one and ignore "
+          "this file. The session file path recorded above must stay writable\nby the "
+          "user who runs the agent.")
+    return 0
+
+
+def uninstall_system(args):
+    """Remove exactly what install_system wrote."""
+    paths = [under(args.system_root, p) for p in (MANAGED_SETTINGS, SYSTEM_CONF, SYSTEM_BIN)]
+    for path in paths:
+        if not os.path.exists(path):
+            print(f"not there: {path}")
+        elif args.dry_run:
+            print(f"would remove {path}")
+        else:
+            os.unlink(path)
+            print(f"removed {path}")
+    return 0
+
+
 def uninstall(args):
+    if getattr(args, "system", False):
+        return uninstall_system(args)
     settings = load(args.settings)
     removed = strip(settings)
     if not removed:
@@ -347,22 +513,35 @@ def status(args):
     if not found:
         print(f"no Stratium hooks in {args.settings}")
         return 1
+    open_to = [("hook entry", writable_here(args.settings))]
     incomplete = False
     for event, command, timeout, matcher in found:
         m = "" if matcher is None else f" matcher={matcher!r}"
         print(f"{event}{m} command={command!r} timeout={timeout}")
         runnable = resolves(command)
-        gone = missing_env(event)
+        env = hook_env(command)
+        gone = missing_env(event, env)
         if not runnable:
             print(f"  command: NOT RUNNABLE — {command.split()[0]!r} is not there")
+        where = "config" if env is not os.environ else "env"
         if gone:
-            print(f"  env: missing {', '.join(gone)}")
+            print(f"  {where}: missing {', '.join(gone)}")
         elif REQUIRED_ENV.get(event):
-            print(f"  env: all {len(REQUIRED_ENV[event])} set")
-        short = timeout_too_short(event, timeout)
+            print(f"  {where}: all {len(REQUIRED_ENV[event])} set")
+        short = timeout_too_short(event, timeout, env)
         if short:
-            print(f"  timeout: TOO SHORT — needs at least {hook_timeout()}; {TIMEOUT_FIX}")
+            print(f"  timeout: TOO SHORT — needs at least {hook_timeout(env)}; {TIMEOUT_FIX}")
+        open_to += exposed(command)
         incomplete = incomplete or gone or not runnable or short
+    # A warning, not a failure: a per-project install is a supported setup.
+    open_to = sorted({(w, h) for w, h in open_to if h})
+    for what, hit in open_to:
+        print(f"warning: {what} is writable by you: {hit}")
+    if open_to:
+        print(f"         {EXPOSED_FIX}")
+    if incomplete and getattr(args, "system", False):
+        print("\nre-run: sudo -E deploy/stratium --claude install --system")
+        return 1
     if incomplete:
         next_steps([e for e, _, _, _ in found],
                    "codex" if args.harness == "codex" else "claude",
@@ -481,6 +660,56 @@ def selftest(_args):
         assert cx["PreToolUse"]["hooks"][0]["command"] == "stratium-codex-hook", cx
         assert entries("stratium-pep", "*", ["PreToolUse"])["PreToolUse"]["hooks"][0][
             "command"] == "stratium-pep hook"
+        assert entries("stratium-pep", "*")["PreToolUse"]["hooks"][0]["onFailure"] == "block"
+        assert "onFailure" not in cx["PreToolUse"]["hooks"][0], cx
+
+        # --system: three files under a relocated root, and uninstall removes them
+        sroot = os.path.join(d, "sysroot")
+        src = os.path.join(d, "stratium-pep")
+        with open(src, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(src, 0o755)
+        kept_env = dict(os.environ)
+        for v in set(REQUIRED_ENV["SessionStart"]) | set(REQUIRED_ENV["PreToolUse"]):
+            os.environ[v] = "5s" if "TIMEOUT" in v or "INTERVAL" in v else "x"
+        os.environ["STRATIUM_PEP_PDP_ADDR"] = "pdp.example:50051"
+        try:
+            sa = argparse.Namespace(harness="claude", system=True, system_root=sroot,
+                                    bin=src, matcher="*", dry_run=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sa) == 0
+            sbin, sconf = under(sroot, SYSTEM_BIN), under(sroot, SYSTEM_CONF)
+            sset = load(under(sroot, MANAGED_SETTINGS))
+            assert os.access(sbin, os.X_OK) and os.stat(sconf).st_mode & 0o777 == 0o644
+            assert "STRATIUM_PEP_PDP_ADDR=pdp.example:50051\n" in open(sconf).read()
+            assert (sset["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                    == f"{sbin} hook --config {sconf}"), sset
+            assert (sset["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                    == f"{sbin} session-start --config {sconf}"), sset
+            # the relocated root is ours, so every one of the three reads as exposed
+            assert [w for w, _ in exposed(f"{sbin} hook --config {sconf}")] == [
+                "binary", "configuration"]
+            assert not_root_only(sbin) == os.path.realpath(sbin)
+            # status reads a pinned hook's settings from its file, not this shell
+            pinned_cmd = f"{sbin} hook --config {sconf}"
+            assert hook_env(pinned_cmd)["STRATIUM_PEP_PDP_ADDR"] == "pdp.example:50051"
+            assert hook_env("stratium-pep hook") is os.environ
+            assert hook_timeout({"STRATIUM_PEP_APPROVAL_TIMEOUT": "5s",
+                                 "STRATIUM_PEP_CONNECT_TIMEOUT": "2s"}) == 23
+            del os.environ["STRATIUM_PEP_SUBJECT"]
+            try:
+                install_system(sa)
+                raise AssertionError("install --system ran without a required value")
+            except SystemExit as e:
+                assert "STRATIUM_PEP_SUBJECT" in str(e), e
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(sa)
+            assert not os.path.exists(sbin) and not os.path.exists(sconf)
+        finally:
+            os.environ.clear()
+            os.environ.update(kept_env)
+        # nothing above / is writable by an ordinary user; a sticky dir is not "writable"
+        assert exposed("") == [] and (os.geteuid() == 0 or writable_here("/etc/hosts") is None)
 
         # the PreToolUse timeout outlasts the hook: approval + 4 x connect + margin
         assert go_seconds("120s", 0) == 120 and go_seconds("1m30s", 0) == 90
@@ -585,7 +814,6 @@ def selftest(_args):
             f"{want_h ^ set(REQUIRED_ENV['PreToolUse'])}")
 
     # the guidance has to cover every required variable, or it is worse than none
-    import io, contextlib
     for events in (["SessionStart", "PreToolUse"], ["PreToolUse"]):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -643,6 +871,12 @@ HARNESS = {
 def resolve(args, parser):
     """Fill in the harness-dependent defaults and refuse the fail-open setups."""
     h = HARNESS[args.harness]
+    if getattr(args, "system", False):
+        if args.harness != "claude":
+            parser.error("--system covers Claude Code only")
+        args.settings = under(args.system_root, MANAGED_SETTINGS)
+        if args.bin is None and os.path.exists(PEP_BIN):
+            args.bin = PEP_BIN  # the binary to copy: the quickstart's build, if any
     if args.bin is None:
         args.bin = h["bin"]
     if args.settings is None:
@@ -869,6 +1103,7 @@ def hook_scopes():
     check is exactly what stops you finding it.
     """
     return [
+        ("claude managed", MANAGED_SETTINGS),
         ("claude project", os.path.join(REPO, ".claude", "settings.json")),
         ("claude project-local", os.path.join(REPO, ".claude", "settings.local.json")),
         ("claude user", os.path.expanduser("~/.claude/settings.json")),
@@ -1355,15 +1590,23 @@ def cmd_doctor(args):
               "           observed. If a session still denies with clean scopes here,\n"
               "           the hook is defined somewhere this list does not cover --\n"
               "           check `/hooks` inside that session, then restart it.")
+    exposed_any = False
     for scope, path, event, command, timeout in found:
         runnable = command and resolves(command)
         line("OK" if runnable else "XX", "hooks",
              f"{scope:<20} {event:<12} {command}",
              None if runnable else f"that command does not resolve; re-run install "
                                    f"with --bin {PEP_BIN}")
-        if timeout_too_short(event, timeout):
-            line("XX", "hooks", f"{scope:<20} timeout {timeout} is below {hook_timeout()}",
+        if timeout_too_short(event, timeout, hook_env(command)):
+            line("XX", "hooks", f"{scope:<20} timeout {timeout} is below "
+                                f"{hook_timeout(hook_env(command))}",
                  TIMEOUT_FIX)
+        for what, hit in [("hook entry", writable_here(path))] + exposed(command):
+            if hit:
+                print(f"!!  {'hooks':<12} {scope:<20} {what} writable by you: {hit}")
+                exposed_any = True
+    if exposed_any:
+        print(f"     note: {EXPOSED_FIX}")
 
     if state.get("agent_id"):
         gone = [v for v in sorted(set(REQUIRED_ENV["SessionStart"]) |
@@ -1470,6 +1713,12 @@ def add_options(p, suppress=False):
                    help="install just this event, repeatable (default: every event the "
                         "harness wires). Use --only PreToolUse when a delegation already "
                         "exists and a SessionStart hook would replace it")
+    p.add_argument("--system", action="store_true", default=d(False),
+                   help="install, uninstall or report on the administrator's install: a "
+                        f"root-owned binary ({SYSTEM_BIN}), configuration ({SYSTEM_CONF}) "
+                        "and Claude Code managed hook entry, none of which the agent's "
+                        "own user can change. Needs sudo -E; Claude Code only")
+    p.add_argument("--system-root", default=d("/"), help=argparse.SUPPRESS)
     p.add_argument("-n", "--dry-run", action="store_true", default=d(False),
                    help="print the result, write nothing")
     p.add_argument("--force", action="store_true", default=d(False),

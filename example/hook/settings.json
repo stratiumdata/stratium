@@ -7,7 +7,7 @@
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150 } ] }
+          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150, "onFailure": "block" } ] }
     ]
   }
 }

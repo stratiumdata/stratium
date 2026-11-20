@@ -65,6 +65,16 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if err := applyConfigFile(args[1:]); err != nil {
+		if args[0] == "hook" {
+			// The harness reads a hook's decision from stdout, and lets the
+			// call through on an exit code other than the blocking one.
+			return writeDeny(stdout, fmt.Sprintf("stratium-pep: %s", err))
+		}
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
+		return 1
+	}
+
 	switch args[0] {
 	case "hook":
 		return runHookCmd(stdin, stdout)
