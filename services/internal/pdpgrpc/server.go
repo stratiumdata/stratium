@@ -531,12 +531,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	if extracted.Command != "" {
 		resourceIDs = append(resourceIDs, authz.ShellResourceIDs(extracted.Command)...)
 	}
+	// A patch names its files in its own text. patchIDs is kept apart from the
+	// rest because the policy leg below asks about each of them in turn.
+	patchIDs := authz.PatchResourceIDs(extracted.Patch, req.GetCwd())
+	resourceIDs = append(resourceIDs, patchIDs...)
 	// An aliased call the PDP can name no resource for is refused. The alias
 	// makes it the canonical tool for every rule below, and those rules were
-	// written for calls that say which resource they touch.
-	// ponytail: refuses every aliased tool with no resource (today only
-	// Codex's apply_patch, whose paths are inside the patch text). Read the
-	// paths, or mark resource-less aliases as such, when one needs to pass.
+	// written for calls that say which resource they touch. That includes a
+	// patch whose paths could not be read.
+	// ponytail: refuses every aliased tool with no resource. Mark
+	// resource-less aliases as such when one needs to pass.
 	if alias != nil && len(resourceIDs) == 0 {
 		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
 			fmt.Errorf("%w: %q names no resource the PDP can read", errAliasedNoResource, action.WireTool), &epoch)
@@ -562,6 +566,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 			fmt.Errorf("load tier overrides: %w", err), &epoch)
 	}
 	tiers.Overrides = honoredOverrides(storedOverrides, tiers.Catalog, catalogEntries)
+	tiers = authz.RaiseForWireName(tiers, storedOverrides, action)
 
 	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
@@ -592,19 +597,46 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// too, so a tenant can condition on them, but it still only decides the
 	// principal leg — the agent and delegation legs below are independent
 	// AND terms, so nothing returned here can widen what they allow.
-	principalVerdicts := s.policy.Evaluate(ctx, policy.EvaluationInput{
-		Principal:   principal,
-		Action:      action,
-		DerivedTier: derivedTier,
-		Resource:    resource,
-		Agent:       agent,
-		Delegation: policy.DelegationContext{
-			Depth:              acting.Depth,
-			MaxActionTier:      acting.MaxActionTier,
-			ClassificationCaps: acting.ClassificationCaps,
-			Purpose:            acting.Purpose,
-		},
-	})
+	//
+	// A patch is asked about once per file it names, each as the edit of that
+	// one file a policy for the canonical tool expects, and the strictest
+	// answer stands: a deny on any file, else an escalation on any file, else
+	// allow. The files' verdicts are never pooled into one fold, where one
+	// file's allow would stand in for a file no policy allowed. Every file
+	// carries the strictest label of the set, as the delegation leg's
+	// resource does.
+	policyResources := []map[string]string{resource}
+	if len(patchIDs) > 0 {
+		policyResources = policyResources[:0]
+		for _, id := range patchIDs {
+			policyResources = append(policyResources,
+				labelResource(labelRules, map[string]string{"id": id}, resourceIDs))
+		}
+	}
+	var principalVerdicts []authz.PolicyVerdict
+	strictest := authz.EffectAllow
+	for i, policyResource := range policyResources {
+		verdicts := s.policy.Evaluate(ctx, policy.EvaluationInput{
+			Principal:   principal,
+			Action:      action,
+			DerivedTier: derivedTier,
+			Resource:    policyResource,
+			Agent:       agent,
+			Delegation: policy.DelegationContext{
+				Depth:              acting.Depth,
+				MaxActionTier:      acting.MaxActionTier,
+				ClassificationCaps: acting.ClassificationCaps,
+				Purpose:            acting.Purpose,
+			},
+		})
+		leg, _ := authz.FoldVerdicts(verdicts)
+		if i == 0 || (leg.Effect != authz.EffectAllow && strictest == authz.EffectAllow) || leg.Effect == authz.EffectDeny {
+			principalVerdicts, strictest = verdicts, leg.Effect
+		}
+		if strictest == authz.EffectDeny {
+			break
+		}
+	}
 	result := authz.Decide(authz.Request{
 		TenantID:  s.cfg.TenantID, // config only. Never req — see package doc.
 		Principal: principal,

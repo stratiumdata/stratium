@@ -254,14 +254,32 @@ hook's time budget (see [Configuration](#configuration)).
 The PDP treats an `apply_patch` call from Codex as `Edit`. The audit entry keeps
 the name Codex sent and notes `[apply_patch decided as Edit]`.
 
-**File edits from Codex are refused for now.** An `apply_patch` call names its
-files inside the patch text, which the PDP does not read yet, and the PDP
-refuses an `Edit` it cannot name a file for. Shell commands (`Bash`) are decided
-as they are for Claude Code.
+**A patch is decided as an `Edit` of every file it names.** An `apply_patch`
+call names its files inside the patch text: files it adds, updates, deletes and
+moves to. The PDP reads those paths, resolves relative ones against the working
+directory Codex reported, and then:
 
-To allow `apply_patch` before then, add a tool catalog entry for `apply_patch`.
-Your own entry for a name always wins: the call is then decided under that name,
-by rules that name `apply_patch`, with no file identity.
+- a delegation's path constraint must hold for every file;
+- the strictest classification label among the files applies to the call;
+- policies are asked about each file in turn, as an `Edit` of that file. One
+  refusal refuses the whole patch; failing that, one file that needs approval
+  puts the whole patch up for approval.
+
+What follows from that:
+
+- Write rules against `Edit`. A rule that names `apply_patch` does not match a
+  call from Codex. A tier override on `apply_patch` is still honoured when it is
+  higher than `Edit`'s tier.
+- A patch that deletes a file has `Edit`'s tier (`INTERNAL_MODIFY`), the same
+  tier as a plain `rm` of one file.
+- A patch the PDP can read no file from is refused. So is one that names a
+  relative path when no working directory was reported, and one with a `..`
+  segment in any path.
+- Paths are compared as written. Symbolic links are not followed, as for any
+  other tool.
+- To decide `apply_patch` under its own name instead, add a tool catalog entry
+  for `apply_patch`. Your own entry for a name always wins; the call then
+  carries no file identity.
 
 An older install runs a `stratium-codex-hook` shell script instead. It still
 works, but the PDP is not told the harness, so `apply_patch` is decided under

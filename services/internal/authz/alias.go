@@ -1,14 +1,24 @@
 package authz
 
-import "github.com/stratiumdata/stratium/pkg/models"
+import (
+	"maps"
+	"path"
+	"strings"
+
+	"github.com/stratiumdata/stratium/pkg/models"
+)
 
 // ToolAlias says which canonical tool a harness's own tool name stands for,
 // and where in that harness's input the command or the resource identity
 // lives. An empty field name means "this input carries none".
+//
+// PatchField names a field holding a patch whose text names the files it
+// touches (PatchResourceIDs).
 type ToolAlias struct {
 	Canonical     string
 	CommandField  string
 	ResourceField string
+	PatchField    string
 }
 
 // DefaultAliases is the built-in table: harness, then that harness's own tool
@@ -24,10 +34,9 @@ type ToolAlias struct {
 func DefaultAliases() map[string]map[string]ToolAlias {
 	return map[string]map[string]ToolAlias{
 		"codex": {
-			// The files are named inside the patch text, not in a field, so
-			// this carries no resource identity and the PDP refuses the
-			// call. See Decide.
-			"apply_patch": {Canonical: "Edit"},
+			// Codex hands a hook the patch text as "command". It is not a
+			// shell command, so it is not a CommandField.
+			"apply_patch": {Canonical: "Edit", PatchField: "command"},
 		},
 	}
 }
@@ -74,5 +83,76 @@ func ExtractAliased(entries []models.ToolCatalogEntry, a Action, alias ToolAlias
 	if alias.CommandField != "" {
 		out.Command = jsonStringField(obj, alias.CommandField)
 	}
+	if alias.PatchField != "" {
+		out.Patch = jsonStringField(obj, alias.PatchField)
+	}
 	return out
+}
+
+// patchFileMarkers start the lines of a patch that name a file. The format is
+// the one Codex's apply_patch reads.
+var patchFileMarkers = []string{"*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "}
+
+// PatchResourceIDs returns every file a patch names, as clean absolute paths,
+// in source order, deduplicated. A relative path is resolved against cwd.
+//
+// It returns nil when the patch names no file, names a relative one and cwd
+// is not absolute, or any path has a ".." segment: a path that cannot be
+// resolved is not guessed at, and the caller refuses a patch it has no
+// identities for. ".." is refused, not resolved, for the reason
+// checkResourceConstraints refuses it: through a symbolic link the file
+// system's answer differs from the one the text gives.
+//
+// Every line is looked at, indented or not, so a line of file content that
+// happens to read like a header is taken as a path too. Like ShellResourceIDs,
+// the bias is toward too many: an extra path only adds constraints.
+//
+// ponytail: forward-slash paths only. A Windows path is treated as relative.
+func PatchResourceIDs(patch, cwd string) []string {
+	var ids []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		for _, marker := range patchFileMarkers {
+			p, ok := strings.CutPrefix(line, marker)
+			if p = strings.TrimSpace(p); !ok || p == "" {
+				continue
+			}
+			if !path.IsAbs(p) {
+				if !path.IsAbs(cwd) {
+					return nil
+				}
+				p = cwd + "/" + p
+			}
+			if hasDotDotSegment(p) {
+				return nil
+			}
+			if p = path.Clean(p); !seen[p] {
+				seen[p] = true
+				ids = append(ids, p)
+			}
+		}
+	}
+	return ids
+}
+
+// RaiseForWireName returns t with a's tier raised to the tenant's override
+// for the name a arrived under, when there is one and it is higher. An alias
+// moves the call to its canonical name; a tier the tenant set on the name as
+// sent must not be lost on the way. Raise only, like every override.
+func RaiseForWireName(t TierTable, stored map[string]models.ActionTier, a Action) TierTable {
+	raise, ok := stored[a.WireTool]
+	if a.WireTool == "" || !ok {
+		return t
+	}
+	if current, err := deriveTierByName(t, a); err != nil || raise <= current {
+		return t
+	}
+	overrides := maps.Clone(t.Overrides)
+	if overrides == nil {
+		overrides = make(map[string]models.ActionTier, 1)
+	}
+	overrides[lookupKeys(a)[0]] = raise
+	t.Overrides = overrides
+	return t
 }

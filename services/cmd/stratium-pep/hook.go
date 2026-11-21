@@ -68,6 +68,9 @@ import (
 type hookStdin struct {
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
+	// Cwd is passed to the PDP as sent. It resolves the relative paths a
+	// patch-style edit names; the hook itself never reads a path.
+	Cwd string `json:"cwd"`
 }
 
 // hookConfig is what runHook needs beyond stdin: the identity presented to
@@ -274,6 +277,7 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		RawInput: rawInput,
 		Token:    sess.GetToken(),
 		Harness:  cfg.Harness,
+		Cwd:      in.Cwd,
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
 		// (Verb, NormalizedInput) or are ever set here (Resource) anymore —
 		// see the package doc. DeclaredTier: deliberately never set, same doc.
