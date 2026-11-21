@@ -207,8 +207,8 @@ What the system install does not change:
   source and ignore the file. Run `/status` in a session and check that the
   managed settings are listed.
 - **A user with `sudo` can undo it**, and so can an agent that is given `sudo`.
-- **It covers Claude Code only.** Codex reads a system hook file as well; this
-  installer does not write it yet.
+- **Codex has its own system install**, with its own limits: see
+  [The system install for Codex](#the-system-install-for-codex).
 - **A hook is a guard rail the harness chooses to run.** Launch options that
   skip hooks are the harness's to define, and the list above is what was
   tested, not a guarantee. A boundary that does not depend on
@@ -225,20 +225,92 @@ Same JSON shape, in `~/.codex/hooks.json` — and **only** there. Codex also rea
 project is trusted, and a disabled enforcement hook is not inert, it is
 fail-open.
 
-The command is `stratium-pep hook --harness codex`:
+`deploy/stratium --codex install` writes three events. The decision command is
+`stratium-pep hook --harness codex`:
 
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command",
+                     "command": "/usr/local/bin/stratium-pep session-start",
+                     "timeout": 15 } ] }
+    ],
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [ { "type": "command",
                      "command": "/usr/local/bin/stratium-pep hook --harness codex",
                      "timeout": 330 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*",
+        "hooks": [ { "type": "command",
+                     "command": "/usr/local/bin/stratium-pep report",
+                     "timeout": 15 } ] }
     ]
   }
 }
 ```
+
+Codex will not run a hook in this file until you have reviewed it. A freshly
+installed hook, or one whose command changed, is listed as untrusted and **is
+not enforcing**. Approve all three in the `/hooks` browser.
+
+The facts about Codex on this page were read from its source at version 0.133.0.
+They were not observed in a running Codex session.
+
+### What Codex lets through
+
+Codex decides when a hook runs and what a failed hook means. These cases run the
+tool call without a decision, and nothing in this file changes them:
+
+- **The hook is not trusted yet, or is switched off** in the `/hooks` browser.
+- **The hook runs past its `timeout`.** Keep it above the hook's own time budget
+  (see [Configuration](#configuration)); the installer computes it.
+- **The hook exits with a code other than `0` or `2`**, for example because the
+  binary is missing. `--harness codex` turns every refusal and every failure of
+  the hook itself into exit `2`; a command that cannot start is outside its
+  reach.
+- **Hooks are turned off** in the user's Codex configuration.
+- **A subagent** started inside a session does not run `SessionStart`. It uses
+  the delegation of the session that started it.
+
+The [system install](#the-system-install-for-codex) removes the first and the
+fourth. The others hold under it too.
+
+### The system install for Codex
+
+```sh
+# with the STRATIUM_PEP_* variables exported, as for a per-user install
+sudo -E deploy/stratium --codex install --system --bin ./bin/stratium-pep
+```
+
+It writes the same root-owned binary and configuration as the
+[Claude Code system install](#what-the-install-protects), and the hook entries
+go in `/etc/codex/requirements.toml`, which Codex reads as an administrator's
+requirements:
+
+- the three hooks above, as managed hooks. Codex runs a managed hook without
+  asking the user to review it, and the `/hooks` browser cannot switch one off;
+- `allow_managed_hooks_only = true`. Codex then ignores every hook that is not
+  in this file: the ones in `~/.codex/hooks.json`, in a project, and in plugins.
+  **This switches off hooks you may rely on for other things;**
+- `hooks = true` under `[features]`, so a user configuration cannot turn hooks
+  off.
+
+What to know before running it:
+
+- **Codex has one such file.** If `/etc/codex/requirements.toml` exists and this
+  installer did not write it, the installer stops and changes nothing.
+  `--dry-run` prints the entries to add by hand. `uninstall --system` likewise
+  leaves a file it did not write.
+- **Another requirements source can displace the hooks.** Codex reads
+  cloud-managed requirements and device-management preferences before this
+  file, and for each setting the first source that sets it wins. If one of them
+  sets hooks, the hooks in this file are not used.
+- The points under [What the install protects](#what-the-install-protects)
+  about the session file, the machine-wide configuration and `sudo` apply here
+  as well.
 
 `--harness codex` does two things.
 
@@ -292,7 +364,8 @@ its own name. Re-run `deploy/stratium --codex install` to replace it.
 `stratium-pep hook` asks the PDP before a tool call. `stratium-pep report`
 tells the PDP after one that it ran. It is installed on Claude Code's
 `PostToolUse` and `PostToolUseFailure` events (a tool call that fails still
-ran) and needs three of the hook's variables: `STRATIUM_PEP_PDP_ADDR`,
+ran) and on Codex's `PostToolUse` event, and needs three of the hook's
+variables: `STRATIUM_PEP_PDP_ADDR`,
 `STRATIUM_PEP_SESSION_FILE` and `STRATIUM_PEP_CONNECT_TIMEOUT`.
 
 The PDP looks for the ALLOW it recorded for that session, that tool and
@@ -326,7 +399,9 @@ What it does not tell you:
   `deploy/stratium install` writes the same matcher to both.
 - **The reporter holds the session's token**, so an agent can file reports for
   calls that never ran. That can only raise the count, never lower it.
-- **Claude Code only.** Codex and the [`mcp`](mcp.md) surface do not report.
+- **Codex reports only tool calls that succeeded.** It has no event for a tool
+  call that failed, so one that ran undecided and failed is not counted.
+- **The [`mcp`](mcp.md) surface does not report.**
 
 ---
 

@@ -28,6 +28,14 @@ reads the file headers out of the patch (`Add File`, `Update File`,
 - A policy that names the native tool does not match an aliased call. This is
   documented, not detected.
 
+Outcome notes, PR B (built): Codex gets `SessionStart` and `PostToolUse`
+(`report` needs no `--harness`). Codex has no event for a failed tool call,
+so those are not reported. `--codex install --system` writes
+`/etc/codex/requirements.toml` whole, marked on its first line, and refuses
+a file it did not write. Reading it back (`status --system`) uses a reader
+for the installer's own output, not a TOML parser, because the oldest
+supported Python has none.
+
 ## Intent
 
 Stratium decides tool calls for Claude Code and, partly, Codex. The

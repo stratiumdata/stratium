@@ -25,8 +25,8 @@ once per session, PreToolUse runs `stratium-pep hook` before every tool call.
 
 --codex writes ~/.codex/hooks.json, and only that file — a project-local Codex
 hook is disabled until the project is trusted, which for an enforcement point
-is fail-open rather than inert. It wires PreToolUse alone, running
-`stratium-pep hook --harness codex`. See Part 2 of
+is fail-open rather than inert. It wires SessionStart, PreToolUse (running
+`stratium-pep hook --harness codex`) and PostToolUse. See Part 2 of
 docs/testing/2026-08-20-agent-integration-test.md.
 
 This script only edits the file. The environment variables the hooks read must
@@ -376,6 +376,62 @@ SYSTEM_CONF = "/etc/stratium/pep.env"
 MANAGED_DIR = ("/Library/Application Support/ClaudeCode" if sys.platform == "darwin"
                else "/etc/claude-code")
 MANAGED_SETTINGS = MANAGED_DIR + "/managed-settings.d/50-stratium.json"
+# Codex reads one administrator file, not a directory of them, so this script
+# owns the whole file or none of it: the first line says which.
+CODEX_REQUIREMENTS = "/etc/codex/requirements.toml"
+CODEX_MARK = "# Written by deploy/stratium --codex install --system. Re-run it to change this file."
+SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS}
+
+
+def requirements_toml(wanted):
+    """Codex's requirements.toml for `wanted`: these hooks, no others, hooks on.
+
+    `allow_managed_hooks_only` makes Codex ignore every hook that is not in
+    this file; the `features` entry stops a user configuration turning hooks off.
+    """
+    out = [CODEX_MARK, "\nallow_managed_hooks_only = true\n\n[features]\nhooks = true\n"]
+    for event, group in wanted.items():
+        out.append(f"\n[[hooks.{event}]]\n")
+        if "matcher" in group:
+            out.append(f"matcher = {json.dumps(group['matcher'])}\n")
+        for h in group["hooks"]:
+            out.append(f"\n[[hooks.{event}.hooks]]\ntype = \"command\"\n"
+                       f"command = {json.dumps(h['command'])}\ntimeout = {h['timeout']}\n")
+    return "".join(out)
+
+
+def ours_toml(path):
+    with open(path) as f:
+        return f.readline().rstrip("\n") == CODEX_MARK
+
+
+def load_hooks(path):
+    """`load`, for either kind of hook file.
+
+    ponytail: reads back requirements_toml()'s own output, not TOML at large;
+    a file this script did not write reads as holding no hooks. Use tomllib
+    once Python 3.11 is the floor.
+    """
+    if not path.endswith(".toml"):
+        return load(path)
+    hooks = {}
+    if not os.path.exists(path) or not ours_toml(path):
+        return {"hooks": hooks}
+    group = None
+    with open(path) as f:
+        for line in f:
+            m = re.match(r"\[\[hooks\.(\w+)(\.hooks)?\]\]", line)
+            if m and m.group(2):
+                group["hooks"].append({})
+            elif m:
+                group = {"hooks": []}
+                hooks.setdefault(m.group(1), []).append(group)
+            elif line.startswith("["):
+                group = None
+            elif group is not None and "=" in line:
+                key, value = line.split("=", 1)
+                (group["hooks"][-1] if group["hooks"] else group)[key.strip()] = json.loads(value)
+    return {"hooks": hooks}
 
 
 def under(root, path):
@@ -429,14 +485,13 @@ def exposed(command):
 
 
 EXPOSED_FIX = ("the agent runs as you, so it can change this and stop being governed; "
-               "`sudo -E deploy/stratium --claude install --system` puts it out of reach")
+               "`sudo -E deploy/stratium --{} install --system` puts it out of reach")
 
 
 def install_system(args):
     """Install where only root can write: binary, configuration, managed hook entry."""
     root = args.system_root
-    if args.harness != "claude":
-        sys.exit("stratium: --system covers Claude Code only")
+    h = HARNESS[args.harness]
     real = root == "/" and not args.dry_run
     if real and os.geteuid() != 0:
         sys.exit("stratium: --system writes root-owned files; run it with sudo -E "
@@ -457,16 +512,25 @@ def install_system(args):
         sys.exit("stratium: a STRATIUM_PEP_* value contains a newline")
 
     binary, conf = under(root, SYSTEM_BIN), under(root, SYSTEM_CONF)
-    settings = under(root, MANAGED_SETTINGS)
+    settings = under(root, SYSTEM_HOOKS[args.harness])
     command = f"{binary} --config {conf}"
     if " " in command.replace(" --config ", ""):
         sys.exit("stratium: the install path must not contain spaces")
-    wanted = entries(binary, args.matcher, tail=f" --config {conf}")
+    wanted = entries(binary, args.matcher, h["events"], h["hook_arg"], tail=f" --config {conf}")
     body = "".join(f"{k}={v}\n" for k, v in pinned.items())
+    if args.harness == "codex":
+        if os.path.exists(settings) and not ours_toml(settings):
+            # Codex has one such file and this script cannot merge TOML into
+            # somebody else's without risking the rules already in it.
+            sys.exit(f"stratium: {settings} exists and was not written by this script. "
+                     "Add the hooks to it by hand: `--dry-run` prints them.")
+        hooks_body = requirements_toml(wanted)
+    else:
+        hooks_body = json.dumps({"hooks": {e: [g] for e, g in wanted.items()}}, indent=2) + "\n"
     if args.dry_run:
         print(f"--- would copy {src} to {binary} ---")
         print(f"--- would write {conf} ---\n{body}", end="")
-        save(settings, {"hooks": {e: [g] for e, g in wanted.items()}}, True)
+        print(f"--- would write {settings} ---\n{hooks_body}", end="")
         return 0
 
     for path, mode in ((binary, 0o755), (conf, 0o644), (settings, 0o644)):
@@ -477,8 +541,7 @@ def install_system(args):
             shutil.copyfile(src, tmp)
         else:
             with open(tmp, "w") as f:
-                f.write(body if path == conf else json.dumps(
-                    {"hooks": {e: [g] for e, g in wanted.items()}}, indent=2) + "\n")
+                f.write(body if path == conf else hooks_body)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
         if real:
@@ -487,6 +550,13 @@ def install_system(args):
                 sys.exit(f"stratium: {open_to} can be changed by a non-root user, so "
                          f"{path} is not protected. Fix its owner and mode, then re-run.")
         print(f"wrote {path}")
+    if args.harness == "codex":
+        print("\nNEXT — restart any running Codex session. Codex now runs these hooks and "
+              "ignores every other one,\nincluding hooks in ~/.codex/hooks.json and in "
+              "plugins. A cloud-managed or MDM requirements source,\nwhen present, is "
+              "read ahead of this file. The session file path recorded above must stay\n"
+              "writable by the user who runs the agent.")
+        return 0
     print("\nNEXT — restart any running Claude Code session, then check that `/status` "
           "lists the managed settings\nas a source: when another policy source (MDM, "
           "server-managed settings) is present, Claude Code\nmay use that one and ignore "
@@ -497,10 +567,13 @@ def install_system(args):
 
 def uninstall_system(args):
     """Remove exactly what install_system wrote."""
-    paths = [under(args.system_root, p) for p in (MANAGED_SETTINGS, SYSTEM_CONF, SYSTEM_BIN)]
+    paths = [under(args.system_root, p)
+             for p in (SYSTEM_HOOKS[args.harness], SYSTEM_CONF, SYSTEM_BIN)]
     for path in paths:
         if not os.path.exists(path):
             print(f"not there: {path}")
+        elif path.endswith(".toml") and not ours_toml(path):
+            print(f"left alone, not written by this script: {path}")
         elif args.dry_run:
             print(f"would remove {path}")
         else:
@@ -522,7 +595,7 @@ def uninstall(args):
 
 
 def status(args):
-    settings = load(args.settings)
+    settings = load_hooks(args.settings)
     found = [
         (event, h.get("command"), h.get("timeout"), group.get("matcher"))
         for event, groups in (settings.get("hooks") or {}).items()
@@ -560,9 +633,9 @@ def status(args):
     for what, hit in open_to:
         print(f"warning: {what} is writable by you: {hit}")
     if open_to:
-        print(f"         {EXPOSED_FIX}")
+        print(f"         {EXPOSED_FIX.format(args.harness)}")
     if incomplete and getattr(args, "system", False):
-        print("\nre-run: sudo -E deploy/stratium --claude install --system")
+        print(f"\nre-run: sudo -E deploy/stratium --{args.harness} install --system")
         return 1
     if incomplete:
         next_steps([e for e, _, _, _ in found],
@@ -635,7 +708,7 @@ def selftest(_args):
         install(a)
         uninstall(a)
         assert load(path) == {}, load(path)
-        # --codex: its own file, its own default command, PreToolUse only.
+        # --codex: its own file, its own default command, its own events.
         pr = argparse.ArgumentParser()
         def resolved(**kw):
             ns = argparse.Namespace(harness="codex", settings=None, user=False, bin=None,
@@ -646,7 +719,7 @@ def selftest(_args):
         c = resolved()
         assert c.settings == os.path.expanduser("~/.codex/hooks.json"), c.settings
         assert c.bin == "stratium-pep", c.bin
-        assert c.only == ["PreToolUse"], c.only
+        assert c.only == ["SessionStart", "PreToolUse", "PostToolUse"], c.only
 
         # a project-local Codex hook is fail-open, not inert — refuse it
         for bad in (os.path.join(REPO, ".codex", "hooks.json"),
@@ -658,13 +731,14 @@ def selftest(_args):
             else:
                 raise AssertionError(f"accepted a project-local Codex path: {bad}")
 
-        # ...and Codex has no SessionStart to wire here
+        # ...and an event Codex does not have is refused, not written and never run
+        assert resolved(only=["SessionStart"]).only == ["SessionStart"]
         try:
-            resolved(only=["SessionStart"])
+            resolved(only=["PostToolUseFailure"])
         except SystemExit:
             pass
         else:
-            raise AssertionError("accepted --codex --only SessionStart")
+            raise AssertionError("accepted --codex --only PostToolUseFailure")
 
         # Claude Code keeps the project file by default, the user file under --user
         cc = argparse.Namespace(harness="claude", settings=None, user=False, bin=None,
@@ -736,6 +810,51 @@ def selftest(_args):
             with contextlib.redirect_stdout(io.StringIO()):
                 uninstall_system(sa)
             assert not os.path.exists(sbin) and not os.path.exists(sconf)
+
+            # --codex --system: the same binary and configuration, Codex's own file
+            os.environ["STRATIUM_PEP_SUBJECT"] = "x"
+            sx = argparse.Namespace(harness="codex", system=True, system_root=sroot,
+                                    bin=src, matcher="*", dry_run=False)
+            sreq = under(sroot, CODEX_REQUIREMENTS)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sx) == 0
+            text = open(sreq).read()
+            assert text.startswith(CODEX_MARK + "\n") and "allow_managed_hooks_only = true" in text
+            assert "[features]\nhooks = true\n" in text, text
+            try:
+                import tomllib
+                parsed = tomllib.loads(text)  # real TOML, where Python can check
+                assert parsed["allow_managed_hooks_only"] is True, parsed
+                assert parsed["hooks"] == load_hooks(sreq)["hooks"], parsed
+            except ImportError:
+                pass
+            got = load_hooks(sreq)["hooks"]
+            assert list(got) == ["SessionStart", "PreToolUse", "PostToolUse"], got
+            assert got["PreToolUse"][0]["matcher"] == "*", got
+            assert got["PreToolUse"][0]["hooks"][0] == {
+                "type": "command", "timeout": hook_timeout(),
+                "command": f"{sbin} hook --harness codex --config {sconf}"}, got
+            assert got["SessionStart"][0]["hooks"][0]["command"] == (
+                f"{sbin} session-start --config {sconf}"), got
+            assert got["PostToolUse"][0]["hooks"][0]["command"] == (
+                f"{sbin} report --config {sconf}"), got
+            sx.settings = sreq
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(sx) == 0, out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sx) == 0  # over its own file: fine
+            # somebody else's requirements.toml is neither merged into nor removed
+            with open(sreq, "w") as f:
+                f.write("allowed_sandbox_modes = [\"read-only\"]\n")
+            try:
+                install_system(sx)
+                raise AssertionError("install --system overwrote a requirements.toml it did not write")
+            except SystemExit as e:
+                assert "was not written by this script" in str(e), e
+            assert load_hooks(sreq) == {"hooks": {}}
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(sx)
+            assert open(sreq).read().startswith("allowed_sandbox_modes"), "removed a file it did not write"
         finally:
             os.environ.clear()
             os.environ.update(kept_env)
@@ -893,14 +1012,17 @@ def selftest(_args):
 #   - the command carries `--harness codex`, because Codex reads a blocking
 #     reason off stderr and blocks on exit 2 only; the flag makes the hook
 #     answer that way and tells the PDP whose tool names these are;
-#   - only PreToolUse is wired; session-start is run by hand (§2e, last para).
+#   - there is no PostToolUseFailure event: Codex runs PostToolUse after a tool
+#     call that succeeded and nothing after one that failed, so a failed call
+#     is never reported.
 HARNESS = {
     "claude": {"path": ".claude/settings.json", "user_path": "~/.claude/settings.json",
                "bin": "stratium-pep",
                "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
                "hook_arg": "hook"},
     "codex":  {"path": "~/.codex/hooks.json", "user_path": "~/.codex/hooks.json",
-               "bin": "stratium-pep", "events": ("PreToolUse",),
+               "bin": "stratium-pep",
+               "events": ("SessionStart", "PreToolUse", "PostToolUse"),
                "hook_arg": "hook --harness codex"},
 }
 
@@ -909,9 +1031,7 @@ def resolve(args, parser):
     """Fill in the harness-dependent defaults and refuse the fail-open setups."""
     h = HARNESS[args.harness]
     if getattr(args, "system", False):
-        if args.harness != "claude":
-            parser.error("--system covers Claude Code only")
-        args.settings = under(args.system_root, MANAGED_SETTINGS)
+        args.settings = under(args.system_root, SYSTEM_HOOKS[args.harness])
         if args.bin is None and os.path.exists(PEP_BIN):
             args.bin = PEP_BIN  # the binary to copy: the quickstart's build, if any
     if args.bin is None:
@@ -920,7 +1040,7 @@ def resolve(args, parser):
         args.settings = harness_path(args.harness, user=args.user)
     args.settings = os.path.expanduser(args.settings)
 
-    if args.harness == "codex":
+    if args.harness == "codex" and not getattr(args, "system", False):
         # A project-local .codex/hooks.json is disabled until the project is
         # trusted, and a disabled enforcement hook is not a no-op — it is
         # fail-open: every tool call proceeds unchecked (§2b).
@@ -931,8 +1051,12 @@ def resolve(args, parser):
                 "project-local, and Codex disables project hooks until the project "
                 "is trusted — an enforcement hook that does not run is fail-open, "
                 "not inert (see 2b)")
-        if args.only and "SessionStart" not in h["events"] and "SessionStart" in args.only:
-            parser.error("--codex wires PreToolUse only; run session-start by hand (see 2e)")
+    unknown = [e for e in args.only or () if e not in h["events"]]
+    if unknown:
+        # An event the harness does not have is written and never run, which
+        # reads as installed and enforces nothing.
+        parser.error(f"--{args.harness} has no {', '.join(unknown)} event; "
+                     f"it has {', '.join(h['events'])}")
     args.only = args.only or list(h["events"])
     return args
 
@@ -1703,7 +1827,7 @@ def add_options(p, suppress=False):
                          help="target Claude Code: .claude/settings.json, SessionStart + PreToolUse")
     harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
                          default=d(None),
-                         help="target Codex: ~/.codex/hooks.json, PreToolUse only")
+                         help="target Codex: ~/.codex/hooks.json, SessionStart + PreToolUse + PostToolUse")
     p.add_argument("--settings", default=d(None),
                    help="the file to edit (default: the harness's own, see --claude/--codex)")
     p.add_argument("--user", action="store_true", default=d(False),
@@ -1723,8 +1847,9 @@ def add_options(p, suppress=False):
     p.add_argument("--system", action="store_true", default=d(False),
                    help="install, uninstall or report on the administrator's install: a "
                         f"root-owned binary ({SYSTEM_BIN}), configuration ({SYSTEM_CONF}) "
-                        "and Claude Code managed hook entry, none of which the agent's "
-                        "own user can change. Needs sudo -E; Claude Code only")
+                        "and managed hook entry (Claude Code managed settings, or "
+                        f"{CODEX_REQUIREMENTS} for Codex), none of which the agent's "
+                        "own user can change. Needs sudo -E")
     p.add_argument("--system-root", default=d("/"), help=argparse.SUPPRESS)
     p.add_argument("-n", "--dry-run", action="store_true", default=d(False),
                    help="print the result, write nothing")

@@ -1890,11 +1890,22 @@ hook sooner runs the tool call, so the `timeout` must be the larger number.
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command",
+                     "command": "/usr/local/bin/stratium-pep session-start",
+                     "timeout": 15 } ] }
+    ],
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [ { "type": "command",
                      "command": "/usr/local/bin/stratium-pep hook --harness codex",
                      "timeout": 330 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*",
+        "hooks": [ { "type": "command",
+                     "command": "/usr/local/bin/stratium-pep report",
+                     "timeout": 15 } ] }
     ]
   }
 }
@@ -1911,7 +1922,9 @@ Two Codex-specific gotchas, both of which fail **open**:
   hooks are silently disabled until the project is trusted.
 - Codex content-hashes every hook and will not run one you have not reviewed.
   A freshly installed hook reports `trustStatus: untrusted` and **is not
-  enforcing**. Approve it in the `/hooks` browser.
+  enforcing**. Approve each one in the `/hooks` browser, or use the
+  [system install](pep/hook.md#the-system-install-for-codex), whose hooks need
+  no review.
 
 Full detail: [`docs/testing/2026-08-20-agent-integration-test.md`](testing/2026-08-20-agent-integration-test.md).
 
@@ -2062,8 +2075,8 @@ classification, the system is working.
 - **The PEP never logs a token or key material**, on any path.
 - **A per-project hook install can be undone by the agent it governs.** The
   hook entry, the binary and the hook's environment all sit where the agent
-  can write. `sudo -E deploy/stratium --claude install --system` puts them
-  out of its reach; see
+  can write. `sudo -E deploy/stratium --claude install --system` (or
+  `--codex`) puts them out of its reach; see
   [What the install protects](pep/hook.md#what-the-install-protects).
 - **Uninstalling:** remove the hook from `.claude/settings.json` or
   `~/.codex/hooks.json`, restore the real MCP command, and delete the session
