@@ -531,6 +531,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	if extracted.Command != "" {
 		resourceIDs = append(resourceIDs, authz.ShellResourceIDs(extracted.Command)...)
 	}
+	// An aliased call the PDP can name no resource for is refused. The alias
+	// makes it the canonical tool for every rule below, and those rules were
+	// written for calls that say which resource they touch.
+	// ponytail: refuses every aliased tool with no resource (today only
+	// Codex's apply_patch, whose paths are inside the patch text). Read the
+	// paths, or mark resource-less aliases as such, when one needs to pass.
+	if alias != nil && len(resourceIDs) == 0 {
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
+			fmt.Errorf("%w: %q names no resource the PDP can read", errAliasedNoResource, action.WireTool), &epoch)
+	}
 	resource = labelResource(labelRules, resource, resourceIDs)
 
 	// The catalog step of §4.4's resolution order (override, catalog,
@@ -918,6 +928,10 @@ func (s *Server) denyAndAudit(
 	}
 	return toResponse(result, epoch), nil
 }
+
+// errAliasedNoResource is Decide's refusal of an aliased call that carries
+// no resource identity.
+var errAliasedNoResource = errors.New("aliased tool call refused")
 
 // parseNonNilUUID parses s as a UUID and rejects the zero value.
 func parseNonNilUUID(s string) (uuid.UUID, error) {

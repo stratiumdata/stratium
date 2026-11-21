@@ -25,8 +25,8 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 	return map[string]map[string]ToolAlias{
 		"codex": {
 			// The files are named inside the patch text, not in a field, so
-			// this carries no resource identity: under a path constraint the
-			// call denies. See ResolveAlias.
+			// this carries no resource identity and the PDP refuses the
+			// call. See Decide.
 			"apply_patch": {Canonical: "Edit"},
 		},
 	}

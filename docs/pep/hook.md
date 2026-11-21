@@ -251,18 +251,17 @@ hook's time budget (see [Configuration](#configuration)).
 
 **It tells the PDP whose tool names these are.** Codex reports its shell tool as
 `Bash`, as Claude Code does, but edits files with a tool called `apply_patch`.
-The PDP decides an `apply_patch` call from Codex as `Edit`, so a policy, a
-delegation's tool list or a tier override written for `Edit` covers it. The
-audit entry keeps the name Codex sent and notes `[apply_patch decided as Edit]`.
+The PDP treats an `apply_patch` call from Codex as `Edit`. The audit entry keeps
+the name Codex sent and notes `[apply_patch decided as Edit]`.
 
-Two consequences:
+**File edits from Codex are refused for now.** An `apply_patch` call names its
+files inside the patch text, which the PDP does not read yet, and the PDP
+refuses an `Edit` it cannot name a file for. Shell commands (`Bash`) are decided
+as they are for Claude Code.
 
-- Write rules against `Edit`. A rule that names `apply_patch` does not match a
-  call from Codex, unless you add a tool catalog entry for `apply_patch`: your
-  own entry for a name always wins, and the call is then decided under that name.
-- An `apply_patch` call names its files inside the patch text, which the PDP
-  does not read. It therefore carries no resource identity: under a delegation
-  with a path constraint it is denied, and path-based labels do not apply to it.
+To allow `apply_patch` before then, add a tool catalog entry for `apply_patch`.
+Your own entry for a name always wins: the call is then decided under that name,
+by rules that name `apply_patch`, with no file identity.
 
 An older install runs a `stratium-codex-hook` shell script instead. It still
 works, but the PDP is not told the harness, so `apply_patch` is decided under

@@ -6,7 +6,12 @@ Outcome notes, PR A (built): `--harness` is on `hook` only; `report` gets it
 when a harness's after-the-call payload differs from Claude Code's (Codex's
 does not). The audit row has no free-form field, so the canonical name is
 appended to its reason text (`[apply_patch decided as Edit]`) and the
-harness name is not recorded.
+harness name is not recorded. An aliased call with no resource identity is
+refused outright, not only under a path constraint: once aliased it is
+matched by rules written for calls that name their resource. So Codex's
+`apply_patch` is refused until the patch-path reader lands. That reader must
+also settle the tier of a patch that deletes a file, relative paths, and
+tenant tier overrides keyed on the native name.
 
 ## Intent
 
@@ -228,7 +233,8 @@ a way that changes what can be blocked) does.
   MCP tools, which is the same for every harness.
 - **Patch-style edits.** `apply_patch` (Codex, and later Cline, Devin
   Local, OpenCode's `patch`) names its files inside a patch text, not in a
-  field. Until the PDP can read them, such edits have no resource identity.
+  field. Until the PDP can read them, such edits have no resource identity
+  and are refused.
 
 ## Open question for the maintainer
 
@@ -261,7 +267,7 @@ new harness, because four of the harnesses use patch edits.
   tenant row wins; unknown name unchanged; an alias with a command field
   classifies a shell command with and without a tenant `Bash` row; a
   delegation listing `Bash` covers an aliased shell tool; a Codex
-  `apply_patch` is denied under a path constraint; the audit row carries
+  `apply_patch` is denied for want of a resource identity; the audit row carries
   both names).
 - The installer's built-in self-tests, extended for the Codex changes.
 - `make integration`.

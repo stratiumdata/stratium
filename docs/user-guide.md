@@ -1901,7 +1901,8 @@ hook sooner runs the tool call, so the `timeout` must be the larger number.
 ```
 
 `--harness codex` makes the hook answer the way Codex reads (exit `2`, reason on
-stderr) and has the PDP decide Codex's `apply_patch` as `Edit`. See
+stderr) and tells the PDP the tool names are Codex's. File edits from Codex
+(`apply_patch`) are refused for now. See
 [`stratium-pep hook`](pep/hook.md#installing-in-codex).
 
 Two Codex-specific gotchas, both of which fail **open**:

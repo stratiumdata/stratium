@@ -22,11 +22,14 @@ func TestDecide_HarnessAlias(t *testing.T) {
 		wantReason  string // substring of the audit reason; "" means no alias note
 	}{
 		{
-			name:       "an aliased name is covered by a delegation listing the canonical tool",
+			// The delegation lists the canonical tool, so the alias is all
+			// that stands between this call and an allow. It names no
+			// resource the PDP can read, so it is refused all the same.
+			name:       "an aliased call with no resource identity is refused",
 			harness:    "codex",
 			tools:      []string{"Edit"},
-			wantEffect: Effect_EFFECT_ALLOW,
-			wantReason: "[apply_patch decided as Edit]",
+			wantEffect: Effect_EFFECT_DENY,
+			wantReason: `"apply_patch" names no resource the PDP can read [apply_patch decided as Edit]`,
 		},
 		{
 			// The whole point of the harness field: stratium-pep mcp forwards
@@ -50,9 +53,7 @@ func TestDecide_HarnessAlias(t *testing.T) {
 			wantEffect: Effect_EFFECT_DENY,
 		},
 		{
-			// The alias names no resource field, so the call identifies no
-			// resource and a path constraint cannot be satisfied.
-			name:        "an alias with no resource field denies under a path constraint",
+			name:        "and is refused under a path constraint too",
 			harness:     "codex",
 			constraints: map[string]string{models.ResourceIDPrefixKey: "/workspace/"},
 			wantEffect:  Effect_EFFECT_DENY,
