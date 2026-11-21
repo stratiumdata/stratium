@@ -382,8 +382,8 @@ func testPolicyAgainstSampleInput(s *Server, w http.ResponseWriter, r *http.Requ
 	// AllPolicySource -- the identical PrincipalPolicy production uses
 	// (policy.Multi{} is what pdpgrpc.Server wires as s.policy), never a
 	// bespoke evaluator for this endpoint.
-	isolatedVerdicts := policy.NewMulti(singlePolicySource{candidate}, s.registry).Evaluate(r.Context(), evalInput)
-	foldedVerdicts := policy.NewMulti(candidateAppendingSource{base: s.store, candidate: candidate}, s.registry).Evaluate(r.Context(), evalInput)
+	isolatedVerdicts := policy.NewMulti(singlePolicySource{candidate}, s.registry).WithEvalTimeout(testEvalTimeout).Evaluate(r.Context(), evalInput)
+	foldedVerdicts := policy.NewMulti(candidateAppendingSource{base: s.store, candidate: candidate}, s.registry).WithEvalTimeout(testEvalTimeout).Evaluate(r.Context(), evalInput)
 
 	// FoldVerdicts is the ONE combining rule (this task's own binding
 	// constraint) -- called here, directly, exactly as authz.Decide's own

@@ -112,6 +112,11 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	if req.GetTtlSeconds() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl_seconds must be positive")
 	}
+	if max := s.cfg.MaxDelegationTTL; max > 0 && req.GetTtlSeconds() > int64(max/time.Second) {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"ttl_seconds %d is above this deployment's maximum delegation lifetime of %s",
+			req.GetTtlSeconds(), max)
+	}
 
 	// A child is authorized by the parent's own token, checked before any
 	// store call: see authorizeChild.
@@ -240,7 +245,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		ResourceConstraints: copyStringMap(agent.ResourceConstraints),
 		EscalateAt:          escalateAt,
 		Purpose:             req.GetPurpose(),
-		ExpiresAt:           now.Add(time.Duration(req.GetTtlSeconds()) * time.Second),
+		ExpiresAt:           now.Add(s.boundedTTL(req.GetTtlSeconds())),
 		ParentDelegationID:  parentID,
 		ChainAgentIDs:       []uuid.UUID{agentID},
 	}

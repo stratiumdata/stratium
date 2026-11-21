@@ -24,6 +24,15 @@ type Config struct {
 	MaxDepth             int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
 	DBTimeout            time.Duration // STRATIUM_DB_TIMEOUT, default 5s
 
+	// MaxDelegationTTL is the longest lifetime CreateDelegation grants; a
+	// request above it is refused. Zero, which Load never produces, means no
+	// maximum.
+	MaxDelegationTTL time.Duration // STRATIUM_MAX_DELEGATION_TTL, default 24h
+	// PolicyEvalTimeout bounds one evaluation of the tenant's policy set; an
+	// evaluation that runs past it denies. Zero, which Load never produces,
+	// means no deadline.
+	PolicyEvalTimeout time.Duration // STRATIUM_POLICY_EVAL_TIMEOUT, default 2s
+
 	// gRPC transport (see tls.go). TLS is required unless GRPCInsecure is set.
 	TLSCertFile  string // STRATIUM_TLS_CERT_FILE, PEM certificate chain
 	TLSKeyFile   string // STRATIUM_TLS_KEY_FILE, PEM private key
@@ -143,6 +152,8 @@ func Load() (Config, error) {
 		ListenAddr:             envOr("STRATIUM_LISTEN_ADDR", ":50051"),
 		MaxDepth:               5,
 		DBTimeout:              5 * time.Second,
+		MaxDelegationTTL:       24 * time.Hour,
+		PolicyEvalTimeout:      2 * time.Second,
 		ApprovalTTL:            24 * time.Hour,
 		SpentProofReapInterval: 5 * time.Minute,
 		PolicyLanguages:        defaultPolicyLanguages,
@@ -223,6 +234,12 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("STRATIUM_DB_TIMEOUT: %w", err)
 		}
 	}
+	if c.MaxDelegationTTL, err = positiveDuration("STRATIUM_MAX_DELEGATION_TTL", c.MaxDelegationTTL); err != nil {
+		return c, err
+	}
+	if c.PolicyEvalTimeout, err = positiveDuration("STRATIUM_POLICY_EVAL_TIMEOUT", c.PolicyEvalTimeout); err != nil {
+		return c, err
+	}
 	if v := os.Getenv("STRATIUM_APPROVAL_TTL"); v != "" {
 		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil {
 			return c, fmt.Errorf("STRATIUM_APPROVAL_TTL: %w", err)
@@ -280,6 +297,23 @@ func splitPolicyLanguages(v string) ([]string, error) {
 		langs = append(langs, p)
 	}
 	return langs, nil
+}
+
+// positiveDuration reads the duration setting k, falling back to def when it
+// is unset, and refuses a value that is not a positive duration.
+func positiveDuration(k string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(k)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", k, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %s", k, d)
+	}
+	return d, nil
 }
 
 func envOr(k, def string) string {

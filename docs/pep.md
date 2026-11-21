@@ -69,7 +69,7 @@ polls, so it has no use for either):
 |---|---|
 | `STRATIUM_PEP_REQUESTED_TIER` | Action-tier ceiling to request: `0` REASONING, `1` READ_ONLY, `2` INTERNAL_MODIFY, `3` EXTERNAL_COMMS, `4` DESTRUCTIVE. The PDP may grant less than this — the session file records what was actually granted, not what was requested. |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | Comma-separated tool names to request, e.g. `Read,Grep,Bash`. Must not be empty. Include discovery tools — see below. |
-| `STRATIUM_PEP_TTL_SECONDS` | How long the new delegation is valid for, in seconds. |
+| `STRATIUM_PEP_TTL_SECONDS` | How long the new delegation is valid for, in seconds. The PDP refuses more than its `STRATIUM_MAX_DELEGATION_TTL` (default 24h). |
 | `STRATIUM_PEP_PURPOSE` (optional) | Free-text reason for the delegation, for audit legibility. |
 | `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` (optional) | Path to a file holding the principal's OIDC token, sent to the PDP as `principal_token`. Needed whenever the PDP verifies principals, which is the default; a PDP running with `STRATIUM_PRINCIPAL_AUTH_INSECURE=true` (the local stack) ignores it. An unreadable or empty file fails `session-start`. |
 | `STRATIUM_PEP_ESCALATE_AT` (optional) | A lower escalation threshold than the agent's own, `0`–`4`. It can only make the session stricter, so leaving it unset changes nothing. |

@@ -43,6 +43,8 @@ import (
 // not prevent the process from exiting once a shutdown signal arrives.
 const shutdownTimeout = 10 * time.Second
 
+const maxCallsPerConnection = 256
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	// SetDefault as well as passing logger explicitly. Everything in this
@@ -191,7 +193,7 @@ func run(logger *slog.Logger) error {
 	// both — and Multi itself now supplies pdpgrpc's CreateDelegation gate
 	// with a compiled set via PrepareAll, so repo and an engine no longer
 	// need to be passed to NewServer a second time raw.
-	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry), cfg, signer)
+	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry).WithEvalTimeout(cfg.PolicyEvalTimeout), cfg, signer)
 	if err := configurePrincipalAuth(logger, cfg, srv); err != nil {
 		return err
 	}
@@ -206,7 +208,9 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 
-	grpcServer := grpc.NewServer(transport)
+	// One connection may hold at most maxCallsPerConnection calls in flight;
+	// grpc-go's own default is no limit.
+	grpcServer := grpc.NewServer(transport, grpc.MaxConcurrentStreams(maxCallsPerConnection))
 	pdpgrpc.RegisterPDPServiceServer(grpcServer, srv)
 
 	// The standard health service, nothing else registered alongside it: no

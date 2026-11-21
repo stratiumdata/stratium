@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/stratiumdata/stratium/internal/authz"
 )
@@ -61,6 +62,17 @@ type Registry map[string]PolicyEngine
 type Multi struct {
 	source  AllPolicySource
 	engines Registry
+	// evalTimeout bounds one evaluation of a prepared set; see WithEvalTimeout.
+	evalTimeout time.Duration
+}
+
+// WithEvalTimeout returns m with a deadline of d on each evaluation of the
+// sets it prepares. A policy still running at the deadline ends with an
+// error, which its engine already turns into a deny. Loading and compiling
+// the policies is not under the deadline. Zero means no deadline.
+func (m Multi) WithEvalTimeout(d time.Duration) Multi {
+	m.evalTimeout = d
+	return m
 }
 
 var _ PrincipalPolicy = Multi{}
@@ -164,7 +176,7 @@ func (m Multi) PrepareAll(ctx context.Context) (CompiledPolicySet, error) {
 		entries = append(entries, languageEntry{language: lang, set: set})
 	}
 
-	result := multiSet{entries: entries}
+	result := multiSet{entries: entries, timeout: m.evalTimeout}
 	if len(prepareFailures) > 0 {
 		return result, fmt.Errorf("policy: preparing policies: %s", strings.Join(prepareFailures, "; "))
 	}
@@ -247,6 +259,7 @@ type languageEntry struct {
 // same contract.
 type multiSet struct {
 	entries []languageEntry
+	timeout time.Duration // zero: no deadline
 }
 
 var _ CompiledPolicySet = multiSet{}
@@ -294,6 +307,12 @@ func (s multiSet) Evaluate(ctx context.Context, in EvaluationInput) ([]authz.Pol
 			Source: "none",
 			Reason: "principal: no policies configured for this tenant",
 		}}, nil
+	}
+
+	if s.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
 	}
 
 	var verdicts []authz.PolicyVerdict
