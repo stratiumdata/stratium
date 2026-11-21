@@ -25,8 +25,8 @@ once per session, PreToolUse runs `stratium-pep hook` before every tool call.
 
 --codex writes ~/.codex/hooks.json, and only that file — a project-local Codex
 hook is disabled until the project is trusted, which for an enforcement point
-is fail-open rather than inert. It wires PreToolUse alone, through the
-stratium-codex-hook shim. See Part 2 of
+is fail-open rather than inert. It wires PreToolUse alone, running
+`stratium-pep hook --harness codex`. See Part 2 of
 docs/testing/2026-08-20-agent-integration-test.md.
 
 This script only edits the file. The environment variables the hooks read must
@@ -51,8 +51,9 @@ import urllib.parse
 import urllib.request
 import uuid
 
-# What identifies our entries on the way back out. Both names appear: Claude Code
-# runs the binary directly, Codex runs the stratium-codex-hook shim (see HARNESS).
+# What identifies our entries on the way back out. Every harness now runs the
+# binary itself; the second name is the shell shim older Codex installs used,
+# kept so `status` and `uninstall` still find those.
 MARKERS = ("stratium-pep", "stratium-codex-hook")
 
 
@@ -255,9 +256,9 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
         "PostToolUse": report,
         "PostToolUseFailure": json.loads(json.dumps(report)),
     }
-    if hook_arg:
-        # Claude Code only (the Codex shim takes no argument): a hook that
-        # times out or crashes then blocks the call instead of letting it run.
+    if hook_arg == "hook":
+        # Claude Code only (its own setting, which Codex does not have): a hook
+        # that times out or crashes then blocks the call instead of letting it run.
         all_events["PreToolUse"]["hooks"][0]["onFailure"] = "block"
     return {e: g for e, g in all_events.items() if not only or e in only}
 
@@ -644,7 +645,7 @@ def selftest(_args):
 
         c = resolved()
         assert c.settings == os.path.expanduser("~/.codex/hooks.json"), c.settings
-        assert c.bin == "stratium-codex-hook", c.bin
+        assert c.bin == "stratium-pep", c.bin
         assert c.only == ["PreToolUse"], c.only
 
         # a project-local Codex hook is fail-open, not inert — refuse it
@@ -674,11 +675,12 @@ def selftest(_args):
                                 matcher="*", only=None, dry_run=False)
         assert resolve(cc, pr).settings == os.path.expanduser("~/.claude/settings.json")
 
-        # the Codex block itself: same shape, one event, the shim as the command
-        cx = entries("stratium-codex-hook", "*", ["PreToolUse"], HARNESS["codex"]["hook_arg"])
+        # the Codex block itself: same shape, one event, the binary told whose hook it is
+        cx = entries("stratium-pep", "*", ["PreToolUse"], HARNESS["codex"]["hook_arg"])
         assert list(cx) == ["PreToolUse"], list(cx)
-        # bare, no subcommand: 2b's block is `"command": "…/stratium-codex-hook"`
-        assert cx["PreToolUse"]["hooks"][0]["command"] == "stratium-codex-hook", cx
+        assert cx["PreToolUse"]["hooks"][0]["command"] == "stratium-pep hook --harness codex", cx
+        # onFailure is Claude Code's own key; Codex gets no key it does not define
+        assert "onFailure" not in cx["PreToolUse"]["hooks"][0], cx
         assert entries("stratium-pep", "*", ["PreToolUse"])["PreToolUse"]["hooks"][0][
             "command"] == "stratium-pep hook"
         assert entries("stratium-pep", "*")["PreToolUse"]["hooks"][0]["onFailure"] == "block"
@@ -762,14 +764,20 @@ def selftest(_args):
                 if v is not None:
                     os.environ[k] = v
 
-        # a full round trip against a Codex file, including that uninstall finds
-        # the shim — MARKERS has to cover a name that does not contain "stratium-pep"
+        # a full round trip against a Codex file
         cxpath = os.path.join(d, "codex-hooks.json")
-        b = argparse.Namespace(harness="codex", settings=cxpath, bin="stratium-codex-hook",
+        b = argparse.Namespace(harness="codex", settings=cxpath, bin="stratium-pep",
                                matcher="*", only=["PreToolUse"], dry_run=False, user=False, force=True)
         install(b)
         assert load(cxpath)["hooks"]["PreToolUse"][0]["hooks"][0][
-            "command"] == "stratium-codex-hook"
+            "command"] == "stratium-pep hook --harness codex"
+        uninstall(b)
+        assert load(cxpath) == {}, load(cxpath)
+        # ...and uninstall still finds the shell shim an older install wrote:
+        # MARKERS has to cover a name that does not contain "stratium-pep"
+        with open(cxpath, "w") as f:
+            json.dump({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": "/usr/local/bin/stratium-codex-hook"}]}]}}, f)
         uninstall(b)
         assert load(cxpath) == {}, load(cxpath)
 
@@ -882,21 +890,18 @@ def selftest(_args):
 # Per-harness defaults. Codex differs in three ways that all matter, see Part 2
 # of docs/testing/2026-08-20-agent-integration-test.md:
 #   - the file is ~/.codex/hooks.json, and *only* that one (see resolve());
-#   - the command is the stratium-codex-hook shim, not the bare binary, because
-#     Codex reads a blocking reason off stderr and `stratium-pep hook` writes it
-#     to stdout — without the shim the call is still denied but the reason is
-#     lost (§2e);
+#   - the command carries `--harness codex`, because Codex reads a blocking
+#     reason off stderr and blocks on exit 2 only; the flag makes the hook
+#     answer that way and tells the PDP whose tool names these are;
 #   - only PreToolUse is wired; session-start is run by hand (§2e, last para).
 HARNESS = {
     "claude": {"path": ".claude/settings.json", "user_path": "~/.claude/settings.json",
                "bin": "stratium-pep",
                "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
                "hook_arg": "hook"},
-    # hook_arg is empty for Codex: 2e's shim IS the hook, and calls
-    # `stratium-pep hook` itself. Passing "hook" to the shim would be a stray arg.
     "codex":  {"path": "~/.codex/hooks.json", "user_path": "~/.codex/hooks.json",
-               "bin": "stratium-codex-hook", "events": ("PreToolUse",),
-               "hook_arg": ""},
+               "bin": "stratium-pep", "events": ("PreToolUse",),
+               "hook_arg": "hook --harness codex"},
 }
 
 
@@ -928,10 +933,6 @@ def resolve(args, parser):
                 "not inert (see 2b)")
         if args.only and "SessionStart" not in h["events"] and "SessionStart" in args.only:
             parser.error("--codex wires PreToolUse only; run session-start by hand (see 2e)")
-        if os.path.basename(args.bin) == "stratium-pep":
-            print(f"warning: --codex with {args.bin!r} loses the deny reason — Codex reads "
-                  "it off stderr, the hook writes it to stdout. Use the "
-                  "stratium-codex-hook shim from 2e.", file=sys.stderr)
     args.only = args.only or list(h["events"])
     return args
 
@@ -943,8 +944,9 @@ COMPOSE = os.path.join(REPO, "deploy", "docker", "docker-compose.yml")
 STATE_PATH = os.path.join(REPO, ".stratium-quickstart.json")
 BIN_DIR = os.path.join(REPO, "bin")
 PEP_BIN = os.path.join(BIN_DIR, "stratium-pep")
+# The shell shim older versions wrote for Codex. No longer written; `down`
+# still removes one left behind.
 SHIM_BIN = os.path.join(BIN_DIR, "stratium-codex-hook")
-
 # stratium-pap and pdp-pap are both pinned to this tenant at startup; no request
 # can carry one, so a PAP process serves exactly one tenant for its whole life.
 TENANT = "tenant-pap-e2e-integration"
@@ -983,21 +985,6 @@ OPERATORS = {  # realm users from the docker stack, local dev credentials
     "admin": ("pap-admin", "pap_admin_local_dev_only"),
     "viewer": ("pap-viewer", "pap_viewer_local_dev_only"),
 }
-
-# 2e's shim. Codex reads a blocking reason off stderr; `stratium-pep hook` writes
-# it to stdout. Without this the call is still denied and the reason is lost.
-# Every non-zero becomes 2, so a crashed or missing binary denies rather than
-# falling through: the allow case is the only one that exits 0.
-SHIM = """#!/bin/sh
-# stratium-codex-hook -- `stratium-pep hook` with the deny reason also on stderr,
-# which is where Codex reads it when a PreToolUse hook exits non-zero.
-out=$(%s hook); rc=$?
-[ "$rc" -eq 0 ] && exit 0
-printf '%%s\\n' "${out:-stratium-pep: denied with no output (exit $rc)}" >&2
-printf '%%s' "$out"
-exit 2
-"""
-
 
 class Fail(Exception):
     """A step failed with something the operator can act on."""
@@ -1290,13 +1277,6 @@ def ensure_binary():
         raise Fail(f"built {PEP_BIN} but it is not executable")
 
 
-def ensure_shim():
-    os.makedirs(BIN_DIR, exist_ok=True)
-    with open(SHIM_BIN, "w") as f:
-        f.write(SHIM % PEP_BIN)
-    os.chmod(SHIM_BIN, 0o755)
-
-
 def ensure_policy():
     """0b: without a policy naming the principal, CreateDelegation refuses.
 
@@ -1456,8 +1436,7 @@ def cmd_up(args):
         note("was not launched with the environment the hook reads.")
         note("")
         note("Finish from a plain terminal:")
-        note(f"    deploy/stratium install --{inside} --bin " +
-             (SHIM_BIN if inside == "codex" else PEP_BIN))
+        note(f"    deploy/stratium install --{inside} --bin {PEP_BIN}")
         note(f"    deploy/stratium run {inside}")
         note("")
         note("Or re-run with --wire-anyway if you meant to disable this session.")
@@ -1468,12 +1447,7 @@ def cmd_up(args):
               f"\nhooks are not wired. The two commands above finish it.")
         return rc
     for harness in harnesses:
-        binary = PEP_BIN
-        if harness == "codex":
-            ensure_shim()
-            binary = SHIM_BIN
-            note("wrote the Codex shim: " + SHIM_BIN)
-        install(hook_args(harness, binary))
+        install(hook_args(harness, PEP_BIN))
     save_state(harnesses=harnesses)
 
     step("Verify -- onboarding is not done until a denial is observed")
@@ -1525,15 +1499,15 @@ def cmd_verify(args):
         if reason:
             print(f"        {reason[:150]}")
 
-    if "codex" in state.get("harnesses", []) and resolves(SHIM_BIN):
-        print("\nthrough the Codex shim (2e):")
+    if "codex" in state.get("harnesses", []):
+        print("\nas Codex runs it (--harness codex):")
         for tool, want, _, _ in cases:
             payload = json.dumps({"tool_name": tool, "tool_input": {
                 "file_path": f"/quickstart-{tag}/probe.txt"}})
-            r = subprocess.run([SHIM_BIN], input=payload, text=True,
+            r = subprocess.run([PEP_BIN, "hook", "--harness", "codex"], input=payload, text=True,
                                capture_output=True, env=pep_env(state))
             good = r.returncode == want
-            failures.append(None if good else ("shim:" + tool, want, r.returncode))
+            failures.append(None if good else ("codex:" + tool, want, r.returncode))
             print(f"  {'PASS' if good else 'FAIL'}  {tool:<18} exit={r.returncode} "
                   f"(want {want})  reason on stderr: {bool(r.stderr.strip())}")
         note("the live-session leg is unverified -- see 2f of the agent test plan")
@@ -1729,15 +1703,15 @@ def add_options(p, suppress=False):
                          help="target Claude Code: .claude/settings.json, SessionStart + PreToolUse")
     harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
                          default=d(None),
-                         help="target Codex: ~/.codex/hooks.json, PreToolUse only, via the shim")
+                         help="target Codex: ~/.codex/hooks.json, PreToolUse only")
     p.add_argument("--settings", default=d(None),
                    help="the file to edit (default: the harness's own, see --claude/--codex)")
     p.add_argument("--user", action="store_true", default=d(False),
                    help="use the user-scope file rather than the project one (Claude Code; "
                         "Codex is user-scope either way)")
     p.add_argument("--bin", default=d(None),
-                   help="the hook command (default: stratium-pep, or stratium-codex-hook "
-                        "under --codex; the test plan builds /tmp/stratium-pep)")
+                   help="the hook binary (default: stratium-pep; the test plan builds "
+                        "/tmp/stratium-pep)")
     p.add_argument("--matcher", default=d("*"),
                    help="PreToolUse matcher (default: *; 'Read' to start narrow)")
     p.add_argument("--only", action="append",

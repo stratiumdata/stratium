@@ -3,8 +3,9 @@
 A `PreToolUse` hook for coding agents. The harness invokes it before every tool
 call, hands it the call on stdin, and honours what it answers.
 
-Works with **Claude Code** directly, and with **Codex** through a small shim —
-their hook contracts differ in one place, covered below.
+Works with **Claude Code** and with **Codex**. Their hook contracts differ, so
+the hook is told which one is calling it: `stratium-pep hook --harness codex`.
+Without the flag it speaks Claude Code's.
 
 ---
 
@@ -224,23 +225,48 @@ Same JSON shape, in `~/.codex/hooks.json` — and **only** there. Codex also rea
 project is trusted, and a disabled enforcement hook is not inert, it is
 fail-open.
 
-Codex needs a shim, because of one contract difference: on a non-zero exit it
-reads the blocking reason from **stderr**, and `stratium-pep hook` writes it to
-stdout. Without the shim the call is still denied and the reason is lost.
+The command is `stratium-pep hook --harness codex`:
 
-```sh
-#!/bin/sh
-# stratium-codex-hook
-out=$(stratium-pep hook); rc=$?
-[ "$rc" -eq 0 ] && exit 0
-printf '%s\n' "${out:-stratium-pep: denied with no output (exit $rc)}" >&2
-printf '%s' "$out"
-exit 2
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "*",
+        "hooks": [ { "type": "command",
+                     "command": "/usr/local/bin/stratium-pep hook --harness codex",
+                     "timeout": 330 } ] }
+    ]
+  }
+}
 ```
 
-Point the hook at the shim, with no subcommand — the shim supplies it. Every
-non-zero becomes `2`, so a crashed or missing binary denies rather than falling
-through: **the allow case is the only one that exits 0.**
+`--harness codex` does two things.
+
+**It answers the way Codex reads.** Codex blocks a tool call on exit code `2`
+and shows the model whatever is on stderr. With the flag, every outcome that is
+not a clean allow exits `2` with the reason on stderr, including a failure of
+the hook itself. Codex runs the tool call when a hook exits with any other
+non-zero code, or runs past its `timeout`, so keep the `timeout` above the
+hook's time budget (see [Configuration](#configuration)).
+
+**It tells the PDP whose tool names these are.** Codex reports its shell tool as
+`Bash`, as Claude Code does, but edits files with a tool called `apply_patch`.
+The PDP decides an `apply_patch` call from Codex as `Edit`, so a policy, a
+delegation's tool list or a tier override written for `Edit` covers it. The
+audit entry keeps the name Codex sent and notes `[apply_patch decided as Edit]`.
+
+Two consequences:
+
+- Write rules against `Edit`. A rule that names `apply_patch` does not match a
+  call from Codex, unless you add a tool catalog entry for `apply_patch`: your
+  own entry for a name always wins, and the call is then decided under that name.
+- An `apply_patch` call names its files inside the patch text, which the PDP
+  does not read. It therefore carries no resource identity: under a delegation
+  with a path constraint it is denied, and path-based labels do not apply to it.
+
+An older install runs a `stratium-codex-hook` shell script instead. It still
+works, but the PDP is not told the harness, so `apply_patch` is decided under
+its own name. Re-run `deploy/stratium --codex install` to replace it.
 
 ---
 

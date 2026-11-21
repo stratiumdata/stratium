@@ -1267,7 +1267,7 @@ func TestRunHookCmd_MissingConfig_Denies(t *testing.T) {
 	clearCacheEnv(t)
 
 	var stdout bytes.Buffer
-	code := runHookCmd(stdinBody("Read", `{}`), &stdout)
+	code := runHookCmd("claude", stdinBody("Read", `{}`), &stdout)
 
 	if code != 2 {
 		t.Fatalf("runHookCmd() = %d, want 2", code)
