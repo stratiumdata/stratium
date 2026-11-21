@@ -36,6 +36,14 @@ a file it did not write. Reading it back (`status --system`) uses a reader
 for the installer's own output, not a TOML parser, because the oldest
 supported Python has none.
 
+Outcome notes, OpenCode (built): aliases gained a `PathField`, a file path
+the PDP resolves against `cwd`, because OpenCode sends relative paths. The
+rule that refuses an aliased call with no resource now covers file tools
+only (a path or a patch that could not be resolved); search and web aliases
+carry no resource, as their canonical tools do. The plugin lives in
+`deploy/opencode/stratium-guard` and runs `session-start` when it loads,
+OpenCode having no session-start hook. Not run inside OpenCode.
+
 ## Intent
 
 Stratium decides tool calls for Claude Code and, partly, Codex. The

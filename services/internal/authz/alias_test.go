@@ -36,7 +36,7 @@ func TestExtractAliased(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ExtractAliased(tt.rows, a, tt.alias); got != tt.want {
+			if got := ExtractAliased(tt.rows, a, tt.alias, "/cwd"); got != tt.want {
 				t.Errorf("ExtractAliased() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -52,7 +52,7 @@ func TestAliasedCommandIsClassifiedByItsCommand(t *testing.T) {
 		"rm -rf /": models.ActionTierDestructive,
 	} {
 		a := Action{Tool: "Bash", WireTool: "run", RawInput: `{"cmd":"` + cmd + `"}`}
-		a, _ = ApplyExtraction(ExtractAliased(nil, a, alias), a, nil)
+		a, _ = ApplyExtraction(ExtractAliased(nil, a, alias, ""), a, nil)
 		got, err := DeriveTier(TierTable{Catalog: DefaultCatalog()}, a)
 		if err != nil || got != want {
 			t.Errorf("%q: tier = %v, err = %v, want %v", cmd, got, err, want)
@@ -118,5 +118,97 @@ func TestRaiseForWireName(t *testing.T) {
 	}
 	if base.Overrides != nil {
 		t.Error("RaiseForWireName altered the table it was given")
+	}
+}
+
+func TestResolveFilePath(t *testing.T) {
+	tests := []struct {
+		p, cwd, want string
+		ok           bool
+	}{
+		{"README.md", "/work", "/work/README.md", true},
+		{"./src//a.go", "/work/", "/work/src/a.go", true},
+		{"/abs/a.go", "", "/abs/a.go", true},
+		{"a..b/..c", "/work", "/work/a..b/..c", true},
+		{"README.md", "", "", false},
+		{"README.md", "work", "", false},
+		{"../x", "/work", "", false},
+		{"/work/a/../../etc/passwd", "/work", "", false},
+		{"a.txt", "/work/../etc", "", false},
+		{"~", "/work", "", false},
+		{"~/notes.txt", "/work", "", false},
+		{"~user.txt", "/work", "/work/~user.txt", true},
+		{"", "/work", "", false},
+	}
+	for _, tt := range tests {
+		if got, ok := ResolveFilePath(tt.p, tt.cwd); got != tt.want || ok != tt.ok {
+			t.Errorf("ResolveFilePath(%q, %q) = %q, %v; want %q, %v", tt.p, tt.cwd, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+// OpenCode 2.x tool calls, decided as the canonical tools. The inputs are
+// built from OpenCode's tool schemas at v2.3.2 (packages/core/src/tool/plugin),
+// not captured from a run.
+func TestOpenCodeAliases(t *testing.T) {
+	tests := []struct {
+		tool, input   string
+		wantTool      string
+		wantID        string
+		wantCommand   string
+		wantPatchIDs  []string
+		wantTier      models.ActionTier
+		wantNoAliasAt bool
+	}{
+		{tool: "shell", input: `{"command":"git status","workdir":"/work","timeout":120000}`,
+			wantTool: "Bash", wantCommand: "git status", wantTier: models.ActionTierReadOnly},
+		{tool: "shell", input: `{"command":"rm -rf build"}`,
+			wantTool: "Bash", wantCommand: "rm -rf build", wantTier: models.ActionTierDestructive},
+		{tool: "read", input: `{"path":"README.md","offset":1,"limit":50}`,
+			wantTool: "Read", wantID: "/work/README.md", wantTier: models.ActionTierReadOnly},
+		{tool: "write", input: `{"path":"/work/out.txt","content":"x"}`,
+			wantTool: "Write", wantID: "/work/out.txt", wantTier: models.ActionTierInternalModify},
+		{tool: "edit", input: `{"path":"src/a.go","oldString":"a","newString":"b"}`,
+			wantTool: "Edit", wantID: "/work/src/a.go", wantTier: models.ActionTierInternalModify},
+		{tool: "edit", input: `{"path":"~/notes/todo.md","oldString":"a","newString":"b"}`,
+			wantTool: "Edit", wantID: "", wantTier: models.ActionTierInternalModify},
+		{tool: "patch", input: `{"patchText":"*** Begin Patch\n*** Add File: n.txt\n+hi\n*** End Patch"}`,
+			wantTool: "Edit", wantPatchIDs: []string{"/work/n.txt"}, wantTier: models.ActionTierInternalModify},
+		{tool: "glob", input: `{"pattern":"**/*.go"}`, wantTool: "Glob", wantTier: models.ActionTierReadOnly},
+		{tool: "grep", input: `{"pattern":"TODO","path":"src"}`, wantTool: "Grep", wantTier: models.ActionTierReadOnly},
+		{tool: "webfetch", input: `{"url":"https://example.com","format":"markdown"}`, wantTool: "WebFetch", wantTier: models.ActionTierReadOnly},
+		{tool: "websearch", input: `{"query":"x"}`, wantTool: "WebSearch", wantTier: models.ActionTierReadOnly},
+		// Code Mode, subagents and MCP tools keep their own names.
+		{tool: "execute", input: `{}`, wantNoAliasAt: true},
+		{tool: "subagent", input: `{}`, wantNoAliasAt: true},
+		{tool: "github_create_issue", input: `{}`, wantNoAliasAt: true},
+		// Claude Code's names are not OpenCode's: sent by this harness they
+		// are somebody else's tools.
+		{tool: "Bash", input: `{"command":"ls"}`, wantNoAliasAt: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("opencode", nil, Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAliasAt {
+				if alias != nil || a.Tool != tt.tool {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool || a.WireTool != tt.tool {
+				t.Fatalf("Tool = %q, WireTool = %q, alias = %v; want %q", a.Tool, a.WireTool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/work")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+			if got := PatchResourceIDs(ext.Patch, "/work"); !slices.Equal(got, tt.wantPatchIDs) {
+				t.Errorf("patch ids = %q, want %q", got, tt.wantPatchIDs)
+			}
+			a, _ = ApplyExtraction(ext, a, nil)
+			if tier, err := DeriveTier(TierTable{Catalog: DefaultCatalog()}, a); err != nil || tier != tt.wantTier {
+				t.Errorf("tier = %v, err = %v, want %v", tier, err, tt.wantTier)
+			}
+		})
 	}
 }
