@@ -48,6 +48,36 @@ const shutdownTimeout = 10 * time.Second
 // internet.
 const readHeaderTimeout = 5 * time.Second
 
+// The rest of the server's ceilings. readTimeout covers a whole request,
+// body included; idleTimeout closes a kept-alive connection nobody is using.
+// There is no write timeout: nothing here measures how long a handler may
+// legitimately take to answer.
+const (
+	readTimeout = 30 * time.Second
+	idleTimeout = 120 * time.Second
+	// maxBodyBytes is far above any real request: the largest is a policy's
+	// text.
+	maxBodyBytes = 1 << 20
+	// testEvalTimeout is the deadline on each evaluation the policy test
+	// endpoint runs, the PDP's own default (STRATIUM_POLICY_EVAL_TIMEOUT).
+	testEvalTimeout = 2 * time.Second
+)
+
+// limitBody refuses a request whose declared body is over maxBodyBytes with
+// 413, and cuts off the read of an undeclared one at the same size, which the
+// handler's own decoding then reports as a bad request.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxBodyBytes {
+			http.Error(w, fmt.Sprintf("request body is over the %d byte limit", maxBodyBytes),
+				http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	if err := run(logger); err != nil {
@@ -123,8 +153,10 @@ func run(logger *slog.Logger) error {
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           srv,
+		Handler:           limitBody(srv),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	logger.Info("stratium-pap starting: administration API for agents, delegations, and policy", "tenant_id", cfg.TenantID, "listen_addr", cfg.ListenAddr,

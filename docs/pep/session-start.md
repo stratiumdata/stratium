@@ -45,7 +45,7 @@ STRATIUM_PEP_REQUESTED_TOOLS, STRATIUM_PEP_TTL_SECONDS
 | `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` | `/run/secrets/principal.jwt` | Optional. Path to a file holding the principal's OIDC token. Needed whenever the PDP verifies principals, which is the default. See below. |
 | `STRATIUM_PEP_REQUESTED_TIER` | `3` | Ceiling on action tier, 0–4. |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | `Read,Grep,Glob` | Comma-separated. Empty is refused, not treated as "all". |
-| `STRATIUM_PEP_TTL_SECONDS` | `3600` | Delegation lifetime. |
+| `STRATIUM_PEP_TTL_SECONDS` | `3600` | Delegation lifetime. The PDP refuses more than its `STRATIUM_MAX_DELEGATION_TTL` (default 24h). |
 
 `STRATIUM_PEP_PURPOSE` is optional and free text; it is recorded on the
 delegation and shown in audit.

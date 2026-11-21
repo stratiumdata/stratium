@@ -258,7 +258,7 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 			"delegation %s expired at %s", id, d.ExpiresAt.Format(time.RFC3339))
 	}
 
-	requested := now.Add(time.Duration(req.GetTtlSeconds()) * time.Second)
+	requested := now.Add(s.boundedTTL(req.GetTtlSeconds()))
 	tok, expiry, clamped, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, requested, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)

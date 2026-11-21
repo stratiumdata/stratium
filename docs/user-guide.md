@@ -355,6 +355,8 @@ Three rules run through all three binaries:
 | `STRATIUM_MAX_DELEGATION_DEPTH` | `5` | integer ≥ 1 | Longest delegation chain permitted. A chain deeper than this denies. |
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
 | `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long a pending approval stays valid. How long you can reasonably expect a human to answer an escalation. |
+| `STRATIUM_MAX_DELEGATION_TTL` | `24h` | duration > 0 | Longest lifetime a delegation may be created with. `CreateDelegation` refuses a longer `ttl_seconds` and names this maximum. Raise it if your sessions legitimately run longer. |
+| `STRATIUM_POLICY_EVAL_TIMEOUT` | `2s` | duration > 0 | Deadline on one evaluation of the tenant's policies. A policy still running at the deadline is stopped and the call is denied. |
 | `STRATIUM_SPENT_PROOF_REAP_INTERVAL` | `5m` | duration > 0 | How often the PDP sweeps its own tenant's expired `spent_proofs` rows. A longer interval cannot shorten replay protection — rows only become reapable once past the freshness window — it only delays cleanup. |
 | `STRATIUM_POLICY_LANGUAGES` | `cedar,json,rego,xacml` | any comma-separated subset of those four | Which engines this PDP will evaluate. **A name with no matching engine is a startup failure.** A stray comma (`cedar,,rego`) is rejected rather than silently dropped. A tenant policy in a language this PDP does not run produces an honest deny naming the language — never a silent skip. |
 
@@ -434,6 +436,8 @@ means an intended administrator is refused entirely.
 | `STRATIUM_PAP_OIDC_TIMEOUT` | `5s` | Bounds **every** HTTP call the OIDC library makes for the life of the process, including background JWKS refreshes — not just the initial discovery. |
 | `STRATIUM_PAP_DB_TIMEOUT` | `5s` | Database connect/ping deadline. |
 
+The PAP refuses a request body over 1 MiB (`413`), and closes a connection that takes more than 30 seconds to send a request or sits idle for two minutes. A policy tried through the policy test endpoint is stopped after 2 seconds. These are fixed.
+
 ```bash
 STRATIUM_PAP_TENANT_ID=acme-prod
 STRATIUM_PAP_DATABASE_URL=postgres://stratium_pap_login:...@db:5432/stratium?sslmode=require
@@ -511,7 +515,7 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_SESSION_FILE` | session-start, hook, mcp | `/run/stratium/session.json` | Where `session-start` writes, and where `hook`/`mcp` read **fresh on every call**. Created `0600`. Deleting it ends the session immediately — the next tool call denies. This file is bearer authority: anyone who can read it can act as the agent. |
 | `STRATIUM_PEP_REQUESTED_TOOLS` | session-start | `Read,Write,Bash` | Comma-separated. What you are *asking* for. The PDP clamps this to what the principal actually holds; the session file records what was **granted**, which may be narrower. An empty list is a missing-configuration error. |
 | `STRATIUM_PEP_REQUESTED_TIER` | session-start | `3` | Integer 0–4. Requested `max_action_tier`. Clamped downward if policy does not permit it. Range is validated by the PDP, not locally. |
-| `STRATIUM_PEP_TTL_SECONDS` | session-start | `3600` | Delegation lifetime in seconds. Must be positive. |
+| `STRATIUM_PEP_TTL_SECONDS` | session-start | `3600` | Delegation lifetime in seconds. Must be positive, and no more than the PDP's `STRATIUM_MAX_DELEGATION_TTL` (default 24h), or `session-start` is refused. |
 | `STRATIUM_PEP_PRINCIPAL_TOKEN_FILE` | session-start | `/run/secrets/principal.jwt` | Optional. Path to a file holding the principal's OIDC token; surrounding whitespace is trimmed. `session-start` sends it to the PDP as `principal_token`. Needed whenever the PDP verifies principals (the default, §3.1 "Principal authentication"); a PDP running with `STRATIUM_PRINCIPAL_AUTH_INSECURE=true` ignores it. A file, not a variable, so the token is not copied into child processes' environments. An unreadable or empty file fails `session-start`. The token is needed only at session start: it is typically short-lived, and that does not shorten the session, whose lifetime is `STRATIUM_PEP_TTL_SECONDS`. |
 | `STRATIUM_PEP_PURPOSE` | session-start | `nightly refactor` | Free text, recorded on the delegation and visible to policy. Optional. |
 | `STRATIUM_PEP_ESCALATE_AT` | session-start | `3` | Optional. Asks for a **lower** escalation threshold than the agent's (§5.5). It can never raise or remove the agent's threshold, so leaving it unset changes nothing. |
