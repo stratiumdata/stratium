@@ -14,14 +14,18 @@ import (
 // perFilePolicy allows every call except one on denyID, and records the
 // resource id of each call it was asked about.
 type perFilePolicy struct {
-	denyID string
-	asked  []string
+	denyID     string
+	escalateID string
+	asked      []string
 }
 
 func (p *perFilePolicy) Evaluate(_ context.Context, in policy.EvaluationInput) ([]authz.PolicyVerdict, error) {
 	p.asked = append(p.asked, in.Resource["id"])
 	if in.Resource["id"] == p.denyID {
 		return []authz.PolicyVerdict{{Effect: authz.EffectDeny, Source: "fake", Reason: "not that file"}}, nil
+	}
+	if in.Resource["id"] == p.escalateID {
+		return []authz.PolicyVerdict{{Effect: authz.EffectEscalate, Source: "fake", Reason: "ask first"}}, nil
 	}
 	return []authz.PolicyVerdict{{Effect: authz.EffectAllow, Source: "fake"}}, nil
 }
@@ -42,6 +46,7 @@ func TestDecide_HarnessAlias(t *testing.T) {
 		tools       []string // the delegation's approved tools; Edit when nil
 		constraints map[string]string
 		denyID      string // the one file the policy refuses
+		escalateID  string // the one file the policy wants approval for
 		wantEffect  Effect
 		wantReason  string   // substring of the audit reason; "" means no alias note
 		wantAsked   []string // resource ids the policy was asked about, when set
@@ -70,6 +75,24 @@ func TestDecide_HarnessAlias(t *testing.T) {
 			wantEffect: Effect_EFFECT_DENY,
 			wantReason: "[apply_patch decided as Edit]",
 			wantAsked:  []string{"/workspace/a.txt"},
+		},
+		{
+			name:       "a refusal on a later file beats an escalation on an earlier one",
+			harness:    "codex",
+			cwd:        "/workspace",
+			escalateID: "/workspace/a.txt",
+			denyID:     "/workspace/sub/b.txt",
+			wantEffect: Effect_EFFECT_DENY,
+			wantReason: "[apply_patch decided as Edit]",
+			wantAsked:  []string{"/workspace/a.txt", "/workspace/sub/b.txt"},
+		},
+		{
+			name:       "an escalation on one file escalates the patch, whichever file it is",
+			harness:    "codex",
+			cwd:        "/workspace",
+			escalateID: "/workspace/sub/b.txt",
+			wantEffect: Effect_EFFECT_ESCALATE,
+			wantReason: "[apply_patch decided as Edit]",
 		},
 		{
 			name:        "every file must be inside a path constraint",
@@ -150,7 +173,7 @@ func TestDecide_HarnessAlias(t *testing.T) {
 			}
 			req.Harness = tt.harness
 			req.Cwd = tt.cwd
-			pol := &perFilePolicy{denyID: tt.denyID}
+			pol := &perFilePolicy{denyID: tt.denyID, escalateID: tt.escalateID}
 			srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: pol}), testConfig(), &fakeSigner{})
 
 			resp, err := srv.Decide(context.Background(), req)

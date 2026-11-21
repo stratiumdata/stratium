@@ -21,7 +21,7 @@ reads the file headers out of the patch (`Add File`, `Update File`,
   segment in any path.
 - Path constraints and labels see every file, as they do for a shell command.
   Policies are asked once per file, each as an `Edit` of that file, and the
-  first answer that is not an allow stands.
+  strictest answer stands (deny, then escalate, then allow).
 - A patch that deletes a file keeps `Edit`'s tier. A plain `rm` of one file is
   the same tier today.
 - A tenant tier override keyed on the native name still raises the tier.

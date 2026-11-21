@@ -261,8 +261,9 @@ directory Codex reported, and then:
 
 - a delegation's path constraint must hold for every file;
 - the strictest classification label among the files applies to the call;
-- policies are asked about each file in turn, as an `Edit` of that file, and one
-  refusal refuses the whole patch.
+- policies are asked about each file in turn, as an `Edit` of that file. One
+  refusal refuses the whole patch; failing that, one file that needs approval
+  puts the whole patch up for approval.
 
 What follows from that:
 

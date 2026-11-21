@@ -599,9 +599,12 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// AND terms, so nothing returned here can widen what they allow.
 	//
 	// A patch is asked about once per file it names, each as the edit of that
-	// one file a policy for the canonical tool expects, and the first answer
-	// that is not an allow stands. Every file carries the strictest label of
-	// the set, as the delegation leg's resource does.
+	// one file a policy for the canonical tool expects, and the strictest
+	// answer stands: a deny on any file, else an escalation on any file, else
+	// allow. The files' verdicts are never pooled into one fold, where one
+	// file's allow would stand in for a file no policy allowed. Every file
+	// carries the strictest label of the set, as the delegation leg's
+	// resource does.
 	policyResources := []map[string]string{resource}
 	if len(patchIDs) > 0 {
 		policyResources = policyResources[:0]
@@ -611,8 +614,9 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		}
 	}
 	var principalVerdicts []authz.PolicyVerdict
-	for _, policyResource := range policyResources {
-		principalVerdicts = s.policy.Evaluate(ctx, policy.EvaluationInput{
+	strictest := authz.EffectAllow
+	for i, policyResource := range policyResources {
+		verdicts := s.policy.Evaluate(ctx, policy.EvaluationInput{
 			Principal:   principal,
 			Action:      action,
 			DerivedTier: derivedTier,
@@ -625,7 +629,11 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 				Purpose:            acting.Purpose,
 			},
 		})
-		if leg, _ := authz.FoldVerdicts(principalVerdicts); leg.Effect != authz.EffectAllow {
+		leg, _ := authz.FoldVerdicts(verdicts)
+		if i == 0 || (leg.Effect != authz.EffectAllow && strictest == authz.EffectAllow) || leg.Effect == authz.EffectDeny {
+			principalVerdicts, strictest = verdicts, leg.Effect
+		}
+		if strictest == authz.EffectDeny {
 			break
 		}
 	}
