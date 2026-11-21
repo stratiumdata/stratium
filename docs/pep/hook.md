@@ -311,6 +311,9 @@ What to know before running it:
 - The points under [What the install protects](#what-the-install-protects)
   about the session file, the machine-wide configuration and `sudo` apply here
   as well.
+- **The binary and the configuration are shared with the Claude Code system
+  install.** `uninstall --system` for one harness keeps both while the other
+  harness's hook file still runs the binary.
 
 `--harness codex` does two things.
 

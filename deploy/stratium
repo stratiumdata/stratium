@@ -566,14 +566,28 @@ def install_system(args):
 
 
 def uninstall_system(args):
-    """Remove exactly what install_system wrote."""
-    paths = [under(args.system_root, p)
-             for p in (SYSTEM_HOOKS[args.harness], SYSTEM_CONF, SYSTEM_BIN)]
-    for path in paths:
+    """Remove exactly what install_system wrote.
+
+    The binary and the configuration are shared by every harness's system
+    install. They stay while any hook file still runs the binary: a hook whose
+    command is gone does not block the tool call on every harness.
+    """
+    root = args.system_root
+    mine, binary = under(root, SYSTEM_HOOKS[args.harness]), under(root, SYSTEM_BIN)
+    going = os.path.exists(mine) and not (mine.endswith(".toml") and not ours_toml(mine))
+    in_use = []
+    for f in sorted(under(root, f) for f in SYSTEM_HOOKS.values()):
+        if os.path.exists(f) and not (f == mine and going):
+            with open(f) as fh:
+                if binary in fh.read():
+                    in_use.append(f)
+    for path in (mine, under(root, SYSTEM_CONF), binary):
         if not os.path.exists(path):
             print(f"not there: {path}")
-        elif path.endswith(".toml") and not ours_toml(path):
+        elif path == mine and not going:
             print(f"left alone, not written by this script: {path}")
+        elif path != mine and in_use:
+            print(f"kept, still used by {', '.join(in_use)}: {path}")
         elif args.dry_run:
             print(f"would remove {path}")
         else:
@@ -841,6 +855,13 @@ def selftest(_args):
             sx.settings = sreq
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 assert status(sx) == 0, out.getvalue()
+            # the binary and configuration are shared: removing one harness's
+            # install keeps them while the other's hooks still run the binary
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sa) == 0
+                uninstall_system(sa)
+            assert not os.path.exists(under(sroot, MANAGED_SETTINGS))
+            assert os.path.exists(sbin) and os.path.exists(sconf), "removed a binary Codex still runs"
             with contextlib.redirect_stdout(io.StringIO()):
                 assert install_system(sx) == 0  # over its own file: fine
             # somebody else's requirements.toml is neither merged into nor removed
@@ -855,6 +876,15 @@ def selftest(_args):
             with contextlib.redirect_stdout(io.StringIO()):
                 uninstall_system(sx)
             assert open(sreq).read().startswith("allowed_sandbox_modes"), "removed a file it did not write"
+            assert not os.path.exists(sbin) and not os.path.exists(sconf)
+            # ...but hooks added to it by hand keep the binary they run
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sa) == 0
+            with open(sreq, "a") as f:
+                f.write(f'[[hooks.PreToolUse.hooks]]\ncommand = "{sbin} hook --harness codex"\n')
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(sx)
+            assert os.path.exists(sbin) and os.path.exists(under(sroot, MANAGED_SETTINGS))
         finally:
             os.environ.clear()
             os.environ.update(kept_env)
