@@ -8,10 +8,25 @@ does not). The audit row has no free-form field, so the canonical name is
 appended to its reason text (`[apply_patch decided as Edit]`) and the
 harness name is not recorded. An aliased call with no resource identity is
 refused outright, not only under a path constraint: once aliased it is
-matched by rules written for calls that name their resource. So Codex's
-`apply_patch` is refused until the patch-path reader lands. That reader must
-also settle the tier of a patch that deletes a file, relative paths, and
-tenant tier overrides keyed on the native name.
+matched by rules written for calls that name their resource.
+
+Outcome notes, patch-path reader (built before PR B, because without it a
+Codex file edit is always refused): an alias can name a `PatchField`; the PDP
+reads the file headers out of the patch (`Add File`, `Update File`,
+`Delete File`, `Move to`). Calls made while building it:
+
+- Relative paths are resolved by the PDP against a new `DecideRequest.cwd`
+  (field 16), which the hook passes through from the harness's payload. A
+  relative path with no absolute cwd refuses the patch, and so does a `..`
+  segment in any path.
+- Path constraints and labels see every file, as they do for a shell command.
+  Policies are asked once per file, each as an `Edit` of that file, and the
+  first answer that is not an allow stands.
+- A patch that deletes a file keeps `Edit`'s tier. A plain `rm` of one file is
+  the same tier today.
+- A tenant tier override keyed on the native name still raises the tier.
+- A policy that names the native tool does not match an aliased call. This is
+  documented, not detected.
 
 ## Intent
 
