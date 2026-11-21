@@ -215,7 +215,7 @@ func TestRunHookCmd_CacheStalenessWindow_NotRequiredAndIgnored(t *testing.T) {
 			t.Setenv(cacheStalenessWindowEnv, tt.value)
 
 			var stdout bytes.Buffer
-			code := runHookCmd(stdinBody("Bash", `{"command":"ls"}`), &stdout)
+			code := runHookCmd("claude", stdinBody("Bash", `{"command":"ls"}`), &stdout)
 
 			if code != 0 {
 				t.Fatalf("runHookCmd() = %d, want 0 (the PDP allows); stdout: %s", code, stdout.String())

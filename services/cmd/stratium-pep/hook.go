@@ -98,6 +98,12 @@ type hookConfig struct {
 	// binary should pick on an operator's behalf.
 	ApprovalPollInterval time.Duration
 	ApprovalTimeout      time.Duration
+
+	// Harness is the --harness value, sent to the PDP so it can decide this
+	// harness's own tool names as the canonical ones (DecideRequest.harness).
+	// Not from the environment: it is a property of the hook entry that
+	// invoked this process, and each harness's entry names its own.
+	Harness string
 }
 
 // loadHookConfigFromEnv reads hookConfig from the environment, or returns an
@@ -150,8 +156,9 @@ func loadHookConfigFromEnv() (hookConfig, error) {
 // Deliberately does NOT load cacheConfig (cache.go): hook has no decision
 // cache, so STRATIUM_PEP_CACHE_STALENESS_WINDOW is neither required nor
 // read here. A value left over from an older configuration is ignored.
-func runHookCmd(stdin io.Reader, stdout io.Writer) int {
+func runHookCmd(harness string, stdin io.Reader, stdout io.Writer) int {
 	cfg, err := loadHookConfigFromEnv()
+	cfg.Harness = harness
 	if err != nil {
 		// Missing configuration is not distinguishable from any other reason
 		// this hook cannot be trusted to decide — see the package doc's
@@ -266,6 +273,7 @@ func runHook(stdin io.Reader, stdout io.Writer, client pdpgrpc.PDPServiceClient,
 		Tool:     in.ToolName,
 		RawInput: rawInput,
 		Token:    sess.GetToken(),
+		Harness:  cfg.Harness,
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
 		// (Verb, NormalizedInput) or are ever set here (Resource) anymore —
 		// see the package doc. DeclaredTier: deliberately never set, same doc.

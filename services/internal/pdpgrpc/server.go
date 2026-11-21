@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -469,7 +470,18 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// evidence unconditionally (tier.go's destructiveEvidence), so the order
 	// extraction runs in relative to that scan cannot matter: nothing on
 	// this path can narrow what the evidence check sees.
-	extracted := authz.ExtractFromCatalog(catalogEntries, action)
+	//
+	// A harness hook's own name for a tool is renamed to the canonical one
+	// first (authz.ResolveAlias), so the catalog, the tier table, the tool
+	// lists and the policies below all see one vocabulary. Only a caller
+	// that names its harness gets this; see DecideRequest.harness.
+	action, alias := authz.ResolveAlias(req.GetHarness(), catalogEntries, action)
+	var extracted authz.ExtractedInput
+	if alias != nil {
+		extracted = authz.ExtractAliased(catalogEntries, action, *alias)
+	} else {
+		extracted = authz.ExtractFromCatalog(catalogEntries, action)
+	}
 	action, resource = authz.ApplyExtraction(extracted, action, resource)
 
 	// The tenant's own resource_label_rules (spec §3.9.1 R4), loaded fresh
@@ -518,6 +530,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	}
 	if extracted.Command != "" {
 		resourceIDs = append(resourceIDs, authz.ShellResourceIDs(extracted.Command)...)
+	}
+	// An aliased call the PDP can name no resource for is refused. The alias
+	// makes it the canonical tool for every rule below, and those rules were
+	// written for calls that say which resource they touch.
+	// ponytail: refuses every aliased tool with no resource (today only
+	// Codex's apply_patch, whose paths are inside the patch text). Read the
+	// paths, or mark resource-less aliases as such, when one needs to pass.
+	if alias != nil && len(resourceIDs) == 0 {
+		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
+			fmt.Errorf("%w: %q names no resource the PDP can read", errAliasedNoResource, action.WireTool), &epoch)
 	}
 	resource = labelResource(labelRules, resource, resourceIDs)
 
@@ -779,7 +801,7 @@ func (s *Server) appendAudit(
 		EventType:            eventTypeDecision,
 		Actor:                actor,
 		AgentID:              &agentID,
-		ToolName:             action.Tool,
+		ToolName:             action.RecordedTool(),
 		Action:               action.Verb,
 		DeclaredTier:         declaredTier,
 		DerivedTier:          int16(result.DerivedTier), //nolint:gosec // G115: models.ActionTier is a 0-4 enum
@@ -789,6 +811,13 @@ func (s *Server) appendAudit(
 		Reason:               result.Reason,
 		UnevaluatedPolicyIDs: result.UnevaluatedPolicyIDs,
 		InputDigest:          digest,
+	}
+
+	// The row names the tool as the caller sent it. When an alias applied,
+	// say which tool it was decided as: without that, a reader sees
+	// "apply_patch" allowed by a rule that only mentions "Edit".
+	if action.WireTool != "" {
+		entry.Reason = strings.TrimSpace(fmt.Sprintf("%s [%s decided as %s]", entry.Reason, action.WireTool, action.Tool))
 	}
 
 	// DelegationID is gated on delegationID itself, NOT on chain: the two
@@ -899,6 +928,10 @@ func (s *Server) denyAndAudit(
 	}
 	return toResponse(result, epoch), nil
 }
+
+// errAliasedNoResource is Decide's refusal of an aliased call that carries
+// no resource identity.
+var errAliasedNoResource = errors.New("aliased tool call refused")
 
 // parseNonNilUUID parses s as a UUID and rejects the zero value.
 func parseNonNilUUID(s string) (uuid.UUID, error) {

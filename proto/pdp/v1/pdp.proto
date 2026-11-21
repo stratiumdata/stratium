@@ -193,6 +193,22 @@ message DecideRequest {
   // against a value the surface — not the presenter — supplies.
   string observed_method = 13;
   string observed_uri = 14;
+
+  // harness names the agent harness whose hook sent this call ("codex",
+  // "gemini", ...). Set only by `stratium-pep hook --harness`; the mcp,
+  // proxy and extauthz surfaces leave it empty, as does any older caller.
+  //
+  // It selects the PDP's built-in table of tool-name aliases
+  // (internal/authz.DefaultAliases): a harness's own name for a tool is
+  // decided as the canonical one, so a rule written for "Bash" covers every
+  // harness's shell tool. Empty means no aliasing at all.
+  //
+  // Caller-supplied and unverified, and safe to take anyway: all it does is
+  // turn on a renaming the same caller could have done itself by sending the
+  // canonical name in tool. What it protects is a caller that forwards names
+  // somebody else chose -- an MCP server's own tool names must never be
+  // aliased just because one happens to be called "read" or "shell".
+  string harness = 15;
 }
 
 // DecideResponse is the compound decision and each leg's individual
