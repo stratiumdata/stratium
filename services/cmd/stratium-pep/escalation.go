@@ -59,6 +59,9 @@ import (
 	"io"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
 
@@ -273,7 +276,13 @@ func pollApproval(ctx context.Context, client pdpgrpc.PDPServiceClient, interval
 			// reason deterministic regardless of which branch happened to win,
 			// rather than an operator seeing two different messages for the
 			// same underlying event depending on scheduling luck.
-			if ctx.Err() != nil {
+			//
+			// A DeadlineExceeded status counts as well, with ctx still live.
+			// ctx's deadline is the only one this call has, and the PDP
+			// enforces the same deadline from its side of the wire: its
+			// answer can arrive a moment before this process's own timer
+			// fires.
+			if ctx.Err() != nil || status.Code(err) == codes.DeadlineExceeded {
 				return false, timeoutReason
 			}
 			return false, describeRPCError(err, fmt.Sprintf("approval %s is unknown to the PDP", approvalID))

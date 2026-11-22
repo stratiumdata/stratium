@@ -553,6 +553,20 @@ func TestRunHook_Escalate_NoApprovalIDInResponse_DeniesWithoutPolling(t *testing
 // Wrapped in mustReturnWithin: a mutation that ignored ctx here would hang,
 // and this is what turns that into a fast, reported failure instead of a
 // multi-minute one.
+// The PDP enforces the caller's deadline too, and its DeadlineExceeded can
+// arrive just before this process's own timer fires. That is the escalation
+// timeout, and is reported as one, not as an unresponsive PDP.
+func TestPollApproval_DeadlineReportedByThePDPIsTheEscalationTimeout(t *testing.T) {
+	fake := &fakePDP{getApprovalErr: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute) // nowhere near done
+	defer cancel()
+
+	ok, reason := pollApproval(ctx, startFakePDP(t, fake), 5*time.Millisecond, uuid.NewString())
+	if ok || !strings.Contains(reason, "did not resolve within the escalation timeout") {
+		t.Errorf("pollApproval() = %v, %q; want a denial naming the escalation timeout", ok, reason)
+	}
+}
+
 func TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies(t *testing.T) {
 	fake := &fakePDP{getApprovalResponses: pendingApproval()}
 	client := startFakePDP(t, fake)
