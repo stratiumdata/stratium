@@ -434,3 +434,43 @@ func TestKiroAliases(t *testing.T) {
 		})
 	}
 }
+
+// Inputs follow the parameter structs in Goose's source at 1.60.0.
+func TestGooseAliases(t *testing.T) {
+	tests := []struct {
+		tool, input string
+		wantTool    string
+		wantID      string
+		wantCommand string
+		wantNoAlias bool
+	}{
+		{tool: "shell", input: `{"command":"cat notes.txt","timeout_secs":30}`, wantTool: "Bash", wantCommand: "cat notes.txt"},
+		{tool: "write", input: `{"path":"/proj/new.txt","content":"egret"}`, wantTool: "Write", wantID: "/proj/new.txt"},
+		{tool: "write", input: `{"path":"new.txt","content":"egret"}`, wantTool: "Write", wantID: "/proj/new.txt"},
+		{tool: "edit", input: `{"path":"/proj/notes.txt","before":"heron","after":"crane"}`, wantTool: "Edit", wantID: "/proj/notes.txt"},
+		{tool: "tree", input: `{"path":"/proj/sub","depth":2}`, wantTool: "LS", wantID: "/proj/sub"},
+		{tool: "read_image", input: `{"source":"https://example.com/a.png"}`, wantNoAlias: true},
+		{tool: "todo__todo_write", input: `{"content":"x"}`, wantNoAlias: true},
+		{tool: "developer__shell", input: `{"command":"ls"}`, wantNoAlias: true},
+		// a file tool with no path: no file, so refused
+		{tool: "write", input: `{"content":"egret"}`, wantTool: "Write", wantID: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("goose", Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool {
+				t.Fatalf("Tool = %q, alias = %v; want %q", a.Tool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/proj")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -47,6 +48,11 @@ func TestRunHookFor(t *testing.T) {
 		{"kiro allow", []string{"--harness", "kiro"}, allow, 0, "", ""},
 		{"kiro deny puts the reason on stderr and exits 2: exit 1 would run the call", []string{"--harness", "kiro"}, deny, 2,
 			`"permissionDecision":"deny"`, reason},
+		{"goose allow is silent: other output would count as a failed hook", []string{"--harness", "goose"}, allow, 0, "", ""},
+		{"goose deny is its block decision, stderr and exit 2", []string{"--harness", "goose"}, deny, 2,
+			`"decision":"block"`, reason},
+		{"goose: a failure with no output still blocks", []string{"--harness", "goose"}, crash, 2,
+			`"decision":"block"`, "denied with no output"},
 		{"antigravity allow is silent", []string{"--harness", "antigravity"}, allow, 0, "", ""},
 		{"antigravity deny is its decision JSON with exit 0: exit 2 would lose it", []string{"--harness", "antigravity"}, deny, 0,
 			`{"decision":"deny","reason":"stratium-pep: denied by policy"}`, reason},
@@ -218,5 +224,21 @@ func TestRunReportCmd_AntigravityReply(t *testing.T) {
 	runReportCmd(nil, strings.NewReader(in), &stdout, &stderr)
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q for a harness that reads no reply", stdout.String())
+	}
+}
+
+func TestParseGoose(t *testing.T) {
+	in := `{"event":"PreToolUse","session_id":"s","matcher_context":null,"tool_call_id":"c1",` +
+		`"tool_name":"write","tool_input":{"path":"new.txt","content":"x"},"working_dir":"/proj"}`
+	out, err := parseGoose([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got hookStdin
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ToolName != "write" || got.Cwd != "/proj" || string(got.ToolInput) != `{"path":"new.txt","content":"x"}` {
+		t.Errorf("got %+v", got)
 	}
 }
