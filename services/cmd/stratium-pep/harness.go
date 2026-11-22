@@ -39,6 +39,20 @@ var harnesses = map[string]struct {
 	"opencode": {deny: denyOnStderr},
 	"cursor":   {deny: denyCursor, allow: allowCursor},
 	"copilot":  {deny: denyCopilot, parse: parseCopilot},
+	"gemini":   {deny: denyGemini},
+}
+
+// denyGemini is Gemini CLI's deny: {"decision":"deny","reason":...} on
+// stdout. Gemini reads stdout first and stderr only when stdout is empty,
+// and JSON on stdout decides at any exit code, so stdout carries exactly
+// this and nothing else: Claude Code's JSON there would parse as a document
+// with no decision, which Gemini reads as an allow. The exit code is 2 all
+// the same, and the reason is on stderr too.
+func denyGemini(stdout, stderr io.Writer, _ []byte, reason string) int {
+	_, _ = fmt.Fprintln(stderr, reason)
+	out, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
+	_, _ = fmt.Fprintln(stdout, string(out))
+	return 2
 }
 
 // parseCopilot reads the payload of Copilot CLI's camelCase events, which

@@ -63,6 +63,12 @@ they carry Copilot's own tool names. Its `apply_patch` sends the patch text
 as the whole input, so `PatchField` can be `WholeInput`. Run in live
 sessions of Copilot CLI 1.0.114.
 
+Outcome notes, Gemini CLI (built): no adapter changes beyond a deny format.
+Its stdout must hold Gemini's decision JSON alone, since Gemini acts on
+stdout JSON at any exit code and reads one with no decision as an allow.
+The system install cannot stop a user disabling hooks by name, and the docs
+page says so first. Not run in Gemini CLI: no credentials here.
+
 ## Intent
 
 Stratium decides tool calls for Claude Code and, partly, Codex. The

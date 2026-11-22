@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -44,6 +45,11 @@ func TestRunHookFor(t *testing.T) {
 		{"copilot allow is silent: its own permission flow carries on", []string{"--harness", "copilot"}, allow, 0, "", ""},
 		{"copilot deny is its decision JSON, exit 2", []string{"--harness", "copilot"}, deny, 2,
 			`{"permissionDecision":"deny","permissionDecisionReason":"stratium-pep: denied by policy"}`, reason},
+		{"gemini allow is silent", []string{"--harness", "gemini"}, allow, 0, "", ""},
+		{"gemini deny is its decision JSON alone on stdout, exit 2", []string{"--harness", "gemini"}, deny, 2,
+			`{"decision":"deny","reason":"stratium-pep: denied by policy"}`, reason},
+		{"gemini: a failure with no output still prints a deny", []string{"--harness", "gemini"}, crash, 2,
+			`{"decision":"deny","reason":"stratium-pep: denied with no output (exit 1)"}`, "denied with no output"},
 		{"unknown harness blocks", []string{"--harness", "nope"}, allow, 2,
 			`"permissionDecision":"deny"`, `unknown --harness "nope"`},
 		{"--harness with no value blocks", []string{"--harness"}, allow, 2,
@@ -168,5 +174,21 @@ func TestHarnessStdin(t *testing.T) {
 		if got, _ := io.ReadAll(r); string(got) != want {
 			t.Errorf("%q: stdin = %s, want %s", args, got, want)
 		}
+	}
+}
+
+// Gemini CLI decides on the JSON it finds on stdout, at any exit code, and a
+// document with no "decision" is an allow. So a Gemini deny must never carry
+// Claude Code's JSON, whose decision is nested where Gemini does not look.
+func TestRunHookFor_GeminiDenyHasNoClaudeJSON(t *testing.T) {
+	deny := func(_ string, _ io.Reader, w io.Writer) int { return writeDeny(w, "no") }
+	var stdout, stderr bytes.Buffer
+	runHookFor([]string{"--harness", "gemini"}, strings.NewReader("{}"), &stdout, &stderr, deny)
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v: %q", err, stdout.String())
+	}
+	if got["decision"] != "deny" || got["reason"] != "no" || len(got) != 2 {
+		t.Errorf("stdout = %v, want exactly decision and reason", got)
 	}
 }

@@ -104,6 +104,22 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			"web_fetch":          {Canonical: "WebFetch"},
 			"web_search":         {Canonical: "WebSearch"},
 		},
+		// Gemini CLI, from its tool declarations at v0.70.0; none of it has
+		// been seen in a live session. read_many_files takes patterns, not a
+		// path, and has no canonical tool: it keeps its name, as do the
+		// planning tools and MCP tools (mcp_<server>_<tool>). web_fetch puts
+		// its URLs inside a prompt, so it carries no resource.
+		"gemini": {
+			"run_shell_command": {Canonical: "Bash", CommandField: "command"},
+			"read_file":         {Canonical: "Read", PathField: "file_path"},
+			"write_file":        {Canonical: "Write", PathField: "file_path"},
+			"replace":           {Canonical: "Edit", PathField: "file_path"},
+			"list_directory":    {Canonical: "LS", PathField: "dir_path"},
+			"glob":              {Canonical: "Glob"},
+			"grep_search":       {Canonical: "Grep"},
+			"web_fetch":         {Canonical: "WebFetch"},
+			"google_web_search": {Canonical: "WebSearch"},
+		},
 	}
 }
 

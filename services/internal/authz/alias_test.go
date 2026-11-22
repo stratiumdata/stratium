@@ -316,3 +316,51 @@ func TestCopilotAliases(t *testing.T) {
 		})
 	}
 }
+
+// Gemini CLI tool calls, built from its tool declarations at v0.70.0
+// (packages/core/src/tools/definitions); not captured from a run.
+func TestGeminiAliases(t *testing.T) {
+	tests := []struct {
+		tool, input string
+		wantTool    string
+		wantID      string
+		wantCommand string
+		wantNoAlias bool
+	}{
+		{tool: "run_shell_command", input: `{"command":"git status","description":"Show status","dir_path":"."}`,
+			wantTool: "Bash", wantCommand: "git status"},
+		{tool: "read_file", input: `{"file_path":"/proj/README.md","start_line":1}`, wantTool: "Read", wantID: "/proj/README.md"},
+		{tool: "write_file", input: `{"file_path":"docs/a.md","content":"x"}`, wantTool: "Write", wantID: "/proj/docs/a.md"},
+		{tool: "replace", input: `{"file_path":"/proj/a.go","instruction":"i","old_string":"a","new_string":"b"}`,
+			wantTool: "Edit", wantID: "/proj/a.go"},
+		{tool: "list_directory", input: `{"dir_path":"src"}`, wantTool: "LS", wantID: "/proj/src"},
+		{tool: "glob", input: `{"pattern":"**/*.go","dir_path":"src"}`, wantTool: "Glob"},
+		{tool: "grep_search", input: `{"pattern":"TODO"}`, wantTool: "Grep"},
+		{tool: "web_fetch", input: `{"prompt":"summarise https://example.com"}`, wantTool: "WebFetch"},
+		{tool: "google_web_search", input: `{"query":"x"}`, wantTool: "WebSearch"},
+		{tool: "read_many_files", input: `{"include":["src/**"]}`, wantNoAlias: true},
+		{tool: "mcp_github_create_issue", input: `{}`, wantNoAlias: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			a, alias := ResolveAlias("gemini", nil, Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool || a.WireTool != tt.tool {
+				t.Fatalf("Tool = %q, WireTool = %q, alias = %v; want %q", a.Tool, a.WireTool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/proj")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+			a, _ = ApplyExtraction(ext, a, nil)
+			if _, err := DeriveTier(TierTable{Catalog: DefaultCatalog()}, a); err != nil {
+				t.Errorf("no tier for %q decided as %q: %v", tt.tool, a.Tool, err)
+			}
+		})
+	}
+}

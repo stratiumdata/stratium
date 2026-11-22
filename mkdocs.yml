@@ -103,6 +103,7 @@ nav:
       - hook: pep/hook.md
       - Copilot CLI: pep/harnesses/copilot.md
       - Cursor: pep/harnesses/cursor.md
+      - Gemini CLI: pep/harnesses/gemini.md
       - OpenCode: pep/harnesses/opencode.md
       - mcp: pep/mcp.md
       - proxy: pep/proxy.md

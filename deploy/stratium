@@ -274,7 +274,15 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
         return {CURSOR_EVENT[e]: cursor_entry(e, g) for e, g in wanted.items()}
     if copilot:
         return {CURSOR_EVENT[e]: copilot_entry(g) for e, g in wanted.items()}
+    if hook_arg.endswith("--harness gemini"):
+        # Claude Code's shape under Gemini CLI's event names, timeouts in milliseconds.
+        for group in wanted.values():
+            group["hooks"][0]["timeout"] *= 1000
+        return {GEMINI_EVENT[e]: g for e, g in wanted.items()}
     return wanted
+
+
+GEMINI_EVENT = {"SessionStart": "SessionStart", "PreToolUse": "BeforeTool", "PostToolUse": "AfterTool"}
 
 
 def copilot_entry(group):
@@ -309,7 +317,8 @@ def cursor_entry(event, group):
 
 def claude_event(event):
     """The name REQUIRED_ENV and the timeout check know an event by."""
-    return event[:1].upper() + event[1:]
+    return {"BeforeTool": "PreToolUse", "AfterTool": "PostToolUse"}.get(
+        event, event[:1].upper() + event[1:])
 
 
 def hooks_of(group):
@@ -456,8 +465,10 @@ CURSOR_SYSTEM = ("/Library/Application Support/Cursor/hooks.json" if sys.platfor
 # Copilot CLI reads every *.json here as policy hooks, which no user or
 # repository setting can switch off. The file must be root's alone.
 COPILOT_POLICY = "/etc/github-copilot/policy.d/50-stratium.json"
+GEMINI_SYSTEM = ("/Library/Application Support/GeminiCli/settings.json" if sys.platform == "darwin"
+                 else "/etc/gemini-cli/settings.json")
 SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS, "cursor": CURSOR_SYSTEM,
-                "copilot": COPILOT_POLICY,
+                "copilot": COPILOT_POLICY, "gemini": GEMINI_SYSTEM,
                 "opencode": OPENCODE_SYSTEM + "/stratium-guard/stratium.json"}
 
 
@@ -751,11 +762,15 @@ def install_system(args):
         if args.harness == "copilot":
             own = {"version": 1, **own}
         extra = {settings: json.dumps(own, indent=2) + "\n"}
-    if args.harness == "cursor":
+    if args.harness in ("cursor", "gemini"):
         # One file for every administrator hook: add to it, keep what is there.
         merged = load(settings)
         strip(merged)
-        merged.setdefault("version", 1)
+        if args.harness == "cursor":
+            merged.setdefault("version", 1)
+        else:
+            # The system file is merged last, so this wins over a user's `false`.
+            merged.setdefault("hooksConfig", {})["enabled"] = True
         for event, entry in wanted.items():
             merged.setdefault("hooks", {}).setdefault(event, []).append(entry)
         extra = {settings: json.dumps(merged, indent=2) + "\n"}
@@ -797,6 +812,13 @@ def install_system(args):
               "session file path recorded above must stay writable by the user who runs "
               "the agent.")
         return 0
+    if args.harness == "gemini":
+        print("\nNEXT — restart Gemini CLI. This keeps the hooks out of the user's reach to "
+              "edit, not to switch off: a\nuser can still disable any hook by name "
+              "(`/hooks disable-all`, or `hooksConfig.disabled` in their own\nsettings), "
+              "and Gemini runs no hooks in a folder it does not trust. The session file "
+              "path recorded\nabove must stay writable by the user who runs the agent.")
+        return 0
     if args.harness == "cursor":
         print("\nNEXT — restart Cursor. Its documentation says administrator hooks need an "
               "Enterprise plan; whether\nthis file is read without one is not known, so "
@@ -836,10 +858,12 @@ def uninstall_system(args):
     going = os.path.exists(mine) and not (mine.endswith(".toml") and not ours_toml(mine))
     if args.harness == "opencode":
         uninstall_opencode(args)  # the plugin directory and the config entries
-    if args.harness == "cursor" and going:
+    if args.harness in ("cursor", "gemini") and going:
         # Take our entries out of the shared file; remove it only if it is then empty.
         rest = load(mine)
         strip(rest)
+        if rest == {"hooksConfig": {"enabled": True}}:
+            rest = {}  # only the switch install_system set is left
         going = not rest
         if rest and not args.dry_run:
             save(mine, rest, False)
@@ -856,7 +880,7 @@ def uninstall_system(args):
         if not os.path.exists(path):
             print(f"not there: {path}")
         elif path == mine and not going:
-            if args.harness != "cursor":
+            if args.harness not in ("cursor", "gemini"):
                 print(f"left alone, not written by this script: {path}")
         elif path != mine and in_use:
             print(f"kept, still used by {', '.join(in_use)}: {path}")
@@ -899,6 +923,9 @@ def status(args):
         return 1
     open_to = [("hook entry", writable_here(args.settings))]
     incomplete = False
+    if args.harness == "gemini" and (settings.get("hooksConfig") or {}).get("enabled") is False:
+        print("hooksConfig.enabled is false in this file: Gemini CLI runs no hooks at all")
+        incomplete = True
     for shown, command, timeout, matcher, h in found:
         event = claude_event(shown)
         m = "" if matcher is None else f" matcher={matcher!r}"
@@ -917,9 +944,10 @@ def status(args):
             print(f"  {where}: missing {', '.join(gone)}")
         elif REQUIRED_ENV.get(event):
             print(f"  {where}: all {len(REQUIRED_ENV[event])} set")
-        short = timeout_too_short(event, timeout, env)
+        ms = 1000 if "--harness gemini" in command else 1  # Gemini CLI counts in milliseconds
+        short = timeout_too_short(event, timeout / ms if isinstance(timeout, (int, float)) else timeout, env)
         if short:
-            print(f"  timeout: TOO SHORT — needs at least {hook_timeout(env)}; {TIMEOUT_FIX}")
+            print(f"  timeout: TOO SHORT — needs at least {hook_timeout(env) * ms}; {TIMEOUT_FIX}")
         open_to += exposed(command)
         incomplete = incomplete or gone or not runnable or short
     # A warning, not a failure: a per-project install is a supported setup.
@@ -1274,6 +1302,67 @@ def selftest(_args):
                 uninstall_system(scp_)
             assert not os.path.exists(pol)
 
+            # --gemini: Claude Code's shape, Gemini's event names, milliseconds
+            gep = os.path.join(d, "gemini-settings.json")
+            with open(gep, "w") as f:
+                json.dump({"theme": "dark", "hooks": {"BeforeTool": [
+                    {"matcher": "write_file", "hooks": [{"type": "command", "command": "./lint.sh"}]}]}}, f)
+            ga = argparse.Namespace(harness="gemini", settings=gep, bin=src, matcher="*",
+                                    only=list(HARNESS["gemini"]["events"]), dry_run=False,
+                                    user=False, force=True, show_next=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(ga)
+                install(ga)
+            gs = load(gep)
+            assert gs["theme"] == "dark" and list(gs["hooks"]) == ["BeforeTool", "SessionStart", "AfterTool"], gs
+            assert gs["hooks"]["BeforeTool"][1] == {"matcher": "*", "hooks": [{
+                "type": "command", "command": f"{src} hook --harness gemini",
+                "timeout": hook_timeout() * 1000}]}, gs
+            assert gs["hooks"]["AfterTool"] == [{"matcher": "*", "hooks": [{
+                "type": "command", "command": f"{src} report", "timeout": REPORT_TIMEOUT * 1000}]}], gs
+            assert gs["hooks"]["SessionStart"] == [{"hooks": [{
+                "type": "command", "command": f"{src} session-start",
+                "timeout": SESSION_START_TIMEOUT * 1000}]}], gs
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(ga) == 0, out.getvalue()
+            # seconds where milliseconds belong: Gemini would run the call after 35 ms
+            gs["hooks"]["BeforeTool"][1]["hooks"][0]["timeout"] = hook_timeout()
+            gs["hooksConfig"] = {"enabled": False}
+            with open(gep, "w") as f:
+                json.dump(gs, f)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(ga) == 1, out.getvalue()
+                assert "TOO SHORT" in out.getvalue() and "runs no hooks" in out.getvalue(), out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall(ga)
+            assert load(gep)["hooks"] == {"BeforeTool": [
+                {"matcher": "write_file", "hooks": [{"type": "command", "command": "./lint.sh"}]}]}
+
+            # --gemini --system: added to the system settings, hooks switched on there
+            sg = argparse.Namespace(harness="gemini", system=True, system_root=sroot,
+                                    bin=src, matcher="*", dry_run=False)
+            sgp = under(sroot, GEMINI_SYSTEM)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sg) == 0 and install_system(sg) == 0
+            sgs = load(sgp)
+            assert sgs["hooksConfig"] == {"enabled": True}, sgs
+            assert sgs["hooks"]["BeforeTool"] == [{"matcher": "*", "hooks": [{
+                "type": "command", "timeout": hook_timeout() * 1000,
+                "command": f"{sbin} hook --harness gemini --config {sconf}"}]}], sgs
+            sg.settings = sgp
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(sg) == 0, out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(sg)
+            assert not os.path.exists(sgp)
+            # an administrator's own settings in that file stay
+            with open(sgp, "w") as f:
+                json.dump({"telemetry": {"enabled": False}}, f)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sg) == 0
+                uninstall_system(sg)
+            assert load(sgp) == {"telemetry": {"enabled": False}, "hooksConfig": {"enabled": True}}
+
             # --cursor --system: entries added to the one administrator file
             sc = argparse.Namespace(harness="cursor", system=True, system_root=sroot,
                                     bin=src, matcher="*", dry_run=False)
@@ -1547,6 +1636,11 @@ HARNESS = {
                 "user_path": "~/.copilot/hooks/stratium.json", "bin": "stratium-pep",
                 "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
                 "hook_arg": "hook --harness copilot"},
+    # Gemini CLI has no event for a failed tool call apart from AfterTool, which
+    # it runs either way.
+    "gemini": {"path": "~/.gemini/settings.json", "user_path": "~/.gemini/settings.json",
+               "bin": "stratium-pep", "events": ("SessionStart", "PreToolUse", "PostToolUse"),
+               "hook_arg": "hook --harness gemini"},
     # No hook file and no events: see install_opencode. `--settings` names the
     # OpenCode configuration directory.
     "opencode": {"bin": "stratium-pep", "events": ()},
@@ -2369,6 +2463,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--cursor", dest="harness", action="store_const", const="cursor",
                          default=d(None),
                          help="target Cursor (app and CLI): ~/.cursor/hooks.json")
+    harness.add_argument("--gemini", dest="harness", action="store_const", const="gemini",
+                         default=d(None),
+                         help="target Gemini CLI: ~/.gemini/settings.json")
     harness.add_argument("--opencode", dest="harness", action="store_const", const="opencode",
                          default=d(None),
                          help="target OpenCode 2.x: a plugin in ~/.config/opencode")
@@ -2442,7 +2539,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --claude, --codex, --copilot, --cursor or --opencode")
+            p.error("pick a harness: --claude, --codex, --copilot, --cursor, --gemini or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)
