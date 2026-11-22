@@ -260,7 +260,40 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
         # Claude Code only (its own setting, which Codex does not have): a hook
         # that times out or crashes then blocks the call instead of letting it run.
         all_events["PreToolUse"]["hooks"][0]["onFailure"] = "block"
-    return {e: g for e, g in all_events.items() if not only or e in only}
+    wanted = {e: g for e, g in all_events.items() if not only or e in only}
+    if hook_arg.endswith("--harness cursor"):
+        return {CURSOR_EVENT[e]: cursor_entry(e, g) for e, g in wanted.items()}
+    return wanted
+
+
+# Cursor's hooks.json names its events in camelCase and takes one flat entry
+# per hook, with the matcher and timeout on the entry itself.
+CURSOR_EVENT = {"SessionStart": "sessionStart", "PreToolUse": "preToolUse",
+                "PostToolUse": "postToolUse", "PostToolUseFailure": "postToolUseFailure"}
+
+
+def cursor_entry(event, group):
+    entry = {k: v for k, v in group["hooks"][0].items() if k in ("command", "timeout")}
+    if "matcher" in group:
+        entry["matcher"] = group["matcher"]
+    if event == "PreToolUse":
+        # Cursor runs the tool when a hook crashes, times out or prints nothing,
+        # unless the entry says otherwise.
+        entry["failClosed"] = True
+    return entry
+
+
+def claude_event(event):
+    """The name REQUIRED_ENV and the timeout check know an event by."""
+    return event[:1].upper() + event[1:]
+
+
+def hooks_of(group):
+    """The hook entries in one group: Claude Code nests them, Cursor's group is one."""
+    if not isinstance(group, dict):
+        return []
+    return group["hooks"] if isinstance(group.get("hooks"), list) else (
+        [group] if "command" in group else [])
 
 
 def load(path):
@@ -311,12 +344,13 @@ def strip(settings, events=None):
             continue
         kept_groups = []
         for group in groups:
-            inner = group.get("hooks", []) if isinstance(group, dict) else []
+            inner = hooks_of(group)
             kept = [h for h in inner if not ours(h)]
             removed += len(inner) - len(kept)
-            if not kept:
+            if inner and not kept:
                 continue  # the whole group was ours
-            group["hooks"] = kept
+            if kept and kept[0] is not group:
+                group["hooks"] = kept
             kept_groups.append(group)
         if kept_groups:
             hooks[event] = kept_groups
@@ -324,6 +358,8 @@ def strip(settings, events=None):
             del hooks[event]
     if not hooks:
         del settings["hooks"]
+        if set(settings) == {"version"}:
+            del settings["version"]  # Cursor's file, with nothing left in it
     return removed
 
 
@@ -360,6 +396,8 @@ def install(args):
     # Strip only the events we are about to write, so `install --only PreToolUse`
     # does not silently remove a SessionStart hook installed by an earlier run.
     replaced = strip(settings, events=set(wanted))
+    if args.harness == "cursor":
+        settings.setdefault("version", 1)
     hooks = settings.setdefault("hooks", {})
     for event, group in wanted.items():
         hooks.setdefault(event, []).append(group)
@@ -367,7 +405,7 @@ def install(args):
     verb = "reinstalled" if replaced else "installed"
     print(f"{verb} {' + '.join(wanted)} (matcher {args.matcher!r}, command {args.bin!r}) in {args.settings}")
     if getattr(args, "show_next", True):
-        next_steps(list(wanted), "codex" if args.harness == "codex" else "claude", args.bin)
+        next_steps([claude_event(e) for e in wanted], args.harness, args.bin)
 
 
 # --system: where an administrator's install lives. A per-project install puts
@@ -389,7 +427,9 @@ OPENCODE_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "opencod
 OPENCODE_SYSTEM = ("/Library/Application Support/opencode" if sys.platform == "darwin"
                    else "/etc/opencode")
 OPENCODE_DENY_ALL = {"action": "plugin.use", "resource": "*", "effect": "deny"}
-SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS,
+CURSOR_SYSTEM = ("/Library/Application Support/Cursor/hooks.json" if sys.platform == "darwin"
+                 else "/etc/cursor/hooks.json")
+SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS, "cursor": CURSOR_SYSTEM,
                 "opencode": OPENCODE_SYSTEM + "/stratium-guard/stratium.json"}
 
 
@@ -681,6 +721,14 @@ def install_system(args):
         wanted = entries(binary, args.matcher, h["events"], h["hook_arg"], tail=f" --config {conf}")
         extra = {settings: json.dumps({"hooks": {e: [g] for e, g in wanted.items()}},
                                       indent=2) + "\n"}
+    if args.harness == "cursor":
+        # One file for every administrator hook: add to it, keep what is there.
+        merged = load(settings)
+        strip(merged)
+        merged.setdefault("version", 1)
+        for event, entry in wanted.items():
+            merged.setdefault("hooks", {}).setdefault(event, []).append(entry)
+        extra = {settings: json.dumps(merged, indent=2) + "\n"}
     if args.harness == "codex":
         if os.path.exists(settings) and not ours_toml(settings):
             # Codex has one such file and this script cannot merge TOML into
@@ -712,6 +760,12 @@ def install_system(args):
                 sys.exit(f"stratium: {open_to} can be changed by a non-root user, so "
                          f"{path} is not protected. Fix its owner and mode, then re-run.")
         print(f"wrote {path}")
+    if args.harness == "cursor":
+        print("\nNEXT — restart Cursor. Its documentation says administrator hooks need an "
+              "Enterprise plan; whether\nthis file is read without one is not known, so "
+              "check that a tool call is refused before relying\non it. The session file "
+              "path recorded above must stay writable by the user who runs the agent.")
+        return 0
     if args.harness == "opencode":
         print("\nNEXT — restart OpenCode. It now loads this plugin and refuses every other "
               "one, by the plugin.use\npolicies added to its system opencode.json. macOS "
@@ -745,6 +799,14 @@ def uninstall_system(args):
     going = os.path.exists(mine) and not (mine.endswith(".toml") and not ours_toml(mine))
     if args.harness == "opencode":
         uninstall_opencode(args)  # the plugin directory and the config entries
+    if args.harness == "cursor" and going:
+        # Take our entries out of the shared file; remove it only if it is then empty.
+        rest = load(mine)
+        strip(rest)
+        going = not rest
+        if rest and not args.dry_run:
+            save(mine, rest, False)
+            print(f"removed the Stratium hooks from {mine}")
     in_use = []
     for f in sorted(under(root, f) for f in SYSTEM_HOOKS.values()):
         if os.path.exists(f) and not (f == mine and going):
@@ -757,7 +819,8 @@ def uninstall_system(args):
         if not os.path.exists(path):
             print(f"not there: {path}")
         elif path == mine and not going:
-            print(f"left alone, not written by this script: {path}")
+            if args.harness != "cursor":
+                print(f"left alone, not written by this script: {path}")
         elif path != mine and in_use:
             print(f"kept, still used by {', '.join(in_use)}: {path}")
         elif args.dry_run:
@@ -787,12 +850,11 @@ def status(args):
         return status_opencode(args)
     settings = load_hooks(args.settings)
     found = [
-        (event, h.get("command"), h.get("timeout"), group.get("matcher"))
+        (event, h.get("command"), h.get("timeout"), group.get("matcher"), h)
         for event, groups in (settings.get("hooks") or {}).items()
         if isinstance(groups, list)
         for group in groups
-        if isinstance(group, dict)
-        for h in group.get("hooks", [])
+        for h in hooks_of(group)
         if ours(h)
     ]
     if not found:
@@ -800,12 +862,17 @@ def status(args):
         return 1
     open_to = [("hook entry", writable_here(args.settings))]
     incomplete = False
-    for event, command, timeout, matcher in found:
+    for shown, command, timeout, matcher, h in found:
+        event = claude_event(shown)
         m = "" if matcher is None else f" matcher={matcher!r}"
-        print(f"{event}{m} command={command!r} timeout={timeout}")
+        print(f"{shown}{m} command={command!r} timeout={timeout}")
         runnable = resolves(command)
         env = hook_env(command)
         gone = missing_env(event, env)
+        if shown == "preToolUse" and h.get("failClosed") is not True:
+            print("  failClosed: NOT SET — Cursor runs the tool call when this hook "
+                  "crashes, times out or prints nothing")
+            incomplete = True
         if not runnable:
             print(f"  command: NOT RUNNABLE — {command.split()[0]!r} is not there")
         where = "config" if env is not os.environ else "env"
@@ -828,9 +895,7 @@ def status(args):
         print(f"\nre-run: sudo -E deploy/stratium --{args.harness} install --system")
         return 1
     if incomplete:
-        next_steps([e for e, _, _, _ in found],
-                   "codex" if args.harness == "codex" else "claude",
-                   found[0][1] or args.bin)
+        next_steps([claude_event(f[0]) for f in found], args.harness, found[0][1] or args.bin)
         return 1
     return 0
 
@@ -1061,6 +1126,78 @@ def selftest(_args):
             with contextlib.redirect_stdout(io.StringIO()):
                 uninstall_system(sx)
             assert os.path.exists(sbin) and os.path.exists(under(sroot, MANAGED_SETTINGS))
+
+            # --cursor: Cursor's own file shape, in the user file only
+            cu = argparse.Namespace(harness="cursor", settings=None, user=False, bin=None,
+                                    matcher="*", only=None, dry_run=False)
+            assert resolve(cu, pr).settings == os.path.expanduser("~/.cursor/hooks.json")
+            try:
+                resolve(argparse.Namespace(harness="cursor", user=False, bin=None, matcher="*",
+                                           only=None, dry_run=False,
+                                           settings=os.path.join(d, ".cursor", "hooks.json")), pr)
+                raise AssertionError("accepted a project-local Cursor path")
+            except SystemExit:
+                pass
+            cup = os.path.join(d, "cursor-hooks.json")
+            with open(cup, "w") as f:
+                json.dump({"version": 1, "hooks": {"preToolUse": [{"command": "./lint.sh"}],
+                                                   "stop": [{"command": "./done.sh"}]}}, f)
+            cb = argparse.Namespace(harness="cursor", settings=cup, bin=src, matcher="*",
+                                    only=list(HARNESS["cursor"]["events"]), dry_run=False,
+                                    user=False, force=True, show_next=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(cb)
+                install(cb)  # twice: replaced, not duplicated
+            ch = load(cup)
+            assert ch["version"] == 1 and ch["hooks"]["stop"] == [{"command": "./done.sh"}], ch
+            assert ch["hooks"]["preToolUse"] == [{"command": "./lint.sh"}, {
+                "command": f"{src} hook --harness cursor", "timeout": hook_timeout(),
+                "matcher": "*", "failClosed": True}], ch
+            assert ch["hooks"]["sessionStart"] == [{
+                "command": f"{src} session-start", "timeout": SESSION_START_TIMEOUT}], ch
+            for ev in ("postToolUse", "postToolUseFailure"):
+                assert ch["hooks"][ev] == [{"command": f"{src} report", "timeout": REPORT_TIMEOUT,
+                                            "matcher": "*"}], ch
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(cb) == 0, out.getvalue()
+            # a decision hook without failClosed is reported: Cursor would run the call
+            ch["hooks"]["preToolUse"][1].pop("failClosed")
+            with open(cup, "w") as f:
+                json.dump(ch, f)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(cb) == 1 and "failClosed: NOT SET" in out.getvalue(), out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall(cb)
+            assert load(cup) == {"version": 1, "hooks": {"preToolUse": [{"command": "./lint.sh"}],
+                                                         "stop": [{"command": "./done.sh"}]}}
+            # ...and a file that held only ours is left empty, version and all
+            os.unlink(cup)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(cb)
+                uninstall(cb)
+            assert load(cup) == {}, load(cup)
+
+            # --cursor --system: entries added to the one administrator file
+            sc = argparse.Namespace(harness="cursor", system=True, system_root=sroot,
+                                    bin=src, matcher="*", dry_run=False)
+            scp = under(sroot, CURSOR_SYSTEM)
+            os.makedirs(os.path.dirname(scp), exist_ok=True)
+            with open(scp, "w") as f:
+                json.dump({"version": 1, "hooks": {"stop": [{"command": "/corp/audit.sh"}]}}, f)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(sc) == 0 and install_system(sc) == 0
+            sh_ = load(scp)["hooks"]
+            assert sh_["stop"] == [{"command": "/corp/audit.sh"}], sh_
+            assert sh_["preToolUse"] == [{
+                "command": f"{sbin} hook --harness cursor --config {sconf}",
+                "timeout": hook_timeout(), "matcher": "*", "failClosed": True}], sh_
+            sc.settings = scp
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(sc) == 0, out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(sc)
+            assert load(scp) == {"version": 1, "hooks": {"stop": [{"command": "/corp/audit.sh"}]}}
+            assert os.path.exists(sbin), "removed a binary Claude Code's install still runs"
 
             # --opencode: a plugin directory, its settings, and a config entry
             ob = os.path.join(d, "opencode-user")
@@ -1301,6 +1438,13 @@ HARNESS = {
                "bin": "stratium-pep",
                "events": ("SessionStart", "PreToolUse", "PostToolUse"),
                "hook_arg": "hook --harness codex"},
+    # User scope only, like Codex: a project .cursor/hooks.json runs only in a
+    # workspace the user has trusted. No PostToolUseFailure trap here: Cursor
+    # has that event, and `report` skips the calls it fires for that were denied.
+    "cursor": {"path": "~/.cursor/hooks.json", "user_path": "~/.cursor/hooks.json",
+               "bin": "stratium-pep",
+               "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
+               "hook_arg": "hook --harness cursor"},
     # No hook file and no events: see install_opencode. `--settings` names the
     # OpenCode configuration directory.
     "opencode": {"bin": "stratium-pep", "events": ()},
@@ -1328,15 +1472,16 @@ def resolve(args, parser):
         args.settings = harness_path(args.harness, user=args.user)
     args.settings = os.path.expanduser(args.settings)
 
-    if args.harness == "codex" and not getattr(args, "system", False):
-        # A project-local .codex/hooks.json is disabled until the project is
-        # trusted, and a disabled enforcement hook is not a no-op — it is
-        # fail-open: every tool call proceeds unchecked (§2b).
-        home = os.path.expanduser("~/.codex")
+    if args.harness in ("codex", "cursor") and not getattr(args, "system", False):
+        # A project-local hooks.json is disabled until the project is trusted
+        # (both harnesses), and a disabled enforcement hook is not a no-op — it
+        # is fail-open: every tool call proceeds unchecked (§2b).
+        home = os.path.expanduser(f"~/.{args.harness}")
+        name = "Codex" if args.harness == "codex" else "Cursor"
         if os.path.dirname(os.path.abspath(args.settings)) != home:
             parser.error(
-                f"--codex writes {home}/hooks.json only. {args.settings} looks "
-                "project-local, and Codex disables project hooks until the project "
+                f"--{args.harness} writes {home}/hooks.json only. {args.settings} looks "
+                f"project-local, and {name} disables project hooks until the project "
                 "is trusted — an enforcement hook that does not run is fail-open, "
                 "not inert (see 2b)")
     unknown = [e for e in args.only or () if e not in h["events"]]
@@ -2116,6 +2261,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
                          default=d(None),
                          help="target Codex: ~/.codex/hooks.json, SessionStart + PreToolUse + PostToolUse")
+    harness.add_argument("--cursor", dest="harness", action="store_const", const="cursor",
+                         default=d(None),
+                         help="target Cursor (app and CLI): ~/.cursor/hooks.json")
     harness.add_argument("--opencode", dest="harness", action="store_const", const="opencode",
                          default=d(None),
                          help="target OpenCode 2.x: a plugin in ~/.config/opencode")
@@ -2189,7 +2337,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --claude, --codex or --opencode")
+            p.error("pick a harness: --claude, --codex, --cursor or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)

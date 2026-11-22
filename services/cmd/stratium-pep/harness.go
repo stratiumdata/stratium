@@ -19,8 +19,12 @@ import (
 // What a harness sends on stdin is the other half. Codex sends Claude Code's
 // tool_name/tool_input fields, so there is no input translation yet; a
 // harness that sends something else adds it here.
+//
+// allow is for a harness that reads silence as a failed hook: it writes what
+// that harness needs to see for the call to go ahead.
 var harnesses = map[string]struct {
-	deny func(stdout, stderr io.Writer, claudeOut []byte, reason string) int
+	deny  func(stdout, stderr io.Writer, claudeOut []byte, reason string) int
+	allow func(stdout io.Writer)
 }{
 	"claude": {},
 	"codex":  {deny: denyOnStderr},
@@ -28,6 +32,25 @@ var harnesses = map[string]struct {
 	// binary, sends Claude Code's field names, and rejects the tool call
 	// with stderr as the reason on any exit but 0.
 	"opencode": {deny: denyOnStderr},
+	"cursor":   {deny: denyCursor, allow: allowCursor},
+}
+
+// Cursor reads a JSON decision from stdout, and treats a hook that prints
+// nothing as a failed hook, which an install with failClosed set turns into
+// a block. So an allow has to say so.
+func allowCursor(stdout io.Writer) {
+	_, _ = fmt.Fprintln(stdout, `{"permission":"allow"}`)
+}
+
+// denyCursor says no every way Cursor documents: its own deny JSON on stdout,
+// and exit code 2, which Cursor treats as a deny whatever stdout holds. The
+// reason goes to stderr as well.
+func denyCursor(stdout, stderr io.Writer, _ []byte, reason string) int {
+	_, _ = fmt.Fprintln(stderr, reason)
+	out, _ := json.Marshal(map[string]string{
+		"permission": "deny", "user_message": reason, "agent_message": reason})
+	_, _ = fmt.Fprintln(stdout, string(out))
+	return 2
 }
 
 // denyOnStderr is Codex's contract: exit 2 blocks, and the reason shown to
@@ -69,6 +92,9 @@ func runHookFor(args []string, stdin io.Reader, stdout, stderr io.Writer,
 	var out bytes.Buffer
 	code := run(name, stdin, &out)
 	if code == 0 {
+		if h.allow != nil {
+			h.allow(stdout)
+		}
 		return 0
 	}
 	return h.deny(stdout, stderr, out.Bytes(), denyReason(out.Bytes(), code))

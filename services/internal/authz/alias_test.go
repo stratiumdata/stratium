@@ -213,3 +213,55 @@ func TestOpenCodeAliases(t *testing.T) {
 		})
 	}
 }
+
+// Cursor's Read and Write share the canonical names. The alias still
+// applies, and a tenant's catalog row for the canonical tool does not
+// displace it. The inputs have the shapes captured from live sessions of
+// Cursor's CLI (2026.11.19): absolute file_path, and a Shell input with an
+// empty cwd.
+func TestCursorAliases(t *testing.T) {
+	canonicalField := "path" // a tenant row that would read the wrong field
+	rows := []models.ToolCatalogEntry{{ToolName: "Read", Verb: "read", ResourceField: &canonicalField}}
+	tests := []struct {
+		tool, input string
+		wantTool    string
+		wantWire    string
+		wantID      string
+		wantCommand string
+		wantFiles   bool // an alias that names files: no file means refused
+		wantNoAlias bool
+	}{
+		{tool: "Shell", input: `{"command":"cat notes.txt hello.txt","cwd":"","timeout":30000}`,
+			wantTool: "Bash", wantWire: "Shell", wantCommand: "cat notes.txt hello.txt"},
+		{tool: "Read", input: `{"file_path":"/project/a.txt","path":"/decoy"}`,
+			wantTool: "Read", wantID: "/project/a.txt", wantFiles: true},
+		{tool: "Read", input: `{"file_path":"src/a.txt"}`, wantTool: "Read", wantID: "/project/src/a.txt", wantFiles: true},
+		{tool: "Write", input: `{"file_path":"/project/b.txt","content":"x"}`,
+			wantTool: "Write", wantID: "/project/b.txt", wantFiles: true},
+		{tool: "Delete", input: `{"file_path":"/project/old.txt"}`,
+			wantTool: "Delete", wantID: "/project/old.txt", wantFiles: true},
+		// a shape this table does not know yields no file, which Decide refuses
+		{tool: "Read", input: `{"target_file":"/project/a.txt"}`, wantTool: "Read", wantID: "", wantFiles: true},
+		{tool: "Grep", input: `{"pattern":"egret","output_mode":"content"}`, wantNoAlias: true},
+		{tool: "MCP:create_issue", input: `{}`, wantNoAlias: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("cursor", rows, Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool || a.WireTool != tt.wantWire || a.RecordedTool() != tt.tool {
+				t.Fatalf("Tool = %q, WireTool = %q, alias = %v; want %q, %q", a.Tool, a.WireTool, alias, tt.wantTool, tt.wantWire)
+			}
+			ext := ExtractAliased(rows, a, *alias, "/project")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand || alias.NamesFiles() != tt.wantFiles {
+				t.Errorf("ResourceID = %q, Command = %q, NamesFiles = %v; want %q, %q, %v",
+					ext.ResourceID, ext.Command, alias.NamesFiles(), tt.wantID, tt.wantCommand, tt.wantFiles)
+			}
+		})
+	}
+}
