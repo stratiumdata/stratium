@@ -406,6 +406,7 @@ func TestKiroAliases(t *testing.T) {
 		{tool: "remote_web_search", input: `{"query":"heron bird"}`, wantTool: "WebSearch"},
 		{tool: "code", input: `{"operation":"pattern_search","pattern":"word"}`, wantNoAlias: true},
 		{tool: "tool_load", input: `{"tool_ids":["builtin::code"]}`, wantNoAlias: true},
+		{tool: "execute_pwsh", input: `{"command":"Get-Content notes.txt"}`, wantNoAlias: true},
 		{tool: "mcp_postgres_query", input: `{"sql":"select 1"}`, wantNoAlias: true},
 		// from the documentation
 		{tool: "fs_append", input: `{"path":"/proj/new.txt","text":"tail"}`, wantTool: "Edit", wantID: "/proj/new.txt"},
