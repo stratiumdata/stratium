@@ -306,3 +306,41 @@ func TestDecide_CursorSameNameAlias(t *testing.T) {
 		})
 	}
 }
+
+// Copilot's apply_patch sends the patch text as its whole input.
+func TestDecide_CopilotPatchIsTheWholeInput(t *testing.T) {
+	tests := []struct {
+		name, input string
+		wantEffect  Effect
+		wantAsked   []string
+	}{
+		{"the files are read from the string", `"*** Begin Patch\n*** Update File: /workspace/a.txt\n@@\n-a\n+b\n*** End Patch\n"`,
+			Effect_EFFECT_ALLOW, []string{"/workspace/a.txt"}},
+		{"a file outside the constraint refuses it", `"*** Begin Patch\n*** Add File: /etc/x\n+a\n*** End Patch\n"`,
+			Effect_EFFECT_DENY, nil},
+		{"an input that is not a patch string is refused", `{"command":"*** Add File: /workspace/a.txt"}`,
+			Effect_EFFECT_DENY, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, req := wellFormedFixture()
+			fs.chain[0].ApprovedTools = []string{"Edit"}
+			fs.chain[0].MaxActionTier = models.ActionTierInternalModify
+			fs.chain[0].ResourceConstraints = map[string]string{models.ResourceIDPrefixKey: "/workspace/"}
+			req.Tool, req.RawInput, req.Harness, req.Cwd = "apply_patch", tt.input, "copilot", "/workspace"
+			pol := &perFilePolicy{denyID: "none", escalateID: "none"}
+			srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: pol}), testConfig(), &fakeSigner{})
+
+			resp, err := srv.Decide(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Decide() error = %v", err)
+			}
+			if resp.GetEffect() != tt.wantEffect {
+				t.Fatalf("Effect = %v (%q), want %v", resp.GetEffect(), resp.GetReason(), tt.wantEffect)
+			}
+			if tt.wantAsked != nil && !slices.Equal(pol.asked, tt.wantAsked) {
+				t.Errorf("policy asked about %q, want %q", pol.asked, tt.wantAsked)
+			}
+		})
+	}
+}

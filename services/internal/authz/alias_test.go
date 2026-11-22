@@ -265,3 +265,54 @@ func TestCursorAliases(t *testing.T) {
 		})
 	}
 }
+
+// Copilot CLI tool calls. The bash, view, apply_patch, rg and glob inputs are
+// the shapes captured from live sessions (1.0.114); create and edit are built
+// from its documentation, with "path" assumed.
+func TestCopilotAliases(t *testing.T) {
+	tests := []struct {
+		tool, input  string
+		wantTool     string
+		wantID       string
+		wantCommand  string
+		wantPatchIDs []string
+		wantNoAlias  bool
+	}{
+		{tool: "bash", input: `{"command":"cat notes.txt hello.txt","description":"Display files"}`,
+			wantTool: "Bash", wantCommand: "cat notes.txt hello.txt"},
+		{tool: "view", input: `{"path":"/proj/notes.txt"}`, wantTool: "Read", wantID: "/proj/notes.txt"},
+		{tool: "apply_patch", input: `"*** Begin Patch\n*** Update File: /proj/notes.txt\n@@\n-a\n+b\n*** End Patch\n"`,
+			wantTool: "Edit", wantPatchIDs: []string{"/proj/notes.txt"}},
+		{tool: "apply_patch", input: `"*** Begin Patch\n*** Add File: hello.txt\n+hi.\n*** End Patch\n"`,
+			wantTool: "Edit", wantPatchIDs: []string{"/proj/hello.txt"}},
+		// an object where the patch text should be: no file, so refused
+		{tool: "apply_patch", input: `{"patch":"*** Add File: /proj/x"}`, wantTool: "Edit"},
+		{tool: "rg", input: `{"pattern":"egret","paths":"/proj","output_mode":"content"}`, wantTool: "Grep"},
+		{tool: "glob", input: `{"pattern":"*.txt","paths":"/proj"}`, wantTool: "Glob"},
+		{tool: "create", input: `{"path":"new.txt","file_text":"x"}`, wantTool: "Write", wantID: "/proj/new.txt"},
+		{tool: "edit", input: `{"path":"/proj/a.txt","old_str":"a","new_str":"b"}`, wantTool: "Edit", wantID: "/proj/a.txt"},
+		{tool: "task", input: `{}`, wantNoAlias: true},
+		{tool: "powershell", input: `{"command":"dir"}`, wantNoAlias: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("copilot", nil, Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool || a.WireTool != tt.tool {
+				t.Fatalf("Tool = %q, WireTool = %q, alias = %v; want %q", a.Tool, a.WireTool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/proj")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+			if got := PatchResourceIDs(ext.Patch, "/proj"); !slices.Equal(got, tt.wantPatchIDs) {
+				t.Errorf("patch ids = %q, want %q", got, tt.wantPatchIDs)
+			}
+		})
+	}
+}

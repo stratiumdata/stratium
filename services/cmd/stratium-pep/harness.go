@@ -22,9 +22,14 @@ import (
 //
 // allow is for a harness that reads silence as a failed hook: it writes what
 // that harness needs to see for the call to go ahead.
+//
+// parse is for a harness whose stdin is not Claude Code's: it returns the
+// same call in Claude Code's fields (tool_name, tool_input, cwd). It moves
+// the input, whole; it never looks inside it or renames the tool.
 var harnesses = map[string]struct {
 	deny  func(stdout, stderr io.Writer, claudeOut []byte, reason string) int
 	allow func(stdout io.Writer)
+	parse func(stdin []byte) ([]byte, error)
 }{
 	"claude": {},
 	"codex":  {deny: denyOnStderr},
@@ -33,6 +38,66 @@ var harnesses = map[string]struct {
 	// with stderr as the reason on any exit but 0.
 	"opencode": {deny: denyOnStderr},
 	"cursor":   {deny: denyCursor, allow: allowCursor},
+	"copilot":  {deny: denyCopilot, parse: parseCopilot},
+}
+
+// parseCopilot reads the payload of Copilot CLI's camelCase events, which
+// carry its own tool names: toolName, toolArgs, cwd.
+//
+// toolArgs is passed on as sent, object or string (apply_patch sends the
+// patch text itself as a string), with one exception: a string that holds a
+// JSON object is that object. Copilot's documentation shows the arguments
+// encoded that way, and the PDP reads fields from an object.
+func parseCopilot(stdin []byte) ([]byte, error) {
+	var in struct {
+		ToolName string          `json:"toolName"`
+		ToolArgs json.RawMessage `json:"toolArgs"`
+		Cwd      string          `json:"cwd"`
+	}
+	if err := json.Unmarshal(stdin, &in); err != nil {
+		return nil, fmt.Errorf("malformed stdin: %w", err)
+	}
+	var encoded string
+	if json.Unmarshal(in.ToolArgs, &encoded) == nil {
+		var object map[string]json.RawMessage
+		if json.Unmarshal([]byte(encoded), &object) == nil && object != nil {
+			in.ToolArgs = json.RawMessage(encoded)
+		}
+	}
+	return json.Marshal(hookStdin{ToolName: in.ToolName, ToolInput: in.ToolArgs, Cwd: in.Cwd})
+}
+
+// denyCopilot is Copilot CLI's deny: its decision JSON on stdout, which is
+// where it reads the reason it shows the model, and exit code 2, which it
+// treats as a deny whatever stdout holds.
+func denyCopilot(stdout, stderr io.Writer, _ []byte, reason string) int {
+	_, _ = fmt.Fprintln(stderr, reason)
+	out, _ := json.Marshal(map[string]string{
+		"permissionDecision": "deny", "permissionDecisionReason": reason})
+	_, _ = fmt.Fprintln(stdout, string(out))
+	return 2
+}
+
+// harnessStdin returns stdin as the named harness's parse leaves it. The
+// harness is taken from args; with no --harness, or one that needs no
+// parsing, stdin comes back untouched.
+func harnessStdin(args []string, stdin io.Reader) (io.Reader, error) {
+	name, _, err := flagValue(args, "--harness")
+	if err != nil {
+		return nil, err
+	}
+	h := harnesses[name]
+	if h.parse == nil {
+		return stdin, nil
+	}
+	body, err := io.ReadAll(stdin)
+	if err != nil {
+		return nil, fmt.Errorf("could not read stdin: %w", err)
+	}
+	if body, err = h.parse(body); err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(body), nil
 }
 
 // Cursor reads a JSON decision from stdout, and treats a hook that prints
@@ -90,6 +155,11 @@ func runHookFor(args []string, stdin io.Reader, stdout, stderr io.Writer,
 	}
 
 	var out bytes.Buffer
+	stdin, err = harnessStdin(args, stdin)
+	if err != nil {
+		reason := fmt.Sprintf("stratium-pep: %s", err)
+		return h.deny(stdout, stderr, nil, reason)
+	}
 	code := run(name, stdin, &out)
 	if code == 0 {
 		if h.allow != nil {

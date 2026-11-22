@@ -79,7 +79,7 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "hook":
 		return runHookFor(args[1:], stdin, stdout, stderr, runHookCmd)
 	case "report":
-		return runReportCmd(stdin, stderr)
+		return runReportCmd(args[1:], stdin, stderr)
 	case "session-start":
 		return runSessionStartCmd(stderr)
 	case "mcp":

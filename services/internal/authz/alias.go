@@ -1,6 +1,7 @@
 package authz
 
 import (
+	"encoding/json"
 	"maps"
 	"path"
 	"strings"
@@ -16,7 +17,8 @@ import (
 // as written. PathField holds one file path, which is resolved against the
 // caller's working directory (ResolveFilePath): harnesses that send relative
 // paths would otherwise name a different resource than the one they touch.
-// PatchField holds a patch whose text names the files (PatchResourceIDs).
+// PatchField holds a patch whose text names the files (PatchResourceIDs); it
+// is WholeInput when the tool's input is the patch text itself.
 type ToolAlias struct {
 	Canonical     string
 	CommandField  string
@@ -24,6 +26,10 @@ type ToolAlias struct {
 	PathField     string
 	PatchField    string
 }
+
+// WholeInput, as a PatchField, says the tool's input is not an object with a
+// field to read but one JSON string, and that string is the value.
+const WholeInput = "."
 
 // NamesFiles reports whether calls through this alias say which files they
 // touch. One that does and yields no file is refused (pdpgrpc.Decide).
@@ -76,6 +82,27 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			"Read":   {Canonical: "Read", PathField: "file_path"},
 			"Write":  {Canonical: "Write", PathField: "file_path"},
 			"Delete": {Canonical: "Delete", PathField: "file_path"},
+		},
+		// Copilot CLI, by the names its camelCase hook events carry. bash,
+		// view, apply_patch, rg and glob are from live sessions (1.0.114):
+		// which file tool a session has depends on its model, and the ones
+		// seen used apply_patch, whose input is the patch text itself, for
+		// every edit and new file. create, edit and str_replace_editor are
+		// from Copilot's documentation, with "path" assumed; a call without
+		// it is refused. Search and web tools carry no resource, as their
+		// canonical tools do. Everything else keeps its own name.
+		"copilot": {
+			"bash":               {Canonical: "Bash", CommandField: "command"},
+			"view":               {Canonical: "Read", PathField: "path"},
+			"create":             {Canonical: "Write", PathField: "path"},
+			"edit":               {Canonical: "Edit", PathField: "path"},
+			"str_replace_editor": {Canonical: "Edit", PathField: "path"},
+			"apply_patch":        {Canonical: "Edit", PatchField: WholeInput},
+			"grep":               {Canonical: "Grep"},
+			"rg":                 {Canonical: "Grep"},
+			"glob":               {Canonical: "Glob"},
+			"web_fetch":          {Canonical: "WebFetch"},
+			"web_search":         {Canonical: "WebSearch"},
 		},
 	}
 }
@@ -133,7 +160,9 @@ func ExtractAliased(entries []models.ToolCatalogEntry, a Action, alias ToolAlias
 	if alias.PathField != "" {
 		out.ResourceID, _ = ResolveFilePath(jsonStringField(obj, alias.PathField), cwd)
 	}
-	if alias.PatchField != "" {
+	if alias.PatchField == WholeInput {
+		_ = json.Unmarshal([]byte(a.RawInput), &out.Patch)
+	} else if alias.PatchField != "" {
 		out.Patch = jsonStringField(obj, alias.PatchField)
 	}
 	return out
