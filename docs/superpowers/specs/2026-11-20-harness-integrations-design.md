@@ -10,6 +10,14 @@ harness name is not recorded. An aliased call with no resource identity is
 refused outright, not only under a path constraint: once aliased it is
 matched by rules written for calls that name their resource.
 
+Outcome notes, Goose (built 2026-11-22 from source at 1.60.0, then run on
+1.60.2, which agreed with the source): a
+plugin of its own at `~/.agents/plugins/stratium/hooks/hooks.json`, in Claude
+Code's file shape. The payload has `tool_name` and `tool_input`, with the
+working directory as `working_dir`. No matcher is written, because `"*"` does
+not compile as a regular expression and Goose skips the rule; `on_failure:
+block` is written on `PreToolUse`. Goose has no tool that reads a text file.
+
 Outcome notes, Kiro (built 2026-11-22, run on CLI 3.5.0): hooks are a flat
 list in `~/.kiro/hooks/stratium.json`, Claude Code's payload field names, deny
 by exit 2 with stderr. Only the v3 engine runs them; v2, still the default

@@ -133,6 +133,19 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			"web_fetch":         {Canonical: "WebFetch"},
 			"remote_web_search": {Canonical: "WebSearch"},
 		},
+		// Goose, from its source at 1.60.0 (36b2911) and live sessions of
+		// 1.60.2. The developer
+		// extension's tools carry bare names: shell, write, edit, tree and
+		// read_image. There is no tool that reads a text file; the model
+		// uses the shell. read_image takes a path or a URL in one field, so
+		// it keeps its own name. Other extensions' tools arrive as
+		// <extension>__<tool> and keep their names too.
+		"goose": {
+			"shell": {Canonical: "Bash", CommandField: "command"},
+			"write": {Canonical: "Write", PathField: "path"},
+			"edit":  {Canonical: "Edit", PathField: "path"},
+			"tree":  {Canonical: "LS", PathField: "path"},
+		},
 		"antigravity": {
 			"run_command":                {Canonical: "Bash", CommandField: "CommandLine"},
 			"read_file":                  {Canonical: "Read", PathField: "Path"},

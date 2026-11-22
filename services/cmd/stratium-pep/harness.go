@@ -41,6 +41,10 @@ var harnesses = map[string]struct {
 	// exit 2, with stderr as the reason: on 3.5.0 any other failing exit,
 	// a timeout or a missing command let the call run.
 	"kiro": {deny: denyOnStderr},
+	// Goose names the working directory working_dir. An allow prints
+	// nothing: anything on stdout that is not a decision counts as a failed
+	// hook there.
+	"goose": {deny: denyGoose, parse: parseGoose},
 	// OpenCode has no command hooks. Its plugin (deploy/opencode) runs this
 	// binary, sends Claude Code's field names, and rejects the tool call
 	// with stderr as the reason on any exit but 0.
@@ -68,6 +72,29 @@ func parseAntigravity(stdin []byte) ([]byte, error) {
 		return nil, fmt.Errorf("malformed stdin: %w", err)
 	}
 	return json.Marshal(hookStdin{ToolName: in.ToolCall.Name, ToolInput: in.ToolCall.Args, Cwd: in.Cwd})
+}
+
+// parseGoose reads Goose's hook payload. It has Claude Code's tool_name and
+// tool_input, and the working directory under working_dir.
+func parseGoose(stdin []byte) ([]byte, error) {
+	var in struct {
+		ToolName   string          `json:"tool_name"`
+		ToolInput  json.RawMessage `json:"tool_input"`
+		WorkingDir string          `json:"working_dir"`
+	}
+	if err := json.Unmarshal(stdin, &in); err != nil {
+		return nil, fmt.Errorf("malformed stdin: %w", err)
+	}
+	return json.Marshal(hookStdin{ToolName: in.ToolName, ToolInput: in.ToolInput, Cwd: in.WorkingDir})
+}
+
+// denyGoose gives both of Goose's denials: exit code 2 with the reason on
+// stderr, and its block decision on stdout, which it honours on any exit.
+func denyGoose(stdout, stderr io.Writer, _ []byte, reason string) int {
+	_, _ = fmt.Fprintln(stderr, reason)
+	out, _ := json.Marshal(map[string]string{"decision": "block", "reason": reason})
+	_, _ = fmt.Fprintln(stdout, string(out))
+	return 2
 }
 
 // denyAntigravity is the one deny that exits 0. Antigravity CLI reads the
