@@ -384,3 +384,52 @@ func TestAntigravityAliases(t *testing.T) {
 		})
 	}
 }
+
+// Inputs are the ones live sessions of Kiro CLI 3.5.0 sent, except where a
+// comment says the tool is from its documentation.
+func TestKiroAliases(t *testing.T) {
+	tests := []struct {
+		tool, input string
+		wantTool    string
+		wantID      string
+		wantCommand string
+		wantNoAlias bool
+	}{
+		{tool: "execute_bash", input: `{"command":"cd sub && ls","description":"d","cwd":"/proj","run_in_background":false,"timeout":null}`,
+			wantTool: "Bash", wantCommand: "cd sub && ls"},
+		{tool: "read_file", input: `{"path":"/proj/notes.txt","offset":null,"limit":null}`, wantTool: "Read", wantID: "/proj/notes.txt"},
+		{tool: "read_file", input: `{"path":"sub/a.txt","offset":0,"limit":1}`, wantTool: "Read", wantID: "/proj/sub/a.txt"},
+		{tool: "fs_write", input: `{"path":"/proj/new.txt","text":"egret"}`, wantTool: "Write", wantID: "/proj/new.txt"},
+		{tool: "str_replace", input: `{"path":"/proj/notes.txt","oldStr":"heron","newStr":"crane","replace_all":false}`,
+			wantTool: "Edit", wantID: "/proj/notes.txt"},
+		{tool: "web_fetch", input: `{"url":"https://example.com","mode":"truncated","searchPhrase":null}`, wantTool: "WebFetch"},
+		{tool: "remote_web_search", input: `{"query":"heron bird"}`, wantTool: "WebSearch"},
+		{tool: "code", input: `{"operation":"pattern_search","pattern":"word"}`, wantNoAlias: true},
+		{tool: "tool_load", input: `{"tool_ids":["builtin::code"]}`, wantNoAlias: true},
+		{tool: "mcp_postgres_query", input: `{"sql":"select 1"}`, wantNoAlias: true},
+		// from the documentation
+		{tool: "fs_append", input: `{"path":"/proj/new.txt","text":"tail"}`, wantTool: "Edit", wantID: "/proj/new.txt"},
+		{tool: "delete_file", input: `{"path":"/proj/new.txt"}`, wantTool: "delete_file", wantID: "/proj/new.txt"},
+		{tool: "list_directory", input: `{"path":"/proj/sub"}`, wantTool: "LS", wantID: "/proj/sub"},
+		// a file tool whose path is somewhere else: no file, so refused
+		{tool: "fs_write", input: `{"file_path":"/proj/new.txt"}`, wantTool: "Write", wantID: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("kiro", Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool {
+				t.Fatalf("Tool = %q, alias = %v; want %q", a.Tool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/proj")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+		})
+	}
+}
