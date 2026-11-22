@@ -46,6 +46,16 @@ OpenCode having no session-start hook. Run in live OpenCode 2.3.2 sessions
 with the per-user install: allow, refuse and reporting observed for read,
 edit, write and shell.
 
+Outcome notes, Cursor (built): the adapter gained an `allow` output, because
+Cursor reads silence as a failed hook. An alias may now map a harness tool
+to the canonical tool of the same name; such an alias is not displaced by
+the tenant's catalog row for that name, so the path field is the harness's
+and a call without it is refused. `report` skips a call Cursor says was
+denied. `Delete` has no canonical tool: it keeps its name and is given its
+file's identity. Run in live sessions of Cursor's CLI (2026.11.19), which
+confirmed `file_path`, that edits arrive as `Write`, and that the model is
+shown the reason on a refusal.
+
 ## Intent
 
 Stratium decides tool calls for Claude Code and, partly, Codex. The

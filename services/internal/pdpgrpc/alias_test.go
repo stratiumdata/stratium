@@ -264,3 +264,45 @@ func TestDecide_OpenCodeFileTools(t *testing.T) {
 		})
 	}
 }
+
+// Cursor's Read is decided under its own name, with the alias's field and not
+// the tenant catalog's, and with no rename to note.
+func TestDecide_CursorSameNameAlias(t *testing.T) {
+	tests := []struct {
+		name, input string
+		wantEffect  Effect
+		wantReason  string
+	}{
+		{"the path comes from the alias's field", `{"file_path":"a.txt"}`, Effect_EFFECT_ALLOW, ""},
+		{"an input without it is refused", `{"target_file":"a.txt"}`, Effect_EFFECT_DENY,
+			`"Read" names no resource the PDP can read`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, req := wellFormedFixture()
+			wrong := "target_file"
+			fs.catalog = []models.ToolCatalogEntry{{ToolName: "Read", Verb: "read", ResourceField: &wrong,
+				ActionTier: tierPtr(models.ActionTierReadOnly)}}
+			fs.chain[0].ApprovedTools = []string{"Read"}
+			fs.chain[0].ResourceConstraints = map[string]string{models.ResourceIDPrefixKey: "/workspace/"}
+			req.Tool, req.RawInput, req.Harness, req.Cwd = "Read", tt.input, "cursor", "/workspace"
+			pol := &perFilePolicy{denyID: "none", escalateID: "none"}
+			srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: pol}), testConfig(), &fakeSigner{})
+
+			resp, err := srv.Decide(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Decide() error = %v", err)
+			}
+			if resp.GetEffect() != tt.wantEffect {
+				t.Fatalf("Effect = %v (%q), want %v", resp.GetEffect(), resp.GetReason(), tt.wantEffect)
+			}
+			row := fs.appended[0]
+			if row.ToolName != "Read" || strings.Contains(row.Reason, "decided as") || !strings.Contains(row.Reason, tt.wantReason) {
+				t.Errorf("audit ToolName = %q, Reason = %q; want Read, no rename note, containing %q", row.ToolName, row.Reason, tt.wantReason)
+			}
+			if tt.wantEffect == Effect_EFFECT_ALLOW && !slices.Equal(pol.asked, []string{"/workspace/a.txt"}) {
+				t.Errorf("policy asked about %q, want the resolved path", pol.asked)
+			}
+		})
+	}
+}

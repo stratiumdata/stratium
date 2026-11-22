@@ -541,7 +541,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// which file they touch.
 	if alias != nil && alias.NamesFiles() && len(resourceIDs) == 0 {
 		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
-			fmt.Errorf("%w: %q names no resource the PDP can read", errAliasedNoResource, action.WireTool), &epoch)
+			fmt.Errorf("%w: %q names no resource the PDP can read", errAliasedNoResource, action.RecordedTool()), &epoch)
 	}
 	resource = labelResource(labelRules, resource, resourceIDs)
 

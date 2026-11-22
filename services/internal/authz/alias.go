@@ -62,6 +62,21 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			"webfetch":  {Canonical: "WebFetch"},
 			"websearch": {Canonical: "WebSearch"},
 		},
+		// Cursor, from live sessions of its CLI (2026.11.19). Read and Write
+		// carry Claude Code's names but are Cursor's own tools, so they get
+		// rows too: the row, not a tenant's catalog entry for the canonical
+		// tool, says where the path is, and a call without it is refused.
+		// An edit of an existing file arrives as Write. Delete has no
+		// canonical tool: it keeps its name and gains its file's identity.
+		// Grep (which also finds files), WebFetch and WebSearch carry no
+		// resource under either name and need no row. Task and MCP:<tool>
+		// are decided under their own names.
+		"cursor": {
+			"Shell":  {Canonical: "Bash", CommandField: "command"},
+			"Read":   {Canonical: "Read", PathField: "file_path"},
+			"Write":  {Canonical: "Write", PathField: "file_path"},
+			"Delete": {Canonical: "Delete", PathField: "file_path"},
+		},
 	}
 }
 
@@ -73,11 +88,19 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 // own catalog has a row for the exact name as received: a tenant can always
 // say what one of its tools is.
 //
+// A harness tool that already carries the canonical name is not renamed, and
+// the tenant's row for that name does not displace the alias: that row
+// describes the canonical tool's input, and the alias is what says where
+// this harness puts its path.
+//
 // The name as received is kept in WireTool, which is what gets recorded.
 func ResolveAlias(harness string, entries []models.ToolCatalogEntry, a Action) (Action, *ToolAlias) {
 	alias, ok := DefaultAliases()[harness][a.Tool]
 	if !ok {
 		return a, nil
+	}
+	if alias.Canonical == a.Tool {
+		return a, &alias
 	}
 	for _, e := range entries {
 		if e.ToolName == a.Tool {

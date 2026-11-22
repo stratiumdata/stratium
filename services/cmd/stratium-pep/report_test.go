@@ -99,3 +99,20 @@ func TestDispatch_Report_ExitsZeroAndSilentOnFailure(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
+
+// Cursor's failure hook also fires for a call that was denied. That call did
+// not run, so reporting it would flag every refusal as an undecided call.
+func TestReportToolUse_SkipsACallCursorSaysWasDenied(t *testing.T) {
+	client := &fakeReportClient{}
+	denied := `{"tool_name":"Shell","tool_input":{"command":"ls"},"failure_type":"permission_denied"}`
+	if err := reportToolUse(strings.NewReader(denied), client, reportTestConfig(t)); err != nil {
+		t.Fatalf("reportToolUse() error = %v", err)
+	}
+	failed := `{"tool_name":"Shell","tool_input":{"command":"ls"},"failure_type":"error"}`
+	if err := reportToolUse(strings.NewReader(failed), client, reportTestConfig(t)); err != nil {
+		t.Fatalf("reportToolUse() error = %v", err)
+	}
+	if len(client.reports) != 1 {
+		t.Errorf("reports sent = %d, want 1: the failed call only", len(client.reports))
+	}
+}

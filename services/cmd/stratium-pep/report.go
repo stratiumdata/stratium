@@ -89,6 +89,15 @@ func reportToolUse(stdin io.Reader, client reportClient, cfg reportConfig) error
 	if in.ToolName == "" {
 		return fmt.Errorf("malformed stdin: tool_name is required")
 	}
+	// Cursor runs its tool-failure hook for a call that was denied as well as
+	// for one that ran and failed. A denied call did not run, so it is not
+	// reported; no other harness sends this field.
+	var failure struct {
+		Type string `json:"failure_type"`
+	}
+	if _ = json.Unmarshal(body, &failure); failure.Type == "permission_denied" {
+		return nil
+	}
 	sess, err := loadSessionFile(cfg.SessionFilePath)
 	if err != nil {
 		return err
