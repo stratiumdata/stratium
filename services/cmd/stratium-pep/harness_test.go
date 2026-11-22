@@ -44,6 +44,11 @@ func TestRunHookFor(t *testing.T) {
 		{"copilot allow is silent: its own permission flow carries on", []string{"--harness", "copilot"}, allow, 0, "", ""},
 		{"copilot deny is its decision JSON, exit 2", []string{"--harness", "copilot"}, deny, 2,
 			`{"permissionDecision":"deny","permissionDecisionReason":"stratium-pep: denied by policy"}`, reason},
+		{"antigravity allow is silent", []string{"--harness", "antigravity"}, allow, 0, "", ""},
+		{"antigravity deny is its decision JSON with exit 0: exit 2 would lose it", []string{"--harness", "antigravity"}, deny, 0,
+			`{"decision":"deny","reason":"stratium-pep: denied by policy"}`, reason},
+		{"antigravity: a failure with no output still prints a deny", []string{"--harness", "antigravity"}, crash, 0,
+			`{"decision":"deny","reason":"stratium-pep: denied with no output (exit 1)"}`, "denied with no output"},
 		{"unknown harness blocks", []string{"--harness", "nope"}, allow, 2,
 			`"permissionDecision":"deny"`, `unknown --harness "nope"`},
 		{"--harness with no value blocks", []string{"--harness"}, allow, 2,
@@ -168,5 +173,47 @@ func TestHarnessStdin(t *testing.T) {
 		if got, _ := io.ReadAll(r); string(got) != want {
 			t.Errorf("%q: stdin = %s, want %s", args, got, want)
 		}
+	}
+}
+
+// Antigravity CLI's payload, as captured from a live session (1.5.14) with
+// ids and paths shortened. The user's prompt is in it and must not be passed on.
+func TestParseAntigravity(t *testing.T) {
+	in := `{"toolCall":{"args":{"Path":"/proj/notes.txt"},"id":"call_1","name":"read_file"},"stepIdx":3,` +
+		`"hookEventName":"PreToolUse","cwd":"/proj","workspacePaths":["/proj"],"conversationId":"c",` +
+		`"modelName":"auto","lastUserInput":"a private prompt","transcriptPath":"/t","artifactDirectoryPath":"/a"}`
+	got, err := parseAntigravity([]byte(in))
+	if want := `{"tool_name":"read_file","tool_input":{"Path":"/proj/notes.txt"},"cwd":"/proj"}`; err != nil || string(got) != want {
+		t.Errorf("parseAntigravity() = %s, %v\nwant %s", got, err, want)
+	}
+	if strings.Contains(string(got), "private prompt") {
+		t.Error("the user's prompt was passed on")
+	}
+
+	// Input that cannot be parsed is refused in Antigravity's terms, and the hook is not run.
+	var stdout, stderr bytes.Buffer
+	ran := false
+	code := runHookFor([]string{"--harness", "antigravity"}, strings.NewReader("not json"), &stdout, &stderr,
+		func(string, io.Reader, io.Writer) int { ran = true; return 0 })
+	if ran || code != 0 || !strings.Contains(stdout.String(), `"decision":"deny"`) {
+		t.Errorf("malformed stdin: ran = %v, exit = %d, stdout = %q; want a deny without running the hook", ran, code, stdout.String())
+	}
+}
+
+// report answers Antigravity CLI's after-the-call hook with the empty object
+// it expects, whether or not the report itself could be sent.
+func TestRunReportCmd_AntigravityReply(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	in := `{"toolCall":{"name":"read_file","args":{"Path":"/proj/a"}},"cwd":"/proj","error":""}`
+	if code := runReportCmd([]string{"--harness", "antigravity"}, strings.NewReader(in), &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if strings.TrimSpace(stdout.String()) != "{}" {
+		t.Errorf("stdout = %q, want {}", stdout.String())
+	}
+	stdout.Reset()
+	runReportCmd(nil, strings.NewReader(in), &stdout, &stderr)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q for a harness that reads no reply", stdout.String())
 	}
 }

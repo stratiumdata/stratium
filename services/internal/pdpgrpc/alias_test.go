@@ -148,11 +148,23 @@ func TestDecide_HarnessAlias(t *testing.T) {
 			wantEffect: Effect_EFFECT_DENY,
 		},
 		{
-			name:       "a tenant's own row for the name as sent beats the alias",
+			// A row with the harness tool's name was written for another tool
+			// (an MCP server's, say). It does not take the call away from the
+			// alias: the delegation grants Edit, and Edit is what is decided.
+			name:       "a tenant's row for the name as sent does not displace the alias",
 			harness:    "codex",
 			cwd:        "/workspace",
 			catalog:    []models.ToolCatalogEntry{{ToolName: "apply_patch", ActionTier: tierPtr(models.ActionTierInternalModify)}},
+			wantEffect: Effect_EFFECT_ALLOW,
+			wantReason: "[apply_patch decided as Edit]",
+		},
+		{
+			name:       "but a higher tier on that row still raises the tier",
+			harness:    "codex",
+			cwd:        "/workspace",
+			catalog:    []models.ToolCatalogEntry{{ToolName: "apply_patch", ActionTier: tierPtr(models.ActionTierDestructive)}},
 			wantEffect: Effect_EFFECT_DENY,
+			wantReason: "[apply_patch decided as Edit]",
 		},
 	}
 	for _, tt := range tests {

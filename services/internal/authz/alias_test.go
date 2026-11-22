@@ -97,20 +97,27 @@ func TestPatchResourceIDs(t *testing.T) {
 func TestRaiseForWireName(t *testing.T) {
 	base := TierTable{Catalog: DefaultCatalog()} // Edit is INTERNAL_MODIFY
 	aliased := Action{Tool: "Edit", WireTool: "apply_patch"}
+	destructive := models.ActionTierDestructive
+	readOnly := models.ActionTierReadOnly
 	tests := []struct {
 		name   string
 		stored map[string]models.ActionTier
+		rows   []models.ToolCatalogEntry
 		action Action
 		want   models.ActionTier
 	}{
-		{"a higher tier on the wire name raises", map[string]models.ActionTier{"apply_patch": models.ActionTierDestructive}, aliased, models.ActionTierDestructive},
-		{"a lower one does not lower", map[string]models.ActionTier{"apply_patch": models.ActionTierReadOnly}, aliased, models.ActionTierInternalModify},
-		{"none", nil, aliased, models.ActionTierInternalModify},
-		{"a call that was not aliased is untouched", map[string]models.ActionTier{"": models.ActionTierDestructive}, Action{Tool: "Edit"}, models.ActionTierInternalModify},
+		{name: "a higher tier on a catalog row for the wire name raises too",
+			rows: []models.ToolCatalogEntry{{ToolName: "apply_patch", ActionTier: &destructive}}, action: aliased, want: models.ActionTierDestructive},
+		{name: "a lower one on a catalog row does not lower",
+			rows: []models.ToolCatalogEntry{{ToolName: "apply_patch", ActionTier: &readOnly}}, action: aliased, want: models.ActionTierInternalModify},
+		{"a higher tier on the wire name raises", map[string]models.ActionTier{"apply_patch": models.ActionTierDestructive}, nil, aliased, models.ActionTierDestructive},
+		{"a lower one does not lower", map[string]models.ActionTier{"apply_patch": models.ActionTierReadOnly}, nil, aliased, models.ActionTierInternalModify},
+		{"none", nil, nil, aliased, models.ActionTierInternalModify},
+		{"a call that was not aliased is untouched", map[string]models.ActionTier{"": models.ActionTierDestructive}, nil, Action{Tool: "Edit"}, models.ActionTierInternalModify},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := DeriveTier(RaiseForWireName(base, tt.stored, tt.action), tt.action)
+			got, err := DeriveTier(RaiseForWireName(base, tt.stored, tt.rows, tt.action), tt.action)
 			if err != nil || got != tt.want {
 				t.Errorf("tier = %v, err = %v, want %v", got, err, tt.want)
 			}
@@ -189,7 +196,7 @@ func TestOpenCodeAliases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
-			a, alias := ResolveAlias("opencode", nil, Action{Tool: tt.tool, RawInput: tt.input})
+			a, alias := ResolveAlias("opencode", Action{Tool: tt.tool, RawInput: tt.input})
 			if tt.wantNoAliasAt {
 				if alias != nil || a.Tool != tt.tool {
 					t.Fatalf("aliased to %q, want no alias", a.Tool)
@@ -247,7 +254,7 @@ func TestCursorAliases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
-			a, alias := ResolveAlias("cursor", rows, Action{Tool: tt.tool, RawInput: tt.input})
+			a, alias := ResolveAlias("cursor", Action{Tool: tt.tool, RawInput: tt.input})
 			if tt.wantNoAlias {
 				if alias != nil {
 					t.Fatalf("aliased to %q, want no alias", a.Tool)
@@ -296,7 +303,7 @@ func TestCopilotAliases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
-			a, alias := ResolveAlias("copilot", nil, Action{Tool: tt.tool, RawInput: tt.input})
+			a, alias := ResolveAlias("copilot", Action{Tool: tt.tool, RawInput: tt.input})
 			if tt.wantNoAlias {
 				if alias != nil {
 					t.Fatalf("aliased to %q, want no alias", a.Tool)
@@ -312,6 +319,67 @@ func TestCopilotAliases(t *testing.T) {
 			}
 			if got := PatchResourceIDs(ext.Patch, "/proj"); !slices.Equal(got, tt.wantPatchIDs) {
 				t.Errorf("patch ids = %q, want %q", got, tt.wantPatchIDs)
+			}
+		})
+	}
+}
+
+// Antigravity CLI tool calls. The first group has the shapes captured from
+// live sessions (1.5.14); the second is built from its documentation.
+func TestAntigravityAliases(t *testing.T) {
+	tests := []struct {
+		tool, input string
+		wantTool    string
+		wantID      string
+		wantCommand string
+		wantNoAlias bool
+	}{
+		{tool: "run_command", input: `{"CommandLine":"cat notes.txt","WaitMsBeforeAsync":5000,"toolSummary":"Show notes"}`,
+			wantTool: "Bash", wantCommand: "cat notes.txt"},
+		{tool: "read_file", input: `{"Path":"/proj/notes.txt"}`, wantTool: "Read", wantID: "/proj/notes.txt"},
+		{tool: "read_file", input: `{"Path":"notes.txt"}`, wantTool: "Read", wantID: "/proj/notes.txt"},
+		{tool: "write_file", input: `{"Content":"a","Path":"/proj/w.txt"}`, wantTool: "Write", wantID: "/proj/w.txt"},
+		{tool: "edit_file", input: `{"Path":"/proj/notes.txt","Replacement":"egret","Target":"heron"}`,
+			wantTool: "Edit", wantID: "/proj/notes.txt"},
+		{tool: "search_web", input: `{"query":"test"}`, wantTool: "WebSearch"},
+		{tool: "invoke_subagent", input: `{"Prompt":"p","Role":"r","TypeName":"research"}`, wantNoAlias: true},
+		{tool: "manage_task", input: `{"Action":"list"}`, wantNoAlias: true},
+
+		{tool: "view_file", input: `{"AbsolutePath":"/proj/a.go","StartLine":1}`, wantTool: "Read", wantID: "/proj/a.go"},
+		{tool: "write_to_file", input: `{"TargetFile":"/proj/b.go","CodeContent":"x","Overwrite":true}`,
+			wantTool: "Write", wantID: "/proj/b.go"},
+		{tool: "replace_file_content", input: `{"TargetFile":"/proj/b.go","TargetContent":"a","ReplacementContent":"b"}`,
+			wantTool: "Edit", wantID: "/proj/b.go"},
+		{tool: "multi_replace_file_content", input: `{"TargetFile":"/proj/b.go","ReplacementChunks":[]}`,
+			wantTool: "Edit", wantID: "/proj/b.go"},
+		{tool: "list_dir", input: `{"DirectoryPath":"/proj/src"}`, wantTool: "LS", wantID: "/proj/src"},
+		{tool: "find_by_name", input: `{"SearchDirectory":"/proj","Pattern":"*.go"}`, wantTool: "Glob"},
+		{tool: "grep_search", input: `{"SearchPath":"/proj","Query":"x"}`, wantTool: "Grep"},
+		{tool: "read_url_content", input: `{"Url":"https://example.com"}`, wantTool: "WebFetch"},
+		// the live name with the documented field: no file, so refused
+		{tool: "read_file", input: `{"AbsolutePath":"/proj/a.go"}`, wantTool: "Read", wantID: ""},
+		{tool: "call_mcp_tool", input: `{"ServerName":"s","ToolName":"t"}`, wantNoAlias: true},
+		{tool: "mcp_github_create_issue", input: `{}`, wantNoAlias: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("antigravity", Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool || a.WireTool != tt.tool {
+				t.Fatalf("Tool = %q, WireTool = %q, alias = %v; want %q", a.Tool, a.WireTool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/proj")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+			a, _ = ApplyExtraction(ext, a, nil)
+			if _, err := DeriveTier(TierTable{Catalog: DefaultCatalog()}, a); err != nil {
+				t.Errorf("no tier for %q decided as %q: %v", tt.tool, a.Tool, err)
 			}
 		})
 	}

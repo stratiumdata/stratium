@@ -63,6 +63,10 @@ they carry Copilot's own tool names. Its `apply_patch` sends the patch text
 as the whole input, so `PatchField` can be `WholeInput`. Run in live
 sessions of Copilot CLI 1.0.114.
 
+Outcome note, 2026-11-22: the rule "a tenant's own catalog row for a native
+name beats the alias" was reversed when Antigravity CLI was added. See the
+outcome notes in `2026-11-22-antigravity-cli-design.md`.
+
 ## Intent
 
 Stratium decides tool calls for Claude Code and, partly, Codex. The

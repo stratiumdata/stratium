@@ -104,6 +104,27 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			"web_fetch":          {Canonical: "WebFetch"},
 			"web_search":         {Canonical: "WebSearch"},
 		},
+		// Antigravity CLI. It has two sets of tool names: the ones live
+		// sessions of 1.5.14 sent (run_command, read_file, write_file,
+		// edit_file, search_web) and the ones its documentation lists
+		// (view_file, write_to_file, replace_file_content and the rest),
+		// with different field names. Either may arrive, so both are here.
+		// Subagent, task, MCP and browser tools keep their own names.
+		"antigravity": {
+			"run_command":                {Canonical: "Bash", CommandField: "CommandLine"},
+			"read_file":                  {Canonical: "Read", PathField: "Path"},
+			"view_file":                  {Canonical: "Read", PathField: "AbsolutePath"},
+			"write_file":                 {Canonical: "Write", PathField: "Path"},
+			"write_to_file":              {Canonical: "Write", PathField: "TargetFile"},
+			"edit_file":                  {Canonical: "Edit", PathField: "Path"},
+			"replace_file_content":       {Canonical: "Edit", PathField: "TargetFile"},
+			"multi_replace_file_content": {Canonical: "Edit", PathField: "TargetFile"},
+			"list_dir":                   {Canonical: "LS", PathField: "DirectoryPath"},
+			"find_by_name":               {Canonical: "Glob"},
+			"grep_search":                {Canonical: "Grep"},
+			"read_url_content":           {Canonical: "WebFetch"},
+			"search_web":                 {Canonical: "WebSearch"},
+		},
 	}
 }
 
@@ -111,28 +132,26 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 // alias for it, and reports the alias that applied.
 //
 // It does nothing when harness is empty (every caller that is not a harness
-// hook), when the harness has no alias for the name, or when the tenant's
-// own catalog has a row for the exact name as received: a tenant can always
-// say what one of its tools is.
+// hook) or when the harness has no alias for the name.
 //
-// A harness tool that already carries the canonical name is not renamed, and
-// the tenant's row for that name does not displace the alias: that row
-// describes the canonical tool's input, and the alias is what says where
-// this harness puts its path.
+// A tenant's own catalog row for the name as received does not displace the
+// alias. A caller that names its harness has said whose tool this is, and a
+// row with the same name was written for some other tool: the MCP filesystem
+// server's read_file is not Antigravity CLI's, and the two put their path in
+// different fields. Letting the row win would decide the harness's tool with
+// another tool's extraction and no file identity. A higher tier on that row
+// is still honoured (RaiseForWireName).
+//
+// A harness tool that already carries the canonical name is not renamed.
 //
 // The name as received is kept in WireTool, which is what gets recorded.
-func ResolveAlias(harness string, entries []models.ToolCatalogEntry, a Action) (Action, *ToolAlias) {
+func ResolveAlias(harness string, a Action) (Action, *ToolAlias) {
 	alias, ok := DefaultAliases()[harness][a.Tool]
 	if !ok {
 		return a, nil
 	}
 	if alias.Canonical == a.Tool {
 		return a, &alias
-	}
-	for _, e := range entries {
-		if e.ToolName == a.Tool {
-			return a, nil
-		}
 	}
 	a.WireTool = a.Tool
 	a.Tool = alias.Canonical
@@ -234,13 +253,22 @@ func PatchResourceIDs(patch, cwd string) []string {
 	return ids
 }
 
-// RaiseForWireName returns t with a's tier raised to the tenant's override
-// for the name a arrived under, when there is one and it is higher. An alias
-// moves the call to its canonical name; a tier the tenant set on the name as
-// sent must not be lost on the way. Raise only, like every override.
-func RaiseForWireName(t TierTable, stored map[string]models.ActionTier, a Action) TierTable {
+// RaiseForWireName returns t with a's tier raised to the highest tier the
+// tenant set on the name a arrived under, by a tier override or a catalog
+// row, when that is higher. An alias moves the call to its canonical name; a
+// tier the tenant set on the name as sent must not be lost on the way. Raise
+// only, like every override.
+func RaiseForWireName(t TierTable, stored map[string]models.ActionTier, entries []models.ToolCatalogEntry, a Action) TierTable {
+	if a.WireTool == "" {
+		return t
+	}
 	raise, ok := stored[a.WireTool]
-	if a.WireTool == "" || !ok {
+	for _, e := range entries {
+		if e.ToolName == a.WireTool && e.ActionTier != nil && (!ok || *e.ActionTier > raise) {
+			raise, ok = *e.ActionTier, true
+		}
+	}
+	if !ok {
 		return t
 	}
 	if current, err := deriveTierByName(t, a); err != nil || raise <= current {

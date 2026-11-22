@@ -101,6 +101,7 @@ nav:
       - Installing stratium-pep: pep.md
       - session-start: pep/session-start.md
       - hook: pep/hook.md
+      - Antigravity CLI: pep/harnesses/antigravity.md
       - Copilot CLI: pep/harnesses/copilot.md
       - Cursor: pep/harnesses/cursor.md
       - OpenCode: pep/harnesses/opencode.md
