@@ -42,7 +42,9 @@ rule that refuses an aliased call with no resource now covers file tools
 only (a path or a patch that could not be resolved); search and web aliases
 carry no resource, as their canonical tools do. The plugin lives in
 `deploy/opencode/stratium-guard` and runs `session-start` when it loads,
-OpenCode having no session-start hook. Not run inside OpenCode.
+OpenCode having no session-start hook. Run in live OpenCode 2.3.2 sessions
+with the per-user install: allow, refuse and reporting observed for read,
+edit, write and shell.
 
 ## Intent
 

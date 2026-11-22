@@ -147,9 +147,10 @@ func TestResolveFilePath(t *testing.T) {
 	}
 }
 
-// OpenCode 2.x tool calls, decided as the canonical tools. The inputs are
-// built from OpenCode's tool schemas at v2.3.2 (packages/core/src/tool/plugin),
-// not captured from a run.
+// OpenCode 2.x tool calls, decided as the canonical tools. The read, edit,
+// write and shell inputs have the shape captured from a live OpenCode 2.3.2
+// session (relative paths, these field names); the rest are built from its
+// tool schemas (packages/core/src/tool/plugin).
 func TestOpenCodeAliases(t *testing.T) {
 	tests := []struct {
 		tool, input   string

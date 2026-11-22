@@ -11,7 +11,7 @@ Code's.
 |---|---|---|---|
 | Claude Code | (none) | `PreToolUse` hook | yes |
 | Codex | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
-| [OpenCode 2.x](harnesses/opencode.md) | `opencode` | a plugin that runs the hook | no: read from source at 2.3.2 |
+| [OpenCode 2.x](harnesses/opencode.md) | `opencode` | a plugin that runs the hook | yes, 2.3.2; see its page for what was observed |
 
 ---
 

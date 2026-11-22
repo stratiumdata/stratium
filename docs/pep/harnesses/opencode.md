@@ -5,10 +5,20 @@ has no command hooks, so the plugin is the hook: before each tool call it runs
 [`stratium-pep hook --harness opencode`](../hook.md) and rejects the call unless
 that allows it.
 
-**How this was verified.** Everything on this page about OpenCode was read from
-its source and docs at version 2.3.2. The plugin's own logic is tested with a
-stand-in for OpenCode's plugin interface. **It has not been run inside
-OpenCode.** OpenCode 1.x has a different plugin interface and is not supported.
+**How this was verified.** Run in live sessions of OpenCode 2.3.2 on macOS
+(`opencode run --standalone`), with the per-user install:
+
+- OpenCode loaded the plugin, and the plugin ran session start;
+- `read`, `edit`, `write` and `shell` calls were decided and allowed, with the
+  paths arriving relative to the session's directory, as described below;
+- a `write` the delegation did not grant was refused, the model was shown the
+  PDP's reason, and the file was not created;
+- every allowed call was reported afterwards and matched its decision.
+
+Not observed in a live session, and described here from OpenCode's source and
+docs: the `patch`, `glob`, `grep`, `webfetch` and `websearch` tools, Code Mode,
+the system install, and the ways a plugin can be switched off. OpenCode 1.x has
+a different plugin interface and is not supported.
 
 ---
 
