@@ -61,6 +61,9 @@ type ExtractedInput struct {
 	Verb       string
 	ResourceID string
 	Command    string
+	// Patch is the text of a patch-style edit, set only through an alias
+	// (ExtractAliased). Its file paths are the call's resource identities.
+	Patch string
 }
 
 // ExtractFromCatalog looks up a.Tool among entries — a tenant's own

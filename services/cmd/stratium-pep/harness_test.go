@@ -77,11 +77,15 @@ func TestRunHook_SendsHarnessAndTheToolNameUntouched(t *testing.T) {
 	cfg.Harness = "codex"
 
 	var stdout bytes.Buffer
-	if code := runHook(stdinBody("apply_patch", `{"command":"*** Begin Patch"}`), &stdout, startFakePDP(t, fake), cfg); code != 0 {
+	stdin := strings.NewReader(`{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch"},"cwd":"/work"}`)
+	if code := runHook(stdin, &stdout, startFakePDP(t, fake), cfg); code != 0 {
 		t.Fatalf("runHook() = %d, want 0; stdout: %s", code, stdout.String())
 	}
 	req := fake.lastRequest()
 	if req.GetHarness() != "codex" || req.GetTool() != "apply_patch" {
 		t.Errorf("request harness = %q, tool = %q; want codex, apply_patch", req.GetHarness(), req.GetTool())
+	}
+	if req.GetCwd() != "/work" {
+		t.Errorf("request cwd = %q, want the harness's own", req.GetCwd())
 	}
 }

@@ -209,6 +209,15 @@ message DecideRequest {
   // somebody else chose -- an MCP server's own tool names must never be
   // aliased just because one happens to be called "read" or "shell".
   string harness = 15;
+
+  // The working directory the harness reported for this call, when it
+  // reported one. Used for one thing: resolving the relative file paths a
+  // patch-style edit names (internal/authz.PatchResourceIDs). A patch with a
+  // relative path and no absolute cwd is refused, never guessed at.
+  //
+  // Caller-supplied and unverified, like raw_input, which names the paths
+  // themselves.
+  string cwd = 16;
 }
 
 // DecideResponse is the compound decision and each leg's individual
