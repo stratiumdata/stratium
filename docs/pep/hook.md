@@ -9,6 +9,7 @@ Code's.
 
 | Harness | `--harness` | How it is wired | Run in a live session |
 |---|---|---|---|
+| [Antigravity CLI](harnesses/antigravity.md) | `antigravity` | `PreToolUse` hook | yes, 1.5.14; see its page for what was observed |
 | Claude Code | (none) | `PreToolUse` hook | yes |
 | Codex | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
 | [Copilot CLI](harnesses/copilot.md) | `copilot` | `preToolUse` hook | yes, 1.0.114; see its page for what was observed |
@@ -360,9 +361,9 @@ What follows from that:
   segment in any path.
 - Paths are compared as written. Symbolic links are not followed, as for any
   other tool.
-- To decide `apply_patch` under its own name instead, add a tool catalog entry
-  for `apply_patch`. Your own entry for a name always wins; the call then
-  carries no file identity.
+- A tool catalog entry for `apply_patch` does not change this: when the hook
+  names its harness, the harness's tool is decided as the shared tool. A higher
+  tier on such an entry is still honoured.
 
 An older install runs a `stratium-codex-hook` shell script instead. It still
 works, but the PDP is not told the harness, so `apply_patch` is decided under

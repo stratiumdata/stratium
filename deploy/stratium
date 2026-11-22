@@ -236,7 +236,8 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
     # Copilot's payload is its own, so `report` has to be told to read it the
     # way `hook` does. The other harnesses' after-the-call payload is Claude Code's.
     copilot = hook_arg.endswith("--harness copilot")
-    report_flag = " --harness copilot" if copilot else ""
+    antigravity = hook_arg.endswith("--harness antigravity")
+    report_flag = " --harness " + hook_arg.split()[-1] if copilot or antigravity else ""
     report = {
         "matcher": matcher,
         "hooks": [{
@@ -274,6 +275,9 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
         return {CURSOR_EVENT[e]: cursor_entry(e, g) for e, g in wanted.items()}
     if copilot:
         return {CURSOR_EVENT[e]: copilot_entry(g) for e, g in wanted.items()}
+    if antigravity:
+        # Claude Code's shape, except that SessionStart is a flat list of handlers.
+        return {e: g["hooks"][0] if e == "SessionStart" else g for e, g in wanted.items()}
     return wanted
 
 
@@ -351,13 +355,19 @@ def save(path, settings, dry_run):
         raise
 
 
-def strip(settings, events=None):
+def hooks_key(harness):
+    """Where a harness's hook file keeps its events: Antigravity CLI files them
+    under a name per hook, and ours is "stratium"."""
+    return "stratium" if harness == "antigravity" else "hooks"
+
+
+def strip(settings, events=None, key="hooks"):
     """Remove Stratium entries, pruning containers left empty. Returns count.
 
     `events` limits the sweep to those event names; None means all of them.
     """
     removed = 0
-    hooks = settings.get("hooks")
+    hooks = settings.get(key)
     if not isinstance(hooks, dict):
         return 0
     for event in list(hooks):
@@ -380,8 +390,8 @@ def strip(settings, events=None):
             hooks[event] = kept_groups
         else:
             del hooks[event]
-    if not hooks:
-        del settings["hooks"]
+    if not hooks or set(hooks) == {"enabled"}:
+        del settings[key]
         if set(settings) == {"version"}:
             del settings["version"]  # Cursor's file, with nothing left in it
     return removed
@@ -419,10 +429,11 @@ def install(args):
     wanted = entries(args.bin, args.matcher, args.only, HARNESS[args.harness]["hook_arg"])
     # Strip only the events we are about to write, so `install --only PreToolUse`
     # does not silently remove a SessionStart hook installed by an earlier run.
-    replaced = strip(settings, events=set(wanted))
+    key = hooks_key(args.harness)
+    replaced = strip(settings, events=set(wanted), key=key)
     if args.harness in ("cursor", "copilot"):
         settings.setdefault("version", 1)
-    hooks = settings.setdefault("hooks", {})
+    hooks = settings.setdefault(key, {})
     for event, group in wanted.items():
         hooks.setdefault(event, []).append(group)
     save(args.settings, settings, args.dry_run)
@@ -874,7 +885,7 @@ def uninstall(args):
     if args.harness == "opencode":
         return uninstall_opencode(args)
     settings = load(args.settings)
-    removed = strip(settings)
+    removed = strip(settings, key=hooks_key(args.harness))
     if not removed:
         print(f"no Stratium hooks in {args.settings}")
         return
@@ -888,7 +899,7 @@ def status(args):
     settings = load_hooks(args.settings)
     found = [
         (event, command_of(h), h.get("timeout", h.get("timeoutSec")), group.get("matcher"), h)
-        for event, groups in (settings.get("hooks") or {}).items()
+        for event, groups in (settings.get(hooks_key(args.harness)) or {}).items()
         if isinstance(groups, list)
         for group in groups
         for h in hooks_of(group)
@@ -899,6 +910,9 @@ def status(args):
         return 1
     open_to = [("hook entry", writable_here(args.settings))]
     incomplete = False
+    if args.harness == "antigravity" and (settings.get("stratium") or {}).get("enabled") is False:
+        print('"enabled" is false on the stratium hook: Antigravity CLI does not run it')
+        incomplete = True
     for shown, command, timeout, matcher, h in found:
         event = claude_event(shown)
         m = "" if matcher is None else f" matcher={matcher!r}"
@@ -1274,6 +1288,47 @@ def selftest(_args):
                 uninstall_system(scp_)
             assert not os.path.exists(pol)
 
+            # --antigravity: one named hook among others, SessionStart flat
+            agp = os.path.join(d, "agy-hooks.json")
+            other = {"lint": {"PostToolUse": [{"matcher": "write_file", "hooks": [{"command": "./lint.sh"}]}]}}
+            with open(agp, "w") as f:
+                json.dump(other, f)
+            aa = argparse.Namespace(harness="antigravity", settings=agp, bin=src, matcher="*",
+                                    only=list(HARNESS["antigravity"]["events"]), dry_run=False,
+                                    user=False, force=True, show_next=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(aa)
+                install(aa)
+            ag = load(agp)
+            assert ag["lint"] == other["lint"], ag
+            assert ag["stratium"] == {
+                "SessionStart": [{"type": "command", "command": f"{src} session-start",
+                                  "timeout": SESSION_START_TIMEOUT}],
+                "PreToolUse": [{"matcher": "*", "hooks": [{
+                    "type": "command", "command": f"{src} hook --harness antigravity",
+                    "timeout": hook_timeout()}]}],
+                "PostToolUse": [{"matcher": "*", "hooks": [{
+                    "type": "command", "command": f"{src} report --harness antigravity",
+                    "timeout": REPORT_TIMEOUT}]}]}, ag["stratium"]
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(aa) == 0, out.getvalue()
+            ag["stratium"]["enabled"] = False  # what /hooks or an agent would do
+            with open(agp, "w") as f:
+                json.dump(ag, f)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(aa) == 1 and "does not run it" in out.getvalue(), out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall(aa)
+            assert load(agp) == other, load(agp)
+            for bad in (dict(system=True, system_root=sroot, settings=None),
+                        dict(settings=os.path.join(d, ".agents", "hooks.json"))):
+                try:
+                    resolve(argparse.Namespace(**{**dict(harness="antigravity", user=False, bin=None,
+                                                         matcher="*", only=None, dry_run=False), **bad}), pr)
+                    raise AssertionError(f"accepted --antigravity with {bad}")
+                except SystemExit:
+                    pass
+
             # --cursor --system: entries added to the one administrator file
             sc = argparse.Namespace(harness="cursor", system=True, system_root=sroot,
                                     bin=src, matcher="*", dry_run=False)
@@ -1547,6 +1602,12 @@ HARNESS = {
                 "user_path": "~/.copilot/hooks/stratium.json", "bin": "stratium-pep",
                 "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
                 "hook_arg": "hook --harness copilot"},
+    # One named hook, "stratium", in the user's hooks.json. A project
+    # .agents/hooks.json runs only in a trusted workspace.
+    "antigravity": {"path": "~/.gemini/config/hooks.json",
+                    "user_path": "~/.gemini/config/hooks.json", "bin": "stratium-pep",
+                    "events": ("SessionStart", "PreToolUse", "PostToolUse"),
+                    "hook_arg": "hook --harness antigravity"},
     # No hook file and no events: see install_opencode. `--settings` names the
     # OpenCode configuration directory.
     "opencode": {"bin": "stratium-pep", "events": ()},
@@ -1556,6 +1617,10 @@ HARNESS = {
 def resolve(args, parser):
     """Fill in the harness-dependent defaults and refuse the fail-open setups."""
     h = HARNESS[args.harness]
+    if args.harness == "antigravity" and getattr(args, "system", False):
+        parser.error("--antigravity has no --system: Antigravity CLI reads hooks from the "
+                     "user's and the project's files only, so there is no administrator "
+                     "location to install into")
     if args.harness == "opencode":
         if args.only or args.user or args.matcher != "*":
             parser.error("--opencode takes no --only, --user or --matcher: its plugin "
@@ -1574,12 +1639,13 @@ def resolve(args, parser):
         args.settings = harness_path(args.harness, user=args.user)
     args.settings = os.path.expanduser(args.settings)
 
-    if args.harness in ("codex", "cursor", "copilot") and not getattr(args, "system", False):
+    if args.harness in ("codex", "cursor", "copilot", "antigravity") and not getattr(args, "system", False):
         # A project-local hook file is disabled until the project is trusted
         # (all three harnesses), and a disabled enforcement hook is not a
         # no-op — it is fail-open: every tool call proceeds unchecked (§2b).
         own = os.path.expanduser(h["user_path"])
-        name = {"codex": "Codex", "cursor": "Cursor", "copilot": "Copilot CLI"}[args.harness]
+        name = {"codex": "Codex", "cursor": "Cursor", "copilot": "Copilot CLI",
+                "antigravity": "Antigravity CLI"}[args.harness]
         if os.path.dirname(os.path.abspath(args.settings)) != os.path.dirname(own):
             parser.error(
                 f"--{args.harness} writes {own} only. {args.settings} looks "
@@ -2363,6 +2429,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
                          default=d(None),
                          help="target Codex: ~/.codex/hooks.json, SessionStart + PreToolUse + PostToolUse")
+    harness.add_argument("--antigravity", dest="harness", action="store_const",
+                         const="antigravity", default=d(None),
+                         help="target Antigravity CLI (agy): ~/.gemini/config/hooks.json")
     harness.add_argument("--copilot", dest="harness", action="store_const", const="copilot",
                          default=d(None),
                          help="target GitHub Copilot CLI: ~/.copilot/hooks/stratium.json")
@@ -2442,7 +2511,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --claude, --codex, --copilot, --cursor or --opencode")
+            p.error("pick a harness: --antigravity, --claude, --codex, --copilot, --cursor or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)

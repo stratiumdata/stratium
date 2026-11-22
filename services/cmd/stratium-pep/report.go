@@ -57,7 +57,10 @@ type reportClient interface {
 // args may name the harness (`--harness copilot`), for one whose after-the-
 // call payload is not Claude Code's. The report must be read exactly as the
 // decision was, or the two would not match.
-func runReportCmd(args []string, stdin io.Reader, stderr io.Writer) int {
+func runReportCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if name, _, _ := flagValue(args, "--harness"); harnesses[name].reportReply != "" {
+		_, _ = fmt.Fprintln(stdout, harnesses[name].reportReply)
+	}
 	stdin, err := harnessStdin(args, stdin)
 	if err == nil {
 		err = dialAndReport(stdin)

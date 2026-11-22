@@ -26,10 +26,14 @@ import (
 // parse is for a harness whose stdin is not Claude Code's: it returns the
 // same call in Claude Code's fields (tool_name, tool_input, cwd). It moves
 // the input, whole; it never looks inside it or renames the tool.
+//
+// reportReply is what `report` prints for a harness that reads a reply from
+// its after-the-call hook.
 var harnesses = map[string]struct {
-	deny  func(stdout, stderr io.Writer, claudeOut []byte, reason string) int
-	allow func(stdout io.Writer)
-	parse func(stdin []byte) ([]byte, error)
+	deny        func(stdout, stderr io.Writer, claudeOut []byte, reason string) int
+	allow       func(stdout io.Writer)
+	parse       func(stdin []byte) ([]byte, error)
+	reportReply string
 }{
 	"claude": {},
 	"codex":  {deny: denyOnStderr},
@@ -39,6 +43,38 @@ var harnesses = map[string]struct {
 	"opencode": {deny: denyOnStderr},
 	"cursor":   {deny: denyCursor, allow: allowCursor},
 	"copilot":  {deny: denyCopilot, parse: parseCopilot},
+	// An allow prints nothing. Antigravity CLI runs the call on a hook that
+	// exits 0 in silence, and an explicit "allow" there is an automatic
+	// approval that would skip a prompt of its own.
+	"antigravity": {deny: denyAntigravity, parse: parseAntigravity, reportReply: "{}"},
+}
+
+// parseAntigravity reads Antigravity CLI's payload: the call is nested under
+// toolCall, with the input as args. The payload also carries the user's
+// prompt (lastUserInput), which goes no further than this function.
+func parseAntigravity(stdin []byte) ([]byte, error) {
+	var in struct {
+		ToolCall struct {
+			Name string          `json:"name"`
+			Args json.RawMessage `json:"args"`
+		} `json:"toolCall"`
+		Cwd string `json:"cwd"`
+	}
+	if err := json.Unmarshal(stdin, &in); err != nil {
+		return nil, fmt.Errorf("malformed stdin: %w", err)
+	}
+	return json.Marshal(hookStdin{ToolName: in.ToolCall.Name, ToolInput: in.ToolCall.Args, Cwd: in.Cwd})
+}
+
+// denyAntigravity is the one deny that exits 0. Antigravity CLI reads the
+// decision from stdout only when the hook succeeds; on exit 2 it discards
+// stdout and tells the model the hook failed. Any other non-zero exit is
+// refused as well (seen on 1.5.14), so a crash still blocks.
+func denyAntigravity(stdout, stderr io.Writer, _ []byte, reason string) int {
+	_, _ = fmt.Fprintln(stderr, reason)
+	out, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
+	_, _ = fmt.Fprintln(stdout, string(out))
+	return 0
 }
 
 // parseCopilot reads the payload of Copilot CLI's camelCase events, which

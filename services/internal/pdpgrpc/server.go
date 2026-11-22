@@ -475,7 +475,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// first (authz.ResolveAlias), so the catalog, the tier table, the tool
 	// lists and the policies below all see one vocabulary. Only a caller
 	// that names its harness gets this; see DecideRequest.harness.
-	action, alias := authz.ResolveAlias(req.GetHarness(), catalogEntries, action)
+	action, alias := authz.ResolveAlias(req.GetHarness(), action)
 	var extracted authz.ExtractedInput
 	if alias != nil {
 		extracted = authz.ExtractAliased(catalogEntries, action, *alias, req.GetCwd())
@@ -564,7 +564,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 			fmt.Errorf("load tier overrides: %w", err), &epoch)
 	}
 	tiers.Overrides = honoredOverrides(storedOverrides, tiers.Catalog, catalogEntries)
-	tiers = authz.RaiseForWireName(tiers, storedOverrides, action)
+	tiers = authz.RaiseForWireName(tiers, storedOverrides, catalogEntries, action)
 
 	// Derived ahead of authz.Decide so the policy engine can see it (spec Y3):
 	// DeriveTier is pure, and Decide (below) derives it again, independently,
