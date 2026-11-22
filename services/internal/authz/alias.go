@@ -112,15 +112,16 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 		// Subagent, task, MCP and browser tools keep their own names.
 		// Kiro CLI's v3 engine, from live sessions of 3.5.0: execute_bash,
 		// read_file, fs_write, str_replace, web_fetch and remote_web_search.
-		// fs_append, delete_file, list_directory, file_search, grep_search
-		// and execute_pwsh are from Kiro's documentation, with "path" and
-		// "command" assumed; a file call without its path is refused.
+		// fs_append, delete_file, list_directory, file_search and grep_search
+		// are from Kiro's documentation, with "path" assumed; a file call
+		// without its path is refused. execute_pwsh, Kiro's shell on Windows,
+		// has no row: PowerShell is not read as a Bash command, so it is
+		// decided under its own name, as Copilot's powershell is.
 		// delete_file has no canonical tool: it keeps its name and gains its
 		// file's identity. code, tool_load, invoke_sub_agent and
 		// mcp_<server>_<tool> are decided under their own names.
 		"kiro": {
 			"execute_bash":      {Canonical: "Bash", CommandField: "command"},
-			"execute_pwsh":      {Canonical: "Bash", CommandField: "command"},
 			"read_file":         {Canonical: "Read", PathField: "path"},
 			"fs_write":          {Canonical: "Write", PathField: "path"},
 			"fs_append":         {Canonical: "Edit", PathField: "path"},

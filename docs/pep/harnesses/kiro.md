@@ -84,7 +84,6 @@ hook.
 | `str_replace` | `Edit` | the file path, from `path` |
 | `web_fetch` | `WebFetch` | nothing |
 | `remote_web_search` | `WebSearch` | nothing |
-| `execute_pwsh` (documented) | `Bash` | the command, from `command` |
 | `fs_append` (documented) | `Edit` | the file path, from `path` |
 | `delete_file` (documented) | `delete_file` | the file path, from `path` |
 | `list_directory` (documented) | `LS` | the directory, from `path` |
@@ -92,8 +91,7 @@ hook.
 | any other | its own name | nothing |
 
 Kiro's documentation does not give the input fields of its tools. For the
-documented rows `path` and `command` are assumed from the tools that were
-seen. If a file tool's path is somewhere else the call is refused, with "names
+documented rows `path` is assumed from the tools that were seen. If a file tool's path is somewhere else the call is refused, with "names
 no resource the PDP can read".
 
 A relative path is resolved against the working directory Kiro reports. A path
@@ -109,6 +107,9 @@ filesystem server's `read_file`, does not change how Kiro's tool is decided.
   decided under their own names, so they are refused unless a delegation
   grants those names. Without `tool_load` the
   model cannot reach web search even when `WebSearch` is granted.
+- **PowerShell.** `execute_pwsh`, Kiro's shell tool on Windows, is decided
+  under its own name and not as `Bash`: a PowerShell command is not read the
+  way a Bash command is.
 - **Other tools are decided under their own names** and refused unless a
   delegation grants that name: `invoke_sub_agent`, `mcp_<server>_<tool>`,
   `knowledge`, `introspect` and the rest. Nothing is read from their input.
@@ -133,7 +134,7 @@ Observed on 3.5.0, v3 engine:
 | exited `2` with nothing on stderr | refused, with no reason |
 | exited `0` and printed Claude Code's deny JSON | refused, showing the reason |
 | exited `1` | **ran the tool** |
-| ran past its timeout | **ran the tool** |
+| ran past its `timeout` (seconds; a hook set to 150 was let run for 75) | **ran the tool** |
 | named a command that does not exist | **ran the tool** |
 
 So a call goes through undecided when:
