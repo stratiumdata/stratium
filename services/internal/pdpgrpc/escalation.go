@@ -70,7 +70,7 @@ func (s *Server) resolveEscalation(
 			RootDelegationID: root.ID,
 			Subject:          subject,
 			RootPrincipal:    root.UserID,
-			ToolName:         action.Tool,
+			ToolName:         action.RecordedTool(),
 			Action:           action.Verb,
 			DerivedTier:      result.DerivedTier,
 			InputDigest:      sha256.Sum256([]byte(action.RawInput)),
@@ -103,7 +103,7 @@ func (s *Server) resolveEscalation(
 	}
 
 	digest := sha256.Sum256([]byte(action.RawInput))
-	if reason := approval.Verify(root.UserID, agentID, delegationID, action.Tool, action.Verb,
+	if reason := approval.Verify(root.UserID, agentID, delegationID, action.RecordedTool(), action.Verb,
 		result.DerivedTier, digest, now); reason != "" {
 		return denyForApproval(result, reason), "", nil
 	}

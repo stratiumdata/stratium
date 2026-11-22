@@ -97,7 +97,13 @@ type PolicyVerdict struct {
 
 // Action describes what the agent is attempting.
 type Action struct {
-	Tool     string // "Bash", "Read", "mcp__stripe__create_refund"
+	Tool string // "Bash", "Read", "mcp__stripe__create_refund"
+
+	// WireTool is the tool name as the caller sent it, set only when
+	// ResolveAlias renamed Tool to a canonical name. Every leg decides on
+	// Tool; RecordedTool is what is written down.
+	WireTool string
+
 	Verb     string // "read", "write", "delete"
 	RawInput string // the actual command or path, used for derivation
 
@@ -115,6 +121,16 @@ type Action struct {
 	// DeclaredTier is what the caller claims. It never derives the tier — it is
 	// only cross-checked against the derived value (C1, C2, C3).
 	DeclaredTier *models.ActionTier
+}
+
+// RecordedTool is the tool name to write in audit and approval rows: the name
+// as received. A completed tool call is matched to its decision by that name
+// (pdpgrpc's ReportToolUse), and the caller reports the name it sent.
+func (a Action) RecordedTool() string {
+	if a.WireTool != "" {
+		return a.WireTool
+	}
+	return a.Tool
 }
 
 // Principal is the human on whose behalf the agent acts.

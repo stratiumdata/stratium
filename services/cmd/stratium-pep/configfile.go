@@ -92,20 +92,30 @@ func applyConfigFile(args []string) error {
 
 // configFlag returns the value of `--config <file>` or `--config=<file>`.
 func configFlag(args []string) (path string, ok bool, err error) {
+	path, ok, err = flagValue(args, "--config")
+	if err != nil {
+		return "", false, fmt.Errorf("--config needs a file path")
+	}
+	return path, ok, nil
+}
+
+// flagValue finds `name value` or `name=value` in args. A flag that is
+// present with no value is an error, never "absent".
+func flagValue(args []string, name string) (value string, ok bool, err error) {
 	for i, a := range args {
-		if v, found := strings.CutPrefix(a, "--config="); found {
-			path, ok = v, true
-		} else if a == "--config" {
+		if v, found := strings.CutPrefix(a, name+"="); found {
+			value, ok = v, true
+		} else if a == name {
 			if i+1 >= len(args) {
-				return "", false, fmt.Errorf("--config needs a file path")
+				return "", false, fmt.Errorf("%s needs a value", name)
 			}
-			path, ok = args[i+1], true
+			value, ok = args[i+1], true
 		}
-		if ok && path == "" {
-			return "", false, fmt.Errorf("--config needs a file path")
+		if ok && value == "" {
+			return "", false, fmt.Errorf("%s needs a value", name)
 		}
 		if ok {
-			return path, true, nil
+			return value, true, nil
 		}
 	}
 	return "", false, nil

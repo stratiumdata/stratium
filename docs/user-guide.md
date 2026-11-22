@@ -1885,7 +1885,7 @@ the values on this page: 5m + 4 × 5s) and denies at that point. A harness that 
 hook sooner runs the tool call, so the `timeout` must be the larger number.
 **Start with a narrow `matcher`** (`"Read"`) on a session you care about.
 
-**Codex** — `~/.codex/hooks.json`, plus a small shim:
+**Codex** — `~/.codex/hooks.json`:
 
 ```json
 {
@@ -1893,24 +1893,17 @@ hook sooner runs the tool call, so the `timeout` must be the larger number.
     "PreToolUse": [
       { "matcher": "*",
         "hooks": [ { "type": "command",
-                     "command": "/usr/local/bin/stratium-codex-hook",
+                     "command": "/usr/local/bin/stratium-pep hook --harness codex",
                      "timeout": 330 } ] }
     ]
   }
 }
 ```
 
-```sh
-#!/bin/sh
-# Codex reads a block reason from stderr when a PreToolUse hook exits non-zero;
-# stratium-pep writes it as JSON on stdout. Mirror it, and normalise any
-# non-zero exit to 2 so a crashed or missing binary still denies.
-out=$(stratium-pep hook); rc=$?
-[ "$rc" -eq 0 ] && exit 0
-printf '%s\n' "${out:-stratium-pep: denied with no output (exit $rc)}" >&2
-printf '%s' "$out"
-exit 2
-```
+`--harness codex` makes the hook answer the way Codex reads (exit `2`, reason on
+stderr) and tells the PDP the tool names are Codex's. File edits from Codex
+(`apply_patch`) are refused for now. See
+[`stratium-pep hook`](pep/hook.md#installing-in-codex).
 
 Two Codex-specific gotchas, both of which fail **open**:
 
