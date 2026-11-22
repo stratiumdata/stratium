@@ -10,6 +10,14 @@ harness name is not recorded. An aliased call with no resource identity is
 refused outright, not only under a path constraint: once aliased it is
 matched by rules written for calls that name their resource.
 
+Outcome notes, Kiro (built 2026-11-22, run on CLI 3.5.0): hooks are a flat
+list in `~/.kiro/hooks/stratium.json`, Claude Code's payload field names, deny
+by exit 2 with stderr. Only the v3 engine runs them; v2, still the default
+until a user opts in, runs every call unchecked. Exit 1, a timeout and a
+missing command all let the call run, against Kiro's documentation. Tool input
+fields are undocumented and were read from live payloads. `tool_load` and
+`code` keep their own names.
+
 Outcome notes, patch-path reader (built before PR B, because without it a
 Codex file edit is always refused): an alias can name a `PatchField`; the PDP
 reads the file headers out of the patch (`Add File`, `Update File`,

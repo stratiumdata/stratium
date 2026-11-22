@@ -355,6 +355,42 @@ def save(path, settings, dry_run):
         raise
 
 
+def kiro_in(doc):
+    """Kiro's hook file as the event-keyed shape the rest of this script works
+    on. Kiro keeps one flat list, each hook naming its trigger; every entry
+    rides along under "kiro" so one that is not ours is written back as it was."""
+    events = {}
+    for h in doc.get("hooks") or []:
+        action = h.get("action") or {}
+        inner = {"type": "command", "command": action.get("command", ""), "timeout": h.get("timeout")}
+        events.setdefault(h.get("trigger"), []).append(
+            {"matcher": h.get("matcher"), "hooks": [inner], "kiro": h})
+    return {"hooks": events} if events else {}
+
+
+def kiro_out(settings):
+    hooks = []
+    for event, groups in (settings.get("hooks") or {}).items():
+        for g in groups:
+            if "kiro" in g:
+                hooks.append(g["kiro"])
+                continue
+            inner = g["hooks"][0]
+            # No matcher: Kiro runs a hook without one for every tool.
+            hooks.append({"name": "stratium-" + event, "trigger": event, "timeout": inner["timeout"],
+                          "action": {"type": "command", "command": inner["command"]}})
+    return {"version": "v1", "hooks": hooks}
+
+
+def read_settings(args, loader=None):
+    doc = (loader or load)(args.settings)
+    return kiro_in(doc) if args.harness == "kiro" else doc
+
+
+def write_settings(args, settings):
+    save(args.settings, kiro_out(settings) if args.harness == "kiro" else settings, args.dry_run)
+
+
 def hooks_key(harness):
     """Where a harness's hook file keeps its events: Antigravity CLI files them
     under a name per hook, and ours is "stratium"."""
@@ -425,7 +461,7 @@ def install(args):
         print(f"warning: {args.bin!r} matches none of {MARKERS} — `uninstall` and "
               "`status` find entries by name, so they will not see this one. "
               "Remove it by hand if you install it.", file=sys.stderr)
-    settings = load(args.settings)
+    settings = read_settings(args)
     wanted = entries(args.bin, args.matcher, args.only, HARNESS[args.harness]["hook_arg"])
     # Strip only the events we are about to write, so `install --only PreToolUse`
     # does not silently remove a SessionStart hook installed by an earlier run.
@@ -436,7 +472,7 @@ def install(args):
     hooks = settings.setdefault(key, {})
     for event, group in wanted.items():
         hooks.setdefault(event, []).append(group)
-    save(args.settings, settings, args.dry_run)
+    write_settings(args, settings)
     verb = "reinstalled" if replaced else "installed"
     print(f"{verb} {' + '.join(wanted)} (matcher {args.matcher!r}, command {args.bin!r}) in {args.settings}")
     if getattr(args, "show_next", True):
@@ -884,19 +920,19 @@ def uninstall(args):
         return uninstall_system(args)
     if args.harness == "opencode":
         return uninstall_opencode(args)
-    settings = load(args.settings)
+    settings = read_settings(args)
     removed = strip(settings, key=hooks_key(args.harness))
     if not removed:
         print(f"no Stratium hooks in {args.settings}")
         return
-    save(args.settings, settings, args.dry_run)
+    write_settings(args, settings)
     print(f"removed {removed} Stratium hook(s) from {args.settings}")
 
 
 def status(args):
     if args.harness == "opencode":
         return status_opencode(args)
-    settings = load_hooks(args.settings)
+    settings = read_settings(args, load_hooks)
     found = [
         (event, command_of(h), h.get("timeout", h.get("timeoutSec")), group.get("matcher"), h)
         for event, groups in (settings.get(hooks_key(args.harness)) or {}).items()
@@ -1288,6 +1324,38 @@ def selftest(_args):
                 uninstall_system(scp_)
             assert not os.path.exists(pol)
 
+            # --kiro: a flat list of named hooks; one that is not ours survives
+            kp = os.path.join(d, "kiro-stratium.json")
+            lint = {"name": "lint", "trigger": "PostFileSave", "matcher": "\\.ts$",
+                    "action": {"type": "agent", "prompt": "lint it"}}
+            with open(kp, "w") as f:
+                json.dump({"version": "v1", "hooks": [lint]}, f)
+            ka = argparse.Namespace(harness="kiro", settings=kp, bin=src, matcher="*",
+                                    only=list(HARNESS["kiro"]["events"]), dry_run=False,
+                                    user=False, force=True, show_next=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(ka)
+                install(ka)
+            assert load(kp) == {"version": "v1", "hooks": [lint] + [
+                {"name": "stratium-" + e, "trigger": e, "timeout": t,
+                 "action": {"type": "command", "command": f"{src} {c}"}}
+                for e, t, c in (("SessionStart", SESSION_START_TIMEOUT, "session-start"),
+                                ("PreToolUse", hook_timeout(), "hook --harness kiro"),
+                                ("PostToolUse", REPORT_TIMEOUT, "report"))]}, load(kp)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(ka) == 0, out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall(ka)
+            assert load(kp) == {"version": "v1", "hooks": [lint]}, load(kp)
+            for bad in (dict(system=True, system_root=sroot, settings=None),
+                        dict(settings=os.path.join(d, ".kiro", "hooks", "stratium.json"))):
+                try:
+                    resolve(argparse.Namespace(**{**dict(harness="kiro", user=False, bin=None,
+                                                         matcher="*", only=None, dry_run=False), **bad}), pr)
+                    raise AssertionError(f"accepted --kiro with {bad}")
+                except SystemExit:
+                    pass
+
             # --antigravity: one named hook among others, SessionStart flat
             agp = os.path.join(d, "agy-hooks.json")
             other = {"lint": {"PostToolUse": [{"matcher": "write_file", "hooks": [{"command": "./lint.sh"}]}]}}
@@ -1608,6 +1676,12 @@ HARNESS = {
                     "user_path": "~/.gemini/config/hooks.json", "bin": "stratium-pep",
                     "events": ("SessionStart", "PreToolUse", "PostToolUse"),
                     "hook_arg": "hook --harness antigravity"},
+    # Its own file in the user hooks directory. A project .kiro/hooks file
+    # runs only in a trusted workspace. Kiro has no event for a failed call:
+    # it arrives on PostToolUse.
+    "kiro": {"path": "~/.kiro/hooks/stratium.json", "user_path": "~/.kiro/hooks/stratium.json",
+             "bin": "stratium-pep", "events": ("SessionStart", "PreToolUse", "PostToolUse"),
+             "hook_arg": "hook --harness kiro"},
     # No hook file and no events: see install_opencode. `--settings` names the
     # OpenCode configuration directory.
     "opencode": {"bin": "stratium-pep", "events": ()},
@@ -1620,6 +1694,10 @@ def resolve(args, parser):
     if args.harness == "antigravity" and getattr(args, "system", False):
         parser.error("--antigravity has no --system: Antigravity CLI reads hooks from the "
                      "user's and the project's files only, so there is no administrator "
+                     "location to install into")
+    if args.harness == "kiro" and getattr(args, "system", False):
+        parser.error("--kiro has no --system: Kiro reads hooks from the user's and the "
+                     "project's .kiro directories only, so there is no administrator "
                      "location to install into")
     if args.harness == "opencode":
         if args.only or args.user or args.matcher != "*":
@@ -1639,13 +1717,13 @@ def resolve(args, parser):
         args.settings = harness_path(args.harness, user=args.user)
     args.settings = os.path.expanduser(args.settings)
 
-    if args.harness in ("codex", "cursor", "copilot", "antigravity") and not getattr(args, "system", False):
+    if args.harness in ("codex", "cursor", "copilot", "antigravity", "kiro") and not getattr(args, "system", False):
         # A project-local hook file is disabled until the project is trusted
         # (all three harnesses), and a disabled enforcement hook is not a
         # no-op — it is fail-open: every tool call proceeds unchecked (§2b).
         own = os.path.expanduser(h["user_path"])
         name = {"codex": "Codex", "cursor": "Cursor", "copilot": "Copilot CLI",
-                "antigravity": "Antigravity CLI"}[args.harness]
+                "antigravity": "Antigravity CLI", "kiro": "Kiro"}[args.harness]
         if os.path.dirname(os.path.abspath(args.settings)) != os.path.dirname(own):
             parser.error(
                 f"--{args.harness} writes {own} only. {args.settings} looks "
@@ -2432,6 +2510,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--antigravity", dest="harness", action="store_const",
                          const="antigravity", default=d(None),
                          help="target Antigravity CLI (agy): ~/.gemini/config/hooks.json")
+    harness.add_argument("--kiro", dest="harness", action="store_const", const="kiro",
+                         default=d(None),
+                         help="target Kiro CLI (v3 engine): ~/.kiro/hooks/stratium.json")
     harness.add_argument("--copilot", dest="harness", action="store_const", const="copilot",
                          default=d(None),
                          help="target GitHub Copilot CLI: ~/.copilot/hooks/stratium.json")
@@ -2511,7 +2592,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --antigravity, --claude, --codex, --copilot, --cursor or --opencode")
+            p.error("pick a harness: --antigravity, --claude, --codex, --copilot, --cursor, --kiro or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)

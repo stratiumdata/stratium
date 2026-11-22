@@ -37,6 +37,10 @@ var harnesses = map[string]struct {
 }{
 	"claude": {},
 	"codex":  {deny: denyOnStderr},
+	// Kiro CLI sends Claude Code's field names. It blocks a call only on
+	// exit 2, with stderr as the reason: on 3.5.0 any other failing exit,
+	// a timeout or a missing command let the call run.
+	"kiro": {deny: denyOnStderr},
 	// OpenCode has no command hooks. Its plugin (deploy/opencode) runs this
 	// binary, sends Claude Code's field names, and rejects the tool call
 	// with stderr as the reason on any exit but 0.

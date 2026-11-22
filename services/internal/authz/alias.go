@@ -110,6 +110,28 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 		// (view_file, write_to_file, replace_file_content and the rest),
 		// with different field names. Either may arrive, so both are here.
 		// Subagent, task, MCP and browser tools keep their own names.
+		// Kiro CLI's v3 engine, from live sessions of 3.5.0: execute_bash,
+		// read_file, fs_write, str_replace, web_fetch and remote_web_search.
+		// fs_append, delete_file, list_directory, file_search, grep_search
+		// and execute_pwsh are from Kiro's documentation, with "path" and
+		// "command" assumed; a file call without its path is refused.
+		// delete_file has no canonical tool: it keeps its name and gains its
+		// file's identity. code, tool_load, invoke_sub_agent and
+		// mcp_<server>_<tool> are decided under their own names.
+		"kiro": {
+			"execute_bash":      {Canonical: "Bash", CommandField: "command"},
+			"execute_pwsh":      {Canonical: "Bash", CommandField: "command"},
+			"read_file":         {Canonical: "Read", PathField: "path"},
+			"fs_write":          {Canonical: "Write", PathField: "path"},
+			"fs_append":         {Canonical: "Edit", PathField: "path"},
+			"str_replace":       {Canonical: "Edit", PathField: "path"},
+			"delete_file":       {Canonical: "delete_file", PathField: "path"},
+			"list_directory":    {Canonical: "LS", PathField: "path"},
+			"file_search":       {Canonical: "Glob"},
+			"grep_search":       {Canonical: "Grep"},
+			"web_fetch":         {Canonical: "WebFetch"},
+			"remote_web_search": {Canonical: "WebSearch"},
+		},
 		"antigravity": {
 			"run_command":                {Canonical: "Bash", CommandField: "CommandLine"},
 			"read_file":                  {Canonical: "Read", PathField: "Path"},

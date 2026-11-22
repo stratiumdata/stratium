@@ -104,6 +104,7 @@ nav:
       - Antigravity CLI: pep/harnesses/antigravity.md
       - Copilot CLI: pep/harnesses/copilot.md
       - Cursor: pep/harnesses/cursor.md
+      - Kiro CLI: pep/harnesses/kiro.md
       - OpenCode: pep/harnesses/opencode.md
       - mcp: pep/mcp.md
       - proxy: pep/proxy.md
