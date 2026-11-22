@@ -56,6 +56,13 @@ file's identity. Run in live sessions of Cursor's CLI (2026.11.19), which
 confirmed `file_path`, that edits arrive as `Write`, and that the model is
 shown the reason on a refusal.
 
+Outcome notes, Copilot CLI (built): the adapter gained a `parse` step, for a
+harness whose stdin is not Claude Code's, and `report` takes `--harness` so
+it reads the payload the same way. The camelCase events are used, because
+they carry Copilot's own tool names. Its `apply_patch` sends the patch text
+as the whole input, so `PatchField` can be `WholeInput`. Run in live
+sessions of Copilot CLI 1.0.114.
+
 ## Intent
 
 Stratium decides tool calls for Claude Code and, partly, Codex. The

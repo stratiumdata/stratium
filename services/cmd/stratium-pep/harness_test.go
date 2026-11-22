@@ -41,6 +41,9 @@ func TestRunHookFor(t *testing.T) {
 			`{"agent_message":"stratium-pep: denied by policy","permission":"deny","user_message":"stratium-pep: denied by policy"}`, reason},
 		{"cursor: a failure with no output still blocks", []string{"--harness", "cursor"}, crash, 2,
 			`"permission":"deny"`, "denied with no output (exit 1)"},
+		{"copilot allow is silent: its own permission flow carries on", []string{"--harness", "copilot"}, allow, 0, "", ""},
+		{"copilot deny is its decision JSON, exit 2", []string{"--harness", "copilot"}, deny, 2,
+			`{"permissionDecision":"deny","permissionDecisionReason":"stratium-pep: denied by policy"}`, reason},
 		{"unknown harness blocks", []string{"--harness", "nope"}, allow, 2,
 			`"permissionDecision":"deny"`, `unknown --harness "nope"`},
 		{"--harness with no value blocks", []string{"--harness"}, allow, 2,
@@ -49,7 +52,7 @@ func TestRunHookFor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := runHookFor(tt.args, strings.NewReader(""), &stdout, &stderr, tt.run)
+			code := runHookFor(tt.args, strings.NewReader("{}"), &stdout, &stderr, tt.run)
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
 			}
@@ -96,5 +99,74 @@ func TestRunHook_SendsHarnessAndTheToolNameUntouched(t *testing.T) {
 	}
 	if req.GetCwd() != "/work" {
 		t.Errorf("request cwd = %q, want the harness's own", req.GetCwd())
+	}
+}
+
+// Copilot CLI's payloads, as captured from live sessions (1.0.114) with the
+// ids and paths shortened, and the JSON-encoded form its documentation shows.
+func TestParseCopilot(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"an object is passed on as sent",
+			`{"sessionId":"s","timestamp":1,"cwd":"/proj","toolName":"view","toolArgs":{"path":"/proj/notes.txt"},"toolCallId":"c"}`,
+			`{"tool_name":"view","tool_input":{"path":"/proj/notes.txt"},"cwd":"/proj"}`},
+		{"apply_patch's input is the patch text, and stays a string",
+			`{"cwd":"/proj","toolName":"apply_patch","toolArgs":"*** Begin Patch\n*** Add File: /proj/hello.txt\n+hi.\n*** End Patch\n"}`,
+			`{"tool_name":"apply_patch","tool_input":"*** Begin Patch\n*** Add File: /proj/hello.txt\n+hi.\n*** End Patch\n","cwd":"/proj"}`},
+		{"a string holding a JSON object is that object",
+			`{"timestamp":1704614400000,"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}`,
+			`{"tool_name":"bash","tool_input":{"command":"ls"},"cwd":"/tmp"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseCopilot([]byte(tt.in))
+			if err != nil || string(got) != tt.want {
+				t.Errorf("parseCopilot() = %s, %v\nwant %s", got, err, tt.want)
+			}
+		})
+	}
+	if _, err := parseCopilot([]byte("not json")); err == nil {
+		t.Error("parseCopilot() accepted malformed stdin")
+	}
+}
+
+// The hook is run on the parsed call, and input it cannot parse is refused
+// in Copilot's own terms.
+func TestRunHookFor_Copilot(t *testing.T) {
+	var seen string
+	run := func(_ string, stdin io.Reader, _ io.Writer) int {
+		b, _ := io.ReadAll(stdin)
+		seen = string(b)
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	in := `{"cwd":"/proj","toolName":"bash","toolArgs":{"command":"ls"}}`
+	if code := runHookFor([]string{"--harness", "copilot"}, strings.NewReader(in), &stdout, &stderr, run); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if want := `{"tool_name":"bash","tool_input":{"command":"ls"},"cwd":"/proj"}`; seen != want {
+		t.Errorf("hook saw %s, want %s", seen, want)
+	}
+	stdout.Reset()
+	if code := runHookFor([]string{"--harness", "copilot"}, strings.NewReader("{"), &stdout, &stderr, run); code != 2 ||
+		!strings.Contains(stdout.String(), `"permissionDecision":"deny"`) {
+		t.Errorf("malformed stdin: exit code = %d, stdout = %q; want a deny", code, stdout.String())
+	}
+}
+
+// report reads a harness's payload the way hook does, so the two match.
+func TestHarnessStdin(t *testing.T) {
+	in := `{"cwd":"/proj","toolName":"bash","toolArgs":{"command":"ls"},"toolResult":{"resultType":"success"}}`
+	for args, want := range map[string]string{
+		"--harness copilot": `{"tool_name":"bash","tool_input":{"command":"ls"},"cwd":"/proj"}`,
+		"":                  in,
+		"--harness codex":   in,
+	} {
+		r, err := harnessStdin(strings.Fields(args), strings.NewReader(in))
+		if err != nil {
+			t.Fatalf("%q: %v", args, err)
+		}
+		if got, _ := io.ReadAll(r); string(got) != want {
+			t.Errorf("%q: stdin = %s, want %s", args, got, want)
+		}
 	}
 }

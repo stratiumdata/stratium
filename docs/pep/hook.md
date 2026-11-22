@@ -11,6 +11,7 @@ Code's.
 |---|---|---|---|
 | Claude Code | (none) | `PreToolUse` hook | yes |
 | Codex | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
+| [Copilot CLI](harnesses/copilot.md) | `copilot` | `preToolUse` hook | yes, 1.0.114; see its page for what was observed |
 | [Cursor](harnesses/cursor.md) | `cursor` | `preToolUse` hook | yes, CLI 2026.11.19; see its page for what was observed |
 | [OpenCode 2.x](harnesses/opencode.md) | `opencode` | a plugin that runs the hook | yes, 2.3.2; see its page for what was observed |
 

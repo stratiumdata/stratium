@@ -57,8 +57,13 @@ import uuid
 MARKERS = ("stratium-pep", "stratium-codex-hook")
 
 
+def command_of(hook):
+    """A hook entry's command line: Copilot CLI keeps it under `bash`."""
+    return str(hook.get("command") or hook.get("bash") or "")
+
+
 def ours(hook):
-    return any(m in str(hook.get("command", "")) for m in MARKERS)
+    return any(m in command_of(hook) for m in MARKERS)
 
 # Timeouts are the harness's own hook-execution budget, in seconds.
 # SessionStart's is deliberately larger than STRATIUM_PEP_CONNECT_TIMEOUT so a
@@ -228,11 +233,15 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
     ran so it can spot one it never allowed. They take PreToolUse's matcher: a
     wider one would report calls the decision hook was never asked about.
     """
+    # Copilot's payload is its own, so `report` has to be told to read it the
+    # way `hook` does. The other harnesses' after-the-call payload is Claude Code's.
+    copilot = hook_arg.endswith("--harness copilot")
+    report_flag = " --harness copilot" if copilot else ""
     report = {
         "matcher": matcher,
         "hooks": [{
             "type": "command",
-            "command": f"{binary} report{tail}",
+            "command": f"{binary} report{report_flag}{tail}",
             "timeout": REPORT_TIMEOUT,
         }],
     }
@@ -263,11 +272,26 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
     wanted = {e: g for e, g in all_events.items() if not only or e in only}
     if hook_arg.endswith("--harness cursor"):
         return {CURSOR_EVENT[e]: cursor_entry(e, g) for e, g in wanted.items()}
+    if copilot:
+        return {CURSOR_EVENT[e]: copilot_entry(g) for e, g in wanted.items()}
     return wanted
 
 
-# Cursor's hooks.json names its events in camelCase and takes one flat entry
-# per hook, with the matcher and timeout on the entry itself.
+def copilot_entry(group):
+    """Copilot CLI's entry: the command under `bash`, the timeout as `timeoutSec`.
+
+    Its matcher is a regular expression on the tool name, and none means every
+    tool, so the installer's "*" is left out.
+    """
+    hook = group["hooks"][0]
+    entry = {"type": "command", "bash": hook["command"], "timeoutSec": hook["timeout"]}
+    if group.get("matcher") not in (None, "*"):
+        entry["matcher"] = group["matcher"]
+    return entry
+
+
+# Cursor's and Copilot CLI's hook files name their events in camelCase and take
+# one flat entry per hook, with the matcher and timeout on the entry itself.
 CURSOR_EVENT = {"SessionStart": "sessionStart", "PreToolUse": "preToolUse",
                 "PostToolUse": "postToolUse", "PostToolUseFailure": "postToolUseFailure"}
 
@@ -293,7 +317,7 @@ def hooks_of(group):
     if not isinstance(group, dict):
         return []
     return group["hooks"] if isinstance(group.get("hooks"), list) else (
-        [group] if "command" in group else [])
+        [group] if "command" in group or "bash" in group else [])
 
 
 def load(path):
@@ -396,7 +420,7 @@ def install(args):
     # Strip only the events we are about to write, so `install --only PreToolUse`
     # does not silently remove a SessionStart hook installed by an earlier run.
     replaced = strip(settings, events=set(wanted))
-    if args.harness == "cursor":
+    if args.harness in ("cursor", "copilot"):
         settings.setdefault("version", 1)
     hooks = settings.setdefault("hooks", {})
     for event, group in wanted.items():
@@ -429,7 +453,11 @@ OPENCODE_SYSTEM = ("/Library/Application Support/opencode" if sys.platform == "d
 OPENCODE_DENY_ALL = {"action": "plugin.use", "resource": "*", "effect": "deny"}
 CURSOR_SYSTEM = ("/Library/Application Support/Cursor/hooks.json" if sys.platform == "darwin"
                  else "/etc/cursor/hooks.json")
+# Copilot CLI reads every *.json here as policy hooks, which no user or
+# repository setting can switch off. The file must be root's alone.
+COPILOT_POLICY = "/etc/github-copilot/policy.d/50-stratium.json"
 SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS, "cursor": CURSOR_SYSTEM,
+                "copilot": COPILOT_POLICY,
                 "opencode": OPENCODE_SYSTEM + "/stratium-guard/stratium.json"}
 
 
@@ -719,8 +747,10 @@ def install_system(args):
         extra = opencode_files(opencode_base(args), binary, conf, pinned, True)
     else:
         wanted = entries(binary, args.matcher, h["events"], h["hook_arg"], tail=f" --config {conf}")
-        extra = {settings: json.dumps({"hooks": {e: [g] for e, g in wanted.items()}},
-                                      indent=2) + "\n"}
+        own = {"hooks": {e: [g] for e, g in wanted.items()}}
+        if args.harness == "copilot":
+            own = {"version": 1, **own}
+        extra = {settings: json.dumps(own, indent=2) + "\n"}
     if args.harness == "cursor":
         # One file for every administrator hook: add to it, keep what is there.
         merged = load(settings)
@@ -760,6 +790,13 @@ def install_system(args):
                 sys.exit(f"stratium: {open_to} can be changed by a non-root user, so "
                          f"{path} is not protected. Fix its owner and mode, then re-run.")
         print(f"wrote {path}")
+    if args.harness == "copilot":
+        print("\nNEXT — restart Copilot CLI: it reads hooks when it starts. A policy hook "
+              "runs whatever the user's or\na repository's settings say, but Copilot runs "
+              "the tool call when a hook passes its timeout, policy\nhook or not. The "
+              "session file path recorded above must stay writable by the user who runs "
+              "the agent.")
+        return 0
     if args.harness == "cursor":
         print("\nNEXT — restart Cursor. Its documentation says administrator hooks need an "
               "Enterprise plan; whether\nthis file is read without one is not known, so "
@@ -850,7 +887,7 @@ def status(args):
         return status_opencode(args)
     settings = load_hooks(args.settings)
     found = [
-        (event, h.get("command"), h.get("timeout"), group.get("matcher"), h)
+        (event, command_of(h), h.get("timeout", h.get("timeoutSec")), group.get("matcher"), h)
         for event, groups in (settings.get("hooks") or {}).items()
         if isinstance(groups, list)
         for group in groups
@@ -869,7 +906,7 @@ def status(args):
         runnable = resolves(command)
         env = hook_env(command)
         gone = missing_env(event, env)
-        if shown == "preToolUse" and h.get("failClosed") is not True:
+        if "--harness cursor" in command and h.get("failClosed") is not True:
             print("  failClosed: NOT SET — Cursor runs the tool call when this hook "
                   "crashes, times out or prints nothing")
             incomplete = True
@@ -1177,6 +1214,66 @@ def selftest(_args):
                 uninstall(cb)
             assert load(cup) == {}, load(cup)
 
+            # --copilot: its own file, the command under `bash`, no "*" matcher
+            cop = os.path.join(d, "copilot-stratium.json")
+            cpa = argparse.Namespace(harness="copilot", settings=cop, bin=src, matcher="*",
+                                     only=list(HARNESS["copilot"]["events"]), dry_run=False,
+                                     user=False, force=True, show_next=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(cpa)
+                install(cpa)
+            assert load(cop) == {"version": 1, "hooks": {
+                "sessionStart": [{"type": "command", "bash": f"{src} session-start",
+                                  "timeoutSec": SESSION_START_TIMEOUT}],
+                "preToolUse": [{"type": "command", "bash": f"{src} hook --harness copilot",
+                                "timeoutSec": hook_timeout()}],
+                "postToolUse": [{"type": "command", "bash": f"{src} report --harness copilot",
+                                 "timeoutSec": REPORT_TIMEOUT}],
+                "postToolUseFailure": [{"type": "command", "bash": f"{src} report --harness copilot",
+                                        "timeoutSec": REPORT_TIMEOUT}]}}, load(cop)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(cpa) == 0, out.getvalue()
+            # a too-short timeout is the one failure Copilot always lets through
+            short = load(cop)
+            short["hooks"]["preToolUse"][0]["timeoutSec"] = 5
+            with open(cop, "w") as f:
+                json.dump(short, f)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(cpa) == 1 and "TOO SHORT" in out.getvalue(), out.getvalue()
+            cpa.matcher = "bash|view"
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(cpa)
+            assert load(cop)["hooks"]["preToolUse"][0]["matcher"] == "bash|view"
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall(cpa)
+            assert load(cop) == {}, load(cop)
+            try:
+                resolve(argparse.Namespace(harness="copilot", user=False, bin=None, matcher="*",
+                                           only=None, dry_run=False,
+                                           settings=os.path.join(d, ".github", "hooks", "s.json")), pr)
+                raise AssertionError("accepted a repository-level Copilot path")
+            except SystemExit:
+                pass
+
+            # --copilot --system: a policy file of its own
+            scp_ = argparse.Namespace(harness="copilot", system=True, system_root=sroot,
+                                      bin=src, matcher="*", dry_run=False)
+            pol = under(sroot, COPILOT_POLICY)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(scp_) == 0
+            assert load(pol)["version"] == 1 and load(pol)["hooks"]["preToolUse"] == [{
+                "type": "command", "timeoutSec": hook_timeout(),
+                "bash": f"{sbin} hook --harness copilot --config {sconf}"}], load(pol)
+            assert load(pol)["hooks"]["postToolUse"][0]["bash"] == (
+                f"{sbin} report --harness copilot --config {sconf}"), load(pol)
+            assert os.stat(pol).st_mode & 0o777 == 0o644
+            scp_.settings = pol
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(scp_) == 0, out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(scp_)
+            assert not os.path.exists(pol)
+
             # --cursor --system: entries added to the one administrator file
             sc = argparse.Namespace(harness="cursor", system=True, system_root=sroot,
                                     bin=src, matcher="*", dry_run=False)
@@ -1445,6 +1542,11 @@ HARNESS = {
                "bin": "stratium-pep",
                "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
                "hook_arg": "hook --harness cursor"},
+    # Its own file in the user hooks directory, which Copilot reads whole.
+    "copilot": {"path": "~/.copilot/hooks/stratium.json",
+                "user_path": "~/.copilot/hooks/stratium.json", "bin": "stratium-pep",
+                "events": ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure"),
+                "hook_arg": "hook --harness copilot"},
     # No hook file and no events: see install_opencode. `--settings` names the
     # OpenCode configuration directory.
     "opencode": {"bin": "stratium-pep", "events": ()},
@@ -1472,15 +1574,15 @@ def resolve(args, parser):
         args.settings = harness_path(args.harness, user=args.user)
     args.settings = os.path.expanduser(args.settings)
 
-    if args.harness in ("codex", "cursor") and not getattr(args, "system", False):
-        # A project-local hooks.json is disabled until the project is trusted
-        # (both harnesses), and a disabled enforcement hook is not a no-op — it
-        # is fail-open: every tool call proceeds unchecked (§2b).
-        home = os.path.expanduser(f"~/.{args.harness}")
-        name = "Codex" if args.harness == "codex" else "Cursor"
-        if os.path.dirname(os.path.abspath(args.settings)) != home:
+    if args.harness in ("codex", "cursor", "copilot") and not getattr(args, "system", False):
+        # A project-local hook file is disabled until the project is trusted
+        # (all three harnesses), and a disabled enforcement hook is not a
+        # no-op — it is fail-open: every tool call proceeds unchecked (§2b).
+        own = os.path.expanduser(h["user_path"])
+        name = {"codex": "Codex", "cursor": "Cursor", "copilot": "Copilot CLI"}[args.harness]
+        if os.path.dirname(os.path.abspath(args.settings)) != os.path.dirname(own):
             parser.error(
-                f"--{args.harness} writes {home}/hooks.json only. {args.settings} looks "
+                f"--{args.harness} writes {own} only. {args.settings} looks "
                 f"project-local, and {name} disables project hooks until the project "
                 "is trusted — an enforcement hook that does not run is fail-open, "
                 "not inert (see 2b)")
@@ -2261,6 +2363,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
                          default=d(None),
                          help="target Codex: ~/.codex/hooks.json, SessionStart + PreToolUse + PostToolUse")
+    harness.add_argument("--copilot", dest="harness", action="store_const", const="copilot",
+                         default=d(None),
+                         help="target GitHub Copilot CLI: ~/.copilot/hooks/stratium.json")
     harness.add_argument("--cursor", dest="harness", action="store_const", const="cursor",
                          default=d(None),
                          help="target Cursor (app and CLI): ~/.cursor/hooks.json")
@@ -2337,7 +2442,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --claude, --codex, --cursor or --opencode")
+            p.error("pick a harness: --claude, --codex, --copilot, --cursor or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)

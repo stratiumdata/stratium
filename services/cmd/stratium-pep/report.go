@@ -54,8 +54,15 @@ type reportClient interface {
 	IssueToken(ctx context.Context, in *pdpgrpc.IssueTokenRequest, opts ...grpc.CallOption) (*pdpgrpc.IssueTokenResponse, error)
 }
 
-func runReportCmd(stdin io.Reader, stderr io.Writer) int {
-	if err := dialAndReport(stdin); err != nil {
+// args may name the harness (`--harness copilot`), for one whose after-the-
+// call payload is not Claude Code's. The report must be read exactly as the
+// decision was, or the two would not match.
+func runReportCmd(args []string, stdin io.Reader, stderr io.Writer) int {
+	stdin, err := harnessStdin(args, stdin)
+	if err == nil {
+		err = dialAndReport(stdin)
+	}
+	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep report: %s\n", err)
 	}
 	return 0
