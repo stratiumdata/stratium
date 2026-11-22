@@ -478,7 +478,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	action, alias := authz.ResolveAlias(req.GetHarness(), catalogEntries, action)
 	var extracted authz.ExtractedInput
 	if alias != nil {
-		extracted = authz.ExtractAliased(catalogEntries, action, *alias)
+		extracted = authz.ExtractAliased(catalogEntries, action, *alias, req.GetCwd())
 	} else {
 		extracted = authz.ExtractFromCatalog(catalogEntries, action)
 	}
@@ -535,13 +535,11 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// rest because the policy leg below asks about each of them in turn.
 	patchIDs := authz.PatchResourceIDs(extracted.Patch, req.GetCwd())
 	resourceIDs = append(resourceIDs, patchIDs...)
-	// An aliased call the PDP can name no resource for is refused. The alias
-	// makes it the canonical tool for every rule below, and those rules were
-	// written for calls that say which resource they touch. That includes a
-	// patch whose paths could not be read.
-	// ponytail: refuses every aliased tool with no resource. Mark
-	// resource-less aliases as such when one needs to pass.
-	if alias != nil && len(resourceIDs) == 0 {
+	// An aliased file tool the PDP can name no file for is refused: a path
+	// or a patch it could not resolve. The alias makes it the canonical tool
+	// for every rule below, and those rules were written for calls that say
+	// which file they touch.
+	if alias != nil && alias.NamesFiles() && len(resourceIDs) == 0 {
 		return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now,
 			fmt.Errorf("%w: %q names no resource the PDP can read", errAliasedNoResource, action.WireTool), &epoch)
 	}

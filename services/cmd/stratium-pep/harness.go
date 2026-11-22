@@ -24,6 +24,10 @@ var harnesses = map[string]struct {
 }{
 	"claude": {},
 	"codex":  {deny: denyOnStderr},
+	// OpenCode has no command hooks. Its plugin (deploy/opencode) runs this
+	// binary, sends Claude Code's field names, and rejects the tool call
+	// with stderr as the reason on any exit but 0.
+	"opencode": {deny: denyOnStderr},
 }
 
 // denyOnStderr is Codex's contract: exit 2 blocks, and the reason shown to

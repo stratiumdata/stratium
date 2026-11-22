@@ -32,6 +32,9 @@ func TestRunHookFor(t *testing.T) {
 		// must come out as the blocking exit code, never as 1.
 		{"codex: a failure with no output still blocks", []string{"--harness", "codex"}, crash, 2,
 			"", "denied with no output (exit 1)"},
+		{"opencode deny is read off stderr by its plugin", []string{"--harness", "opencode"}, deny, 2,
+			"", reason},
+		{"opencode allow", []string{"--harness", "opencode"}, allow, 0, "", ""},
 		{"unknown harness blocks", []string{"--harness", "nope"}, allow, 2,
 			`"permissionDecision":"deny"`, `unknown --harness "nope"`},
 		{"--harness with no value blocks", []string{"--harness"}, allow, 2,

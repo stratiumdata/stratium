@@ -157,7 +157,7 @@ def next_steps(events, agent="claude", binary="stratium-pep"):
         print(f"\nNo SessionStart hook is installed, so nothing issues a delegation for "
               f"you — run `{binary.split()[0]} session-start` by hand first, or every tool "
               "call denies for want of a session.")
-    print(f"\nThen: deploy/stratium --{'codex' if agent == 'codex' else 'claude'} "
+    print(f"\nThen: deploy/stratium --{agent} "
           "status   # 0 when the command resolves and the environment is whole")
 
 
@@ -338,6 +338,8 @@ def resolves(binary):
 def install(args):
     if getattr(args, "system", False):
         return install_system(args)
+    if args.harness == "opencode":
+        return install_opencode(args)
     if not args.force and not resolves(args.bin):
         # Refusing rather than warning, because the failure is fail-open, not
         # broken: a PreToolUse hook whose command is missing exits 127, and
@@ -380,7 +382,163 @@ MANAGED_SETTINGS = MANAGED_DIR + "/managed-settings.d/50-stratium.json"
 # owns the whole file or none of it: the first line says which.
 CODEX_REQUIREMENTS = "/etc/codex/requirements.toml"
 CODEX_MARK = "# Written by deploy/stratium --codex install --system. Re-run it to change this file."
-SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS}
+# OpenCode has no command hooks; its plugin (deploy/opencode/stratium-guard) is
+# the hook. Both scopes get the plugin directory, a stratium.json beside it and
+# an entry in that directory's opencode.json.
+OPENCODE_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "opencode", "stratium-guard")
+OPENCODE_SYSTEM = ("/Library/Application Support/opencode" if sys.platform == "darwin"
+                   else "/etc/opencode")
+OPENCODE_DENY_ALL = {"action": "plugin.use", "resource": "*", "effect": "deny"}
+SYSTEM_HOOKS = {"claude": MANAGED_SETTINGS, "codex": CODEX_REQUIREMENTS,
+                "opencode": OPENCODE_SYSTEM + "/stratium-guard/stratium.json"}
+
+
+def opencode_base(args):
+    """The OpenCode configuration directory this install is for."""
+    if getattr(args, "system", False):
+        return under(args.system_root, OPENCODE_SYSTEM)
+    return args.settings or os.environ.get("OPENCODE_CONFIG_DIR") or os.path.expanduser(
+        "~/.config/opencode")
+
+
+def opencode_config(base):
+    """(path, parsed) of the directory's opencode.json, refusing what cannot be edited."""
+    path = os.path.join(base, "opencode.json")
+    if os.path.exists(path + "c"):
+        # Comments do not survive a rewrite, and two files would both be read.
+        sys.exit(f"stratium: {path}c exists and this script edits opencode.json only. "
+                 "Add the entries to it by hand: `--dry-run` prints them.")
+    return path, load(path)
+
+
+def opencode_files(base, binary, conf, env, system, dry_run=False):
+    """{path: text} for an OpenCode install rooted at `base`.
+
+    The plugin is listed in `plugins` by path, not dropped in `plugins/`: a
+    listed entry in the system file is applied after a user's own "-id"
+    removal. The system install adds `plugin.use` policies so that no other
+    plugin loads, which is what stops one taking this plugin's id.
+    """
+    guard = os.path.join(base, "stratium-guard")
+    path, cfg = (os.path.join(base, "opencode.json"), {}) if dry_run else opencode_config(base)
+    allow = {"action": "plugin.use", "resource": guard, "effect": "allow"}
+    cfg["plugins"] = [x for x in cfg.get("plugins", []) if x != guard] + [guard]
+    added_deny = False
+    if system:
+        policies = [x for x in cfg.get("policies", []) if x != allow]
+        added_deny = OPENCODE_DENY_ALL not in policies
+        cfg["policies"] = policies + ([OPENCODE_DENY_ALL] if added_deny else []) + [allow]
+    files = {}
+    for name in ("index.js", "package.json"):
+        with open(os.path.join(OPENCODE_SRC, name)) as f:
+            files[os.path.join(guard, name)] = f.read()
+    files[os.path.join(guard, "stratium.json")] = json.dumps({
+        "bin": binary, "config": conf, "timeoutMs": hook_timeout(env) * 1000,
+        "addedDenyAll": added_deny}, indent=2) + "\n"
+    files[path] = json.dumps(cfg, indent=2) + "\n"
+    return files
+
+
+def install_opencode(args):
+    """The per-user OpenCode install: plugin, its settings, the config entry."""
+    binary = shutil.which(args.bin) if os.sep not in args.bin else os.path.abspath(args.bin)
+    if not binary or not resolves(binary):
+        if not args.force:
+            sys.exit(f"stratium: {args.bin!r} is not runnable; pass --bin with the path of a "
+                     "built stratium-pep. The plugin refuses every tool call when it cannot "
+                     "run it. --force writes the install anyway.")
+        binary = binary or args.bin
+    files = opencode_files(opencode_base(args), binary, None, os.environ, False, args.dry_run)
+    for path, text in files.items():
+        if args.dry_run:
+            print(f"--- would write {path} ---\n{text}", end="")
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            f.write(text)
+        os.replace(path + ".tmp", path)
+        print(f"wrote {path}")
+    if not args.dry_run and getattr(args, "show_next", True):
+        next_steps(["SessionStart", "PreToolUse"], "opencode", binary)
+    return 0
+
+
+def uninstall_opencode(args):
+    """Remove the plugin directory and this script's entries in opencode.json."""
+    base = opencode_base(args)
+    guard = os.path.join(base, "stratium-guard")
+    if not os.path.isdir(guard):
+        print(f"no Stratium plugin in {base}")
+        return 0
+    try:
+        with open(os.path.join(guard, "stratium.json")) as f:
+            added_deny = json.load(f).get("addedDenyAll")
+    except (OSError, ValueError):
+        added_deny = False
+    path, cfg = opencode_config(base)
+    drop = [{"action": "plugin.use", "resource": guard, "effect": "allow"}]
+    if added_deny:
+        drop.append(OPENCODE_DENY_ALL)
+    for key, gone in (("plugins", [guard]), ("policies", drop)):
+        kept = [x for x in cfg.get(key, []) if x not in gone]
+        if kept:
+            cfg[key] = kept
+        else:
+            cfg.pop(key, None)
+    if args.dry_run:
+        print(f"would remove {guard} and its entries in {path}")
+        return 0
+    # The config entry first: a listed plugin whose directory is gone fails to
+    # load, which OpenCode treats as no plugin at all.
+    if os.path.exists(path):
+        save(path, cfg, False)
+    shutil.rmtree(guard)
+    print(f"removed {guard} and its entries in {path}")
+    return 0
+
+
+def status_opencode(args):
+    base = opencode_base(args)
+    guard = os.path.join(base, "stratium-guard")
+    conf_path = os.path.join(guard, "stratium.json")
+    if not os.path.exists(conf_path):
+        print(f"no Stratium plugin in {base}")
+        return 1
+    with open(conf_path) as f:
+        conf = json.load(f)
+    path, cfg = opencode_config(base)
+    binary, pep_conf, timeout = conf.get("bin") or "", conf.get("config"), conf.get("timeoutMs")
+    command = binary + (f" --config {pep_conf}" if pep_conf else "")
+    env = hook_env(command)
+    print(f"plugin={guard!r} command={command!r} timeoutMs={timeout}")
+    problems = []
+    if guard not in cfg.get("plugins", []):
+        problems.append(f"{path} does not list the plugin, so OpenCode will not load it")
+    if not all(os.path.exists(os.path.join(guard, n)) for n in ("index.js", "package.json")):
+        problems.append("plugin files are missing; OpenCode skips a plugin it cannot load")
+    if not resolves(binary):
+        problems.append(f"NOT RUNNABLE: {binary!r} is not there; every tool call is refused")
+    gone = sorted({v for e in ("SessionStart", "PreToolUse") for v in missing_env(e, env)})
+    if gone:
+        problems.append(f"{'config' if pep_conf else 'env'}: missing {', '.join(gone)}")
+    if not isinstance(timeout, (int, float)) or timeout < hook_timeout(env) * 1000:
+        problems.append(f"timeoutMs is below {hook_timeout(env) * 1000}; a call waiting "
+                        "for approval is refused before the approval can arrive")
+    if getattr(args, "system", False) and (
+            OPENCODE_DENY_ALL not in cfg.get("policies", [])
+            or {"action": "plugin.use", "resource": guard, "effect": "allow"}
+            not in cfg.get("policies", [])):
+        problems.append(f"{path} lacks the plugin.use policies; another plugin can load")
+    for line in problems:
+        print(f"  {line}")
+    open_to = sorted({(w, h) for w, h in [("plugin", writable_here(guard)),
+                                          ("OpenCode config", writable_here(path))]
+                      + exposed(command) if h})
+    for what, hit in open_to:
+        print(f"warning: {what} is writable by you: {hit}")
+    if open_to:
+        print(f"         {EXPOSED_FIX.format('opencode')}")
+    return 1 if problems else 0
 
 
 def requirements_toml(wanted):
@@ -516,24 +674,28 @@ def install_system(args):
     command = f"{binary} --config {conf}"
     if " " in command.replace(" --config ", ""):
         sys.exit("stratium: the install path must not contain spaces")
-    wanted = entries(binary, args.matcher, h["events"], h["hook_arg"], tail=f" --config {conf}")
     body = "".join(f"{k}={v}\n" for k, v in pinned.items())
+    if args.harness == "opencode":
+        extra = opencode_files(opencode_base(args), binary, conf, pinned, True)
+    else:
+        wanted = entries(binary, args.matcher, h["events"], h["hook_arg"], tail=f" --config {conf}")
+        extra = {settings: json.dumps({"hooks": {e: [g] for e, g in wanted.items()}},
+                                      indent=2) + "\n"}
     if args.harness == "codex":
         if os.path.exists(settings) and not ours_toml(settings):
             # Codex has one such file and this script cannot merge TOML into
             # somebody else's without risking the rules already in it.
             sys.exit(f"stratium: {settings} exists and was not written by this script. "
                      "Add the hooks to it by hand: `--dry-run` prints them.")
-        hooks_body = requirements_toml(wanted)
-    else:
-        hooks_body = json.dumps({"hooks": {e: [g] for e, g in wanted.items()}}, indent=2) + "\n"
+        extra = {settings: requirements_toml(wanted)}
+    extra[conf] = body
     if args.dry_run:
         print(f"--- would copy {src} to {binary} ---")
-        print(f"--- would write {conf} ---\n{body}", end="")
-        print(f"--- would write {settings} ---\n{hooks_body}", end="")
+        for path, text in sorted(extra.items(), key=lambda kv: kv[0] != conf):
+            print(f"--- would write {path} ---\n{text}", end="")
         return 0
 
-    for path, mode in ((binary, 0o755), (conf, 0o644), (settings, 0o644)):
+    for path, mode in [(binary, 0o755)] + [(f, 0o644) for f in sorted(extra, key=lambda f: f != conf)]:
         os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
         os.close(fd)
@@ -541,7 +703,7 @@ def install_system(args):
             shutil.copyfile(src, tmp)
         else:
             with open(tmp, "w") as f:
-                f.write(body if path == conf else hooks_body)
+                f.write(extra[path])
         os.chmod(tmp, mode)
         os.replace(tmp, path)
         if real:
@@ -550,6 +712,12 @@ def install_system(args):
                 sys.exit(f"stratium: {open_to} can be changed by a non-root user, so "
                          f"{path} is not protected. Fix its owner and mode, then re-run.")
         print(f"wrote {path}")
+    if args.harness == "opencode":
+        print("\nNEXT — restart OpenCode. It now loads this plugin and refuses every other "
+              "one, by the plugin.use\npolicies added to its system opencode.json. macOS "
+              "managed preferences, when present, outrank\nthat file. The session file "
+              "path recorded above must stay writable by the user who runs the agent.")
+        return 0
     if args.harness == "codex":
         print("\nNEXT — restart any running Codex session. Codex now runs these hooks and "
               "ignores every other one,\nincluding hooks in ~/.codex/hooks.json and in "
@@ -575,6 +743,8 @@ def uninstall_system(args):
     root = args.system_root
     mine, binary = under(root, SYSTEM_HOOKS[args.harness]), under(root, SYSTEM_BIN)
     going = os.path.exists(mine) and not (mine.endswith(".toml") and not ours_toml(mine))
+    if args.harness == "opencode":
+        uninstall_opencode(args)  # the plugin directory and the config entries
     in_use = []
     for f in sorted(under(root, f) for f in SYSTEM_HOOKS.values()):
         if os.path.exists(f) and not (f == mine and going):
@@ -582,6 +752,8 @@ def uninstall_system(args):
                 if binary in fh.read():
                     in_use.append(f)
     for path in (mine, under(root, SYSTEM_CONF), binary):
+        if path == mine and args.harness == "opencode":
+            continue
         if not os.path.exists(path):
             print(f"not there: {path}")
         elif path == mine and not going:
@@ -599,6 +771,8 @@ def uninstall_system(args):
 def uninstall(args):
     if getattr(args, "system", False):
         return uninstall_system(args)
+    if args.harness == "opencode":
+        return uninstall_opencode(args)
     settings = load(args.settings)
     removed = strip(settings)
     if not removed:
@@ -609,6 +783,8 @@ def uninstall(args):
 
 
 def status(args):
+    if args.harness == "opencode":
+        return status_opencode(args)
     settings = load_hooks(args.settings)
     found = [
         (event, h.get("command"), h.get("timeout"), group.get("matcher"))
@@ -885,6 +1061,77 @@ def selftest(_args):
             with contextlib.redirect_stdout(io.StringIO()):
                 uninstall_system(sx)
             assert os.path.exists(sbin) and os.path.exists(under(sroot, MANAGED_SETTINGS))
+
+            # --opencode: a plugin directory, its settings, and a config entry
+            ob = os.path.join(d, "opencode-user")
+            os.makedirs(ob)
+            with open(os.path.join(ob, "opencode.json"), "w") as f:
+                json.dump({"plugins": ["someone-elses"], "theme": "dark"}, f)
+            oa = argparse.Namespace(harness="opencode", settings=ob, bin=src, dry_run=False,
+                                    force=False, system=False, show_next=False)
+            og = os.path.join(ob, "stratium-guard")
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_opencode(oa) == 0 and install_opencode(oa) == 0  # twice: no duplicates
+            ocfg = load(os.path.join(ob, "opencode.json"))
+            assert ocfg == {"plugins": ["someone-elses", og], "theme": "dark"}, ocfg
+            oset = load(os.path.join(og, "stratium.json"))
+            assert oset == {"bin": src, "config": None, "addedDenyAll": False,
+                            "timeoutMs": hook_timeout() * 1000}, oset
+            assert open(os.path.join(og, "index.js")).read() == open(
+                os.path.join(OPENCODE_SRC, "index.js")).read()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status_opencode(oa) == 0, out.getvalue()
+            os.unlink(os.path.join(og, "index.js"))
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status_opencode(oa) == 1 and "plugin files are missing" in out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_opencode(oa)
+            assert not os.path.exists(og)
+            assert load(os.path.join(ob, "opencode.json")) == {"plugins": ["someone-elses"], "theme": "dark"}
+            # a commented config file is not rewritten
+            os.rename(os.path.join(ob, "opencode.json"), os.path.join(ob, "opencode.jsonc"))
+            try:
+                install_opencode(oa)
+                raise AssertionError("install --opencode rewrote around an opencode.jsonc")
+            except SystemExit as e:
+                assert "by hand" in str(e), e
+            assert not os.path.exists(og)
+
+            # --opencode --system: the shared binary and configuration, and the
+            # policies that keep every other plugin out
+            so = argparse.Namespace(harness="opencode", system=True, system_root=sroot,
+                                    bin=src, matcher="*", dry_run=False, settings=None)
+            sob = under(sroot, OPENCODE_SYSTEM)
+            sog = os.path.join(sob, "stratium-guard")
+            allow = {"action": "plugin.use", "resource": sog, "effect": "allow"}
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(so) == 0
+            assert load(os.path.join(sob, "opencode.json")) == {
+                "plugins": [sog], "policies": [OPENCODE_DENY_ALL, allow]}
+            sset = load(os.path.join(sog, "stratium.json"))
+            assert (sset["bin"], sset["config"], sset["addedDenyAll"]) == (sbin, sconf, True), sset
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status_opencode(so) == 0, out.getvalue()
+            # Claude Code's install goes; OpenCode's still runs the binary
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(sa)
+            assert os.path.exists(sbin) and os.path.exists(sconf)
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall_system(so)
+            assert not os.path.exists(sog) and load(os.path.join(sob, "opencode.json")) == {}
+            # a deny-all the administrator already had is theirs: kept on the way out
+            with open(os.path.join(sob, "opencode.json"), "w") as f:
+                json.dump({"policies": [OPENCODE_DENY_ALL]}, f)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert install_system(so) == 0
+                uninstall_system(so)
+            assert load(os.path.join(sob, "opencode.json")) == {"policies": [OPENCODE_DENY_ALL]}
+
+            # the plugin itself, where there is a node to run it
+            if shutil.which("node"):
+                r = subprocess.run(["node", os.path.join(os.path.dirname(OPENCODE_SRC), "guard.test.mjs")],
+                                   capture_output=True, text=True, timeout=120)
+                assert r.returncode == 0, r.stdout + r.stderr
         finally:
             os.environ.clear()
             os.environ.update(kept_env)
@@ -1054,12 +1301,23 @@ HARNESS = {
                "bin": "stratium-pep",
                "events": ("SessionStart", "PreToolUse", "PostToolUse"),
                "hook_arg": "hook --harness codex"},
+    # No hook file and no events: see install_opencode. `--settings` names the
+    # OpenCode configuration directory.
+    "opencode": {"bin": "stratium-pep", "events": ()},
 }
 
 
 def resolve(args, parser):
     """Fill in the harness-dependent defaults and refuse the fail-open setups."""
     h = HARNESS[args.harness]
+    if args.harness == "opencode":
+        if args.only or args.user or args.matcher != "*":
+            parser.error("--opencode takes no --only, --user or --matcher: its plugin "
+                         "checks every tool call, from the user configuration directory")
+        if getattr(args, "system", False) and args.bin is None and os.path.exists(PEP_BIN):
+            args.bin = PEP_BIN
+        args.bin = args.bin or h["bin"]
+        return args
     if getattr(args, "system", False):
         args.settings = under(args.system_root, SYSTEM_HOOKS[args.harness])
         if args.bin is None and os.path.exists(PEP_BIN):
@@ -1858,6 +2116,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--codex", dest="harness", action="store_const", const="codex",
                          default=d(None),
                          help="target Codex: ~/.codex/hooks.json, SessionStart + PreToolUse + PostToolUse")
+    harness.add_argument("--opencode", dest="harness", action="store_const", const="opencode",
+                         default=d(None),
+                         help="target OpenCode 2.x: a plugin in ~/.config/opencode")
     p.add_argument("--settings", default=d(None),
                    help="the file to edit (default: the harness's own, see --claude/--codex)")
     p.add_argument("--user", action="store_true", default=d(False),
@@ -1928,7 +2189,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --claude or --codex")
+            p.error("pick a harness: --claude, --codex or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)

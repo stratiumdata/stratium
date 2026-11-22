@@ -101,6 +101,7 @@ nav:
       - Installing stratium-pep: pep.md
       - session-start: pep/session-start.md
       - hook: pep/hook.md
+      - OpenCode: pep/harnesses/opencode.md
       - mcp: pep/mcp.md
       - proxy: pep/proxy.md
       - extauthz: pep/extauthz.md

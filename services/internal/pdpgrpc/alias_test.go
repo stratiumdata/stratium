@@ -204,3 +204,63 @@ func TestDecide_HarnessAlias(t *testing.T) {
 		})
 	}
 }
+
+// OpenCode's file tools send paths relative to the directory it runs in. The
+// PDP resolves them, and refuses the call when it cannot.
+func TestDecide_OpenCodeFileTools(t *testing.T) {
+	tests := []struct {
+		name, tool, input, cwd string
+		tools                  []string
+		constraints            map[string]string
+		wantEffect             Effect
+		wantAsked              []string
+		wantReason             string
+	}{
+		{name: "a relative path is the file under the working directory",
+			tool: "read", input: `{"path":"docs/a.md"}`, cwd: "/workspace", tools: []string{"Read"},
+			constraints: map[string]string{models.ResourceIDPrefixKey: "/workspace/"},
+			wantEffect:  Effect_EFFECT_ALLOW, wantAsked: []string{"/workspace/docs/a.md"}},
+		{name: "and is held to a path constraint as that file",
+			tool: "write", input: `{"path":"a.md","content":"x"}`, cwd: "/elsewhere", tools: []string{"Write"},
+			constraints: map[string]string{models.ResourceIDPrefixKey: "/workspace/"},
+			wantEffect:  Effect_EFFECT_DENY, wantReason: `resource "/elsewhere/a.md" is outside`},
+		{name: "a home-relative path is refused",
+			tool: "edit", input: `{"path":"~/notes/todo.md","oldString":"a","newString":"b"}`, cwd: "/workspace",
+			tools: []string{"Edit"}, wantEffect: Effect_EFFECT_DENY, wantReason: "names no resource the PDP can read"},
+		{name: "a relative path with no working directory is refused",
+			tool: "read", input: `{"path":"a.md"}`, tools: []string{"Read"},
+			wantEffect: Effect_EFFECT_DENY, wantReason: "names no resource the PDP can read"},
+		{name: "a patch is read from patchText",
+			tool: "patch", input: `{"patchText":"*** Begin Patch\n*** Add File: n.txt\n+hi\n*** End Patch"}`,
+			cwd: "/workspace", tools: []string{"Edit"},
+			wantEffect: Effect_EFFECT_ALLOW, wantAsked: []string{"/workspace/n.txt"}},
+		{name: "a tool that names no file is not held to that rule",
+			tool: "glob", input: `{"pattern":"**/*.go"}`, cwd: "/workspace", tools: []string{"Glob"},
+			wantEffect: Effect_EFFECT_ALLOW, wantAsked: []string{""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, req := wellFormedFixture()
+			fs.chain[0].ApprovedTools = tt.tools
+			fs.chain[0].MaxActionTier = models.ActionTierInternalModify
+			fs.chain[0].ResourceConstraints = tt.constraints
+			req.Tool, req.RawInput, req.Harness, req.Cwd = tt.tool, tt.input, "opencode", tt.cwd
+			pol := &perFilePolicy{denyID: "none", escalateID: "none"}
+			srv := NewServer(fs, singleFakeLanguagePolicy(fakePolicyEngine{set: pol}), testConfig(), &fakeSigner{})
+
+			resp, err := srv.Decide(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Decide() error = %v", err)
+			}
+			if resp.GetEffect() != tt.wantEffect {
+				t.Fatalf("Effect = %v (%q), want %v", resp.GetEffect(), resp.GetReason(), tt.wantEffect)
+			}
+			if tt.wantAsked != nil && !slices.Equal(pol.asked, tt.wantAsked) {
+				t.Errorf("policy asked about %q, want %q", pol.asked, tt.wantAsked)
+			}
+			if row := fs.appended[0]; row.ToolName != tt.tool || !strings.Contains(row.Reason, tt.wantReason) {
+				t.Errorf("audit ToolName = %q, Reason = %q; want %q and %q", row.ToolName, row.Reason, tt.tool, tt.wantReason)
+			}
+		})
+	}
+}

@@ -3,9 +3,15 @@
 A `PreToolUse` hook for coding agents. The harness invokes it before every tool
 call, hands it the call on stdin, and honours what it answers.
 
-Works with **Claude Code** and with **Codex**. Their hook contracts differ, so
-the hook is told which one is calling it: `stratium-pep hook --harness codex`.
-Without the flag it speaks Claude Code's.
+The harnesses' hook contracts differ, so the hook is told which one is calling
+it: `stratium-pep hook --harness codex`. Without the flag it speaks Claude
+Code's.
+
+| Harness | `--harness` | How it is wired | Run in a live session |
+|---|---|---|---|
+| Claude Code | (none) | `PreToolUse` hook | yes |
+| Codex | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
+| [OpenCode 2.x](harnesses/opencode.md) | `opencode` | a plugin that runs the hook | yes, 2.3.2; see its page for what was observed |
 
 ---
 

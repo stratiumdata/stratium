@@ -12,14 +12,22 @@ import (
 // and where in that harness's input the command or the resource identity
 // lives. An empty field name means "this input carries none".
 //
-// PatchField names a field holding a patch whose text names the files it
-// touches (PatchResourceIDs).
+// A resource identity comes from one of three fields. ResourceField is taken
+// as written. PathField holds one file path, which is resolved against the
+// caller's working directory (ResolveFilePath): harnesses that send relative
+// paths would otherwise name a different resource than the one they touch.
+// PatchField holds a patch whose text names the files (PatchResourceIDs).
 type ToolAlias struct {
 	Canonical     string
 	CommandField  string
 	ResourceField string
+	PathField     string
 	PatchField    string
 }
+
+// NamesFiles reports whether calls through this alias say which files they
+// touch. One that does and yields no file is refused (pdpgrpc.Decide).
+func (t ToolAlias) NamesFiles() bool { return t.PathField != "" || t.PatchField != "" }
 
 // DefaultAliases is the built-in table: harness, then that harness's own tool
 // name. The canonical names are DefaultCatalog's (Claude Code's), so a
@@ -37,6 +45,22 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			// Codex hands a hook the patch text as "command". It is not a
 			// shell command, so it is not a CommandField.
 			"apply_patch": {Canonical: "Edit", PatchField: "command"},
+		},
+		// OpenCode 2.x. Fields mirror what the Claude Code catalog seed gives
+		// the canonical tool: a file path for the three file tools, nothing
+		// for search and web. Its other tools (todo, question, skill,
+		// subagent, execute) and MCP tools have no alias and are decided
+		// under their own names.
+		"opencode": {
+			"shell":     {Canonical: "Bash", CommandField: "command"},
+			"read":      {Canonical: "Read", PathField: "path"},
+			"write":     {Canonical: "Write", PathField: "path"},
+			"edit":      {Canonical: "Edit", PathField: "path"},
+			"patch":     {Canonical: "Edit", PatchField: "patchText"},
+			"glob":      {Canonical: "Glob"},
+			"grep":      {Canonical: "Grep"},
+			"webfetch":  {Canonical: "WebFetch"},
+			"websearch": {Canonical: "WebSearch"},
 		},
 	}
 }
@@ -74,7 +98,7 @@ func ResolveAlias(harness string, entries []models.ToolCatalogEntry, a Action) (
 // The result is always Cataloged. The PDP knows what this tool is, so
 // whatever resource the caller asserted is replaced, as it is for any
 // cataloged tool.
-func ExtractAliased(entries []models.ToolCatalogEntry, a Action, alias ToolAlias) ExtractedInput {
+func ExtractAliased(entries []models.ToolCatalogEntry, a Action, alias ToolAlias, cwd string) ExtractedInput {
 	out := ExtractedInput{Cataloged: true, Verb: ExtractFromCatalog(entries, a).Verb}
 	obj := parseJSONObject(a.RawInput)
 	if alias.ResourceField != "" {
@@ -83,10 +107,42 @@ func ExtractAliased(entries []models.ToolCatalogEntry, a Action, alias ToolAlias
 	if alias.CommandField != "" {
 		out.Command = jsonStringField(obj, alias.CommandField)
 	}
+	if alias.PathField != "" {
+		out.ResourceID, _ = ResolveFilePath(jsonStringField(obj, alias.PathField), cwd)
+	}
 	if alias.PatchField != "" {
 		out.Patch = jsonStringField(obj, alias.PatchField)
 	}
 	return out
+}
+
+// ResolveFilePath returns p as a clean absolute path, resolving a relative
+// one against cwd. It reports false, and the caller refuses the call, when
+// the path cannot be resolved from the text alone:
+//
+//   - it is empty, or relative and cwd is not absolute;
+//   - it has a ".." segment, refused for the reason checkResourceConstraints
+//     refuses it: through a symbolic link the file system's answer differs
+//     from the one the text gives;
+//   - it starts with "~", which some harnesses expand to a home directory
+//     the PDP does not know.
+//
+// ponytail: forward-slash paths only. A Windows path is treated as relative.
+func ResolveFilePath(p, cwd string) (string, bool) {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "~" || strings.HasPrefix(p, "~/") {
+		return "", false
+	}
+	if !path.IsAbs(p) {
+		if !path.IsAbs(cwd) {
+			return "", false
+		}
+		p = cwd + "/" + p
+	}
+	if hasDotDotSegment(p) {
+		return "", false
+	}
+	return path.Clean(p), true
 }
 
 // patchFileMarkers start the lines of a patch that name a file. The format is
@@ -96,18 +152,13 @@ var patchFileMarkers = []string{"*** Add File: ", "*** Delete File: ", "*** Upda
 // PatchResourceIDs returns every file a patch names, as clean absolute paths,
 // in source order, deduplicated. A relative path is resolved against cwd.
 //
-// It returns nil when the patch names no file, names a relative one and cwd
-// is not absolute, or any path has a ".." segment: a path that cannot be
-// resolved is not guessed at, and the caller refuses a patch it has no
-// identities for. ".." is refused, not resolved, for the reason
-// checkResourceConstraints refuses it: through a symbolic link the file
-// system's answer differs from the one the text gives.
+// It returns nil when the patch names no file or names one ResolveFilePath
+// cannot resolve: a path is not guessed at, and the caller refuses a patch
+// it has no identities for.
 //
 // Every line is looked at, indented or not, so a line of file content that
 // happens to read like a header is taken as a path too. Like ShellResourceIDs,
 // the bias is toward too many: an extra path only adds constraints.
-//
-// ponytail: forward-slash paths only. A Windows path is treated as relative.
 func PatchResourceIDs(patch, cwd string) []string {
 	var ids []string
 	seen := make(map[string]bool)
@@ -115,19 +166,14 @@ func PatchResourceIDs(patch, cwd string) []string {
 		line = strings.TrimSpace(line)
 		for _, marker := range patchFileMarkers {
 			p, ok := strings.CutPrefix(line, marker)
-			if p = strings.TrimSpace(p); !ok || p == "" {
+			if !ok || strings.TrimSpace(p) == "" {
 				continue
 			}
-			if !path.IsAbs(p) {
-				if !path.IsAbs(cwd) {
-					return nil
-				}
-				p = cwd + "/" + p
-			}
-			if hasDotDotSegment(p) {
+			p, ok = ResolveFilePath(p, cwd)
+			if !ok {
 				return nil
 			}
-			if p = path.Clean(p); !seen[p] {
+			if !seen[p] {
 				seen[p] = true
 				ids = append(ids, p)
 			}
