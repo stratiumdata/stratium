@@ -105,6 +105,7 @@ func TestRunExtmcpCmd_NamesEveryMissingVariable(t *testing.T) {
 	for _, k := range []string{"STRATIUM_PEP_EXTMCP_LISTEN_ADDR", "STRATIUM_PEP_PDP_ADDR", "STRATIUM_PEP_SESSION_FILE"} {
 		t.Setenv(k, "")
 	}
+	t.Cleanup(func() { transportDetail = nil }) // runExtmcpCmd sets it
 	var stderr bytes.Buffer
 	if code := runExtmcpCmd(&stderr); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
@@ -113,5 +114,28 @@ func TestRunExtmcpCmd_NamesEveryMissingVariable(t *testing.T) {
 		if !strings.Contains(stderr.String(), k) {
 			t.Errorf("stderr %q does not name %s", stderr.String(), k)
 		}
+	}
+}
+
+// On a network surface the caller learns that the PDP could not be reached,
+// and the operator's log learns where it was.
+func TestTransportFailure_KeepsThePDPAddressOutOfTheCallersReason(t *testing.T) {
+	var log bytes.Buffer
+	transportDetail = &log
+	t.Cleanup(func() { transportDetail = nil })
+
+	res, err := newExtmcpServer(t, unreachablePDPClient(t)).CheckRequest(context.Background(), toolsCall("files", `{"name":"read_file"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := res.GetError().GetReason()
+	if !strings.Contains(reason, "could not reach PDP") {
+		t.Errorf("reason = %q, want it to say the PDP could not be reached", reason)
+	}
+	if strings.Contains(reason, "127.0.0.1") || strings.Contains(reason, "dial") {
+		t.Errorf("reason = %q, want no connection detail in it", reason)
+	}
+	if !strings.Contains(log.String(), "127.0.0.1") {
+		t.Errorf("operator log = %q, want the connection detail", log.String())
 	}
 }

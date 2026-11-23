@@ -1266,6 +1266,7 @@ func relayTargetToCaller(serverStream grpc.ServerStream, targetStream grpc.Clien
 // "add the dial with the first caller, not ahead of one" choice Task 1 made for cfg.TargetAddr's
 // own dial below.
 func runProxyCmd(stderr io.Writer) int {
+	transportDetail = stderr // see transportFailure (hook.go)
 	cfg, err := loadProxyConfigFromEnv()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)

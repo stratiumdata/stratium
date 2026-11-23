@@ -10,7 +10,7 @@
 # interface, and this stack's credentials are committed development values.
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres_local_dev_only
@@ -339,7 +339,7 @@ services:
   # from is what makes this a same-version proof rather than a
   # close-enough one.
   envoy:
-    image: envoyproxy/envoy:v1.37.0
+    image: envoyproxy/envoy:v1.37.0@sha256:d9b4a70739d92b3e28cd407f106b0e90d55df453d7d87773efd22b4429777fe8
     depends_on:
       - pep-extauthz
       - echo-upstream
@@ -765,7 +765,7 @@ services:
   # own /dev/tcp is the available HTTP client (verified against this exact
   # image, not assumed).
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4
+    image: quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin

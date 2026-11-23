@@ -13,7 +13,7 @@
 # doc, "NO SESSION FILE") -- so folding the two into one parameterized file
 # would carry pdp-only steps (openssl, key generation) into an image that
 # has no use for either.
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS builder
 
 WORKDIR /src/services
 COPY services/go.mod services/go.sum ./
@@ -29,7 +29,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # Distroless, not golang:alpine -- same reasoning as this directory's own
 # Dockerfile: nothing to build or fetch with, no shell to get a foothold in,
 # running as the pre-created nonroot uid/gid by default.
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
 
 COPY --from=builder /out/stratium-pep /stratium-pep
 

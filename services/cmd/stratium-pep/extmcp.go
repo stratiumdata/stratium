@@ -38,6 +38,7 @@ import (
 )
 
 func runExtmcpCmd(stderr io.Writer) int {
+	transportDetail = stderr // see transportFailure (hook.go)
 	var missing []string
 	listenAddr := requiredEnv("STRATIUM_PEP_EXTMCP_LISTEN_ADDR", &missing)
 	var listenErr error

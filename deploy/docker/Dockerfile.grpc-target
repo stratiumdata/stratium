@@ -16,10 +16,12 @@
 # there is no reason to pay for a distroless runtime stage for a component
 # that carries no secret and needs no minimal attack surface the way the two
 # binaries this repo actually ships do.
-FROM golang:1.26-alpine
+FROM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
 WORKDIR /src/services
 COPY services/go.mod services/go.sum ./
 RUN go mod download
 COPY services/ ./
 RUN go build -o /grpc-target ./cmd/grpc-target
+# A test fixture has no reason to run as root either.
+USER nobody
 ENTRYPOINT ["/grpc-target"]
