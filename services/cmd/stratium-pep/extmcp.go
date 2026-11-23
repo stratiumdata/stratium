@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"google.golang.org/grpc"
 
@@ -108,6 +109,15 @@ func (s *extmcpServer) CheckRequest(ctx context.Context, req *extmcp.McpRequest)
 	targets := req.GetServiceNames()
 	if err := json.Unmarshal(req.GetMcpRequest(), &params); err != nil || params.Name == "" || len(targets) != 1 || targets[0] == "" {
 		return extmcpDeny("stratium-pep: malformed tools/call: one target and params.name are required"), nil //nolint:nilerr // a refusal is an answer, never an RPC error: see the package doc
+	}
+
+	// With no underscore in the target, the first underscore of the joined
+	// name is always the join, so no two (target, tool) pairs share a name.
+	// Without this, target "a" with tool "b_c" and target "a_b" with tool
+	// "c" would both be decided as "a_b_c", and a grant for one would cover
+	// the other.
+	if strings.Contains(targets[0], "_") {
+		return extmcpDeny("stratium-pep: the MCP target name \"" + targets[0] + "\" contains an underscore, so its tools cannot be named unambiguously; rename the target in the gateway's configuration"), nil
 	}
 
 	if ok, reason := s.authz.authorize(ctx, targets[0]+"_"+params.Name, string(params.Arguments)); !ok {
