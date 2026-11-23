@@ -7,7 +7,7 @@
 # manager in it. echo-upstream is `make integration`'s own test fixture --
 # it never ships anywhere -- so building and running it from the same
 # golang:alpine stage is the smaller diff for the same result.
-FROM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
 WORKDIR /src
 COPY echo-upstream/main.go .
 RUN go build -o /echo-upstream main.go
