@@ -86,6 +86,16 @@ proto: ## Generate Go code from proto/ (requires protoc, protoc-gen-go, protoc-g
 		--go-grpc_out=$(GO_DIR) --go-grpc_opt=module=github.com/stratiumdata/stratium \
 		$(PROTO_DIR)/pdp/v1/pdp.proto \
 		$(PROTO_DIR)/target/v1/target.proto
+	@# agentgateway's ExtMcp contract, vendored unmodified from its v1.7.0
+	@# tag (Apache-2.0). The M flags place the Go code here instead of at
+	@# the go_package the file names.
+	protoc \
+		--proto_path=$(PROTO_DIR) \
+		--go_out=$(GO_DIR) --go_opt=module=github.com/stratiumdata/stratium \
+		--go-grpc_out=$(GO_DIR) --go-grpc_opt=module=github.com/stratiumdata/stratium \
+		'--go_opt=Magentgateway/ext_mcp.proto=github.com/stratiumdata/stratium/internal/extmcp;extmcp' \
+		'--go-grpc_opt=Magentgateway/ext_mcp.proto=github.com/stratiumdata/stratium/internal/extmcp;extmcp' \
+		$(PROTO_DIR)/agentgateway/ext_mcp.proto
 
 PYTHON_PDP_DIR := sdk/python/stratium/_pdp
 

@@ -61,7 +61,7 @@ func main() {
 // stdin/stdout/stderr swapped for buffers.
 func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|report|session-start|mcp|extauthz|proxy> ...")
+		_, _ = fmt.Fprintln(stderr, "usage: stratium-pep <hook|report|session-start|mcp|extmcp|extauthz|proxy> ...")
 		return 1
 	}
 
@@ -84,6 +84,8 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runSessionStartCmd(stderr)
 	case "mcp":
 		return runMCPCmd(stdin, stdout, stderr)
+	case "extmcp":
+		return runExtmcpCmd(stderr)
 	case "extauthz":
 		return runExtauthzCmd(stderr)
 	case "proxy":

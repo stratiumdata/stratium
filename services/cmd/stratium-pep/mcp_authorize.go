@@ -152,12 +152,25 @@ func (a *mcpAuthorizer) intercept(method string, line []byte) []byte {
 func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	var frame toolsCallFrame
 	if err := json.Unmarshal(line, &frame); err != nil || frame.Params.Name == "" {
-		// Cannot identify a tool to ask the PDP about at all -- there is nothing coherent to send,
-		// retry, or escalate, so this always denies outright rather than guessing a tool name.
+		// A request with no id is a notification: deny has nowhere to send an
+		// error and drops it, which is the fail-closed answer for a call that
+		// could not be decided.
 		a.deny(frame.ID, "stratium-pep: malformed tools/call: params.name is required")
 		return
 	}
+	if ok, reason := a.authorize(context.Background(), frame.Params.Name, string(frame.Params.Arguments)); !ok {
+		a.deny(frame.ID, reason)
+		return
+	}
+	a.forward(line)
+}
 
+// authorize is the decision itself, with no transport in it: the session
+// file, the cache, the PDP call, one token reissue, and the wait on an
+// approval. decideAndRelay (stdio) and extmcpServer.CheckRequest
+// (extmcp.go) both enforce exactly what this returns, so the two surfaces
+// cannot drift. ok is true only on an allow; reason is set on every refusal.
+func (a *mcpAuthorizer) authorize(ctx context.Context, tool, rawInput string) (ok bool, reason string) {
 	// Read fresh on THIS call, deliberately, exactly as hook.go's runHook does and for the same
 	// reason (see loadSessionFile's own doc comment and session_file.go): mcp is a long-lived
 	// process handling many tool calls over one session, not exec'd fresh per call the way hook is,
@@ -170,10 +183,8 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	// source consultCache (local_cache.go) accepts for the cache key and the token-expiry check.
 	sess, err := loadSessionFile(a.cfg.SessionFilePath)
 	if err != nil {
-		a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", err))
-		return
+		return false, fmt.Sprintf("stratium-pep: %s", err)
 	}
-	rawInput := string(frame.Params.Arguments)
 
 	// mcp is the one surface that consults the decision cache -- see local_cache.go's own package
 	// doc for the boundary this call is part of enforcing structurally. now is captured once and
@@ -181,24 +192,23 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	// at all. The cache is this process's own memory (a.cache); the session file above is still
 	// re-read per call, so an expired or replaced token takes effect on the very next call.
 	now := time.Now()
-	if entry, hit := consultCache(a.cache, a.cacheCfg.StalenessWindow, sess, frame.Params.Name, rawInput, now); hit {
+	if entry, hit := consultCache(a.cache, a.cacheCfg.StalenessWindow, sess, tool, rawInput, now); hit {
 		switch entry.Decision {
 		case pdpgrpc.Effect_EFFECT_ALLOW:
-			a.forward(line)
+			return true, ""
 		default:
 			// A default, not an explicit DENY, case: cacheEntryUsable already
 			// refuses to report a hit for an ESCALATE entry, so this is reached
 			// only by a cached DENY in practice, but nothing this function cannot
 			// positively identify as ALLOW may ever be treated as one.
-			a.deny(frame.ID, cacheHitDenyReason)
+			return false, cacheHitDenyReason
 		}
-		return
 	}
 
 	req := &pdpgrpc.DecideRequest{
 		AgentId:  a.cfg.AgentID,
 		Subject:  a.cfg.Subject,
-		Tool:     frame.Params.Name,
+		Tool:     tool,
 		RawInput: rawInput,
 		Token:    sess.GetToken(),
 		// Verb, NormalizedInput, Resource: none of these exist on the wire
@@ -208,15 +218,14 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		// reasoning is identical for both surfaces.
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.ConnectTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, a.cfg.ConnectTimeout)
 	defer cancel()
-	resp, err := a.client.Decide(ctx, req)
+	resp, err := a.client.Decide(callCtx, req)
 	if err != nil {
 		// cacheMissUnreachableReason (local_cache.go) prefixes describeRPCError's own text with the
 		// one fact unique to this cache-wired surface: this denial follows a MISS, not merely a failed
 		// RPC -- the distinction an operator debugging an outage needs from an ordinary policy denial.
-		a.deny(frame.ID, cacheMissUnreachableReason(describeRPCError(err, agentOrDelegationUnknownMsg)))
-		return
+		return false, cacheMissUnreachableReason(describeRPCError(err, agentOrDelegationUnknownMsg))
 	}
 
 	if resp.GetEffect() == pdpgrpc.Effect_EFFECT_DENY {
@@ -225,10 +234,9 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 		// one reissue and retry, mirroring hook.go's runHook one call site over. A failure here (the
 		// reissue call itself, or the retried Decide) denies; a success replaces resp with the
 		// retry's own response and falls through to the same switch below.
-		reissued, reissueErr := reissueAndRetryDecide(a.client, a.cfg.ConnectTimeout, sess.GetDelegationId(), req)
+		reissued, reissueErr := reissueAndRetryDecide(a.client, a.cfg.ConnectTimeout, sess.GetDelegationId(), req) //nolint:contextcheck // bounds its own two calls by ConnectTimeout, as it did before authorize took a ctx
 		if reissueErr != nil {
-			a.deny(frame.ID, fmt.Sprintf("stratium-pep: %s", reissueErr))
-			return
+			return false, fmt.Sprintf("stratium-pep: %s", reissueErr)
 		}
 		resp = reissued
 	}
@@ -240,30 +248,29 @@ func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	// never again afterward. req.GetToken(), not sess.GetToken(): the reissue branch above may have
 	// mutated req.Token in place to a freshly issued one, and storeCacheResult must record the
 	// expiry of whichever token actually produced resp.
-	storeCacheResult(a.cache, sess.GetDelegationId(), frame.Params.Name, rawInput, req.GetToken(), resp, now)
+	storeCacheResult(a.cache, sess.GetDelegationId(), tool, rawInput, req.GetToken(), resp, now)
 
 	switch resp.GetEffect() {
 	case pdpgrpc.Effect_EFFECT_ALLOW:
-		a.forward(line)
+		return true, ""
 	case pdpgrpc.Effect_EFFECT_ESCALATE:
 		// resolveApproval (escalation.go) owns everything from here: it polls GetApproval and
 		// either retries Decide with the resolved approval id or denies. This file still
 		// classifies nothing and decides nothing -- it blocks, then relays whatever resolveApproval
-		// decided, exactly as hook.go's awaitApproval does for its own transport. context.Background(),
+		// decided, exactly as hook.go's awaitApproval does for its own transport. ctx,
 		// not some ctx this goroutine invents: decideAndRelay has no incoming per-frame context to
 		// propagate -- mcp.go relays over stdio, not a cancellable per-request transport -- see
 		// resolveApproval's own doc comment for why every caller passes what it actually has,
 		// never a locally-scoped ctx built for an unrelated, shorter budget.
-		effect, reason := resolveApproval(context.Background(), a.client, a.cfg.ConnectTimeout, a.cfg.ApprovalPollInterval, a.cfg.ApprovalTimeout, req, resp)
+		effect, reason := resolveApproval(ctx, a.client, a.cfg.ConnectTimeout, a.cfg.ApprovalPollInterval, a.cfg.ApprovalTimeout, req, resp)
 		if effect == pdpgrpc.Effect_EFFECT_ALLOW {
-			a.forward(line)
-			return
+			return true, ""
 		}
-		a.deny(frame.ID, reason)
+		return false, reason
 	default:
 		// EFFECT_DENY, and any value this build does not recognize (the proto documents
 		// EFFECT_DENY as the zero value for exactly this case).
-		a.deny(frame.ID, resp.GetReason())
+		return false, resp.GetReason()
 	}
 }
 
