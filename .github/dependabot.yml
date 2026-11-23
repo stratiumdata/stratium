@@ -1,0 +1,29 @@
+# The workflows name Actions by commit and the Docker files name images by
+# digest, so neither moves on its own. This opens the pull requests that
+# move them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Dockerfile base images and the compose file's images.
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker-compose
+    directory: /deploy/docker
+    schedule:
+      interval: weekly
+    groups:
+      compose:
+        patterns: ["*"]

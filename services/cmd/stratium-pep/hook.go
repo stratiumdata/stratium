@@ -381,14 +381,33 @@ const agentOrDelegationUnknownMsg = "PDP says the delegation or agent this reque
 func describeRPCError(err error, notFoundMsg string) string {
 	switch status.Code(err) {
 	case codes.Unavailable:
-		return fmt.Sprintf("could not reach PDP: %s", err)
+		return transportFailure("could not reach PDP", err)
 	case codes.DeadlineExceeded:
-		return fmt.Sprintf("PDP did not respond in time: %s", err)
+		return transportFailure("PDP did not respond in time", err)
 	case codes.NotFound:
 		return fmt.Sprintf("%s: %s", notFoundMsg, err)
 	default:
 		return fmt.Sprintf("PDP returned an error: %s", err)
 	}
+}
+
+// transportDetail is where the detail of a failed connection to the PDP
+// goes when the reason is read by someone other than this process's
+// operator. That detail is gRPC's own text and names the PDP's address.
+//
+// nil, the default, keeps it in the reason: on hook and mcp the reader is the
+// operator, at their own terminal. extauthz, proxy and extmcp answer callers
+// across a network, so each sets this to its stderr at startup; the caller
+// is told only that the PDP could not be reached, and the operator's log
+// says why. One process runs one mode, so a package variable is enough.
+var transportDetail io.Writer
+
+func transportFailure(what string, err error) string {
+	if transportDetail == nil {
+		return fmt.Sprintf("%s: %s", what, err)
+	}
+	_, _ = fmt.Fprintf(transportDetail, "stratium-pep: %s: %s\n", what, err)
+	return what
 }
 
 // hookOutput is Claude Code's PreToolUse structured-output contract for a

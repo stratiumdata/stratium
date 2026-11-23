@@ -296,6 +296,7 @@ func parseAllowedHosts(raw string) ([]string, error) {
 // in-flight at shutdown -- Task 1 does not have one, since Check's only
 // answer today is the same unconditional deny regardless of when it runs.
 func runExtauthzCmd(stderr io.Writer) int {
+	transportDetail = stderr // see transportFailure (hook.go)
 	cfg, err := loadExtauthzConfigFromEnv()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
