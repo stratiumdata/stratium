@@ -55,6 +55,12 @@ for a caller that wants to manage its own delegation lifecycle instead
 (`example/custom_pep.py` uses `Session`, the recommended path — it is the only
 one exercised against a live PDP so far).
 
+`Session(..., harness="cursor")` names the agent harness whose tools the
+session checks, so the PDP decides them under its shared tool names; leave it
+out for tools of your own. `Session.report(tool=..., raw_input=...)` tells the
+PDP a checked call has run, so it can flag one it never allowed. The
+[LiteLLM guardrail](../../docs/pep/litellm.md) is built on both.
+
 `Session(..., principal_token=None)` and
 `Client.create_delegation(..., principal_token=None)` take the principal's OIDC
 token from your identity provider. A root delegation needs it unless the PDP

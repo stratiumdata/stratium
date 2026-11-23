@@ -50,10 +50,20 @@ class Client:
         raw_input: str | Mapping, token: str,
         resource: Mapping[str, str] | None = None,
         approval_id: str | None = None,
+        harness: str = "", cwd: str = "",
     ) -> Decision:
+        """Ask for a decision.
+
+        `harness` names the agent harness whose tool this is ("codex",
+        "cursor", ...), so the PDP decides it under the shared tool name and
+        reads the file or command from where that harness puts it. `cwd` is
+        the directory a relative path in the input is resolved against.
+        Leave both empty for a tool of your own.
+        """
         req = pdp_pb2.DecideRequest(
             agent_id=agent_id, subject=subject, tool=tool,
             raw_input=canonical_raw_input(raw_input), token=token,
+            harness=harness, cwd=cwd,
         )
         if resource:
             req.resource.update(resource)
@@ -139,6 +149,21 @@ class Client:
             ),
             epoch=resp.epoch,
         )
+
+    def report_tool_use(self, *, token: str, tool: str, raw_input: str | Mapping) -> bool:
+        """Tell the PDP a tool call ran, so it can flag one it never allowed.
+
+        True when the PDP matched the call to a decision. A report that could
+        not be delivered is False as well: it is a record, not a decision, and
+        nothing may be allowed or refused on its account.
+        """
+        try:
+            resp = self._stub.ReportToolUse(pdp_pb2.ReportToolUseRequest(
+                token=token, tool=tool, raw_input=canonical_raw_input(raw_input),
+            ), timeout=self._timeout)
+        except Exception:  # noqa: BLE001 -- see the docstring
+            return False
+        return resp.matched
 
     def get_approval(self, approval_id: str) -> str:
         """The approval's current status, lowercased.

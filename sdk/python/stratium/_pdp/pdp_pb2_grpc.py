@@ -5,7 +5,7 @@ import warnings
 
 from . import pdp_pb2 as pdp_dot_v1_dot_pdp__pb2
 
-GRPC_GENERATED_VERSION = '1.83.0'
+GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,14 +18,14 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in pdp/v1/pdp_pb2_grpc.py depends on'
+        + f' but the generated code in pdp/v1/pdp_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class PDPServiceStub:
+class PDPServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -54,9 +54,14 @@ class PDPServiceStub:
                 request_serializer=pdp_dot_v1_dot_pdp__pb2.GetApprovalRequest.SerializeToString,
                 response_deserializer=pdp_dot_v1_dot_pdp__pb2.GetApprovalResponse.FromString,
                 _registered_method=True)
+        self.ReportToolUse = channel.unary_unary(
+                '/stratium.pdp.v1.PDPService/ReportToolUse',
+                request_serializer=pdp_dot_v1_dot_pdp__pb2.ReportToolUseRequest.SerializeToString,
+                response_deserializer=pdp_dot_v1_dot_pdp__pb2.ReportToolUseResponse.FromString,
+                _registered_method=True)
 
 
-class PDPServiceServicer:
+class PDPServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Decide(self, request, context):
@@ -102,6 +107,16 @@ class PDPServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReportToolUse(self, request, context):
+        """ReportToolUse checks a tool call that has already run against the
+        decisions recorded for its delegation. It never changes a decision and
+        is not part of authorization: it exists so that a tool call which ran
+        without an ALLOW leaves an audit entry. See ReportToolUseRequest.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PDPServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -125,6 +140,11 @@ def add_PDPServiceServicer_to_server(servicer, server):
                     request_deserializer=pdp_dot_v1_dot_pdp__pb2.GetApprovalRequest.FromString,
                     response_serializer=pdp_dot_v1_dot_pdp__pb2.GetApprovalResponse.SerializeToString,
             ),
+            'ReportToolUse': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportToolUse,
+                    request_deserializer=pdp_dot_v1_dot_pdp__pb2.ReportToolUseRequest.FromString,
+                    response_serializer=pdp_dot_v1_dot_pdp__pb2.ReportToolUseResponse.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'stratium.pdp.v1.PDPService', rpc_method_handlers)
@@ -133,7 +153,7 @@ def add_PDPServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class PDPService:
+class PDPService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
@@ -234,6 +254,33 @@ class PDPService:
             '/stratium.pdp.v1.PDPService/GetApproval',
             pdp_dot_v1_dot_pdp__pb2.GetApprovalRequest.SerializeToString,
             pdp_dot_v1_dot_pdp__pb2.GetApprovalResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReportToolUse(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/stratium.pdp.v1.PDPService/ReportToolUse',
+            pdp_dot_v1_dot_pdp__pb2.ReportToolUseRequest.SerializeToString,
+            pdp_dot_v1_dot_pdp__pb2.ReportToolUseResponse.FromString,
             options,
             channel_credentials,
             insecure,

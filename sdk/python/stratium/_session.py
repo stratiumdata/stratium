@@ -51,6 +51,7 @@ class Session:
         approval_timeout: float = 120.0,
         escalate_at: int | None = None,
         principal_token: str | None = None,
+        harness: str = "",
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -69,6 +70,9 @@ class Session:
         a backstop, not a licence to leave the pair unpaired.
         """
         self._client = client
+        # One harness per session: see Client.decide. Every call this session
+        # checks or reports is that harness's tool.
+        self._harness = harness
         self._subject = subject
         self._agent_id = agent_id
         self._mint = dict(
@@ -171,6 +175,12 @@ class Session:
         )
         return decision
 
+    def report(self, *, tool: str, raw_input: str | Mapping) -> bool:
+        """Tell the PDP a call this session checked has run. Send the tool and
+        input exactly as they were checked; see Client.report_tool_use."""
+        return self._client.report_tool_use(
+            token=self._grant.token, tool=tool, raw_input=raw_input)
+
     def _key(self, tool: str, canonical: str) -> str:
         return self._cache.key(
             delegation_id=self._grant.delegation_id, agent_id=self._agent_id,
@@ -182,7 +192,7 @@ class Session:
         decision = self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,
-            approval_id=approval_id,
+            approval_id=approval_id, harness=self._harness,
         )
         if not self._token_is_the_problem(decision):
             return decision
@@ -202,7 +212,7 @@ class Session:
         return self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,
-            approval_id=approval_id,
+            approval_id=approval_id, harness=self._harness,
         )
 
     def _token_is_the_problem(self, decision: Decision) -> bool:

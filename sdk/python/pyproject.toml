@@ -5,12 +5,15 @@ description = "Build a Stratium policy enforcement point"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 # Floors match the generated code in stratium/_pdp, which checks them at
-# import: pdp_pb2.py needs protobuf 7.35.1+ within major 7, and
-# pdp_pb2_grpc.py needs grpcio 1.83.0+. Raise them when regenerating.
-dependencies = ["grpcio>=1.83.0", "protobuf>=7.35.1,<8"]
+# import: pdp_pb2.py needs protobuf 5.29.0+, and pdp_pb2_grpc.py needs grpcio
+# 1.71.0+. The stubs are generated with grpcio-tools 1.71.0 on purpose: an
+# older generator's code loads on a newer runtime but not the reverse, and
+# the SDK has to load inside LiteLLM's image, which carries protobuf 5.29.
+# Tested on protobuf 5.29.6 and 7.36.2.
+dependencies = ["grpcio>=1.71.0", "protobuf>=5.29.0,<8"]
 
 [project.optional-dependencies]
-dev = ["grpcio-tools>=1.83.0", "pytest>=8"]
+dev = ["grpcio-tools==1.71.0", "pytest>=8"]
 
 [build-system]
 requires = ["setuptools>=77"]

@@ -13,6 +13,7 @@ it is about to do.
 | [`mcp`](mcp.md) | MCP `tools/call` | 9 | reads it | yes |
 | [`proxy`](proxy.md) | gRPC method calls | 9 | no | no |
 | [`extauthz`](extauthz.md) | HTTP requests, via Envoy | 6 | no | no |
+| [LiteLLM guardrail](litellm.md) | tool calls passing through a LiteLLM proxy: MCP gateway calls, and those a model proposes in chat | 7 | no | MCP calls only |
 | [Python SDK](../../sdk/python/README.md) | whatever you pass to `Session.check()` — no built-in catalog | — (constructor args, not env) | no | yes |
 
 Every variable count above was read off the binary, by running each mode with an
