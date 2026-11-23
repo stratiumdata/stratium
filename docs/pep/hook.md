@@ -10,8 +10,8 @@ Code's.
 | Harness | `--harness` | How it is wired | Run in a live session |
 |---|---|---|---|
 | [Antigravity CLI](harnesses/antigravity.md) | `antigravity` | `PreToolUse` hook | yes, 1.5.14; see its page for what was observed |
-| Claude Code | (none) | `PreToolUse` hook | yes |
-| Codex | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
+| [Claude Code](harnesses/claude-code.md) | (none) | `PreToolUse` hook | yes, 2.1.329; see its page for what was observed |
+| [Codex](harnesses/codex.md) | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
 | [Copilot CLI](harnesses/copilot.md) | `copilot` | `preToolUse` hook | yes, 1.0.114; see its page for what was observed |
 | [Cursor](harnesses/cursor.md) | `cursor` | `preToolUse` hook | yes, CLI 2026.11.19; see its page for what was observed |
 | [Devin](harnesses/devin.md) | `devin` | `PreToolUse` hook | yes, CLI 3000.14; see its page for what was observed |
@@ -91,38 +91,10 @@ that is set; only [`mcp`](mcp.md) reads it.
 
 ---
 
-## Installing in Claude Code
+## Installing in any harness
 
-`.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep session-start", "timeout": 15 } ] }
-    ],
-    "PreToolUse": [
-      { "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep hook", "timeout": 150, "onFailure": "block" } ] }
-    ],
-    "PostToolUse": [
-      { "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep report", "timeout": 15 } ] }
-    ],
-    "PostToolUseFailure": [
-      { "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "/opt/stratium/bin/stratium-pep report", "timeout": 15 } ] }
-    ]
-  }
-}
-```
-
-`deploy/stratium install --claude --bin /opt/stratium/bin/stratium-pep` writes
-exactly that block, merging into whatever the file already holds.
+Each harness has its own hook file and its own install command; its page has
+both. Two rules hold for every one of them.
 
 **Use an absolute path.** A bare `stratium-pep` that is not on `PATH` exits
 `127`, and a harness treats any non-zero that is not `2` as a *non-blocking*
@@ -141,24 +113,11 @@ The hook always answers within
 STRATIUM_PEP_APPROVAL_TIMEOUT + 4 × STRATIUM_PEP_CONNECT_TIMEOUT
 ```
 
-and denies if it reaches that point without a decision. With the values above
-that is 120s + 4 × 5s = 140s, so `150` leaves a margin. If you raise either
-variable, raise the `timeout` with it. `deploy/stratium install` computes the
-value from the two variables in its environment, and `status` and `doctor`
-report a `timeout` that is too short.
-
-**Keep `"onFailure": "block"`.** With it, Claude Code blocks the tool call when
-the hook times out or fails to run, instead of letting it through (observed on
-Claude Code 2.1.329). It is a second line behind the two rules above, not a
-replacement for them.
-
-`SessionStart` carries no `matcher` on purpose, so it runs for every session
-source — `startup`, `resume`, `clear`, `compact`, `fork`. A resumed session gets
-a fresh delegation rather than trusting whatever the file holds.
-
-> Installing `SessionStart` re-issues a delegation on every session start. If you
-> are testing a delegation you built by hand, install `--only PreToolUse` — the
-> `SessionStart` half will discard your work at the next launch.
+and denies if it reaches that point without a decision. With a 120s approval
+timeout and a 5s connect timeout that is 120s + 4 × 5s = 140s, so a `timeout`
+of `150` leaves a margin. If you raise either variable, raise the `timeout`
+with it. `deploy/stratium install` computes the value from the two variables in
+its environment, and `status` and `doctor` report a `timeout` that is too short.
 
 ---
 
@@ -168,9 +127,9 @@ The hook governs an agent that runs as you. Anything you can write, the agent
 can write. A per-project or per-user install therefore leaves three things
 within the agent's reach:
 
-| What | Where a per-project install puts it | What changing it does |
+| What | Where a per-project or per-user install puts it | What changing it does |
 |---|---|---|
-| The hook entry | `.claude/settings.json` | Removing it removes enforcement, immediately. |
+| The hook entry | the harness's hook file, such as `.claude/settings.json` | Removing it removes enforcement, immediately. |
 | The binary | wherever `--bin` points | Replacing it replaces the decision. |
 | The configuration | the environment, which a project settings file can set | Pointing `STRATIUM_PEP_PDP_ADDR` elsewhere changes who decides. |
 
@@ -179,198 +138,38 @@ agent you trust not to edit its own guard rails. It does not hold against an
 agent that is trying to get out. `deploy/stratium status` and `doctor` print a
 warning naming each of the three that the current user can change.
 
-**The system install** puts all three where only root can write:
+**The system install** puts all three where only root can write: the binary in
+`/opt/stratium/bin/stratium-pep`, the configuration in `/etc/stratium/pep.env`
+(read through `--config`), and the hook entry wherever that harness reads an
+administrator's hooks. Where that is, and what it does and does not stop, is
+on each harness's page:
 
-```sh
-# with the STRATIUM_PEP_* variables exported, as for a per-project install
-sudo -E deploy/stratium --claude install --system --bin ./bin/stratium-pep
-```
+- [Claude Code](harnesses/claude-code.md#the-system-install)
+- [Codex](harnesses/codex.md#the-system-install)
+- [Copilot CLI](harnesses/copilot.md#can-the-agent-remove-it)
+- [Cursor](harnesses/cursor.md#can-the-agent-remove-it)
+- [OpenCode](harnesses/opencode.md#the-system-install)
 
-| What | Where |
-|---|---|
-| The binary | `/opt/stratium/bin/stratium-pep` |
-| The configuration | `/etc/stratium/pep.env`, read through `--config` |
-| The hook entry | Claude Code's managed settings: `/Library/Application Support/ClaudeCode/managed-settings.d/50-stratium.json` on macOS, `/etc/claude-code/managed-settings.d/50-stratium.json` on Linux |
+Antigravity CLI, Devin, Goose and Kiro CLI have no system install; their pages
+say why.
 
-Claude Code merges hooks from managed settings with every other scope, and a
-user or project settings file cannot remove or disable them. **Observed** on
-Claude Code 2.1.329 (macOS), with the system install in place the hook still
-decided the call when:
-
-- a project `.claude/settings.json` set `"disableAllHooks": true` and its own
-  `STRATIUM_PEP_PDP_ADDR`;
-- the session was launched with `--settings '{"disableAllHooks": true}'`;
-- the session was launched with `--setting-sources ""`;
-- the session was launched with `--safe-mode`.
-
-`--bare` was not tested. `sudo
-deploy/stratium --claude uninstall --system` removes the three files, and
-`deploy/stratium --claude status --system` reports on them.
-
-What the system install does not change:
+What the system install does not change, for any harness:
 
 - **The session file stays writable by you.** It holds the agent's own
   delegation, which the PDP checks on every call. Deleting or corrupting it
   denies every call; it cannot widen what the agent may do.
 - **The configuration is machine-wide.** Every user of the machine gets the
   agent id and subject recorded in `pep.env`.
-- **Another policy source can displace the file.** When a device-management
-  profile or server-managed settings are also present, Claude Code may use that
-  source and ignore the file. Run `/status` in a session and check that the
-  managed settings are listed.
+- **The binary and the configuration are shared** between the harnesses'
+  system installs. `uninstall --system` for one harness keeps both while
+  another harness's hook file still runs the binary.
 - **A user with `sudo` can undo it**, and so can an agent that is given `sudo`.
-- **Codex has its own system install**, with its own limits: see
-  [The system install for Codex](#the-system-install-for-codex).
 - **A hook is a guard rail the harness chooses to run.** Launch options that
-  skip hooks are the harness's to define, and the list above is what was
-  tested, not a guarantee. A boundary that does not depend on
+  skip hooks are the harness's to define, and what each harness page lists is
+  what was tested, not a guarantee. A boundary that does not depend on
   the harness needs the thing being protected to be out of the agent's reach:
   run [`proxy`](proxy.md) or [`extauthz`](extauthz.md) as a different user or
   on a different host, in front of a service the agent has no other route to.
-
----
-
-## Installing in Codex
-
-Same JSON shape, in `~/.codex/hooks.json` — and **only** there. Codex also reads
-`<repo>/.codex/hooks.json`, but project-local hooks are disabled until the
-project is trusted, and a disabled enforcement hook is not inert, it is
-fail-open.
-
-`deploy/stratium --codex install` writes three events. The decision command is
-`stratium-pep hook --harness codex`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [ { "type": "command",
-                     "command": "/usr/local/bin/stratium-pep session-start",
-                     "timeout": 15 } ] }
-    ],
-    "PreToolUse": [
-      { "matcher": "*",
-        "hooks": [ { "type": "command",
-                     "command": "/usr/local/bin/stratium-pep hook --harness codex",
-                     "timeout": 330 } ] }
-    ],
-    "PostToolUse": [
-      { "matcher": "*",
-        "hooks": [ { "type": "command",
-                     "command": "/usr/local/bin/stratium-pep report",
-                     "timeout": 15 } ] }
-    ]
-  }
-}
-```
-
-Codex will not run a hook in this file until you have reviewed it. A freshly
-installed hook, or one whose command changed, is listed as untrusted and **is
-not enforcing**. Approve all three in the `/hooks` browser.
-
-The facts about Codex on this page were read from its source at version 0.133.0.
-They were not observed in a running Codex session.
-
-### What Codex lets through
-
-Codex decides when a hook runs and what a failed hook means. These cases run the
-tool call without a decision, and nothing in this file changes them:
-
-- **The hook is not trusted yet, or is switched off** in the `/hooks` browser.
-- **The hook runs past its `timeout`.** Keep it above the hook's own time budget
-  (see [Configuration](#configuration)); the installer computes it.
-- **The hook exits with a code other than `0` or `2`**, for example because the
-  binary is missing. `--harness codex` turns every refusal and every failure of
-  the hook itself into exit `2`; a command that cannot start is outside its
-  reach.
-- **Hooks are turned off** in the user's Codex configuration.
-- **A subagent** started inside a session does not run `SessionStart`. It uses
-  the delegation of the session that started it.
-
-The [system install](#the-system-install-for-codex) removes the first and the
-fourth. The others hold under it too.
-
-### The system install for Codex
-
-```sh
-# with the STRATIUM_PEP_* variables exported, as for a per-user install
-sudo -E deploy/stratium --codex install --system --bin ./bin/stratium-pep
-```
-
-It writes the same root-owned binary and configuration as the
-[Claude Code system install](#what-the-install-protects), and the hook entries
-go in `/etc/codex/requirements.toml`, which Codex reads as an administrator's
-requirements:
-
-- the three hooks above, as managed hooks. Codex runs a managed hook without
-  asking the user to review it, and the `/hooks` browser cannot switch one off;
-- `allow_managed_hooks_only = true`. Codex then ignores every hook that is not
-  in this file: the ones in `~/.codex/hooks.json`, in a project, and in plugins.
-  **This switches off hooks you may rely on for other things;**
-- `hooks = true` under `[features]`, so a user configuration cannot turn hooks
-  off.
-
-What to know before running it:
-
-- **Codex has one such file.** If `/etc/codex/requirements.toml` exists and this
-  installer did not write it, the installer stops and changes nothing.
-  `--dry-run` prints the entries to add by hand. `uninstall --system` likewise
-  leaves a file it did not write.
-- **Another requirements source can displace the hooks.** Codex reads
-  cloud-managed requirements and device-management preferences before this
-  file, and for each setting the first source that sets it wins. If one of them
-  sets hooks, the hooks in this file are not used.
-- The points under [What the install protects](#what-the-install-protects)
-  about the session file, the machine-wide configuration and `sudo` apply here
-  as well.
-- **The binary and the configuration are shared with the Claude Code system
-  install.** `uninstall --system` for one harness keeps both while the other
-  harness's hook file still runs the binary.
-
-`--harness codex` does two things.
-
-**It answers the way Codex reads.** Codex blocks a tool call on exit code `2`
-and shows the model whatever is on stderr. With the flag, every outcome that is
-not a clean allow exits `2` with the reason on stderr, including a failure of
-the hook itself. Codex runs the tool call when a hook exits with any other
-non-zero code, or runs past its `timeout`, so keep the `timeout` above the
-hook's time budget (see [Configuration](#configuration)).
-
-**It tells the PDP whose tool names these are.** Codex reports its shell tool as
-`Bash`, as Claude Code does, but edits files with a tool called `apply_patch`.
-The PDP treats an `apply_patch` call from Codex as `Edit`. The audit entry keeps
-the name Codex sent and notes `[apply_patch decided as Edit]`.
-
-**A patch is decided as an `Edit` of every file it names.** An `apply_patch`
-call names its files inside the patch text: files it adds, updates, deletes and
-moves to. The PDP reads those paths, resolves relative ones against the working
-directory Codex reported, and then:
-
-- a delegation's path constraint must hold for every file;
-- the strictest classification label among the files applies to the call;
-- policies are asked about each file in turn, as an `Edit` of that file. One
-  refusal refuses the whole patch; failing that, one file that needs approval
-  puts the whole patch up for approval.
-
-What follows from that:
-
-- Write rules against `Edit`. A rule that names `apply_patch` does not match a
-  call from Codex. A tier override on `apply_patch` is still honoured when it is
-  higher than `Edit`'s tier.
-- A patch that deletes a file has `Edit`'s tier (`INTERNAL_MODIFY`), the same
-  tier as a plain `rm` of one file.
-- A patch the PDP can read no file from is refused. So is one that names a
-  relative path when no working directory was reported, and one with a `..`
-  segment in any path.
-- Paths are compared as written. Symbolic links are not followed, as for any
-  other tool.
-- A tool catalog entry for `apply_patch` does not change this: when the hook
-  names its harness, the harness's tool is decided as the shared tool. A higher
-  tier on such an entry is still honoured.
-
-An older install runs a `stratium-codex-hook` shell script instead. It still
-works, but the PDP is not told the harness, so `apply_patch` is decided under
-its own name. Re-run `deploy/stratium --codex install` to replace it.
 
 ---
 
@@ -459,6 +258,7 @@ Four unrelated causes all exit `2`, so read the reason, never the code:
 ## See also
 
 - [`session-start.md`](session-start.md) — required first.
+- The harness pages, from the table at the top — how each one is installed, what its tools are decided as, and when it runs a tool without a decision.
 - [`mcp.md`](mcp.md) — the same enforcement for MCP tool calls.
 - [`../pep.md`](../pep.md) § "Reading a denial" — every reason string decoded.
 - [`../../example/hook/`](../../example/hook/) — this surface's configuration plus a real, captured Claude Code transcript hitting the deny path.

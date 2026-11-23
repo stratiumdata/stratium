@@ -102,6 +102,8 @@ nav:
       - session-start: pep/session-start.md
       - hook: pep/hook.md
       - Antigravity CLI: pep/harnesses/antigravity.md
+      - Claude Code: pep/harnesses/claude-code.md
+      - Codex: pep/harnesses/codex.md
       - Copilot CLI: pep/harnesses/copilot.md
       - Cursor: pep/harnesses/cursor.md
       - Devin: pep/harnesses/devin.md

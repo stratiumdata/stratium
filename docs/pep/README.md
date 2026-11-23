@@ -27,8 +27,9 @@ variables, because there is no separate process to hand them to.
 
 ## Which one do I want?
 
-**Your agent is Claude Code or Codex.** [`hook`](hook.md), preceded by
-[`session-start`](session-start.md). This is the highest-fidelity surface: the
+**Your agent is a coding harness** — Claude Code, Codex, or another one in
+[`hook`](hook.md)'s table, each with a page of its own. [`hook`](hook.md),
+preceded by [`session-start`](session-start.md). This is the highest-fidelity surface: the
 PDP sees the tool name and its arguments, so classification caps and
 resource labels all work.
 
