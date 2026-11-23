@@ -984,6 +984,65 @@ services:
       # count against retries, so a slow start is not reported as unhealthy.
       start_period: 180s
 
+  # LiteLLM again, this time with the Stratium guardrails loaded
+  # (deploy/litellm/stratium_guardrail.py, docs/pep/litellm.md), so the
+  # integration suite can show what they do inside a real proxy: the unit
+  # tests in deploy/litellm drive the guardrail classes directly and cannot
+  # show that this LiteLLM release still loads them and still calls them.
+  #
+  # Decisions come from pdp-mcp, which already runs with principal
+  # verification off, as the guardrail needs. The agent and subject below are
+  # fixed because the proxy reads them at start-up; the suite seeds that
+  # agent and a policy for that subject before its first request. Only the
+  # two read tools are requested, so the write tools the mocks also offer are
+  # refused.
+  #
+  # mock-llm and mock-mcp run from the same image for its Python and its MCP
+  # library, so there is no further image to build or pin. All three must use
+  # the same digest as litellm above.
+  mock-llm:
+    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    entrypoint: ["python", "/mock/mock_llm.py"]
+    volumes:
+      - ./litellm/mock_llm.py:/mock/mock_llm.py:ro
+
+  mock-mcp:
+    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    entrypoint: ["python", "/mock/mock_mcp.py"]
+    volumes:
+      - ./litellm/mock_mcp.py:/mock/mock_mcp.py:ro
+
+  litellm-guarded:
+    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      - pdp-mcp
+      - mock-llm
+      - mock-mcp
+    environment:
+      STRATIUM_PEP_PDP_ADDR: pdp-mcp:50051
+      STRATIUM_PEP_PDP_INSECURE: "true"  # local stack only
+      STRATIUM_PEP_CONNECT_TIMEOUT: 5s
+      STRATIUM_PEP_APPROVAL_POLL_INTERVAL: 1s
+      STRATIUM_PEP_APPROVAL_TIMEOUT: 5s
+      STRATIUM_PEP_TTL_SECONDS: "3600"
+      STRATIUM_PEP_REQUESTED_TIER: "4"
+      STRATIUM_PEP_REQUESTED_TOOLS: guarded_read,guarded-read_file
+      STRATIUM_PEP_AGENT_ID: 6c1e7e11-0000-4000-8000-000000000001
+      STRATIUM_PEP_SUBJECT: litellm-guarded@example.com
+    volumes:
+      - ./litellm/guarded-config.yaml:/app/config.yaml:ro
+      - ../litellm/stratium_guardrail.py:/app/stratium_guardrail.py:ro
+      - ../../sdk/python/stratium:/app/stratium:ro
+    ports:
+      - "127.0.0.1::4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 180s
+
   # Tenth PDP instance, and the only one that authenticates principals: every
   # PDP above sets STRATIUM_PRINCIPAL_AUTH_INSECURE and believes the subject a
   # caller sends, which keeps their proofs about what they are about. This one

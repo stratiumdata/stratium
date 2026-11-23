@@ -1,0 +1,33 @@
+# deploy/docker/litellm/guarded-config.yaml
+#
+# The litellm-guarded service: LiteLLM with both Stratium guardrails loaded,
+# in front of a mock model and a mock MCP server (mock_llm.py, mock_mcp.py).
+# Nothing here reaches outside the stack.
+model_list:
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://mock-llm:9001/v1
+      api_key: not-a-real-key
+
+# The server's name is the prefix of its tools: guarded-read_file.
+mcp_servers:
+  guarded:
+    url: http://mock-mcp:9002/mcp
+    transport: http
+    allow_all_keys: true
+
+guardrails:
+  - guardrail_name: stratium-mcp
+    litellm_params:
+      guardrail: stratium_guardrail.StratiumMCPGuardrail
+      mode: [pre_mcp_call, post_mcp_call]
+      default_on: true
+  - guardrail_name: stratium-chat
+    litellm_params:
+      guardrail: stratium_guardrail.StratiumChatGuardrail
+      mode: post_call
+      default_on: true
+
+general_settings:
+  master_key: sk-local-dev-only
