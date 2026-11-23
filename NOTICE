@@ -3,3 +3,7 @@ Copyright 2026 Stratium Data
 
 This product includes software developed by Stratium Data
 (https://stratium.dev).
+
+proto/agentgateway/ext_mcp.proto is copied unmodified from agentgateway
+v1.7.0 (https://github.com/agentgateway/agentgateway), licensed under the
+Apache License, Version 2.0. services/internal/extmcp is generated from it.
