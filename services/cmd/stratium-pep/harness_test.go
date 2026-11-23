@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -53,6 +54,9 @@ func TestRunHookFor(t *testing.T) {
 			`"decision":"block"`, reason},
 		{"goose: a failure with no output still blocks", []string{"--harness", "goose"}, crash, 2,
 			`"decision":"block"`, "denied with no output"},
+		{"devin allow", []string{"--harness", "devin"}, allow, 0, "", ""},
+		{"devin deny puts the reason on stderr and exits 2: exit 1 would run the call", []string{"--harness", "devin"}, deny, 2,
+			`"permissionDecision":"deny"`, reason},
 		{"antigravity allow is silent", []string{"--harness", "antigravity"}, allow, 0, "", ""},
 		{"antigravity deny is its decision JSON with exit 0: exit 2 would lose it", []string{"--harness", "antigravity"}, deny, 0,
 			`{"decision":"deny","reason":"stratium-pep: denied by policy"}`, reason},
@@ -240,5 +244,39 @@ func TestParseGoose(t *testing.T) {
 	}
 	if got.ToolName != "write" || got.Cwd != "/proj" || string(got.ToolInput) != `{"path":"new.txt","content":"x"}` {
 		t.Errorf("got %+v", got)
+	}
+}
+
+func TestParseDevin(t *testing.T) {
+	in := `{"hook_event_name":"PreToolUse","tool_name":"read","tool_input":{"file_path":"sub/a.txt"},"tool_use_id":"c1"}`
+	out, err := parseDevin([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got hookStdin
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if got.ToolName != "read" || got.Cwd != wd || string(got.ToolInput) != `{"file_path":"sub/a.txt"}` {
+		t.Errorf("got %+v, want cwd %q", got, wd)
+	}
+}
+
+// A hook installed for Claude Code is run by Devin too, with no --harness.
+func TestHarnessFlag_DevinWithoutFlag(t *testing.T) {
+	for _, tt := range []struct {
+		env, args, want string
+		wantOK          bool
+	}{
+		{"", "", "", false},
+		{"/proj", "", "devin", true},
+		{"/proj", "--harness codex", "codex", true},
+	} {
+		t.Setenv("DEVIN_PROJECT_DIR", tt.env)
+		name, ok, err := harnessFlag(strings.Fields(tt.args))
+		if err != nil || name != tt.want || ok != tt.wantOK {
+			t.Errorf("env %q args %q: got %q, %v, %v; want %q, %v", tt.env, tt.args, name, ok, err, tt.want, tt.wantOK)
+		}
 	}
 }

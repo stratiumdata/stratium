@@ -14,6 +14,7 @@ Code's.
 | Codex | `codex` | `PreToolUse` hook | no: read from source at 0.133.0 |
 | [Copilot CLI](harnesses/copilot.md) | `copilot` | `preToolUse` hook | yes, 1.0.114; see its page for what was observed |
 | [Cursor](harnesses/cursor.md) | `cursor` | `preToolUse` hook | yes, CLI 2026.11.19; see its page for what was observed |
+| [Devin](harnesses/devin.md) | `devin` | `PreToolUse` hook | yes, CLI 3000.14; see its page for what was observed |
 | [Goose](harnesses/goose.md) | `goose` | `PreToolUse` hook in a plugin | yes, 1.60.2; see its page for what was observed |
 | [Kiro CLI](harnesses/kiro.md) | `kiro` | `PreToolUse` hook | yes, 3.5.0 on the v3 engine; see its page for what was observed |
 | [OpenCode 2.x](harnesses/opencode.md) | `opencode` | a plugin that runs the hook | yes, 2.3.2; see its page for what was observed |

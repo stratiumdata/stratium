@@ -238,7 +238,8 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
     copilot = hook_arg.endswith("--harness copilot")
     antigravity = hook_arg.endswith("--harness antigravity")
     goose = hook_arg.endswith("--harness goose")
-    report_flag = " --harness " + hook_arg.split()[-1] if copilot or antigravity or goose else ""
+    devin = hook_arg.endswith("--harness devin")
+    report_flag = " --harness " + hook_arg.split()[-1] if copilot or antigravity or goose or devin else ""
     report = {
         "matcher": matcher,
         "hooks": [{
@@ -276,6 +277,17 @@ def entries(binary, matcher, only=None, hook_arg="hook", tail=""):
         return {CURSOR_EVENT[e]: cursor_entry(e, g) for e, g in wanted.items()}
     if copilot:
         return {CURSOR_EVENT[e]: copilot_entry(g) for e, g in wanted.items()}
+    if devin:
+        # Claude Code's shape. The matcher is a regular expression and ""
+        # is every tool. `fail_closed` is what makes Devin refuse the call
+        # when the hook crashes, times out or cannot be started; without it
+        # the call runs.
+        for e, g in wanted.items():
+            if g.get("matcher") == "*":
+                g["matcher"] = ""
+            if e == "PreToolUse":
+                g["hooks"][0]["fail_closed"] = True
+        return wanted
     if goose:
         # Claude Code's shape, with two differences that both fail open if
         # missed. Goose's matcher is a regular expression, and it skips a rule
@@ -410,7 +422,7 @@ def hooks_key(harness):
     return "stratium" if harness == "antigravity" else "hooks"
 
 
-def strip(settings, events=None, key="hooks"):
+def strip(settings, events=None, key="hooks", drop_version=True):
     """Remove Stratium entries, pruning containers left empty. Returns count.
 
     `events` limits the sweep to those event names; None means all of them.
@@ -441,7 +453,7 @@ def strip(settings, events=None, key="hooks"):
             del hooks[event]
     if not hooks or set(hooks) == {"enabled"}:
         del settings[key]
-        if set(settings) == {"version"}:
+        if drop_version and set(settings) == {"version"}:
             del settings["version"]  # Cursor's file, with nothing left in it
     return removed
 
@@ -479,7 +491,7 @@ def install(args):
     # Strip only the events we are about to write, so `install --only PreToolUse`
     # does not silently remove a SessionStart hook installed by an earlier run.
     key = hooks_key(args.harness)
-    replaced = strip(settings, events=set(wanted), key=key)
+    replaced = strip(settings, events=set(wanted), key=key, drop_version=args.harness != "devin")
     if args.harness in ("cursor", "copilot"):
         settings.setdefault("version", 1)
     hooks = settings.setdefault(key, {})
@@ -934,7 +946,8 @@ def uninstall(args):
     if args.harness == "opencode":
         return uninstall_opencode(args)
     settings = read_settings(args)
-    removed = strip(settings, key=hooks_key(args.harness))
+    # Devin's file is the user's whole configuration: its "version" is theirs.
+    removed = strip(settings, key=hooks_key(args.harness), drop_version=args.harness != "devin")
     if not removed:
         print(f"no Stratium hooks in {args.settings}")
         return
@@ -1337,6 +1350,39 @@ def selftest(_args):
                 uninstall_system(scp_)
             assert not os.path.exists(pol)
 
+            # --devin: under "hooks" beside the user's other settings, fail_closed
+            dp = os.path.join(d, "devin-config.json")
+            with open(dp, "w") as f:
+                json.dump({"version": 1}, f)
+            da = argparse.Namespace(harness="devin", settings=dp, bin=src, matcher="*",
+                                    only=list(HARNESS["devin"]["events"]), dry_run=False,
+                                    user=False, force=True, show_next=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                install(da)
+                install(da)
+            assert load(dp) == {"version": 1, "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": f"{src} session-start",
+                                             "timeout": SESSION_START_TIMEOUT}]}],
+                "PreToolUse": [{"matcher": "", "hooks": [{
+                    "type": "command", "command": f"{src} hook --harness devin",
+                    "timeout": hook_timeout(), "fail_closed": True}]}],
+                "PostToolUse": [{"matcher": "", "hooks": [{
+                    "type": "command", "command": f"{src} report --harness devin",
+                    "timeout": REPORT_TIMEOUT}]}]}}, load(dp)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                assert status(da) == 0, out.getvalue()
+            with contextlib.redirect_stdout(io.StringIO()):
+                uninstall(da)
+            assert load(dp) == {"version": 1}, load(dp)  # the user's key survives
+            for bad in (dict(system=True, system_root=sroot, settings=None),
+                        dict(settings=os.path.join(d, ".devin", "config.json"))):
+                try:
+                    resolve(argparse.Namespace(**{**dict(harness="devin", user=False, bin=None,
+                                                         matcher="*", only=None, dry_run=False), **bad}), pr)
+                    raise AssertionError(f"accepted --devin with {bad}")
+                except SystemExit:
+                    pass
+
             # --goose: no "*" matcher (Goose would skip the rule), block on failure
             gp = os.path.join(d, "goose", "hooks", "hooks.json")
             ga = argparse.Namespace(harness="goose", settings=gp, bin=src, matcher="*",
@@ -1719,6 +1765,11 @@ HARNESS = {
                     "user_path": "~/.gemini/config/hooks.json", "bin": "stratium-pep",
                     "events": ("SessionStart", "PreToolUse", "PostToolUse"),
                     "hook_arg": "hook --harness antigravity"},
+    # The "hooks" key of the user's config file, which holds their other
+    # settings too. A project's .devin/ needs the workspace to be trusted.
+    "devin": {"path": "~/.config/devin/config.json", "user_path": "~/.config/devin/config.json",
+              "bin": "stratium-pep", "events": ("SessionStart", "PreToolUse", "PostToolUse"),
+              "hook_arg": "hook --harness devin"},
     # A plugin of its own, holding nothing but its hooks file. A project's
     # .agents/plugins is loaded too, but the installer writes the user's only.
     "goose": {"path": "~/.agents/plugins/stratium/hooks/hooks.json",
@@ -1744,6 +1795,9 @@ def resolve(args, parser):
         parser.error("--antigravity has no --system: Antigravity CLI reads hooks from the "
                      "user's and the project's files only, so there is no administrator "
                      "location to install into")
+    if args.harness == "devin" and getattr(args, "system", False):
+        parser.error("--devin has no --system: no administrator location for the Devin "
+                     "CLI's hooks has been confirmed")
     if args.harness == "goose" and getattr(args, "system", False):
         parser.error("--goose has no --system: Goose loads plugins from the user's and the "
                      "project's .agents/plugins only, so there is no administrator "
@@ -1770,13 +1824,13 @@ def resolve(args, parser):
         args.settings = harness_path(args.harness, user=args.user)
     args.settings = os.path.expanduser(args.settings)
 
-    if args.harness in ("codex", "cursor", "copilot", "antigravity", "kiro", "goose") and not getattr(args, "system", False):
+    if args.harness in ("codex", "cursor", "copilot", "antigravity", "kiro", "goose", "devin") and not getattr(args, "system", False):
         # A project-local hook file is disabled until the project is trusted
         # (all three harnesses), and a disabled enforcement hook is not a
         # no-op — it is fail-open: every tool call proceeds unchecked (§2b).
         own = os.path.expanduser(h["user_path"])
         name = {"codex": "Codex", "cursor": "Cursor", "copilot": "Copilot CLI",
-                "antigravity": "Antigravity CLI", "kiro": "Kiro", "goose": "Goose"}[args.harness]
+                "antigravity": "Antigravity CLI", "kiro": "Kiro", "goose": "Goose", "devin": "Devin"}[args.harness]
         if os.path.dirname(os.path.abspath(args.settings)) != os.path.dirname(own):
             parser.error(
                 f"--{args.harness} writes {own} only. {args.settings} looks "
@@ -2563,6 +2617,9 @@ def add_options(p, suppress=False):
     harness.add_argument("--antigravity", dest="harness", action="store_const",
                          const="antigravity", default=d(None),
                          help="target Antigravity CLI (agy): ~/.gemini/config/hooks.json")
+    harness.add_argument("--devin", dest="harness", action="store_const", const="devin",
+                         default=d(None),
+                         help="target Devin (CLI and Desktop): ~/.config/devin/config.json")
     harness.add_argument("--goose", dest="harness", action="store_const", const="goose",
                          default=d(None),
                          help="target Goose: ~/.agents/plugins/stratium/hooks/hooks.json")
@@ -2648,7 +2705,7 @@ def main():
     args = p.parse_args()
     if getattr(args, "needs_harness", False):
         if args.harness is None:
-            p.error("pick a harness: --antigravity, --claude, --codex, --copilot, --cursor, --goose, --kiro or --opencode")
+            p.error("pick a harness: --antigravity, --claude, --codex, --copilot, --cursor, --devin, --goose, --kiro or --opencode")
         resolve(args, p)
     try:
         sys.exit(args.fn(args) or 0)

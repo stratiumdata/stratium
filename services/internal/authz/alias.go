@@ -146,6 +146,20 @@ func DefaultAliases() map[string]map[string]ToolAlias {
 			"edit":  {Canonical: "Edit", PathField: "path"},
 			"tree":  {Canonical: "LS", PathField: "path"},
 		},
+		// Devin (CLI and Desktop share one agent), from live sessions of CLI
+		// 3000.14: exec, read, write, edit, grep, glob and webfetch. read,
+		// write and edit take Claude Code's file_path. apply_patch and the
+		// notebook tools are in Devin's documentation without their inputs,
+		// so they keep their own names, as subagent and MCP tools do.
+		"devin": {
+			"exec":     {Canonical: "Bash", CommandField: "command"},
+			"read":     {Canonical: "Read", PathField: "file_path"},
+			"write":    {Canonical: "Write", PathField: "file_path"},
+			"edit":     {Canonical: "Edit", PathField: "file_path"},
+			"grep":     {Canonical: "Grep"},
+			"glob":     {Canonical: "Glob"},
+			"webfetch": {Canonical: "WebFetch"},
+		},
 		"antigravity": {
 			"run_command":                {Canonical: "Bash", CommandField: "CommandLine"},
 			"read_file":                  {Canonical: "Read", PathField: "Path"},

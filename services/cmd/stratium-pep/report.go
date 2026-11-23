@@ -58,7 +58,7 @@ type reportClient interface {
 // call payload is not Claude Code's. The report must be read exactly as the
 // decision was, or the two would not match.
 func runReportCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if name, _, _ := flagValue(args, "--harness"); harnesses[name].reportReply != "" {
+	if name, _, _ := harnessFlag(args); harnesses[name].reportReply != "" {
 		_, _ = fmt.Fprintln(stdout, harnesses[name].reportReply)
 	}
 	stdin, err := harnessStdin(args, stdin)
