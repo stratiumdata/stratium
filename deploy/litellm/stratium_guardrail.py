@@ -215,10 +215,22 @@ class Engine:
 _shared: Engine | None = None
 
 
+class StartupError(RuntimeError):
+    """The guardrail cannot be built from this environment.
+
+    Deliberately not a ValueError. LiteLLM catches ValueError and TypeError
+    from a guardrail's constructor, logs "starting WITHOUT this guardrail" and
+    starts. Any other exception stops the proxy.
+    """
+
+
 def shared_engine() -> Engine:
     global _shared
     if _shared is None:
-        _shared = Engine()
+        try:
+            _shared = Engine()
+        except (ValueError, TypeError) as err:
+            raise StartupError(f"stratium guardrail: {err}") from err
     return _shared
 
 

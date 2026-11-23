@@ -82,6 +82,17 @@ def test_a_missing_setting_stops_start_up():
         load_config({})
 
 
+def test_a_guardrail_that_cannot_be_configured_is_not_one_litellm_skips(monkeypatch):
+    """LiteLLM starts without a guardrail whose constructor raises ValueError
+    or TypeError. A missing setting has to reach it as something else."""
+    import stratium_guardrail as g
+    monkeypatch.setattr(g, "_shared", None)
+    monkeypatch.delenv("STRATIUM_PEP_PDP_ADDR", raising=False)
+    with pytest.raises(g.StartupError, match="STRATIUM_PEP_PDP_ADDR") as err:
+        g.StratiumChatGuardrail(guardrail_name="stratium-chat")
+    assert not isinstance(err.value, (ValueError, TypeError))
+
+
 def test_durations_are_read_as_stratium_pep_reads_them():
     env = {"STRATIUM_PEP_PDP_ADDR": "pdp:50051", "STRATIUM_PEP_CONNECT_TIMEOUT": "500ms",
            "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s", "STRATIUM_PEP_APPROVAL_TIMEOUT": "2m",

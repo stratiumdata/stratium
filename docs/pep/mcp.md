@@ -50,10 +50,10 @@ it starts empty on every start, and nothing is ever read from a cache file. See
 | Variable | Example | Notes |
 |---|---|---|
 | `STRATIUM_PEP_MCP_UPSTREAM_COMMAND` | `npx` | The real server's executable. |
-| `STRATIUM_PEP_MCP_UPSTREAM_ARGS` | `-y @modelcontextprotocol/server-filesystem /srv/data` | Optional. Space-separated. |
+| `STRATIUM_PEP_MCP_UPSTREAM_ARGS` | `-y,@modelcontextprotocol/server-filesystem,/srv/data` | Optional. Comma-separated, one argument per item. Spaces do not separate arguments. |
 | `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. |
 | `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |
-| *(the eight from [`hook.md`](hook.md))* | | Same meanings, same values. |
+| *(the seven from [`hook.md`](hook.md))* | | Same meanings, same values. |
 
 ---
 
@@ -75,7 +75,7 @@ environment:
   "args": ["mcp"],
   "env": {
     "STRATIUM_PEP_MCP_UPSTREAM_COMMAND": "npx",
-    "STRATIUM_PEP_MCP_UPSTREAM_ARGS": "-y @modelcontextprotocol/server-filesystem /srv/data",
+    "STRATIUM_PEP_MCP_UPSTREAM_ARGS": "-y,@modelcontextprotocol/server-filesystem,/srv/data",
 
     "STRATIUM_PEP_PDP_ADDR": "localhost:50051",
     "STRATIUM_PEP_PDP_INSECURE": "true",

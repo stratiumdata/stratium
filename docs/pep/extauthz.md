@@ -106,11 +106,40 @@ clusters:
 > outage into a blanket allow. Deny-on-error is Envoy's default and is the
 > behaviour this design assumes.
 
-The agent attaches its delegation token as a normal HTTP header:
+The agent attaches a delegation token and a proof as HTTP headers:
 
 ```
-Authorization: Bearer <the session file's token>
+Authorization: Bearer <a token bound to the agent's key>
+DPoP: <a proof signed with that key>
 ```
+
+**The session file's token is refused here.** `session-start` issues a
+bearer token, and this surface accepts only a token bound to a key the caller
+holds (RFC 9449 DPoP), with a fresh proof on every call. A bearer token is
+answered with
+
+```
+this surface requires a sender-constrained token (RFC 9449 DPoP), and the
+delegation token presented is not bound to a key
+```
+
+whatever policy says. To get a bound token, the agent:
+
+1. generates a P-256 key pair and keeps the private key;
+2. calls the PDP's `IssueToken` with the session file's `delegation_id`, the
+   session file's `token`, and the public key as a JWK in `dpop_jwk`. The
+   reply's token is bound to that key;
+3. signs a new proof for each request: a JWT of type `dpop+jwt`, signed ES256
+   with the public key embedded, claiming `htm` as the request's method,
+   `htu` as the URL the request is addressed to, without its query string
+   (`http://api.example.com/v1/orders`), a unique `jti` and the current time
+   as `iat`.
+
+A proof is good for one request. `MintBoundToken` in
+[`example/agent/setup.go`](../../example/agent/setup.go) and
+[`example/extauthz/main.go`](../../example/extauthz/main.go) are a working
+client. Envoy forwards the `Authorization` header to the upstream service
+unless you configure it to remove it.
 
 ---
 

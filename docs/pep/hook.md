@@ -248,10 +248,18 @@ Four unrelated causes all exit `2`, so read the reason, never the code:
 - **Fieldless tools deny under any cap.** `Glob`, `Grep`, `WebFetch`,
   `WebSearch` and `TodoWrite` declare no resource field, so nothing can be
   labelled and the cap cannot be evaluated.
-- **`Bash` is not a back door but it is a different check.** It is catalogued
-  with a command field and no resource field, so its tier is derived from the
-  command text and no resource label is resolved. `Bash(cat secret.txt)` and
-  `Read(secret.txt)` are not the same decision.
+- **`Bash` is checked by the paths in its command.** It is catalogued with a
+  command field and no resource field, so its tier is derived from the command
+  text. Under a classification cap the PDP labels every path-like word in the
+  command and applies the strictest label: `Bash(cat /tmp/secret-plans.txt)`
+  is refused under a cap that file exceeds, as `Read` of it would be.
+- **A command that names no path is refused under any cap.** `ls -la`,
+  `git status` and `echo hi` give the PDP nothing to label, so the cap cannot
+  be evaluated, as for the fieldless tools above. An agent with a cap can run
+  only shell commands that name a file.
+- **The command is read as text, not run through a shell.** Variable
+  expansion, here-documents and a script piped into `sh` hide a path from the
+  label. The delegation's tier ceiling and escalation are what hold there.
 
 ---
 
