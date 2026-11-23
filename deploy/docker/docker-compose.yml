@@ -339,7 +339,7 @@ services:
   # from is what makes this a same-version proof rather than a
   # close-enough one.
   envoy:
-    image: envoyproxy/envoy:v1.37.0@sha256:d9b4a70739d92b3e28cd407f106b0e90d55df453d7d87773efd22b4429777fe8
+    image: envoyproxy/envoy:v1.40.2@sha256:8de97e654644827d62afdbf7e1d3dc9fee01a8690d410dd1c63a30dc6b6cecbb
     depends_on:
       - pep-extauthz
       - echo-upstream
@@ -765,7 +765,7 @@ services:
   # own /dev/tcp is the available HTTP client (verified against this exact
   # image, not assumed).
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
+    image: quay.io/keycloak/keycloak:26.8@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
