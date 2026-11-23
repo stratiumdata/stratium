@@ -1914,7 +1914,7 @@ hook sooner runs the tool call, so the `timeout` must be the larger number.
 `--harness codex` makes the hook answer the way Codex reads (exit `2`, reason on
 stderr) and tells the PDP the tool names are Codex's, so a file edit from Codex
 (`apply_patch`) is decided as an `Edit` of each file the patch names. See
-[`stratium-pep hook`](pep/hook.md#installing-in-codex).
+[`stratium-pep hook`](pep/harnesses/codex.md).
 
 Two Codex-specific gotchas, both of which fail **open**:
 
@@ -1923,7 +1923,7 @@ Two Codex-specific gotchas, both of which fail **open**:
 - Codex content-hashes every hook and will not run one you have not reviewed.
   A freshly installed hook reports `trustStatus: untrusted` and **is not
   enforcing**. Approve each one in the `/hooks` browser, or use the
-  [system install](pep/hook.md#the-system-install-for-codex), whose hooks need
+  [system install](pep/harnesses/codex.md#the-system-install), whose hooks need
   no review.
 
 Full detail: [`docs/testing/2026-08-20-agent-integration-test.md`](testing/2026-08-20-agent-integration-test.md).
