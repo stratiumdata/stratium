@@ -263,6 +263,16 @@ func TestParseDevin(t *testing.T) {
 	}
 }
 
+// DEVIN_PROJECT_DIR can be inherited by another harness's session. Its
+// payload names its own working directory, which is left as sent.
+func TestParseDevin_KeepsPayloadCwd(t *testing.T) {
+	in := `{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"a.txt"},"cwd":"/elsewhere"}`
+	out, err := parseDevin([]byte(in))
+	if err != nil || string(out) != in {
+		t.Errorf("got %s, %v; want the payload untouched", out, err)
+	}
+}
+
 // A hook installed for Claude Code is run by Devin too, with no --harness.
 func TestHarnessFlag_DevinWithoutFlag(t *testing.T) {
 	for _, tt := range []struct {

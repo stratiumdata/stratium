@@ -92,11 +92,17 @@ func harnessFlag(args []string) (string, bool, error) {
 
 // parseDevin reads Devin's hook payload: Claude Code's, less the working
 // directory. Devin runs a hook in the session's directory, so that is where
-// a relative path in the tool input is resolved.
+// a relative path in the tool input is resolved. A working directory the
+// payload does carry is kept: Devin is recognised by an environment variable,
+// which another harness's session can inherit, and that harness's own cwd
+// must not be replaced.
 func parseDevin(stdin []byte) ([]byte, error) {
 	var in hookStdin
 	if err := json.Unmarshal(stdin, &in); err != nil {
 		return nil, fmt.Errorf("malformed stdin: %w", err)
+	}
+	if in.Cwd != "" {
+		return stdin, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
