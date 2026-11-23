@@ -10,6 +10,14 @@ harness name is not recorded. An aliased call with no resource identity is
 refused outright, not only under a path constraint: once aliased it is
 matched by rules written for calls that name their resource.
 
+Outcome notes, Devin (built 2026-11-22, run on CLI 3000.14): hooks under the
+`hooks` key of `~/.config/devin/config.json`, Claude Code's payload without
+`cwd` (the hook passes on its own working directory), deny by exit 2 with
+stderr. `fail_closed: true`, undocumented, makes a failed hook refuse the
+call. Devin also runs the hooks in Claude Code's settings files, with no
+`--harness`; `hook` and `report` recognise Devin by `DEVIN_PROJECT_DIR`. This
+is the one place a harness is inferred instead of named.
+
 Outcome notes, Goose (built 2026-11-22 from source at 1.60.0, then run on
 1.60.2, which agreed with the source): a
 plugin of its own at `~/.agents/plugins/stratium/hooks/hooks.json`, in Claude

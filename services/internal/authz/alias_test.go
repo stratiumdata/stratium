@@ -474,3 +474,47 @@ func TestGooseAliases(t *testing.T) {
 		})
 	}
 }
+
+// Inputs are the ones live sessions of Devin CLI 3000.14 sent.
+func TestDevinAliases(t *testing.T) {
+	tests := []struct {
+		tool, input string
+		wantTool    string
+		wantID      string
+		wantCommand string
+		wantNoAlias bool
+	}{
+		{tool: "exec", input: `{"command":"ls sub"}`, wantTool: "Bash", wantCommand: "ls sub"},
+		{tool: "read", input: `{"file_path":"/proj/notes.txt"}`, wantTool: "Read", wantID: "/proj/notes.txt"},
+		{tool: "read", input: `{"file_path":"sub/a.txt"}`, wantTool: "Read", wantID: "/proj/sub/a.txt"},
+		{tool: "write", input: `{"content":"egret","file_path":"/proj/new.txt"}`, wantTool: "Write", wantID: "/proj/new.txt"},
+		{tool: "edit", input: `{"file_path":"/proj/notes.txt","new_string":"crane","old_string":"heron"}`,
+			wantTool: "Edit", wantID: "/proj/notes.txt"},
+		{tool: "grep", input: `{"pattern":"word"}`, wantTool: "Grep"},
+		{tool: "glob", input: `{"pattern":"**/*.txt"}`, wantTool: "Glob"},
+		{tool: "webfetch", input: `{"url":"https://example.com"}`, wantTool: "WebFetch"},
+		{tool: "apply_patch", input: `{"patch":"x"}`, wantNoAlias: true},
+		{tool: "run_subagent", input: `{"prompt":"p"}`, wantNoAlias: true},
+		{tool: "mcp__github__create_issue", input: `{}`, wantNoAlias: true},
+		// a file tool with no file_path: no file, so refused
+		{tool: "write", input: `{"path":"/proj/new.txt"}`, wantTool: "Write", wantID: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.input, func(t *testing.T) {
+			a, alias := ResolveAlias("devin", Action{Tool: tt.tool, RawInput: tt.input})
+			if tt.wantNoAlias {
+				if alias != nil {
+					t.Fatalf("aliased to %q, want no alias", a.Tool)
+				}
+				return
+			}
+			if alias == nil || a.Tool != tt.wantTool {
+				t.Fatalf("Tool = %q, alias = %v; want %q", a.Tool, alias, tt.wantTool)
+			}
+			ext := ExtractAliased(nil, a, *alias, "/proj")
+			if ext.ResourceID != tt.wantID || ext.Command != tt.wantCommand {
+				t.Errorf("ResourceID = %q, Command = %q; want %q, %q", ext.ResourceID, ext.Command, tt.wantID, tt.wantCommand)
+			}
+		})
+	}
+}

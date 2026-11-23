@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 )
 
 // A harness is an agent runtime whose pre-tool-call hook this binary can be.
@@ -45,6 +46,9 @@ var harnesses = map[string]struct {
 	// nothing: anything on stdout that is not a decision counts as a failed
 	// hook there.
 	"goose": {deny: denyGoose, parse: parseGoose},
+	// Devin sends Claude Code's field names without the working directory.
+	// It blocks on exit 2 with stderr as the reason.
+	"devin": {deny: denyOnStderr, parse: parseDevin},
 	// OpenCode has no command hooks. Its plugin (deploy/opencode) runs this
 	// binary, sends Claude Code's field names, and rejects the tool call
 	// with stderr as the reason on any exit but 0.
@@ -72,6 +76,40 @@ func parseAntigravity(stdin []byte) ([]byte, error) {
 		return nil, fmt.Errorf("malformed stdin: %w", err)
 	}
 	return json.Marshal(hookStdin{ToolName: in.ToolCall.Name, ToolInput: in.ToolCall.Args, Cwd: in.Cwd})
+}
+
+// harnessFlag is --harness, with one harness recognised without it. Devin
+// runs the hooks in Claude Code's settings files as well as its own, so a
+// hook installed for Claude Code is called by Devin with no flag; Devin sets
+// DEVIN_PROJECT_DIR for every hook it runs.
+func harnessFlag(args []string) (string, bool, error) {
+	name, ok, err := flagValue(args, "--harness")
+	if err == nil && !ok && os.Getenv("DEVIN_PROJECT_DIR") != "" {
+		return "devin", true, nil
+	}
+	return name, ok, err
+}
+
+// parseDevin reads Devin's hook payload: Claude Code's, less the working
+// directory. Devin runs a hook in the session's directory, so that is where
+// a relative path in the tool input is resolved. A working directory the
+// payload does carry is kept: Devin is recognised by an environment variable,
+// which another harness's session can inherit, and that harness's own cwd
+// must not be replaced.
+func parseDevin(stdin []byte) ([]byte, error) {
+	var in hookStdin
+	if err := json.Unmarshal(stdin, &in); err != nil {
+		return nil, fmt.Errorf("malformed stdin: %w", err)
+	}
+	if in.Cwd != "" {
+		return stdin, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("no working directory: %w", err)
+	}
+	in.Cwd = cwd
+	return json.Marshal(in)
 }
 
 // parseGoose reads Goose's hook payload. It has Claude Code's tool_name and
@@ -149,7 +187,7 @@ func denyCopilot(stdout, stderr io.Writer, _ []byte, reason string) int {
 // harness is taken from args; with no --harness, or one that needs no
 // parsing, stdin comes back untouched.
 func harnessStdin(args []string, stdin io.Reader) (io.Reader, error) {
-	name, _, err := flagValue(args, "--harness")
+	name, _, err := harnessFlag(args)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +239,7 @@ func denyOnStderr(stdout, stderr io.Writer, claudeOut []byte, reason string) int
 // so a failure here that exited 1 would be an allow.
 func runHookFor(args []string, stdin io.Reader, stdout, stderr io.Writer,
 	run func(harness string, stdin io.Reader, stdout io.Writer) int) int {
-	name, ok, err := flagValue(args, "--harness")
+	name, ok, err := harnessFlag(args)
 	if !ok {
 		name = "claude"
 	}
