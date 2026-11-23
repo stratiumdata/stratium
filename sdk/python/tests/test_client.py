@@ -253,3 +253,25 @@ def test_principal_token_on_a_child_raises_before_any_call(fake_pdp):
                                 principal_token="oidc-token")
     assert fake_pdp.delegation_calls == []
 
+
+
+def test_decide_names_the_harness_and_working_directory_when_given(fake_pdp):
+    fake_pdp.decide_responses += [pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW)] * 2
+    with Client(fake_pdp.addr, insecure=True) as c:
+        c.decide(agent_id="a", subject="s", tool="apply_patch", raw_input="p", token="t",
+                 harness="codex", cwd="/proj")
+        c.decide(agent_id="a", subject="s", tool="Read", raw_input="{}", token="t")
+    assert (fake_pdp.decide_calls[0].harness, fake_pdp.decide_calls[0].cwd) == ("codex", "/proj")
+    assert (fake_pdp.decide_calls[1].harness, fake_pdp.decide_calls[1].cwd) == ("", "")
+
+
+def test_report_tool_use_sends_the_call_as_it_was_decided(fake_pdp):
+    with Client(fake_pdp.addr, insecure=True) as c:
+        assert c.report_tool_use(token="tok", tool="Read", raw_input={"b": 2, "a": 1}) is True
+    req = fake_pdp.report_calls[0]
+    assert (req.token, req.tool, req.raw_input) == ("tok", "Read", '{"a":1,"b":2}')
+
+
+def test_a_report_that_cannot_be_delivered_is_false_not_an_error():
+    with Client("127.0.0.1:1", insecure=True, connect_timeout=0.5) as c:
+        assert c.report_tool_use(token="t", tool="Read", raw_input="{}") is False

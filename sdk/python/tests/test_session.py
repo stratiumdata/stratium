@@ -439,3 +439,16 @@ def test_a_session_forwards_its_escalation_threshold(fake_pdp):
 def test_session_sends_the_principal_token_when_minting(fake_pdp):
     session(fake_pdp, Clock(), principal_token="oidc-token")
     assert fake_pdp.delegation_calls[0].principal_token == "oidc-token"
+
+
+def test_a_sessions_harness_rides_on_every_decision_and_report_uses_its_token(fake_pdp):
+    fake_pdp.delegation_responses.append(grant_resp(tools=("Bash",)))
+    fake_pdp.decide_responses.append(pdp_pb2.DecideResponse(effect=pdp_pb2.EFFECT_ALLOW))
+    with Client(fake_pdp.addr, insecure=True) as c:
+        s = Session(c, subject="s", agent_id="a", tools=["Bash"], max_action_tier=3,
+                    purpose="p", ttl_seconds=60, harness="devin")
+        assert s.check(tool="exec", raw_input={"command": "ls"})
+        assert s.report(tool="exec", raw_input={"command": "ls"}) is True
+    assert fake_pdp.decide_calls[0].harness == "devin"
+    assert fake_pdp.report_calls[0].token == s.grant.token
+    assert fake_pdp.report_calls[0].raw_input == fake_pdp.decide_calls[0].raw_input

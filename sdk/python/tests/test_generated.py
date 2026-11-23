@@ -16,7 +16,7 @@ def test_generated_stubs_are_importable_and_carry_the_expected_shapes():
     assert pdp_pb2.EFFECT_ESCALATE == 2
 
     assert hasattr(pdp_pb2_grpc, "PDPServiceStub")
-    for field in ("agent_id", "subject", "tool", "raw_input", "token"):
+    for field in ("agent_id", "subject", "tool", "raw_input", "token", "harness", "cwd"):
         assert field in pdp_pb2.DecideRequest.DESCRIPTOR.fields_by_name
     for field in ("effect", "reason", "approval_id", "epoch"):
         assert field in pdp_pb2.DecideResponse.DESCRIPTOR.fields_by_name

@@ -109,6 +109,7 @@ nav:
       - Kiro CLI: pep/harnesses/kiro.md
       - OpenCode: pep/harnesses/opencode.md
       - mcp: pep/mcp.md
+      - LiteLLM guardrail: pep/litellm.md
       - proxy: pep/proxy.md
       - extauthz: pep/extauthz.md
   - Architecture:

@@ -20,6 +20,7 @@ class FakePDP(pdp_pb2_grpc.PDPServiceServicer):
         self.decide_calls: list = []
         self.approval_calls: list = []
         self.delegation_calls: list = []
+        self.report_calls: list = []
 
     def Decide(self, request, context):
         self.decide_calls.append(request)
@@ -33,6 +34,10 @@ class FakePDP(pdp_pb2_grpc.PDPServiceServicer):
         if not self.delegation_responses:
             context.abort(grpc.StatusCode.INTERNAL, "no scripted response")
         return self.delegation_responses.pop(0)
+
+    def ReportToolUse(self, request, context):
+        self.report_calls.append(request)
+        return pdp_pb2.ReportToolUseResponse(matched=True)
 
     def GetApproval(self, request, context):
         self.approval_calls.append(request)

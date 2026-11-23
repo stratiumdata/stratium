@@ -123,6 +123,22 @@ jobs:
         env:
           GITLEAKS_VERSION: "8.30.1"
 
+  python:
+    name: Python SDK and LiteLLM guardrail
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The SDK alone first, on its own floor for protobuf: that is the
+      # version LiteLLM's image carries, and the stubs must load on it.
+      - run: pip install -e 'sdk/python[dev]' 'protobuf>=5.29,<6'
+      - run: make proto-python-check
+      - run: pytest sdk/python
+      - run: pip install 'litellm[proxy]>=1.110,<1.112'
+      - run: pytest deploy/litellm
+
   conformance:
     name: Authorization conformance
     runs-on: ubuntu-latest
