@@ -18,7 +18,8 @@ works, you just have to do all of this by hand.
 
 You need Docker (with `docker compose`, v2 — not the old `docker-compose`), a Go
 toolchain, and Python 3. The script checks all three before doing anything else
-and names what is missing.
+and names what is missing. On a fresh clone it also builds the admin UI, which
+the stack's images embed, and that needs Node.js (`npm`).
 
 ```bash
 git clone https://github.com/stratiumdata/stratium.git && cd stratium

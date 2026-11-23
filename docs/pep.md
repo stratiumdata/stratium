@@ -6,11 +6,12 @@ gRPC before that tool call runs. It classifies nothing itself — see the
 package doc in `services/cmd/stratium-pep/hook.go` for why that boundary is
 load-bearing, not incidental.
 
-It has two enforcement-surface subcommands today, both covered below: `hook`
-(a Claude Code `PreToolUse` hook) and `mcp` (a stdio proxy that stands in for
-an MCP server). Both are gated by the same `session-start` subcommand and the
-same PDP call; they differ only in *how* a harness invokes them and how each
-reports a denial back to it.
+This page covers two of its surfaces in full: `hook` (a `PreToolUse` hook
+for a coding agent) and `mcp` (a stdio proxy that stands in for an MCP
+server). Both are gated by the same `session-start` subcommand and the same
+PDP call; they differ only in *how* a harness invokes them and how each
+reports a denial back to it. The other surfaces (`proxy`, `extauthz`,
+`extmcp`) have pages of their own under [`pep/`](pep/README.md).
 
 **Every tool call is denied until a session is started and a policy permits
 it.** This holds for both `hook` and `mcp` — if you install either and see
@@ -37,7 +38,7 @@ like a policy denial rather than a misconfiguration. Set the same shared
 values across every subcommand you run — they must agree on which PDP,
 agent, and subject a session belongs to.
 
-Shared by all three subcommands (`session-start`, `hook`, `mcp`):
+Shared by `session-start`, `hook` and `mcp`:
 
 | Variable | Meaning |
 |---|---|
@@ -403,6 +404,7 @@ location are your client's own, not something this project defines):
         "STRATIUM_PEP_CONNECT_TIMEOUT": "5s",
         "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s",
         "STRATIUM_PEP_APPROVAL_TIMEOUT": "5m",
+        "STRATIUM_PEP_CACHE_STALENESS_WINDOW": "30s",
         "STRATIUM_PEP_MCP_UPSTREAM_COMMAND": "/usr/local/bin/my-real-mcp-server",
         "STRATIUM_PEP_MCP_UPSTREAM_ARGS": "--flag-one,--flag-two"
       }

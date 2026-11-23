@@ -91,10 +91,11 @@ the rest), so each tool is decided under its own name and nothing is
 translated. The other harnesses' pages map their tools onto these names, so a
 policy, tool list or tier override written for `Edit` covers every harness.
 
-`Bash` is catalogued with a command field and no resource field, and `Glob`,
-`Grep`, `WebFetch`, `WebSearch` and `TodoWrite` declare no resource field at
-all. See [Traps](../hook.md#traps) for what that means under a classification
-cap.
+`Bash` is catalogued with a command field and no resource field: its tier
+comes from the command text, and under a classification cap it is labelled by
+the paths the command names. `Glob`, `Grep`, `WebFetch`, `WebSearch` and
+`TodoWrite` declare no resource field at all. See [Traps](../hook.md#traps)
+for what both mean under a classification cap.
 
 ## Can the agent remove it?
 

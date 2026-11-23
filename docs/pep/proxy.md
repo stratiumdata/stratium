@@ -80,11 +80,39 @@ Then repoint the agent — the only change on its side:
 + conn, err := grpc.Dial("127.0.0.1:9292", …)
 ```
 
-The agent must attach its delegation token as gRPC metadata:
+The agent attaches a delegation token and a proof as gRPC metadata:
 
 ```
-authorization: Bearer <the session file's token>
+authorization: Bearer <a token bound to the agent's key>
+dpop: <a proof signed with that key>
 ```
+
+**The session file's token is refused here.** `session-start` issues a
+bearer token, and this surface accepts only a token bound to a key the caller
+holds (RFC 9449 DPoP), with a fresh proof on every call. A bearer token is
+answered with
+
+```
+this surface requires a sender-constrained token (RFC 9449 DPoP), and the
+delegation token presented is not bound to a key
+```
+
+whatever policy says. To get a bound token, the agent:
+
+1. generates a P-256 key pair and keeps the private key;
+2. calls the PDP's `IssueToken` with the session file's `delegation_id`, the
+   session file's `token`, and the public key as a JWK in `dpop_jwk`. The
+   reply's token is bound to that key;
+3. signs a new proof for each call: a JWT of type `dpop+jwt`, signed ES256
+   with the public key embedded, claiming `htm` `POST`, `htu`
+   `STRATIUM_PEP_PROXY_PUBLIC_URI` followed by the full method path
+   (`https://proxy.example.com/orders.v1.Orders/Cancel`), a unique `jti` and
+   the current time as `iat`.
+
+A proof is good for one call. `MintBoundToken` in
+[`example/agent/setup.go`](../../example/agent/setup.go) and `proof` in
+[`example/proxy/main.go`](../../example/proxy/main.go) are a working client.
+See [Sender-constrained tokens on `proxy`](../pep.md#sender-constrained-tokens-on-proxy).
 
 ---
 

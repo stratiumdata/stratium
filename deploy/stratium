@@ -2175,7 +2175,20 @@ def preflight():
         raise Fail("`docker compose` is not available (v1 `docker-compose` will not do)")
 
 
+def ensure_ui():
+    """Build the admin UI if it is not there. The PAP image embeds it from
+    the host, and it is not in git, so a fresh clone has none and the image
+    build fails with "pattern dist: no matching files found"."""
+    if os.path.exists(os.path.join(REPO, "services", "cmd", "stratium-pap", "dist", "index.html")):
+        return
+    if not shutil.which("npm"):
+        raise Fail("the admin UI is not built and npm is not on PATH -- "
+                   "install Node.js, then run this again (it runs `make ui`)")
+    sh(["make", "ui"], cwd=REPO)
+
+
 def ensure_stack():
+    ensure_ui()
     compose("up", "-d", "--build", "--wait", "--wait-timeout", "300")
 
 

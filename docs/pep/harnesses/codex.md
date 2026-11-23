@@ -30,7 +30,7 @@ This writes three events into `~/.codex/hooks.json`:
       { "matcher": "*",
         "hooks": [ { "type": "command",
                      "command": "/usr/local/bin/stratium-pep hook --harness codex",
-                     "timeout": 330 } ] }
+                     "timeout": 150 } ] }
     ],
     "PostToolUse": [
       { "matcher": "*",

@@ -117,9 +117,11 @@ requested tools (`STRATIUM_PEP_REQUESTED_TOOLS`) and in the tool catalog. As
 with [`mcp`](mcp.md#seeding-the-catalog), a tool that is not in the catalog is
 not held and is refused.
 
-A target name must not contain an underscore. With one, two different
-tools could be given the same name (`a` + `b_c` and `a_b` + `c`), so `extmcp`
-refuses every call to such a target and says why.
+A target name cannot contain an underscore. With one, two different tools
+could be given the same name (`a` + `b_c` and `a_b` + `c`). agentgateway 1.7.0
+refuses to start with such a name (`invalid MCP target name`), and `extmcp`
+refuses every call to such a target, and says why, should a gateway ever send
+one.
 
 The tool's `arguments` are sent to the PDP as they arrived.
 
