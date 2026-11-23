@@ -143,14 +143,19 @@ created: the guardrail has no OIDC token for the subject.
 - In a streamed reply, the text before the first tool call streams as it
   arrives. From the first tool call on, the reply is held until it ends and
   the calls are decided.
+- A reply with several choices (`n` above 1) has the tool calls of every
+  choice decided, streamed or not.
 
 ## What is not covered
 
-- **Anthropic Messages (`/v1/messages`) and the Responses API
-  (`/v1/responses`).** Their replies are not read yet. By default a call on
-  those routes is refused with HTTP 501, so that it is not passed unchecked
-  without anyone choosing that. `STRATIUM_LITELLM_UNREAD_ROUTES=allow` passes
-  them unchecked.
+- **Anything but chat and text completions.** Tool calls are read from
+  completion replies, and from streams on the `…/completions` routes. Every
+  other reply that could carry a tool call is refused with HTTP 501, so that
+  it is not passed unchecked without anyone choosing that: Anthropic Messages
+  (`/v1/messages`), the Responses API (`/v1/responses`), and any route
+  LiteLLM adds later. Replies that cannot carry one, such as embeddings,
+  images and transcriptions, pass.
+  `STRATIUM_LITELLM_UNREAD_ROUTES=allow` passes the refused ones unchecked.
 - **File tools with a relative path.** The proxy does not know the client's
   working directory, so the PDP refuses them.
 - **Which model a key may call.** [`example/extauthz`](../../example/extauthz/README.md)
@@ -162,7 +167,7 @@ created: the guardrail has no OIDC token for the subject.
 
 - **The guardrails are not in `config.yaml`**, or `default_on` is false and
   the request does not ask for them.
-- **`STRATIUM_LITELLM_UNREAD_ROUTES=allow`**, for the routes above.
+- **`STRATIUM_LITELLM_UNREAD_ROUTES=allow`**, for the replies above.
 - **The client does not use the proxy.**
 
 A PDP that cannot be reached, a key with no agent and an error inside the

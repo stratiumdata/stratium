@@ -18,8 +18,13 @@ Outcome notes (built 2026-11-22):
 - **Configured subject and agent as a fallback.** A proxy with no database has
   only its master key, whose user is a placeholder. `STRATIUM_PEP_AGENT_ID`
   and `STRATIUM_PEP_SUBJECT` cover that; a key's metadata still wins.
-- **Unread routes are refused, not passed.** `/v1/messages` and
-  `/v1/responses` return 501 unless `STRATIUM_LITELLM_UNREAD_ROUTES=allow`.
+- **What is not read is refused, not passed.** The guardrail lists the
+  replies it reads (completions) and the kinds that cannot carry a tool
+  call; every other reply returns 501 unless
+  `STRATIUM_LITELLM_UNREAD_ROUTES=allow`. A list of unread routes would have
+  passed any route added later.
+- **Every choice of a streamed reply is decided**, for a request with `n`
+  above 1.
 - **Not built:** the guardrail in the compose stack and integration tests
   through it. The existing LiteLLM service there serves the `extauthz`
   example with no keys. Verified instead by unit tests and the live run the

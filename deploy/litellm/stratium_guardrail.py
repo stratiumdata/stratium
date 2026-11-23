@@ -31,8 +31,16 @@ from litellm.integrations.custom_guardrail import CustomGuardrail
 
 from stratium import Client, Session
 
-# Routes whose replies carry tool calls in a shape this file does not read yet.
-UNREAD_ROUTES = ("/v1/messages", "/messages", "/v1/responses", "/responses")
+# What is read is listed; everything else is refused. A list of what is NOT
+# read would pass any route added to LiteLLM later.
+#
+# Streams are read on the completions routes only (chat and text).
+READ_STREAMS = ("/completions",)
+# Replies with no `choices` that cannot carry a tool call.
+TOOLLESS_REPLIES = frozenset({
+    "EmbeddingResponse", "ImageResponse", "TranscriptionResponse", "RerankResponse",
+    "HttpxBinaryResponseContent", "OpenAIModerationResponse",
+})
 # ponytail: one session per key and client session, kept in memory. A proxy
 # with more live sessions than this re-mints the oldest; raise it, or move
 # the tokens to LiteLLM's cache, if that shows up in the audit trail.
@@ -251,15 +259,22 @@ class StratiumChatGuardrail(CustomGuardrail):
         self.engine = engine or shared_engine()
         super().__init__(**kwargs)
 
-    def _unread(self, auth):
-        route = _get(auth, "request_route") or ""
-        if route.endswith(UNREAD_ROUTES) and self.engine.cfg["unread_routes"] != "allow":
-            raise refusal(501, f"tool calls on {route} are not checked yet; "
+    def _unread(self, what: str) -> None:
+        """Refuse a reply this file cannot read tool calls from, unless the
+        operator has chosen to pass those unchecked."""
+        if self.engine.cfg["unread_routes"] != "allow":
+            raise refusal(501, f"tool calls in {what} are not checked yet; "
                                "set STRATIUM_LITELLM_UNREAD_ROUTES=allow to pass them unchecked")
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):
-        self._unread(user_api_key_dict)
-        for choice in _get(response, "choices") or []:
+        choices = _get(response, "choices")
+        if choices is None:
+            # Not a completion. Only the kinds known to carry no tool call
+            # pass; anything else may hold one in a shape not read here.
+            if type(response).__name__ not in TOOLLESS_REPLIES:
+                self._unread(f"a {type(response).__name__} reply")
+            return response
+        for choice in choices:
             message = _get(choice, "message")
             calls = _get(message, "tool_calls")
             if not calls:
@@ -285,58 +300,88 @@ class StratiumChatGuardrail(CustomGuardrail):
         """Hold back every chunk from the first tool-call delta, decide once
         the stream ends, then release the calls or replace them. Text before
         the first tool call is passed on as it arrives."""
-        self._unread(user_api_key_dict)
+        route = _get(user_api_key_dict, "request_route") or ""
+        if not route.endswith(READ_STREAMS):
+            self._unread(f"a stream on {route or 'an unnamed route'}")
+            async for chunk in response:
+                yield chunk
+            return
+
         held = []
         async for chunk in response:
-            if held or self._tool_deltas(chunk):
+            if held or any(self._tool_deltas(c) for c in _get(chunk, "choices") or []):
                 held.append(chunk)
             else:
                 yield chunk
         if not held:
             return
 
-        calls: dict[int, dict] = {}
+        # Every choice in the held chunks, put back together: a reply asked
+        # for with n > 1 carries a set of tool calls per choice.
+        replies: dict[int, dict] = {}
+        template = None
         for chunk in held:
-            for d in self._tool_deltas(chunk):
-                call = calls.setdefault(d.index, {"id": None, "name": "", "arguments": ""})
-                fn = _get(d, "function")
-                call["id"] = call["id"] or _get(d, "id")
-                call["name"] += _get(fn, "name") or ""
-                call["arguments"] += _get(fn, "arguments") or ""
+            for choice in _get(chunk, "choices") or []:
+                r = replies.setdefault(choice.index, {"text": "", "calls": {}, "finish": None})
+                r["text"] += _get(choice.delta, "content") or ""
+                r["finish"] = choice.finish_reason or r["finish"]
+                for d in self._tool_deltas(choice):
+                    template = template or (chunk, choice)
+                    call = r["calls"].setdefault(d.index, {"id": None, "name": "", "arguments": ""})
+                    fn = _get(d, "function")
+                    call["id"] = call["id"] or _get(d, "id")
+                    call["name"] += _get(fn, "name") or ""
+                    call["arguments"] += _get(fn, "arguments") or ""
 
-        notes, kept = [], []
-        for _, call in sorted(calls.items()):
-            allowed, reason = await self.engine.decide(
-                request_data, user_api_key_dict, call["name"], call["arguments"] or "{}")
-            if allowed:
-                kept.append(call)
-            else:
-                notes.append(f"[Stratium refused {call['name']}: {reason}]")
-        if not notes:
+        refused = False
+        for _, r in sorted(replies.items()):
+            r["kept"], r["notes"] = [], []
+            for _, call in sorted(r["calls"].items()):
+                allowed, reason = await self.engine.decide(
+                    request_data, user_api_key_dict, call["name"], call["arguments"] or "{}")
+                if allowed:
+                    r["kept"].append(call)
+                else:
+                    r["notes"].append(f"[Stratium refused {call['name']}: {reason}]")
+                    refused = True
+        if not refused:
             for chunk in held:
                 yield chunk
             return
 
-        # Something was refused. Send each allowed call whole, renumbered,
-        # then one closing chunk that carries the refusals as text.
-        template = next(c for c in held if self._tool_deltas(c))
-        for i, call in enumerate(kept):
-            chunk = copy.deepcopy(template)
-            delta = chunk.choices[0].delta
-            delta.content = None
-            piece = delta.tool_calls[0]
-            piece.index, piece.id = i, call["id"]
-            piece.function.name, piece.function.arguments = call["name"], call["arguments"]
-            delta.tool_calls = [piece]
-            chunk.choices[0].finish_reason = None
+        # Something was refused, so the held chunks are not sent. Each choice
+        # is written out again: its text, each allowed call whole and
+        # renumbered, and a closing chunk that carries the refusals as text.
+        def piece(index: int, content=None, call=None, finish=None):
+            chunk = copy.deepcopy(template[0])
+            choice = copy.deepcopy(template[1])
+            choice.index, choice.finish_reason = index, finish
+            choice.delta.content = content
+            if call is None:
+                choice.delta.tool_calls = None
+            else:
+                part = choice.delta.tool_calls[0]
+                part.index, part.id = call[0], call[1]["id"]
+                part.function.name, part.function.arguments = call[1]["name"], call[1]["arguments"]
+                choice.delta.tool_calls = [part]
+            chunk.choices = [choice]
+            if _get(chunk, "usage") is not None:
+                chunk.usage = None
+            return chunk
+
+        out = []
+        for index, r in sorted(replies.items()):
+            if r["text"]:
+                out.append(piece(index, content=r["text"]))
+            out += [piece(index, call=(i, call)) for i, call in enumerate(r["kept"])]
+            finish = r["finish"] if not r["notes"] else ("tool_calls" if r["kept"] else "stop")
+            out.append(piece(index, content=("\n" + "\n".join(r["notes"])) if r["notes"] else None, finish=finish))
+        usage = next((u for u in (_get(c, "usage") for c in reversed(held)) if u is not None), None)
+        if usage is not None:
+            out[-1].usage = usage
+        for chunk in out:
             yield chunk
-        last = held[-1]
-        last.choices[0].delta.tool_calls = None
-        last.choices[0].delta.content = "\n" + "\n".join(notes)
-        last.choices[0].finish_reason = "tool_calls" if kept else "stop"
-        yield last
 
     @staticmethod
-    def _tool_deltas(chunk) -> list:
-        choices = _get(chunk, "choices") or []
-        return (_get(_get(choices[0], "delta"), "tool_calls") or []) if choices else []
+    def _tool_deltas(choice) -> list:
+        return _get(_get(choice, "delta"), "tool_calls") or []

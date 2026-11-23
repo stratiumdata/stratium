@@ -240,12 +240,29 @@ def test_the_pdp_being_down_removes_every_call():
     assert out.choices[0].message.tool_calls is None and "could not be reached" in out.choices[0].message.content
 
 
-def test_a_reply_shape_that_is_not_read_yet_is_refused_unless_allowed():
+def test_a_reply_that_is_not_a_completion_is_refused_unless_it_cannot_hold_a_tool_call():
+    """Listed by what is read, not by route: an Anthropic Messages reply, a
+    Responses API reply and anything LiteLLM adds later are all refused."""
+    from litellm.types.utils import EmbeddingResponse
+    g = guard(FakeClient())
+    for unread in ({"content": [{"type": "tool_use", "name": "Bash"}]}, types.SimpleNamespace(output=[])):
+        with pytest.raises(HTTPException) as err:
+            run(g.async_post_call_success_hook({}, AUTH, unread))
+        assert err.value.status_code == 501
+    run(g.async_post_call_success_hook({}, AUTH, EmbeddingResponse()))
+    run(guard(FakeClient(), unread_routes="allow").async_post_call_success_hook({}, AUTH, {"content": []}))
+
+
+def test_a_stream_on_a_route_that_is_not_read_is_refused_unless_allowed():
+    chunks = stream_of(("Bash", {"command": "ls"}))
+    for route in ("/v1/messages", "/v1/responses", "/v1/something/new", None):
+        auth = types.SimpleNamespace(metadata={}, user_id=None, token="k", request_route=route)
+        with pytest.raises(HTTPException) as err:
+            streamed(guard(FakeClient()), chunks, auth)
+        assert err.value.status_code == 501, route
     auth = types.SimpleNamespace(metadata={}, user_id=None, token="k", request_route="/v1/messages")
-    with pytest.raises(HTTPException) as err:
-        run(guard(FakeClient()).async_post_call_success_hook({}, auth, {"content": []}))
-    assert err.value.status_code == 501
-    run(guard(FakeClient(), unread_routes="allow").async_post_call_success_hook({}, auth, {"content": []}))
+    assert streamed(guard(FakeClient(), unread_routes="allow"), chunks, auth) == chunks
+
 
 # --- chat replies, streamed ----------------------------------------------------------
 
@@ -321,3 +338,32 @@ def test_the_pdp_being_down_holds_back_every_streamed_call():
     out = streamed(guard(FakeClient(down=True)), stream_of(("Read", {"file_path": "/a"})))
     assert calls_in(out) == [] and "could not be reached" in text_in(out)
     assert "PDP unreachable" not in text_in(out), "the transport's own text stays in the log"
+
+
+def test_every_choice_of_a_streamed_reply_is_decided():
+    """n > 1: each choice carries its own tool calls, in the same chunks."""
+    def both(delta0, delta1, finish=None):
+        return ModelResponseStream(choices=[
+            {"index": 0, "delta": delta0, "finish_reason": finish},
+            {"index": 1, "delta": delta1, "finish_reason": finish}])
+
+    def call(name, args):
+        return {"tool_calls": [{"index": 0, "id": f"id_{name}", "type": "function",
+                                "function": {"name": name, "arguments": json.dumps(args)}}]}
+    chunks = [both({"role": "assistant", "content": "a"}, {"role": "assistant", "content": "b"}),
+              both(call("Read", {"file_path": "/a"}), call("Write", {"file_path": "/b"})),
+              both({}, {}, "tool_calls")]
+    c = FakeClient(deny={"Write"})
+    out = streamed(guard(c), chunks)
+    assert sorted(d["tool"] for d in c.decisions) == ["Read", "Write"]
+    by_choice = {}
+    for ch in out:
+        for choice in ch.choices:
+            e = by_choice.setdefault(choice.index, {"calls": [], "text": "", "finish": None})
+            e["calls"] += [t.function.name for t in choice.delta.tool_calls or []]
+            e["text"] += choice.delta.content or ""
+            e["finish"] = choice.finish_reason or e["finish"]
+    assert by_choice[0] == {"calls": ["Read"], "text": "a", "finish": "tool_calls"}
+    assert by_choice[1]["text"].startswith("b")
+    assert by_choice[1]["calls"] == [] and by_choice[1]["finish"] == "stop"
+    assert "[Stratium refused Write: Write is not granted]" in by_choice[1]["text"]
