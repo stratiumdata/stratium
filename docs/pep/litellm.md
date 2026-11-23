@@ -145,6 +145,8 @@ created: the guardrail has no OIDC token for the subject.
   the calls are decided.
 - A reply with several choices (`n` above 1) has the tool calls of every
   choice decided, streamed or not.
+- The older `function_call` form, one call per reply, is decided the same
+  way.
 
 ## What is not covered
 

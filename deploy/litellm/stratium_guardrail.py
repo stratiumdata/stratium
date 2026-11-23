@@ -276,10 +276,19 @@ class StratiumChatGuardrail(CustomGuardrail):
             return response
         for choice in choices:
             message = _get(choice, "message")
-            calls = _get(message, "tool_calls")
-            if not calls:
+            calls = _get(message, "tool_calls") or []
+            # The older way to propose one call. It is the same question.
+            legacy = _get(message, "function_call")
+            if not calls and not legacy:
                 continue
             kept, notes = [], []
+            if legacy:
+                name = _get(legacy, "name") or ""
+                allowed, reason = await self.engine.decide(
+                    data, user_api_key_dict, name, _get(legacy, "arguments") or "{}")
+                if not allowed:
+                    message.function_call = None
+                    notes.append(f"[Stratium refused {name}: {reason}]")
             for call in calls:
                 fn = _get(call, "function")
                 name = _get(fn, "name") or ""
@@ -292,7 +301,7 @@ class StratiumChatGuardrail(CustomGuardrail):
             if notes:
                 message.tool_calls = kept or None
                 message.content = "\n".join(filter(None, [_get(message, "content"), *notes]))
-                if not kept:
+                if not kept and not _get(message, "function_call"):
                     choice.finish_reason = "stop"
         return response
 
@@ -309,7 +318,7 @@ class StratiumChatGuardrail(CustomGuardrail):
 
         held = []
         async for chunk in response:
-            if held or any(self._tool_deltas(c) for c in _get(chunk, "choices") or []):
+            if held or any(self._tool_deltas(c) or self._legacy(c) for c in _get(chunk, "choices") or []):
                 held.append(chunk)
             else:
                 yield chunk
@@ -322,9 +331,15 @@ class StratiumChatGuardrail(CustomGuardrail):
         template = None
         for chunk in held:
             for choice in _get(chunk, "choices") or []:
-                r = replies.setdefault(choice.index, {"text": "", "calls": {}, "finish": None})
+                r = replies.setdefault(choice.index, {"text": "", "calls": {}, "finish": None, "legacy": None})
                 r["text"] += _get(choice.delta, "content") or ""
                 r["finish"] = choice.finish_reason or r["finish"]
+                fc = self._legacy(choice)
+                if fc is not None:
+                    template = template or (chunk, choice)
+                    r["legacy"] = r["legacy"] or {"name": "", "arguments": ""}
+                    r["legacy"]["name"] += _get(fc, "name") or ""
+                    r["legacy"]["arguments"] += _get(fc, "arguments") or ""
                 for d in self._tool_deltas(choice):
                     template = template or (chunk, choice)
                     call = r["calls"].setdefault(d.index, {"id": None, "name": "", "arguments": ""})
@@ -336,6 +351,13 @@ class StratiumChatGuardrail(CustomGuardrail):
         refused = False
         for _, r in sorted(replies.items()):
             r["kept"], r["notes"] = [], []
+            if r["legacy"]:
+                allowed, reason = await self.engine.decide(
+                    request_data, user_api_key_dict, r["legacy"]["name"], r["legacy"]["arguments"] or "{}")
+                if not allowed:
+                    r["notes"].append(f"[Stratium refused {r['legacy']['name']}: {reason}]")
+                    r["legacy"] = None
+                    refused = True
             for _, call in sorted(r["calls"].items()):
                 allowed, reason = await self.engine.decide(
                     request_data, user_api_key_dict, call["name"], call["arguments"] or "{}")
@@ -352,15 +374,19 @@ class StratiumChatGuardrail(CustomGuardrail):
         # Something was refused, so the held chunks are not sent. Each choice
         # is written out again: its text, each allowed call whole and
         # renumbered, and a closing chunk that carries the refusals as text.
-        def piece(index: int, content=None, call=None, finish=None):
+        tool_part = next((copy.deepcopy(d) for c in held for ch in _get(c, "choices") or []
+                          for d in self._tool_deltas(ch)), None)
+
+        def piece(index: int, content=None, call=None, legacy=None, finish=None):
             chunk = copy.deepcopy(template[0])
             choice = copy.deepcopy(template[1])
             choice.index, choice.finish_reason = index, finish
             choice.delta.content = content
+            choice.delta.function_call = legacy
             if call is None:
                 choice.delta.tool_calls = None
             else:
-                part = choice.delta.tool_calls[0]
+                part = copy.deepcopy(tool_part)
                 part.index, part.id = call[0], call[1]["id"]
                 part.function.name, part.function.arguments = call[1]["name"], call[1]["arguments"]
                 choice.delta.tool_calls = [part]
@@ -373,8 +399,11 @@ class StratiumChatGuardrail(CustomGuardrail):
         for index, r in sorted(replies.items()):
             if r["text"]:
                 out.append(piece(index, content=r["text"]))
+            if r["legacy"]:
+                out.append(piece(index, legacy=dict(r["legacy"])))
             out += [piece(index, call=(i, call)) for i, call in enumerate(r["kept"])]
-            finish = r["finish"] if not r["notes"] else ("tool_calls" if r["kept"] else "stop")
+            finish = r["finish"] if not r["notes"] else (
+                "tool_calls" if r["kept"] else "function_call" if r["legacy"] else "stop")
             out.append(piece(index, content=("\n" + "\n".join(r["notes"])) if r["notes"] else None, finish=finish))
         usage = next((u for u in (_get(c, "usage") for c in reversed(held)) if u is not None), None)
         if usage is not None:
@@ -385,3 +414,8 @@ class StratiumChatGuardrail(CustomGuardrail):
     @staticmethod
     def _tool_deltas(choice) -> list:
         return _get(_get(choice, "delta"), "tool_calls") or []
+
+    @staticmethod
+    def _legacy(choice):
+        """A delta's function_call: the older, single-call form."""
+        return _get(_get(choice, "delta"), "function_call")

@@ -367,3 +367,44 @@ def test_every_choice_of_a_streamed_reply_is_decided():
     assert by_choice[1]["text"].startswith("b")
     assert by_choice[1]["calls"] == [] and by_choice[1]["finish"] == "stop"
     assert "[Stratium refused Write: Write is not granted]" in by_choice[1]["text"]
+
+
+# --- function_call: the older way to propose one call -------------------------------
+
+
+def legacy_reply(name, args):
+    return ModelResponse(choices=[{"index": 0, "finish_reason": "function_call", "message": {
+        "role": "assistant", "content": None, "function_call": {"name": name, "arguments": json.dumps(args)}}}])
+
+
+def test_a_function_call_is_decided_like_a_tool_call():
+    c = FakeClient(deny={"Write"})
+    g = guard(c)
+    ok = run(g.async_post_call_success_hook({}, AUTH, legacy_reply("Read", {"file_path": "/a"})))
+    assert ok.choices[0].message.function_call.name == "Read" and ok.choices[0].finish_reason == "function_call"
+    no = run(g.async_post_call_success_hook({}, AUTH, legacy_reply("Write", {"file_path": "/a"})))
+    assert no.choices[0].message.function_call is None and no.choices[0].finish_reason == "stop"
+    assert "[Stratium refused Write: Write is not granted]" in no.choices[0].message.content
+    assert [d["tool"] for d in c.decisions] == ["Read", "Write"]
+
+
+def legacy_stream(name, args):
+    a = json.dumps(args)
+    return [chunk({"role": "assistant", "content": "On it."}),
+            chunk({"function_call": {"name": name, "arguments": ""}}),
+            chunk({"function_call": {"arguments": a[: len(a) // 2]}}),
+            chunk({"function_call": {"arguments": a[len(a) // 2:]}}),
+            chunk({}, "function_call")]
+
+
+def test_a_streamed_function_call_is_held_and_decided():
+    c = FakeClient(deny={"Write"})
+    g = guard(c)
+    allowed = legacy_stream("Read", {"file_path": "/a"})
+    assert streamed(g, allowed) == allowed
+    out = streamed(g, legacy_stream("Write", {"file_path": "/a"}))
+    assert all(ch.choices[0].delta.function_call is None for ch in out)
+    assert "[Stratium refused Write: Write is not granted]" in text_in(out)
+    assert out[-1].choices[0].finish_reason == "stop"
+    assert [(d["tool"], d["raw_input"]) for d in c.decisions] == [
+        ("Read", '{"file_path": "/a"}'), ("Write", '{"file_path": "/a"}')]
