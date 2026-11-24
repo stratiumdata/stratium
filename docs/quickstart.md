@@ -59,7 +59,7 @@ images):
     ok   already present (subject agent-tester@example.com)
 
 [5] Seed the tool catalog
-    ok   tool_catalog rows: 29 -> 29
+    ok   tool_catalog rows: 26 -> 26
 
 [6] Agent row
     ok   reused: quickstart-46384b (0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19)
@@ -83,8 +83,8 @@ images):
 
 **PASS if** step 10 ends with four `PASS` lines and `Enforcement proven`. See §3.
 
-> The run above is a **warm** one — `already present`, `reused`, `29 -> 29`. On a
-> genuinely first run those read `created`, `created`, and `0 -> 29`, and the
+> The run above is a **warm** one — `already present`, `reused`, `26 -> 26`. On a
+> genuinely first run those read `created`, `created`, and `0 -> 26`, and the
 > whole thing takes minutes rather than 80 seconds because it builds the images.
 > Every step is idempotent, so re-running `up` is safe and is the fastest way to
 > repair a half-configured stack.
@@ -305,7 +305,7 @@ deploy/stratium doctor
 
 ```
   OK  toolchain    docker, docker compose, go
-  OK  stack        18 services running
+  OK  stack        24 services running
   OK  ports        pap=localhost:51465 pdp=localhost:51458
   OK  state        quickstart-46384b (0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19)
   OK  binary       /Users/you/stratium/bin/stratium-pep

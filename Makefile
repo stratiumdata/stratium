@@ -191,7 +191,8 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	pap_port=$$($(COMPOSE) port stratium-pap 8080 | sed -E 's/.*://'); \
 	pap_extauthz_port=$$($(COMPOSE) port pap-extauthz 8080 | sed -E 's/.*://'); \
 	keycloak_port=$$($(COMPOSE) port keycloak 8080 | sed -E 's/.*://'); \
-	echo "postgres -> localhost:$$pg_port  pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port   pdp-epoch -> localhost:$$pdp_epoch_port   pdp-cache -> localhost:$$pdp_cache_port   pdp-mcp -> localhost:$$pdp_mcp_port   pdp-pap -> localhost:$$pdp_pap_port   stratium-pap -> localhost:$$pap_port   pap-extauthz -> localhost:$$pap_extauthz_port   keycloak -> localhost:$$keycloak_port"; \
+	litellm_guarded_port=$$($(COMPOSE) port litellm-guarded 4000 | sed -E 's/.*://'); \
+	echo "postgres -> localhost:$$pg_port  pdp -> localhost:$$pdp_port   pdp-narrow -> localhost:$$pdp_narrow_port   pdp-resource -> localhost:$$pdp_resource_port   pdp-extauthz -> localhost:$$pdp_extauthz_port   envoy -> localhost:$$envoy_port   pdp-proxy -> localhost:$$pdp_proxy_port   grpc-target -> localhost:$$grpc_target_port   pep-proxy -> localhost:$$pep_proxy_port   pdp-epoch -> localhost:$$pdp_epoch_port   pdp-cache -> localhost:$$pdp_cache_port   pdp-mcp -> localhost:$$pdp_mcp_port   pdp-pap -> localhost:$$pdp_pap_port   stratium-pap -> localhost:$$pap_port   pap-extauthz -> localhost:$$pap_extauthz_port   keycloak -> localhost:$$keycloak_port   litellm-guarded -> localhost:$$litellm_guarded_port"; \
 	STRATIUM_IT_DATABASE_URL="postgres://stratium_migrate:stratium_migrate_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_SERVING_DATABASE_URL="postgres://stratium:stratium_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
 	STRATIUM_IT_PAP_DATABASE_URL="postgres://stratium_pap_login:stratium_pap_login_local_dev_only@localhost:$$pg_port/stratium?sslmode=disable" \
@@ -222,6 +223,7 @@ integration: ui ## Run the end-to-end proof: fresh compose volumes -> integratio
 	STRATIUM_IT_TOKEN_SIGNING_KEY_PATH="$$key_dir/token-signing.pem" \
 	STRATIUM_IT_PDP_OIDC_ADDR="localhost:$$pdp_oidc_port" \
 	STRATIUM_IT_OIDC_TENANT_ID="tenant-principal-oidc-integration" \
+	STRATIUM_IT_LITELLM_GUARDED_ADDR="localhost:$$litellm_guarded_port" \
 	go -C $(GO_DIR) test -tags=integration -race -v -count=1 ./internal/store/...
 
 .PHONY: help build test vet fmt lint proto proto-python proto-python-check conformance sdk-conformance integration ui ui-test ui-clean

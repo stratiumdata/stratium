@@ -244,8 +244,8 @@ class StratiumMCPGuardrail(CustomGuardrail):
     async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
         """Decide an MCP call before it runs; report it once it has."""
         if input_type == "request" and "mcp_tool_name" in request_data:
-            if _get(logging_obj, "call_type") != "call_mcp_tool":
-                return inputs  # tools/list: nothing is being called
+            if _get(logging_obj, "call_type") != "call_mcp_tool" or self._description_scan(request_data):
+                return inputs  # tools/list, or a scan: nothing is being called
             tool = self._mcp_tool(request_data.get("mcp_server_name"), request_data["mcp_tool_name"])
             allowed, reason = await self.engine.decide(
                 request_data, None, tool, request_data.get("mcp_arguments") or {})
@@ -256,6 +256,28 @@ class StratiumMCPGuardrail(CustomGuardrail):
             tool = self._mcp_tool(called.get("mcp_server_name"), called.get("name"))
             await self.engine.report(request_data, tool, called.get("arguments") or {})
         return inputs
+
+    @staticmethod
+    def _description_scan(request_data) -> bool:
+        """Whether LiteLLM is asking if a tool's description may be shown.
+
+        Before a call to a tool it has not listed yet, LiteLLM puts that
+        question to every guardrail. It has the shape of a call with no
+        arguments and comes with the call's own logging object, and the call
+        itself follows with its arguments. Deciding the question would
+        refuse a tool the PDP allows only for some arguments.
+
+        The one difference is the message LiteLLM writes: for this question
+        it names the description, for a call it does not. Only an exact
+        match counts. A tool with no description, and anything else that
+        does not match, is decided as a call.
+        """
+        name = str(request_data.get("mcp_tool_name") or "")
+        description = request_data.get("mcp_tool_description")
+        if not description or "\n" in name or request_data.get("mcp_arguments"):
+            return False
+        messages = request_data.get("messages") or [None]
+        return _get(messages[0], "content") == f"Tool: {name}\nDescription: {description}\nArguments: {{}}"
 
     @staticmethod
     def _mcp_tool(server, name) -> str:

@@ -24,13 +24,15 @@ built from [`docs/`](docs/), so the same pages also read fine on GitHub.
     make conformance  # authorization conformance properties
     make integration  # the live-stack proofs (see below)
 
-`make integration` brings up the whole stack in Docker — 17 services:
-Postgres, eight PDP instances, two PEPs, a real Envoy and its upstream, a real
-gRPC target, two `stratium-pap` instances, and a real Keycloak — runs the
-integration-tagged tests against it, and tears it down
-again with its volumes, always. It therefore needs Docker and, on a cold
-machine, network access to pull `postgres`, `envoyproxy/envoy`, and
-`quay.io/keycloak/keycloak`. The Keycloak realm is imported from
+`make integration` brings up the whole stack in Docker — 24 services:
+Postgres, ten PDP instances, two PEPs, a real Envoy and its upstream, a real
+gRPC target, three `stratium-pap` instances, a real Keycloak, and two real
+LiteLLM proxies, one of them with the Stratium guardrails in front of a mock
+model and a mock MCP server — runs the integration-tagged tests against it,
+and tears it down again with its volumes, always. CI runs it on every pull
+request. It therefore needs Docker and, on a cold machine, network access to
+pull `postgres`, `envoyproxy/envoy`, `quay.io/keycloak/keycloak`, and
+`ghcr.io/berriai/litellm`. The Keycloak realm is imported from
 `deploy/docker/keycloak/stratium-realm.json`; nothing in it is a credential
 to anything outside this stack.
 

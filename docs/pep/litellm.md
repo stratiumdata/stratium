@@ -33,9 +33,13 @@ one ungranted tool call, and a mock MCP server:
 - with a LiteLLM virtual key carrying the agent in its metadata, both
   guardrails found it; with a key naming no agent, every call was refused.
 
+`make integration` repeats the chat and MCP checks against the
+`litellm-guarded` service of the Docker stack, and also shows that Anthropic
+Messages (streamed or not) and the Responses API are refused with HTTP 501
+when the model proposes a tool call there.
+
 Not observed: a real model or agent harness as the client, an approval wait
-(the SDK's tests cover it), LiteLLM run with several workers, and the routes
-listed under [What is not covered](#what-is-not-covered).
+(the SDK's tests cover it), and LiteLLM run with several workers.
 
 ---
 

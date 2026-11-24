@@ -143,6 +143,35 @@ def test_listing_tools_decides_nothing():
     assert c.decisions == []
 
 
+def scan_request(description="Write a file.", content=None, args=None, tool="write_file"):
+    """LiteLLM's question before a call to a tool it has not listed yet."""
+    if content is None:
+        content = f"Tool: {tool}\nDescription: {description}\nArguments: {{}}"
+    return {"mcp_tool_name": tool, "mcp_arguments": args or {}, "mcp_server_name": "files",
+            "mcp_tool_description": description, "messages": [{"role": "user", "content": content}],
+            "user_api_key_hash": "keyhash", "metadata": {"user_api_key_metadata": {}}}
+
+
+def test_a_description_scan_before_a_call_decides_nothing():
+    c = FakeClient(deny={"files-write_file"})
+    run(guard(c).mcp.apply_guardrail({}, scan_request(), "request", CALL))
+    assert c.decisions == []
+
+
+@pytest.mark.parametrize("request_data", [
+    scan_request(content="Tool: write_file\nArguments: {}"),            # a call with no arguments
+    scan_request(args={"path": "/proj/a.txt"}),                          # arguments, whatever the message says
+    scan_request(description=""),                                        # nothing to tell it from a call by
+    scan_request(tool="write_file\nDescription: Write a file.",
+                 content="Tool: write_file\nDescription: Write a file.\nArguments: {}"),
+])
+def test_only_an_exact_description_scan_is_passed_undecided(request_data):
+    c = FakeClient(deny={"files-" + request_data["mcp_tool_name"]})
+    with pytest.raises(HTTPException):
+        run(guard(c).mcp.apply_guardrail({}, request_data, "request", CALL))
+    assert len(c.decisions) == 1
+
+
 def test_the_pdp_being_down_refuses_an_mcp_call():
     with pytest.raises(HTTPException) as err:
         run(guard(FakeClient(down=True)).mcp.apply_guardrail({}, mcp_request(), "request", CALL))
