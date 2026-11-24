@@ -486,7 +486,8 @@ func frameMethod(line []byte) (method string, malformed bool) {
 }
 
 // ambiguousJSONKeys reports whether obj, a JSON object, names one of keys
-// more than once, or under another capitalization. encoding/json matches a
+// more than once, or under another capitalization. With no keys given, it
+// reports whether any two of obj's own keys differ at most in capitalization. encoding/json matches a
 // key to a field whatever its case and keeps the last of several, and other
 // JSON parsers do neither, so such an object can read as one request here and
 // as another to the server it is forwarded to. An object that is not valid
@@ -502,6 +503,14 @@ func ambiguousJSONKeys(obj []byte, keys ...string) bool {
 		key, ok := t.(string)
 		if err != nil || !ok {
 			return false
+		}
+		if len(keys) == 0 {
+			// Upper then lower folds every pair encoding/json would match.
+			folded := strings.ToLower(strings.ToUpper(key))
+			if seen[folded] {
+				return true
+			}
+			seen[folded] = true
 		}
 		for _, k := range keys {
 			if strings.EqualFold(key, k) {
