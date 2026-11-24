@@ -144,10 +144,30 @@ model may plan around tools it cannot use.
 
 ---
 
+## Resources and prompts
+
+`resources/read`, `resources/subscribe` and `prompts/get` are decided too,
+because each hands the agent the server's data. Each is decided as a tool
+named after its method, with the request's params as its input:
+
+| Request | Tool the PDP is asked about | Input |
+|---|---|---|
+| `resources/read` | `resources/read` | `{"uri":"…"}` |
+| `resources/subscribe` | `resources/subscribe` | `{"uri":"…"}` |
+| `prompts/get` | `prompts/get` | `{"name":"…","arguments":{…}}` |
+
+A delegation that does not hold the name refuses the request, so an agent
+reads no resource and gets no prompt until `STRATIUM_PEP_REQUESTED_TOOLS` (or
+whatever creates the delegation) asks for it. The listing methods,
+`resources/list` and `prompts/list`, are relayed undecided, as `tools/list`
+is.
+
+---
+
 ## Limits
 
-- **One decision per `tools/call`.** Anything the upstream does off its own
-  initiative is not seen.
+- **One decision per request** that is decided. Anything the upstream does
+  off its own initiative is not seen.
 - **Arguments are authorized as sent.** The proxy does not evaluate what the
   upstream will do with them.
 - **The upstream is a child process.** It inherits the proxy's environment —

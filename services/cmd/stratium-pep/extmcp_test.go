@@ -139,3 +139,34 @@ func TestTransportFailure_KeepsThePDPAddressOutOfTheCallersReason(t *testing.T) 
 		t.Errorf("operator log = %q, want the connection detail", log.String())
 	}
 }
+
+// Reading a resource, subscribing to one and getting a prompt hand the agent
+// the server's data, so each is decided as the tool "<target>_<method>" with
+// the request's params as its input.
+func TestExtmcpCheckRequest_DecidesResourceAndPromptMethods(t *testing.T) {
+	const params = `{"uri":"file:///etc/passwd"}`
+	for _, method := range []string{"resources/read", "resources/subscribe", "prompts/get"} {
+		t.Run(method, func(t *testing.T) {
+			req := &extmcp.McpRequest{ServiceNames: []string{"files"}, Method: method, McpRequest: []byte(params)}
+
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "not granted"}}
+			res, err := newExtmcpServer(t, startFakePDP(t, fake)).CheckRequest(context.Background(), req)
+			if err != nil || res.GetError() == nil || !strings.Contains(res.GetError().GetReason(), "not granted") {
+				t.Fatalf("a denied %s was not refused with the PDP's reason: %v, %v", method, res, err)
+			}
+			if got := fake.lastRequest(); got.GetTool() != "files_"+method || got.GetRawInput() != params {
+				t.Errorf("asked about tool %q with input %q, want files_%s and the params", got.GetTool(), got.GetRawInput(), method)
+			}
+
+			allowed := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			if res, err := newExtmcpServer(t, startFakePDP(t, allowed)).CheckRequest(context.Background(), req); err != nil || res.GetPass() == nil {
+				t.Errorf("an allowed %s did not pass: %v, %v", method, res, err)
+			}
+
+			noParams := &extmcp.McpRequest{ServiceNames: []string{"files"}, Method: method}
+			if res, _ := newExtmcpServer(t, startFakePDP(t, allowed)).CheckRequest(context.Background(), noParams); res.GetError() == nil {
+				t.Errorf("%s with no params was not refused: %v", method, res)
+			}
+		})
+	}
+}

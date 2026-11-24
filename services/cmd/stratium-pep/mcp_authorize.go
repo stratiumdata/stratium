@@ -131,15 +131,56 @@ type mcpAuthorizer struct {
 // (a malformed frame already takes this same path, one level up) -- it does not mean the frame is
 // dropped, only that this function is not the one relaying it.
 func (a *mcpAuthorizer) intercept(method string, line []byte) []byte {
-	if method != "tools/call" {
+	if !mcpMethodIsDecided(method) {
 		return line
 	}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		a.decideAndRelay(line)
+		if method == "tools/call" {
+			a.decideAndRelay(line)
+		} else {
+			a.decideMethodAndRelay(method, line)
+		}
 	}()
 	return nil
+}
+
+// mcpMethodIsDecided reports whether the PDP is asked before a request with
+// this method reaches the MCP server. Besides tools/call these are the
+// requests that hand the agent a server's data: a resource's contents, now or
+// on every change, and a prompt's text. Each is decided as a tool named after
+// its method, with the request's params as its input, so a delegation that
+// does not list "resources/read" refuses it. Listing methods are not decided,
+// as tools/list is not.
+//
+// ponytail: a server could name a tool "resources/read", and a grant for that
+// tool would then cover reading resources. Give the methods a name no tool
+// can have if that ever matters.
+func mcpMethodIsDecided(method string) bool {
+	switch method {
+	case "tools/call", "resources/read", "resources/subscribe", "prompts/get":
+		return true
+	}
+	return false
+}
+
+// decideMethodAndRelay is decideAndRelay for a decided method other than
+// tools/call.
+func (a *mcpAuthorizer) decideMethodAndRelay(method string, line []byte) {
+	var frame struct {
+		ID     json.RawMessage `json:"id"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(line, &frame); err != nil || len(frame.Params) == 0 {
+		a.deny(frame.ID, "stratium-pep: malformed "+method+": params are required")
+		return
+	}
+	if ok, reason := a.authorize(context.Background(), method, string(frame.Params)); !ok {
+		a.deny(frame.ID, reason)
+		return
+	}
+	a.forward(line)
 }
 
 // decideAndRelay is the whole of one tools/call decision: parse the frame's id/tool/arguments,

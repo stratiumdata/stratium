@@ -968,6 +968,28 @@ func TestIntegration_MCP_E2E_DeniedCallNeverReachesUpstream(t *testing.T) {
 	assertRecordedTools(t, p.records(), mcpApprovedTool)
 }
 
+// A resource read is decided as the tool "resources/read". This session's
+// delegation does not hold it, so the PDP refuses it by that name and the
+// request never reaches the upstream.
+func TestIntegration_MCP_E2E_ResourceReadIsDecidedAndRefusedWithoutAGrant(t *testing.T) {
+	f := newMCPFixture(t, "resource-read")
+	p := f.start(t)
+
+	p.send(initializeFrame("1"))
+	assertCallSucceededInit(t, decodeReply(t, p.nextFrame(15*time.Second)))
+
+	p.send(`{"jsonrpc":"2.0","id":"2","method":"resources/read","params":{"uri":"file:///etc/passwd"}}`)
+	assertDenied(t, decodeReply(t, p.nextFrame(20*time.Second)), "resources/read", "approved_tools")
+
+	p.closeStdin()
+	if code := p.waitForExit(30 * time.Second); code != 0 {
+		t.Errorf("stratium-pep mcp exit = %d, want 0; stderr: %s", code, p.stderr.String())
+	}
+	if recordedMethod(p.records(), "resources/read") {
+		t.Error("the refused resources/read reached the upstream")
+	}
+}
+
 // Proof 3. tools/list relays UNFILTERED, including a tool that would be
 // denied if called -- pinned at both ends, in one test: the listing is
 // unchanged, and calling the tool it advertises is then denied.

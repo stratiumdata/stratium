@@ -52,6 +52,44 @@ func TestDecideAndRelay_Allow_ForwardsFrameAndResponseReturnsToAgent(t *testing.
 	}
 }
 
+// Reading a resource, subscribing to one and getting a prompt are decided as
+// a tool named after the method, with the params as its input: a denied one
+// never reaches the server, an allowed one is forwarded unchanged, and a
+// listing method is still not decided at all.
+func TestIntercept_DecidesResourceAndPromptMethods(t *testing.T) {
+	for _, method := range []string{"resources/read", "resources/subscribe", "prompts/get"} {
+		t.Run(method, func(t *testing.T) {
+			req := `{"jsonrpc":"2.0","id":7,"method":"` + method + `","params":{"uri":"file:///etc/passwd"}}`
+
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY, Reason: "not granted"}}
+			h := newMCPHarness(t, startFakePDP(t, fake), testCfg(t))
+			h.sendFromAgent(t, req)
+			assertNoFrame(t, h.upstreamReceived, 200*time.Millisecond)
+			if out := decodeJSONRPCError(t, readFrame(t, h.agentReceived, time.Second)); string(out.ID) != "7" || out.Error.Message != "not granted" {
+				t.Errorf("agent received id %s, message %q; want id 7 and the PDP's reason", out.ID, out.Error.Message)
+			}
+			if got := fake.lastRequest(); got.GetTool() != method || got.GetRawInput() != `{"uri":"file:///etc/passwd"}` {
+				t.Errorf("asked about tool %q with input %q, want %s and the params", got.GetTool(), got.GetRawInput(), method)
+			}
+
+			allowed := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			h = newMCPHarness(t, startFakePDP(t, allowed), testCfg(t))
+			h.sendFromAgent(t, req)
+			if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != req {
+				t.Errorf("upstream received %q, want the request forwarded unchanged", got)
+			}
+		})
+	}
+
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_DENY}}
+	h := newMCPHarness(t, startFakePDP(t, fake), testCfg(t))
+	const list = `{"jsonrpc":"2.0","id":8,"method":"resources/list"}`
+	h.sendFromAgent(t, list)
+	if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != list || fake.requestCount() != 0 {
+		t.Errorf("resources/list: upstream received %q and the PDP was asked %d times; want it forwarded and never decided", got, fake.requestCount())
+	}
+}
+
 // --- DENY: never reaches upstream, agent gets a correlated JSON-RPC error --
 
 // Anchors the required mutation "forward on DENY": if decideAndRelay ever forwarded on a denial,
