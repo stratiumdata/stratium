@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -931,6 +932,41 @@ func TestRunHook_NoSessionFile_ExitsTwo(t *testing.T) {
 	}
 	if !strings.Contains(reason, "session-start") {
 		t.Errorf("permissionDecisionReason = %q, want it to say how to fix this (run session-start)", reason)
+	}
+}
+
+// A session file that group or others can read or write was not left that
+// way by session-start, so nothing in it is used: the call is refused before
+// the PDP is asked, even though the file's contents are a valid session.
+func TestRunHook_SessionFileOpenToOthers_ExitsTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports no owner/group/other permission bits")
+	}
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o620, 0o606} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			client := startFakePDP(t, fake)
+
+			cfg := testCfg(t)
+			writeTestSessionFile(t, cfg.SessionFilePath, "delegation-1", "token-1")
+			if err := os.Chmod(cfg.SessionFilePath, mode); err != nil {
+				t.Fatalf("chmod session file fixture: %v", err)
+			}
+
+			var stdout bytes.Buffer
+			code := runHook(stdinBody("Bash", `{"command":"ls"}`), &stdout, client, cfg)
+
+			if code != 2 {
+				t.Fatalf("runHook() = %d, want 2", code)
+			}
+			if fake.requestCount() != 0 {
+				t.Errorf("PDP was called %d times, want 0", fake.requestCount())
+			}
+			reason := decodeHookOutput(t, stdout.Bytes()).HookSpecificOutput.PermissionDecisionReason
+			if !strings.Contains(reason, "open to other users") {
+				t.Errorf("permissionDecisionReason = %q, want it to say the file is open to other users", reason)
+			}
+		})
 	}
 }
 

@@ -93,7 +93,7 @@ scope (which may be narrower than what was requested) to
     STRATIUM_PEP_PDP_INSECURE=true \
     STRATIUM_PEP_AGENT_ID=<agent-uuid> \
     STRATIUM_PEP_SUBJECT=alice@example.com \
-    STRATIUM_PEP_SESSION_FILE=/tmp/stratium-pep-session.json \
+    STRATIUM_PEP_SESSION_FILE=/run/stratium/session.json \
     STRATIUM_PEP_CONNECT_TIMEOUT=5s \
     STRATIUM_PEP_REQUESTED_TIER=2 \
     STRATIUM_PEP_REQUESTED_TOOLS=Read,Grep,Bash \
@@ -400,7 +400,7 @@ location are your client's own, not something this project defines):
         "STRATIUM_PEP_PDP_INSECURE": "true",
         "STRATIUM_PEP_AGENT_ID": "<agent-uuid>",
         "STRATIUM_PEP_SUBJECT": "alice@example.com",
-        "STRATIUM_PEP_SESSION_FILE": "/tmp/stratium-pep-session.json",
+        "STRATIUM_PEP_SESSION_FILE": "/run/stratium/session.json",
         "STRATIUM_PEP_CONNECT_TIMEOUT": "5s",
         "STRATIUM_PEP_APPROVAL_POLL_INTERVAL": "2s",
         "STRATIUM_PEP_APPROVAL_TIMEOUT": "5m",
@@ -427,8 +427,9 @@ escalation wait — configure both the same way you would for `hook`.
 
 ### Why `tools/list` is not filtered
 
-`mcp` gates `tools/call` only. It relays `tools/list` — and every other MCP
-method — unchanged, exactly as the real server would have answered it, even
+`mcp` gates `tools/call`, and the three requests that read a resource or get
+a prompt (see [`mcp`](pep/mcp.md#resources-and-prompts)). It relays
+`tools/list` — and every other MCP method — unchanged, exactly as the real server would have answered it, even
 when the list includes a tool the agent would go on to be denied for at call
 time. This is deliberate, not a gap, and worth stating plainly because the
 UX case for filtering is obvious enough that you will want to ask for it:

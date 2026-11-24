@@ -28,8 +28,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
@@ -114,11 +116,33 @@ func writeSessionFile(path string, resp *pdpgrpc.CreateDelegationResponse) error
 // cannot even make the ordinary call. Checking token first means that more
 // serious failure is never masked by the second message.
 func loadSessionFile(path string) (*pdpgrpc.CreateDelegationResponse, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is operator configuration (STRATIUM_PEP_SESSION_FILE), not attacker-supplied request data -- the same trust level as internal/config.Config's own file/URL fields
+	f, err := os.Open(path) //nolint:gosec // G304: path is operator configuration (STRATIUM_PEP_SESSION_FILE), not attacker-supplied request data
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("no session file at %s -- run 'stratium-pep session-start' first", path)
 		}
+		return nil, fmt.Errorf("could not read session file %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// writeSessionFile creates the file readable by its owner alone. A file
+	// anyone else can read or write was not left that way by session-start,
+	// and a file only its owner can read is, since this process just opened
+	// it, this user's own. Checked on the open file, so it cannot be swapped
+	// between the check and the read. Windows reports no such bits.
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("could not read session file %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session file %s is not a regular file", path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("session file %s is open to other users (mode %04o) -- run 'stratium-pep session-start' again",
+			path, info.Mode().Perm())
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
 		return nil, fmt.Errorf("could not read session file %s: %w", path, err)
 	}
 
