@@ -108,6 +108,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -478,10 +479,44 @@ func frameMethod(line []byte) (method string, malformed bool) {
 	var env struct {
 		Method string `json:"method"`
 	}
-	if err := json.Unmarshal(line, &env); err != nil {
+	if err := json.Unmarshal(line, &env); err != nil || ambiguousJSONKeys(line, "method", "params", "id") {
 		return "", true
 	}
 	return env.Method, false
+}
+
+// ambiguousJSONKeys reports whether obj, a JSON object, names one of keys
+// more than once, or under another capitalization. encoding/json matches a
+// key to a field whatever its case and keeps the last of several, and other
+// JSON parsers do neither, so such an object can read as one request here and
+// as another to the server it is forwarded to. An object that is not valid
+// JSON reports false: the caller's own decoding refuses it.
+func ambiguousJSONKeys(obj []byte, keys ...string) bool {
+	dec := json.NewDecoder(bytes.NewReader(obj))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]bool, len(keys))
+	for dec.More() {
+		t, err := dec.Token()
+		key, ok := t.(string)
+		if err != nil || !ok {
+			return false
+		}
+		for _, k := range keys {
+			if strings.EqualFold(key, k) {
+				if key != k || seen[k] {
+					return true
+				}
+				seen[k] = true
+			}
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return false
+		}
+	}
+	return false
 }
 
 // passthroughUpstreamFrame relays every frame from the upstream server to the agent unchanged.
@@ -491,4 +526,46 @@ func frameMethod(line []byte) (method string, malformed bool) {
 // has no gate to grow into and stays a plain function rather than a method with state.
 func passthroughUpstreamFrame(_ string, line []byte) []byte {
 	return line
+}
+
+// ambiguousJSONKeysAnywhere reports whether any object in data, at any depth,
+// has two keys that differ at most in capitalization. Data that is not valid
+// JSON reports false: the caller's own decoding refuses it.
+func ambiguousJSONKeysAnywhere(data []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	// One entry per open object or array: an object's keys so far, nil for
+	// an array. wantKey is whether the next token in the innermost object
+	// is a key.
+	var open []map[string]bool
+	wantKey := false
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return false // io.EOF at the end, or invalid JSON
+		}
+		inObject := len(open) > 0 && open[len(open)-1] != nil
+		if key, ok := t.(string); ok && inObject && wantKey {
+			// Upper then lower folds every pair encoding/json would match.
+			folded := strings.ToLower(strings.ToUpper(key))
+			if open[len(open)-1][folded] {
+				return true
+			}
+			open[len(open)-1][folded] = true
+			wantKey = false
+			continue
+		}
+		switch t {
+		case json.Delim('{'):
+			open = append(open, map[string]bool{})
+			wantKey = true
+			continue
+		case json.Delim('['):
+			open = append(open, nil)
+			continue
+		case json.Delim('}'), json.Delim(']'):
+			open = open[:len(open)-1]
+		}
+		// A value has just ended, so the enclosing object wants a key next.
+		wantKey = true
+	}
 }

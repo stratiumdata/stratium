@@ -131,15 +131,69 @@ type mcpAuthorizer struct {
 // (a malformed frame already takes this same path, one level up) -- it does not mean the frame is
 // dropped, only that this function is not the one relaying it.
 func (a *mcpAuthorizer) intercept(method string, line []byte) []byte {
-	if method != "tools/call" {
+	if !mcpMethodIsDecided(method) {
 		return line
 	}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		a.decideAndRelay(line)
+		if method == "tools/call" {
+			a.decideAndRelay(line)
+		} else {
+			a.decideMethodAndRelay(method, line)
+		}
 	}()
 	return nil
+}
+
+// mcpMethodIsDecided reports whether the PDP is asked before a request with
+// this method reaches the MCP server. Besides tools/call these are the
+// requests that hand the agent a server's data: a resource's contents, now or
+// on every change, and a prompt's text. Each is decided as a tool named after
+// its method, with the request's params as its input, so a delegation that
+// does not list "resources/read" refuses it. Listing methods are not decided,
+// as tools/list is not.
+//
+// ponytail: a server could name a tool "resources/read", and a grant for that
+// tool would then cover reading resources. Give the methods a name no tool
+// can have if that ever matters.
+func mcpMethodIsDecided(method string) bool {
+	switch method {
+	case "tools/call", "resources/read", "resources/subscribe", "prompts/get":
+		return true
+	}
+	return false
+}
+
+// toolsCallParams returns a frame's params as they were sent, for
+// ambiguousJSONKeys: toolsCallFrame has already lost what it needs to see.
+func toolsCallParams(line []byte) []byte {
+	var frame struct {
+		Params json.RawMessage `json:"params"`
+	}
+	_ = json.Unmarshal(line, &frame) // the caller has already decoded line
+	return frame.Params
+}
+
+// decideMethodAndRelay is decideAndRelay for a decided method other than
+// tools/call.
+func (a *mcpAuthorizer) decideMethodAndRelay(method string, line []byte) {
+	var frame struct {
+		ID     json.RawMessage `json:"id"`
+		Params json.RawMessage `json:"params"`
+	}
+	// The PDP and the server both read the params, each with its own
+	// decoder, so no two keys of any object in them may differ only in
+	// capitalization.
+	if err := json.Unmarshal(line, &frame); err != nil || len(frame.Params) == 0 || ambiguousJSONKeysAnywhere(frame.Params) {
+		a.deny(frame.ID, "stratium-pep: malformed "+method+": params are required")
+		return
+	}
+	if ok, reason := a.authorize(context.Background(), method, string(frame.Params)); !ok {
+		a.deny(frame.ID, reason)
+		return
+	}
+	a.forward(line)
 }
 
 // decideAndRelay is the whole of one tools/call decision: parse the frame's id/tool/arguments,
@@ -151,7 +205,8 @@ func (a *mcpAuthorizer) intercept(method string, line []byte) []byte {
 // nothing it does may assume it is the only such call in flight.
 func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	var frame toolsCallFrame
-	if err := json.Unmarshal(line, &frame); err != nil || frame.Params.Name == "" {
+	if err := json.Unmarshal(line, &frame); err != nil || frame.Params.Name == "" ||
+		ambiguousJSONKeys(toolsCallParams(line), "name", "arguments") || ambiguousJSONKeysAnywhere(frame.Params.Arguments) {
 		// A request with no id is a notification: deny has nowhere to send an
 		// error and drops it, which is the fail-closed answer for a call that
 		// could not be decided.

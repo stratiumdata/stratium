@@ -90,6 +90,9 @@ routes:
         failureMode: failClosed
         methods:
           tools/call: request
+          resources/read: request
+          resources/subscribe: request
+          prompts/get: request
   backends:
   - mcp:
       targets:
@@ -173,14 +176,19 @@ The MCP client must also be willing to wait that long.
 
 ## Limits
 
-- **`tools/call` only.** Every other MCP method passes undecided, and
-  `tools/list` is not filtered, for the reason given in
-  [`mcp`](mcp.md#toolslist-is-not-filtered).
+- **Four methods are decided:** `tools/call`, `resources/read`,
+  `resources/subscribe` and `prompts/get`. The last three are decided as a
+  tool named `<target>_<method>`, for example `files_resources/read`, with
+  the request's params as its input, so a delegation must hold that name
+  before an agent can read a resource or get a prompt. Every other MCP method
+  passes undecided, and `tools/list` is not filtered, for the reason given in
+  [`mcp`](mcp.md#toolslist-is-not-filtered). Only `tools/call` was run against
+  a live agentgateway; the other three method keys are from its documentation.
 - **Nothing is reported after a call runs.** agentgateway's response-phase
   call does not say which tool or arguments it belongs to.
 - **Only what the processor's `methods` map names is sent.** A route without
-  the processor, or a `methods` map without `tools/call: request`, is not
-  checked.
+  the processor is not checked, and neither is a method its `methods` map
+  leaves out.
 - **Arguments are authorized as sent.** What the MCP server does with them is
   not seen.
 

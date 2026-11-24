@@ -38,7 +38,7 @@ STRATIUM_PEP_REQUESTED_TOOLS, STRATIUM_PEP_TTL_SECONDS
 | `STRATIUM_PEP_PDP_ADDR` | `localhost:50051` | The PDP's gRPC address. Ephemeral under Docker — resolve it, don't store it. |
 | `STRATIUM_PEP_AGENT_ID` | `0f8f833a-…` | An agent row's uuid, from `POST /v1/agents`. |
 | `STRATIUM_PEP_SUBJECT` | `you@example.com` | The principal delegating. A policy must name it, or issuance fails. Must equal the identity in the principal's token. |
-| `STRATIUM_PEP_SESSION_FILE` | `/run/stratium/session.json` | Where the delegation lands. |
+| `STRATIUM_PEP_SESSION_FILE` | `/run/stratium/session.json` | Where the delegation lands. Created readable by its owner alone; `hook`, `report` and `mcp` refuse a file that anyone else can read or write. Put it in a directory other users cannot write to. |
 | `STRATIUM_PEP_CONNECT_TIMEOUT` | `5s` | Bounds the gRPC dial only. |
 | `STRATIUM_PEP_PDP_CA_FILE` | `/etc/stratium/pdp-ca.pem` | Optional. PEM CA bundle to verify the PDP's TLS certificate with, instead of the system roots. |
 | `STRATIUM_PEP_PDP_INSECURE` | `true` | Optional. Plaintext connection to the PDP, for a local development stack only. Default is TLS. Conflicts with `STRATIUM_PEP_PDP_CA_FILE`. |

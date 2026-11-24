@@ -639,8 +639,13 @@ STRATIUM_PAP_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-guid>/v2.0
 STRATIUM_PAP_OIDC_AUDIENCE=api://<application-client-id>
 STRATIUM_PAP_OIDC_CLIENT_ID=<application-client-id>
 STRATIUM_PAP_ROLE_CLAIM=groups     # or "roles" for app roles
-STRATIUM_PAP_APPROVER_CLAIM=preferred_username
+STRATIUM_PAP_APPROVER_CLAIM=oid
 ```
+
+> Use `oid`, the user's object ID, to identify an approver. Entra documents
+> `preferred_username` and `email` as changeable, so neither should decide who
+> may approve. `STRATIUM_PRINCIPAL_CLAIM` on the PDP must be `oid` too, and
+> policies then name people by object ID.
 
 > Entra emits group **object IDs**, not display names, unless you enable group
 > name emission for groups synced from on-prem AD. Your
@@ -1678,7 +1683,7 @@ you are policing**, not by vendor.
 | Surface | Use it when | Intercepts | Can block on a human? |
 |---|---|---|---|
 | `hook` | the harness has a pre-tool-use hook — **Claude Code, Codex** | every tool call, including shell | **yes** |
-| `mcp` | the harness launches local stdio MCP servers — **Claude Desktop, ChatGPT desktop, Claude Code, Codex** | `tools/call` on the server you wrap | **yes** |
+| `mcp` | the harness launches local stdio MCP servers — **Claude Desktop, ChatGPT desktop, Claude Code, Codex** | `tools/call`, resource reads and prompts on the server you wrap | **yes** |
 | `extauthz` | the tool is an HTTP API you control, behind Envoy | every HTTP request | no — degrades to a denial naming the approval |
 | `proxy` | the tool is a gRPC service you control | every gRPC stream, at open | no — same degrade |
 

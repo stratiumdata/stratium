@@ -89,9 +89,9 @@ type extmcpServer struct {
 	authz *mcpAuthorizer
 }
 
-// CheckRequest decides tools/call and passes every other method, the same
-// split "mcp" makes (see mcp.go's package doc for why tools/list is not
-// filtered).
+// CheckRequest decides the methods mcpMethodIsDecided names and passes every
+// other, the same split "mcp" makes (see mcp.go's package doc for why
+// tools/list is not filtered).
 //
 // The tool the PDP is asked about is "<target>_<name>": the gateway's name
 // for the MCP server, then the server's own name for the tool. Two servers
@@ -99,7 +99,8 @@ type extmcpServer struct {
 // has to be able to tell them apart. It is also the name agentgateway shows
 // a client when a route has more than one target.
 func (s *extmcpServer) CheckRequest(ctx context.Context, req *extmcp.McpRequest) (*extmcp.McpRequestResult, error) {
-	if req.GetMethod() != "tools/call" {
+	method := req.GetMethod()
+	if !mcpMethodIsDecided(method) {
 		return &extmcp.McpRequestResult{Result: &extmcp.McpRequestResult_Pass{Pass: &extmcp.Pass{}}}, nil
 	}
 
@@ -108,7 +109,14 @@ func (s *extmcpServer) CheckRequest(ctx context.Context, req *extmcp.McpRequest)
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	targets := req.GetServiceNames()
-	if err := json.Unmarshal(req.GetMcpRequest(), &params); err != nil || params.Name == "" || len(targets) != 1 || targets[0] == "" {
+	if method != "tools/call" {
+		// Decided as the tool "<target>_<method>", with the params as input.
+		params.Name, params.Arguments = method, req.GetMcpRequest()
+		if len(params.Arguments) == 0 || len(targets) != 1 || targets[0] == "" || ambiguousJSONKeysAnywhere(params.Arguments) {
+			return extmcpDeny("stratium-pep: malformed " + method + ": one target and params are required"), nil
+		}
+	} else if err := json.Unmarshal(req.GetMcpRequest(), &params); err != nil || params.Name == "" || len(targets) != 1 || targets[0] == "" ||
+		ambiguousJSONKeys(req.GetMcpRequest(), "name", "arguments") || ambiguousJSONKeysAnywhere(params.Arguments) {
 		return extmcpDeny("stratium-pep: malformed tools/call: one target and params.name are required"), nil //nolint:nilerr // a refusal is an answer, never an RPC error: see the package doc
 	}
 
