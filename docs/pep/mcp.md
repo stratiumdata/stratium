@@ -169,8 +169,9 @@ is.
 - **A request must read one way.** A frame that names `method`, `params` or
   `id` twice, or under another capitalization, is dropped. A `tools/call`
   whose params do that with `name` or `arguments` is refused. So is a decided
-  request with two keys that differ at most in capitalization, in a tool's
-  arguments or in a resource or prompt request's params.
+  request with two keys of one object that differ at most in capitalization,
+  at any depth of a tool's arguments or of a resource or prompt request's
+  params.
 - **One decision per request** that is decided. Anything the upstream does
   off its own initiative is not seen.
 - **Arguments are authorized as sent.** The proxy does not evaluate what the

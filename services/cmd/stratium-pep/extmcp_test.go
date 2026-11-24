@@ -41,6 +41,7 @@ func TestExtmcpCheckRequest(t *testing.T) {
 		{"tool name twice", allow, toolsCall("files", `{"name":"delete_file","name":"read_file","arguments":{}}`), false, "malformed", false},
 		{"argument twice", allow, toolsCall("files", `{"name":"read_file","arguments":{"path":"/a","path":"/b"}}`), false, "malformed", false},
 		{"resource uri in another case", allow, &extmcp.McpRequest{ServiceNames: []string{"files"}, Method: "resources/read", McpRequest: []byte(`{"uri":"a","URI":"b"}`)}, false, "malformed", false},
+		{"nested argument twice", allow, toolsCall("files", `{"name":"read_file","arguments":{"o":[{"path":"/a","Path":"/b"}]}}`), false, "malformed", false},
 		{"tool name in another case", allow, toolsCall("files", `{"name":"delete_file","Name":"read_file","arguments":{}}`), false, "malformed", false},
 		{"underscore in the target", allow, toolsCall("my_files", call), false, "underscore", false},
 		{"no target", allow, &extmcp.McpRequest{Method: "tools/call", McpRequest: []byte(call)}, false, "malformed", false},

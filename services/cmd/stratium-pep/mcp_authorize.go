@@ -182,9 +182,10 @@ func (a *mcpAuthorizer) decideMethodAndRelay(method string, line []byte) {
 		ID     json.RawMessage `json:"id"`
 		Params json.RawMessage `json:"params"`
 	}
-	// The PDP reads the params too, with the same decoder, so no two of
-	// their keys may differ only in capitalization.
-	if err := json.Unmarshal(line, &frame); err != nil || len(frame.Params) == 0 || ambiguousJSONKeys(frame.Params) {
+	// The PDP and the server both read the params, each with its own
+	// decoder, so no two keys of any object in them may differ only in
+	// capitalization.
+	if err := json.Unmarshal(line, &frame); err != nil || len(frame.Params) == 0 || ambiguousJSONKeysAnywhere(frame.Params) {
 		a.deny(frame.ID, "stratium-pep: malformed "+method+": params are required")
 		return
 	}
@@ -205,7 +206,7 @@ func (a *mcpAuthorizer) decideMethodAndRelay(method string, line []byte) {
 func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	var frame toolsCallFrame
 	if err := json.Unmarshal(line, &frame); err != nil || frame.Params.Name == "" ||
-		ambiguousJSONKeys(toolsCallParams(line), "name", "arguments") || ambiguousJSONKeys(frame.Params.Arguments) {
+		ambiguousJSONKeys(toolsCallParams(line), "name", "arguments") || ambiguousJSONKeysAnywhere(frame.Params.Arguments) {
 		// A request with no id is a notification: deny has nowhere to send an
 		// error and drops it, which is the fail-closed answer for a call that
 		// could not be decided.

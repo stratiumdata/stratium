@@ -108,6 +108,9 @@ func TestIntercept_AmbiguousKeysNeverReachUpstream(t *testing.T) {
 		"resource uri twice":            `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///etc/passwd","uri":"file:///tmp/x"}}`,
 		"resource uri in another case":  `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///etc/passwd","URI":"file:///tmp/x"}}`,
 		"prompt name twice":             `{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"a","name":"b"}}`,
+		"nested argument twice":         `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"opts":{"path":"/a","path":"/b"}}}}`,
+		"nested argument, other case":   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"opts":[1,{"deep":{"Name":"a","name":"b"}}]}}}`,
+		"nested prompt argument twice":  `{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"a","arguments":{"x":"1","x":"2"}}}`,
 		"escaped duplicate":             `{"jsonrpc":"2.0","id":1,"method":"tools/call","m\u0065thod":"tools/list","params":{"name":"delete_file","arguments":{}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -121,11 +124,11 @@ func TestIntercept_AmbiguousKeysNeverReachUpstream(t *testing.T) {
 		})
 	}
 
-	// The same keys one level further down are not checked, and an ordinary
-	// frame is untouched.
+	// The same key in different objects is not a duplicate, a string value
+	// that looks like a key is not one, and such a frame is untouched.
 	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
 	h := newMCPHarness(t, startFakePDP(t, fake), testCfg(t))
-	const fine = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"method":"x","opts":{"Name":"a","name":"b"}}}}`
+	const fine = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"name":"x","opts":{"name":"a","list":["name","name",{"name":"b"},{"name":"c"}]},"more":{"name":"name"}}}}`
 	h.sendFromAgent(t, fine)
 	if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != fine {
 		t.Errorf("upstream received %q, want the frame forwarded unchanged", got)
