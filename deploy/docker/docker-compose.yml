@@ -1,4 +1,4 @@
-# Local/CI stack for the Task 7 end-to-end proof: postgres:16 plus the PDP
+# Local/CI stack for the Task 7 end-to-end proof: postgres:18 plus the PDP
 # built from ./Dockerfile. `make integration` (repo root) drives this file:
 # fresh volumes up, integration tests against the running stack, volumes
 # torn down again — see that target for the exact sequence.
@@ -10,14 +10,16 @@
 # interface, and this stack's credentials are committed development values.
 services:
   postgres:
-    image: postgres:16@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f
+    image: postgres:18@sha256:f5cbc081c25690710f3fc6f4c61a7565382bae01ca0d0f2028a53d7926b85a20
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres_local_dev_only
       POSTGRES_DB: postgres
     volumes:
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
-      - pgdata:/var/lib/postgresql/data
+      # The parent of the data directory, as the image asks from Postgres 18
+      # on: it keeps each major version in its own subdirectory.
+      - pgdata:/var/lib/postgresql
     ports:
       - "127.0.0.1::5432"
     healthcheck:
@@ -959,12 +961,12 @@ services:
   # example, and this is a throwaway local stack. The variable below is
   # LiteLLM's own documented switch for local development.
   #
-  # Pinned by digest: main-latest moves daily, and an upstream release already
-  # broke `make integration` once. This is the main-latest image of 2026-11-13
-  # that the full integration suite passed against. To upgrade, pull the new
-  # image, run `make integration`, and replace the digest.
+  # A stable release, pinned by tag and digest: main-latest moves daily, and
+  # an upstream release already broke `make integration` once. Dependabot
+  # proposes the next release, and CI runs `make integration` against it,
+  # which includes the guardrail proofs on litellm-guarded below.
   litellm:
-    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    image: ghcr.io/berriai/litellm:v1.110.2@sha256:ef798594ca3db8d81bad2e1439f536f49b71fe095ee9f20416f5e149b4e22035
     command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
     environment:
       LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY: "true"
@@ -1001,19 +1003,19 @@ services:
   # library, so there is no further image to build or pin. All three must use
   # the same digest as litellm above.
   mock-llm:
-    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    image: ghcr.io/berriai/litellm:v1.110.2@sha256:ef798594ca3db8d81bad2e1439f536f49b71fe095ee9f20416f5e149b4e22035
     entrypoint: ["python", "/mock/mock_llm.py"]
     volumes:
       - ./litellm/mock_llm.py:/mock/mock_llm.py:ro
 
   mock-mcp:
-    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    image: ghcr.io/berriai/litellm:v1.110.2@sha256:ef798594ca3db8d81bad2e1439f536f49b71fe095ee9f20416f5e149b4e22035
     entrypoint: ["python", "/mock/mock_mcp.py"]
     volumes:
       - ./litellm/mock_mcp.py:/mock/mock_mcp.py:ro
 
   litellm-guarded:
-    image: ghcr.io/berriai/litellm@sha256:97c4b26fe69197cde82a827d7386606e6d991c561f1954a1832618b3219c3249
+    image: ghcr.io/berriai/litellm:v1.110.2@sha256:ef798594ca3db8d81bad2e1439f536f49b71fe095ee9f20416f5e149b4e22035
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     depends_on:
       - pdp-mcp
