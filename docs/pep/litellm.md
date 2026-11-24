@@ -17,8 +17,8 @@ Use it to bring agents with no Stratium hook under the same policy and audit
 trail, alongside a boundary such as [`proxy`](proxy.md) or
 [`extauthz`](extauthz.md) for what must be protected.
 
-**How this was verified.** Run on LiteLLM 1.111.0 (the image this repository
-pins) against a quickstart PDP, a mock model that proposes one granted and
+**How this was verified.** Run on a LiteLLM 1.111.0 pre-release
+build against a quickstart PDP, a mock model that proposes one granted and
 one ungranted tool call, and a mock MCP server:
 
 - chat, not streamed: the granted call was delivered, the other was removed,
@@ -34,7 +34,8 @@ one ungranted tool call, and a mock MCP server:
   guardrails found it; with a key naming no agent, every call was refused.
 
 `make integration` repeats the chat and MCP checks against the
-`litellm-guarded` service of the Docker stack, and also shows that Anthropic
+`litellm-guarded` service of the Docker stack, on the LiteLLM release that
+stack pins (1.110.2 when this was written), and also shows that Anthropic
 Messages (streamed or not) and the Responses API are refused with HTTP 501
 when the model proposes a tool call there.
 

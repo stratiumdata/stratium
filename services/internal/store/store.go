@@ -102,10 +102,13 @@ func isUniqueViolation(err error) bool {
 // (SQLSTATE 23503) — isUniqueViolation's own counterpart for the opposite
 // direction of integrity-constraint conflict. DeleteAgent (agent.go) hits
 // this one, not unique_violation, when a delegation or approval still names
-// the agent being deleted (agents.id's ON DELETE RESTRICT).
+// the agent being deleted (agents.id's ON DELETE RESTRICT). PostgreSQL 18
+// and later report that refusal as restrict_violation (SQLSTATE 23001), so
+// both codes count.
 func isForeignKeyViolation(err error) bool {
 	var pqErr *pq.Error
-	return errors.As(err, &pqErr) && pqErr.Code == sqlStateForeignKeyViolation
+	return errors.As(err, &pqErr) &&
+		(pqErr.Code == sqlStateForeignKeyViolation || pqErr.Code == sqlStateRestrictViolation)
 }
 
 // isCheckViolation reports whether err is a Postgres check_violation

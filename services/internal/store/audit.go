@@ -98,6 +98,10 @@ const sqlStateUniqueViolation = "23505"
 // join rather than a choice between two existing precedents.
 const sqlStateForeignKeyViolation = "23503"
 
+// sqlStateRestrictViolation is what PostgreSQL 18 and later raise, in place
+// of foreign_key_violation, when ON DELETE RESTRICT refuses a delete.
+const sqlStateRestrictViolation = "23001"
+
 // sqlStateCheckViolation is PostgreSQL's SQLSTATE class for check_violation
 // — isCheckViolation's own check (store.go), the third and, for now, last
 // member of this file's small SQLSTATE set (see sqlStateForeignKeyViolation's

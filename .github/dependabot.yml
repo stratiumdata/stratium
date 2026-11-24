@@ -28,11 +28,8 @@ updates:
       compose:
         patterns: ["*"]
     ignore:
-      # Postgres 18 refuses the data volume as the compose file mounts it. A
-      # new major version is a change to the stack, made by hand.
+      # A new major version of Postgres is a change to the stack, made by
+      # hand: 18 moved where the image keeps its data, and the volume mount
+      # had to move with it.
       - dependency-name: postgres
         update-types: ["version-update:semver-major"]
-      # Named by digest with no tag, so an update follows wherever the default
-      # tag points, which can be an older release. The compose file says how
-      # this digest is chosen.
-      - dependency-name: berriai/litellm

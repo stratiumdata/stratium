@@ -418,7 +418,8 @@ func TestIntegration_PAPCRUD_EffectMismatchNeverPersisted(t *testing.T) {
 // hand-built pq.Error fixture (internal/store/agent_test.go's own sqlmock
 // proof of the MAPPING) — deleting an agent a live delegation still names
 // is refused as store.ErrConflict, and the agent is left in place. This is
-// what confirms isForeignKeyViolation's assumed SQLSTATE (23503) is what
+// what confirms isForeignKeyViolation's SQLSTATEs (23503, or 23001 from
+// PostgreSQL 18) include what
 // this exact schema actually raises for this exact shape of conflict, not
 // merely what the unit test was told to return.
 func TestIntegration_PAPCRUD_DeleteAgent_StillReferencedReturnsConflict(t *testing.T) {

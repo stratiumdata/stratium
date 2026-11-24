@@ -623,6 +623,13 @@ func TestStore_DeleteAgent_NotFound(t *testing.T) {
 // cmd/stratium-pap/respond.go's writeStoreError would fall through to its
 // default 500 case.
 func TestStore_DeleteAgent_ForeignKeyViolationIsConflict(t *testing.T) {
+	// PostgreSQL 17 and earlier raise the first code, 18 and later the second.
+	for _, code := range []pq.ErrorCode{sqlStateForeignKeyViolation, sqlStateRestrictViolation} {
+		t.Run(string(code), func(t *testing.T) { deleteAgentRefusedIsConflict(t, code) })
+	}
+}
+
+func deleteAgentRefusedIsConflict(t *testing.T, code pq.ErrorCode) {
 	s, mock := newMockStore(t)
 	id := uuid.New()
 
@@ -631,7 +638,7 @@ func TestStore_DeleteAgent_ForeignKeyViolationIsConflict(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(deleteAgentQuery)).
 		WithArgs(id.String()).
 		WillReturnError(&pq.Error{
-			Code:    sqlStateForeignKeyViolation,
+			Code:    code,
 			Message: `update or delete on table "agents" violates foreign key constraint "delegations_agent_id_fkey" on table "delegations"`,
 			Detail:  `Key (id)=(deadbeef-0000-0000-0000-000000000000) is still referenced from table "delegations".`,
 		})
