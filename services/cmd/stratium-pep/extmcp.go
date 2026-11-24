@@ -115,7 +115,8 @@ func (s *extmcpServer) CheckRequest(ctx context.Context, req *extmcp.McpRequest)
 		if len(params.Arguments) == 0 || len(targets) != 1 || targets[0] == "" {
 			return extmcpDeny("stratium-pep: malformed " + method + ": one target and params are required"), nil
 		}
-	} else if err := json.Unmarshal(req.GetMcpRequest(), &params); err != nil || params.Name == "" || len(targets) != 1 || targets[0] == "" {
+	} else if err := json.Unmarshal(req.GetMcpRequest(), &params); err != nil || params.Name == "" || len(targets) != 1 || targets[0] == "" ||
+		ambiguousJSONKeys(req.GetMcpRequest(), "name", "arguments") {
 		return extmcpDeny("stratium-pep: malformed tools/call: one target and params.name are required"), nil //nolint:nilerr // a refusal is an answer, never an RPC error: see the package doc
 	}
 

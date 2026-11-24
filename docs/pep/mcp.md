@@ -166,6 +166,9 @@ is.
 
 ## Limits
 
+- **A request must read one way.** A frame that names `method`, `params` or
+  `id` twice, or under another capitalization, is dropped. A `tools/call`
+  whose params do that with `name` or `arguments` is refused.
 - **One decision per request** that is decided. Anything the upstream does
   off its own initiative is not seen.
 - **Arguments are authorized as sent.** The proxy does not evaluate what the

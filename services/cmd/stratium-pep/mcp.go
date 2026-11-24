@@ -108,6 +108,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -478,10 +479,44 @@ func frameMethod(line []byte) (method string, malformed bool) {
 	var env struct {
 		Method string `json:"method"`
 	}
-	if err := json.Unmarshal(line, &env); err != nil {
+	if err := json.Unmarshal(line, &env); err != nil || ambiguousJSONKeys(line, "method", "params", "id") {
 		return "", true
 	}
 	return env.Method, false
+}
+
+// ambiguousJSONKeys reports whether obj, a JSON object, names one of keys
+// more than once, or under another capitalization. encoding/json matches a
+// key to a field whatever its case and keeps the last of several, and other
+// JSON parsers do neither, so such an object can read as one request here and
+// as another to the server it is forwarded to. An object that is not valid
+// JSON reports false: the caller's own decoding refuses it.
+func ambiguousJSONKeys(obj []byte, keys ...string) bool {
+	dec := json.NewDecoder(bytes.NewReader(obj))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]bool, len(keys))
+	for dec.More() {
+		t, err := dec.Token()
+		key, ok := t.(string)
+		if err != nil || !ok {
+			return false
+		}
+		for _, k := range keys {
+			if strings.EqualFold(key, k) {
+				if key != k || seen[k] {
+					return true
+				}
+				seen[k] = true
+			}
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return false
+		}
+	}
+	return false
 }
 
 // passthroughUpstreamFrame relays every frame from the upstream server to the agent unchanged.

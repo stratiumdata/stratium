@@ -90,6 +90,43 @@ func TestIntercept_DecidesResourceAndPromptMethods(t *testing.T) {
 	}
 }
 
+// encoding/json matches keys whatever their case and keeps the last of
+// several; the MCP server's parser may do neither. A frame that could name
+// one method or tool here and another there is dropped or refused, and never
+// reaches the server, even though the PDP would allow what this side reads.
+func TestIntercept_AmbiguousKeysNeverReachUpstream(t *testing.T) {
+	for name, frame := range map[string]string{
+		"second method in another case": `{"jsonrpc":"2.0","id":1,"method":"tools/call","Method":"tools/list","params":{"name":"delete_file","arguments":{}}}`,
+		"method twice":                  `{"jsonrpc":"2.0","id":1,"method":"tools/call","method":"tools/list","params":{"name":"delete_file","arguments":{}}}`,
+		"params twice":                  `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_file","arguments":{}},"params":{"name":"read_file","arguments":{}}}`,
+		"params in another case":        `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///etc/passwd"},"Params":{"uri":"file:///tmp/x"}}`,
+		"tool name twice":               `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_file","name":"read_file","arguments":{}}}`,
+		"tool name in another case":     `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_file","Name":"read_file","arguments":{}}}`,
+		"arguments twice":               `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/etc/passwd"},"arguments":{"path":"/tmp/x"}}}`,
+		"escaped duplicate":             `{"jsonrpc":"2.0","id":1,"method":"tools/call","m\u0065thod":"tools/list","params":{"name":"delete_file","arguments":{}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+			h := newMCPHarness(t, startFakePDP(t, fake), testCfg(t))
+			h.sendFromAgent(t, frame)
+			assertNoFrame(t, h.upstreamReceived, 200*time.Millisecond)
+			if fake.requestCount() != 0 {
+				t.Errorf("the PDP was asked %d times about a frame that cannot be read one way", fake.requestCount())
+			}
+		})
+	}
+
+	// The same keys nested where this proxy does not read them are the
+	// server's own business, and an ordinary frame is untouched.
+	fake := &fakePDP{resp: &pdpgrpc.DecideResponse{Effect: pdpgrpc.Effect_EFFECT_ALLOW}}
+	h := newMCPHarness(t, startFakePDP(t, fake), testCfg(t))
+	const fine = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"Name":"a","name":"b","method":"x"}}}`
+	h.sendFromAgent(t, fine)
+	if got := readFrame(t, h.upstreamReceived, time.Second); string(got) != fine {
+		t.Errorf("upstream received %q, want the frame forwarded unchanged", got)
+	}
+}
+
 // --- DENY: never reaches upstream, agent gets a correlated JSON-RPC error --
 
 // Anchors the required mutation "forward on DENY": if decideAndRelay ever forwarded on a denial,

@@ -165,6 +165,16 @@ func mcpMethodIsDecided(method string) bool {
 	return false
 }
 
+// toolsCallParams returns a frame's params as they were sent, for
+// ambiguousJSONKeys: toolsCallFrame has already lost what it needs to see.
+func toolsCallParams(line []byte) []byte {
+	var frame struct {
+		Params json.RawMessage `json:"params"`
+	}
+	_ = json.Unmarshal(line, &frame) // the caller has already decoded line
+	return frame.Params
+}
+
 // decideMethodAndRelay is decideAndRelay for a decided method other than
 // tools/call.
 func (a *mcpAuthorizer) decideMethodAndRelay(method string, line []byte) {
@@ -192,7 +202,7 @@ func (a *mcpAuthorizer) decideMethodAndRelay(method string, line []byte) {
 // nothing it does may assume it is the only such call in flight.
 func (a *mcpAuthorizer) decideAndRelay(line []byte) {
 	var frame toolsCallFrame
-	if err := json.Unmarshal(line, &frame); err != nil || frame.Params.Name == "" {
+	if err := json.Unmarshal(line, &frame); err != nil || frame.Params.Name == "" || ambiguousJSONKeys(toolsCallParams(line), "name", "arguments") {
 		// A request with no id is a notification: deny has nowhere to send an
 		// error and drops it, which is the fail-closed answer for a call that
 		// could not be decided.
