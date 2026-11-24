@@ -162,10 +162,13 @@ func stratiumPEPBinary(t *testing.T) string {
 // have diagnostics mixed into it.
 func runPEPSubcommand(t *testing.T, subcommand string, env map[string]string, stdin string) (stdout, stderr string, exitCode int) {
 	t.Helper()
+	// Before the timeout starts: the first call builds the binary, which can
+	// take longer than the 15 seconds the subcommand itself is given.
+	binary := stratiumPEPBinary(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, stratiumPEPBinary(t), subcommand)
+	cmd := exec.CommandContext(ctx, binary, subcommand)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = os.Environ()
 	for k, v := range env {
