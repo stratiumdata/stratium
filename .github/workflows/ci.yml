@@ -117,11 +117,15 @@ jobs:
       # org-owned repo. The CLI itself is MIT-licensed with no such gate.
       - name: gitleaks
         run: |
-          curl -sSLf "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
+          curl -sSLf -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm gitleaks.tar.gz
           gitleaks git --no-banner --redact --verbose .
         env:
           GITLEAKS_VERSION: "8.30.1"
+          # From the release's checksums file. Change it with the version.
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
 
   python:
     name: Python SDK and LiteLLM guardrail
