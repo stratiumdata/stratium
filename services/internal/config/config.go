@@ -24,6 +24,10 @@ type Config struct {
 	ListenAddr           string        // STRATIUM_LISTEN_ADDR, default ":50051"
 	MaxDepth             int           // STRATIUM_MAX_DELEGATION_DEPTH, default 5
 	DBTimeout            time.Duration // STRATIUM_DB_TIMEOUT, default 5s
+	// DBMaxOpenConns caps the serving connection pool (store.LimitPool). A
+	// decision uses one connection at a time, so this is also how many
+	// decisions can be in the database at once.
+	DBMaxOpenConns int // STRATIUM_DB_MAX_OPEN_CONNS, default 20
 
 	// MaxDelegationTTL is the longest lifetime CreateDelegation grants; a
 	// request above it is refused. Zero, which Load never produces, means no
@@ -159,6 +163,7 @@ func Load() (Config, error) {
 		ListenAddr:        envOr("STRATIUM_LISTEN_ADDR", ":50051"),
 		MaxDepth:          5,
 		DBTimeout:         5 * time.Second,
+		DBMaxOpenConns:    20,
 		MaxDelegationTTL:  24 * time.Hour,
 		PolicyEvalTimeout: 2 * time.Second,
 		// A PEP whose token expired presents it once and re-issues, so real
@@ -232,6 +237,13 @@ func Load() (Config, error) {
 	// loaded, a deliberate and common choice outside a rotation window, not a
 	// missing required value.
 	c.TokenPreviousKeyPath = os.Getenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH")
+	if v := os.Getenv("STRATIUM_DB_MAX_OPEN_CONNS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("STRATIUM_DB_MAX_OPEN_CONNS must be an integer of at least 1, got %q", v)
+		}
+		c.DBMaxOpenConns = n
+	}
 	if v := os.Getenv("STRATIUM_MAX_DELEGATION_DEPTH"); v != "" {
 		if c.MaxDepth, err = strconv.Atoi(v); err != nil {
 			return c, fmt.Errorf("STRATIUM_MAX_DELEGATION_DEPTH: %w", err)

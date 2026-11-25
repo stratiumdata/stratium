@@ -362,6 +362,7 @@ Three rules run through all three binaries:
 | `STRATIUM_PRINCIPAL_AUTH_INSECURE` | `false` | `true`, `false` | `true` turns principal verification off: the PDP believes the `subject` a caller sends. **Local development only**; the PDP logs a warning on every start. Setting it alongside any of the issuer, audience, or claim variables is a startup failure. |
 | `STRATIUM_MAX_DELEGATION_DEPTH` | `5` | integer ≥ 1 | Longest delegation chain permitted. A chain deeper than this denies. |
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
+| `STRATIUM_DB_MAX_OPEN_CONNS` | `20` | integer ≥ 1 | Most database connections this PDP holds at once. A call that needs one while all are in use waits for it until the caller's own deadline. Add up this value for every PDP, plus `STRATIUM_PAP_DB_MAX_OPEN_CONNS` for every PAP, and keep the total under Postgres's `max_connections` (100 unless you changed it). |
 | `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long an approval stays valid, from the moment it is requested: the time a person has to answer, plus the time the agent has to use the answer. An approval allows one call. |
 | `STRATIUM_MAX_DELEGATION_TTL` | `24h` | duration > 0 | Longest lifetime a delegation may be created with. `CreateDelegation` refuses a longer `ttl_seconds` and names this maximum. Raise it if your sessions legitimately run longer. |
 | `STRATIUM_POLICY_EVAL_TIMEOUT` | `2s` | duration > 0 | Deadline on one evaluation of the tenant's policies. A policy still running at the deadline is stopped and the call is denied. |
@@ -450,6 +451,7 @@ means an intended administrator is refused entirely.
 | `STRATIUM_PAP_OIDC_SCOPE` | `openid profile email` | The scope string the UI requests. Add your IdP's group scope here if it needs one (Okta's `groups`, for instance). **Do not add `offline_access`** — it mints a refresh token, a longer-lived credential the browser has nowhere safe to keep. |
 | `STRATIUM_PAP_OIDC_TIMEOUT` | `5s` | Bounds **every** HTTP call the OIDC library makes for the life of the process, including background JWKS refreshes — not just the initial discovery. |
 | `STRATIUM_PAP_DB_TIMEOUT` | `5s` | Database connect/ping deadline. |
+| `STRATIUM_PAP_DB_MAX_OPEN_CONNS` | `10` | Most database connections the PAP holds at once; an integer of at least 1. A request that needs one while all are in use waits. See `STRATIUM_DB_MAX_OPEN_CONNS` for how to size it against Postgres. |
 
 The PAP refuses a request body over 1 MiB (`413`), and closes a connection that takes more than 30 seconds to send a request or sits idle for two minutes. A policy tried through the policy test endpoint is stopped after 2 seconds. These are fixed.
 

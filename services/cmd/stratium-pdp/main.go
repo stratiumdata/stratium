@@ -118,6 +118,8 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
+	store.LimitPool(db, cfg.DBMaxOpenConns)
+
 	pingCtx, cancel := context.WithTimeout(context.Background(), cfg.DBTimeout)
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
