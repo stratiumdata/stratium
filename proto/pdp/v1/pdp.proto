@@ -633,6 +633,16 @@ message GetApprovalRequest {
   // declared_tier/approval_id-on-DecideRequest's optional treatment: there
   // is no "ask fresh" case here for presence-tracking to distinguish from.
   string approval_id = 1;
+
+  // token is a token issued for the delegation the approval was requested
+  // under: the one the caller presented on the Decide that escalated.
+  // Required. An approval is reported only to a holder of its own
+  // delegation's token; to anyone else it does not exist.
+  //
+  // Its expiry is not checked, as IssueToken's prior token is not: a caller
+  // may wait for a person longer than a token lasts, and the answer here is
+  // a status, not an allow.
+  string token = 2;
 }
 
 // GetApprovalResponse is read-only by construction: calling GetApproval never

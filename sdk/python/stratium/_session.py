@@ -143,7 +143,7 @@ class Session:
             # DENY and no check on it could tell it apart from one the PDP
             # reached unaided. It holds by position.
             return resolve_escalation(
-                self._client.get_approval,
+                lambda approval_id: self._client.get_approval(approval_id, self._grant.token),
                 lambda: self._ask(tool=tool, raw_input=canonical, resource=resource,
                                   approval_id=decision.approval_id),
                 approval_id=decision.approval_id,

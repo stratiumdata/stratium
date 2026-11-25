@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/store"
 	"github.com/stratiumdata/stratium/pkg/models"
@@ -20,19 +21,20 @@ import (
 func approvalFixture() (*fakeStore, *models.Approval) {
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	a := &models.Approval{
-		ID:        uuid.New(),
-		TenantID:  testTenant,
-		Status:    "pending",
-		ExpiresAt: expires,
+		ID:           uuid.New(),
+		TenantID:     testTenant,
+		DelegationID: uuid.New(),
+		Status:       "pending",
+		ExpiresAt:    expires,
 	}
 	return &fakeStore{loadApproval: a}, a
 }
 
 func TestGetApproval_ReturnsStatusAndExpiry(t *testing.T) {
 	fs, a := approvalFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
 
-	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String()})
+	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: a.DelegationID.String()})
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v, want nil", err)
 	}
@@ -51,9 +53,9 @@ func TestGetApproval_ReturnsStatusAndExpiry(t *testing.T) {
 func TestGetApproval_ReflectsApprovedStatus(t *testing.T) {
 	fs, a := approvalFixture()
 	a.Status = "approved"
-	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
 
-	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String()})
+	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: a.DelegationID.String()})
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v, want nil", err)
 	}
@@ -66,9 +68,9 @@ func TestGetApproval_UnknownID_NotFound(t *testing.T) {
 	fs, _ := approvalFixture()
 	unknown := uuid.New()
 	fs.loadApprovalErr = fmt.Errorf("%w: approval %s", store.ErrNotFound, unknown)
-	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
 
-	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: unknown.String()})
+	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: unknown.String(), Token: uuid.NewString()})
 	if resp != nil {
 		t.Fatalf("GetApproval() response = %+v, want nil", resp)
 	}
@@ -84,9 +86,9 @@ func TestGetApproval_UnknownID_NotFound(t *testing.T) {
 func TestGetApproval_StoreErrorNotNotFound_Internal(t *testing.T) {
 	fs, _ := approvalFixture()
 	fs.loadApprovalErr = errors.New("connection reset")
-	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
 
-	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: uuid.NewString()})
+	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: uuid.NewString(), Token: uuid.NewString()})
 	if resp != nil {
 		t.Fatalf("GetApproval() response = %+v, want nil", resp)
 	}
@@ -106,7 +108,7 @@ func TestGetApproval_InvalidApprovalID_InvalidArgument(t *testing.T) {
 	for name, id := range cases {
 		t.Run(name, func(t *testing.T) {
 			fs, _ := approvalFixture()
-			srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
+			srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
 
 			resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: id})
 			if resp != nil {
@@ -130,9 +132,9 @@ func TestGetApproval_InvalidApprovalID_InvalidArgument(t *testing.T) {
 // fact for the one write path that does exist on this fake, by name.
 func TestGetApproval_OnlyLoadsNeverWrites(t *testing.T) {
 	fs, a := approvalFixture()
-	srv := NewServer(fs, escalationPolicy(), testConfig(), nil)
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
 
-	if _, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String()}); err != nil {
+	if _, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: a.DelegationID.String()}); err != nil {
 		t.Fatalf("GetApproval() error = %v, want nil", err)
 	}
 
@@ -142,5 +144,52 @@ func TestGetApproval_OnlyLoadsNeverWrites(t *testing.T) {
 	if len(fs.createdApprovals) != 0 {
 		t.Errorf("approvals created = %d, want 0: GetApproval must never create or otherwise write a row",
 			len(fs.createdApprovals))
+	}
+}
+
+// The fake signer's token for a delegation is that delegation's bare id.
+
+func TestGetApproval_NoOrBadToken_UnauthenticatedBeforeAnyStoreCall(t *testing.T) {
+	for name, tok := range map[string]string{"absent": "", "does not verify": "not-a-token"} {
+		t.Run(name, func(t *testing.T) {
+			fs, a := approvalFixture()
+			srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+			resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: tok})
+			if resp != nil || status.Code(err) != codes.Unauthenticated {
+				t.Fatalf("GetApproval() = %+v, %v; want nil and Unauthenticated", resp, err)
+			}
+			if fs.calls != 0 {
+				t.Errorf("store calls = %d, want 0: a caller with no token must cost no database work", fs.calls)
+			}
+		})
+	}
+}
+
+// A token for another delegation gets exactly what an unknown id gets, so it
+// cannot be used to learn that an approval exists.
+func TestGetApproval_AnotherDelegationsToken_IsNotFoundLikeAnUnknownID(t *testing.T) {
+	fs, a := approvalFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+	_, other := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: uuid.NewString()})
+
+	fs.loadApprovalErr = fmt.Errorf("%w: approval %s", store.ErrNotFound, a.ID)
+	_, unknown := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: uuid.NewString()})
+
+	if status.Code(other) != codes.NotFound {
+		t.Fatalf("another delegation's token: error = %v, want NotFound", other)
+	}
+	if other.Error() != unknown.Error() {
+		t.Errorf("another delegation's token got %q; an unknown id gets %q; want the same", other, unknown)
+	}
+}
+
+func TestGetApproval_OverLongToken_InvalidArgument(t *testing.T) {
+	fs, a := approvalFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+	_, err := srv.GetApproval(context.Background(),
+		&GetApprovalRequest{ApprovalId: a.ID.String(), Token: long(lim.CredentialBytes)})
+	if status.Code(err) != codes.InvalidArgument || fs.calls != 0 {
+		t.Fatalf("error = %v, store calls = %d; want InvalidArgument and 0", err, fs.calls)
 	}
 }
