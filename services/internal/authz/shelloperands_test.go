@@ -50,6 +50,27 @@ func TestShellOperands(t *testing.T) {
 		"ls -la":                          nil,
 		"(cd build; ls)":                  {"build"},
 		"tee -a log":                      {"log"},
+
+		// A quoted or escaped separator does not end a command.
+		`cat "/workspace/a;" notes`:   {"/workspace/a;", "notes"},
+		`cat /workspace/a\; notes`:    {"/workspace/a;", "notes"},
+		`cat '/workspace/a|b' notes`:  {"/workspace/a|b", "notes"},
+		"cat /workspace/a \\\n notes": {"/workspace/a", "notes"},
+		// Reserved words and wrapper flags do not hide the command.
+		"if true; then cat notes; fi":     {"notes"},
+		"while true; do rm -rf out; done": {"out"},
+		"! cat notes":                     {"notes"},
+		"sudo -u root cat notes":          {"notes"},
+		"timeout 5 cat notes":             {"notes"},
+		// Every spelling of a redirection names its target.
+		"echo hi >| out":   {"out"},
+		"echo hi >& out":   {"out"},
+		"echo hi &> out":   {"out"},
+		"echo hi &>> out":  {"out"},
+		"echo hi <> out":   {"out"},
+		"echo hi 2> err":   {"err"},
+		"echo hi 2>&1 >&2": nil,
+		`c\at notes`:       {"notes"},
 	} {
 		if got := shellOperands(command); !reflect.DeepEqual(got, want) {
 			t.Errorf("shellOperands(%q) = %#v, want %#v", command, got, want)
