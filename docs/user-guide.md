@@ -1180,11 +1180,28 @@ before you use it:
 6. **On a shell tool it is not a boundary.** The PDP reads a command's text
    and does not run a shell. It checks every word that looks like a path: one
    with a `/`, one starting with `~`, a bare `..`, or a name with a file
-   extension. A bare name with none of those is not checked, so `cat
-   /workspace/a.txt; cat notes` is allowed whatever `notes` is, and a path
-   built by a variable or a subshell is not seen at all. Use `id_prefix` to
-   keep a well-behaved agent in its lane. To confine a shell, run it where
-   the files outside its scope are not reachable.
+   extension. Under an `id_prefix` it also checks two things more:
+
+    - **Bare names that a file command or a redirection uses.** For `cat`,
+      `ls`, `cd`, `pushd`, `rm`, `rmdir`, `cp`, `mv`, `ln`, `touch`, `mkdir`,
+      `head`, `tail`, `less`, `more`, `tac`, `nl`, `stat`, `du`, `wc`, `file`,
+      `tee`, `readlink`, `realpath` or `source`, wherever it stands in a
+      command (`sudo cat notes` too), every later word that is not a flag or
+      a number counts as a path, and so does the word after `<` or `>`.
+      `cat /workspace/a.txt; cat notes`, `cd build` and `echo x > out` are
+      denied: write the full path. A bare `cd` counts as `~`. This also
+      refuses one of those names used as plain text, as in `echo cat notes`.
+    - **Whether the text can be read at all.** A command that uses `$`, a
+      backtick, or an unquoted `*`, `?`, `[` or `{` is denied with `command
+      uses … cannot be evaluated`, because the shell would change its words
+      after the check. `$` inside single quotes and a glob inside any quotes
+      are fine: `awk '{print $1}' /workspace/a.txt` is allowed.
+
+   What still gets through: a bare name given to a command outside that
+   list (`python script`, `make -C dir`), a script or interpreter that opens
+   files itself, and a symlink inside the prefix that points out of it. Use
+   `id_prefix` to keep a well-behaved agent in its lane. To confine a shell,
+   run it where the files outside its scope are not reachable.
 
 A child delegation may narrow `id_prefix` further (`/workspace/service-a/`
 under a parent's `/workspace/`) but may not widen it or drop it — see
