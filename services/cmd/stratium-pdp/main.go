@@ -214,9 +214,11 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 
-	// One connection may hold at most maxCallsPerConnection calls in flight;
-	// grpc-go's own default is no limit.
-	grpcServer := grpc.NewServer(transport, grpc.MaxConcurrentStreams(maxCallsPerConnection))
+	// One connection may hold at most maxCallsPerConnection calls in flight,
+	// and one call may run at most cfg.RequestTimeout; grpc-go's own default
+	// for both is no limit.
+	grpcServer := grpc.NewServer(transport, grpc.MaxConcurrentStreams(maxCallsPerConnection),
+		grpc.UnaryInterceptor(requestDeadline(cfg.RequestTimeout)))
 	pdpgrpc.RegisterPDPServiceServer(grpcServer, srv)
 
 	// The standard health service, nothing else registered alongside it: no
