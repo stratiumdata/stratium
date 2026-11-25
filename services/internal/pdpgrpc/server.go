@@ -305,6 +305,10 @@ func (s *Server) loadEpochOrDeny(ctx context.Context) (int64, error) {
 // place deny-overrides-with-default-deny lives. A credential that fails
 // verification denies through denyAndAudit before authz.Decide is ever
 // called, so there is nothing for the fold to see.
+// errAmbiguousInput is Decide's reason for refusing raw_input in which two
+// keys of one object differ at most in capitalization.
+var errAmbiguousInput = errors.New("raw_input has two keys of one object that differ at most in capitalization; it cannot be decided")
+
 func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideResponse, error) {
 	agentID, err := parseNonNilUUID(req.GetAgentId())
 	if err != nil {
@@ -397,6 +401,13 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		// row needs to know WHICH delegation's token was presented with a bad
 		// proof. Only chain is still nil — nothing has loaded it yet.
 		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, req.GetSubject(), now, err, nil)
+	}
+
+	// Input that can be read two ways is refused before anything is decided
+	// about it: the tier, the resource and the approval digest would describe
+	// one reading, and the call that runs could be the other.
+	if authz.AmbiguousJSONKeys([]byte(action.RawInput)) {
+		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, req.GetSubject(), now, errAmbiguousInput, nil)
 	}
 
 	epoch, err := s.loadEpochOrDeny(ctx)

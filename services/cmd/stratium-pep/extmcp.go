@@ -33,6 +33,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/stratiumdata/stratium/internal/authz"
 	"github.com/stratiumdata/stratium/internal/extmcp"
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 )
@@ -112,11 +113,11 @@ func (s *extmcpServer) CheckRequest(ctx context.Context, req *extmcp.McpRequest)
 	if method != "tools/call" {
 		// Decided as the tool "<target>_<method>", with the params as input.
 		params.Name, params.Arguments = method, req.GetMcpRequest()
-		if len(params.Arguments) == 0 || len(targets) != 1 || targets[0] == "" || ambiguousJSONKeysAnywhere(params.Arguments) {
+		if len(params.Arguments) == 0 || len(targets) != 1 || targets[0] == "" || authz.AmbiguousJSONKeys(params.Arguments) {
 			return extmcpDeny("stratium-pep: malformed " + method + ": one target and params are required"), nil
 		}
 	} else if err := json.Unmarshal(req.GetMcpRequest(), &params); err != nil || params.Name == "" || len(targets) != 1 || targets[0] == "" ||
-		ambiguousJSONKeys(req.GetMcpRequest(), "name", "arguments") || ambiguousJSONKeysAnywhere(params.Arguments) {
+		ambiguousJSONKeys(req.GetMcpRequest(), "name", "arguments") || authz.AmbiguousJSONKeys(params.Arguments) {
 		return extmcpDeny("stratium-pep: malformed tools/call: one target and params.name are required"), nil //nolint:nilerr // a refusal is an answer, never an RPC error: see the package doc
 	}
 

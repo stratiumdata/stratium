@@ -24,6 +24,10 @@ server's two tools:
 - with the PDP unreachable, the call was refused the same way;
 - with `extmcp` stopped and `failureMode: failClosed`, agentgateway refused
   the call itself (`guardrail check failed`);
+- a `resources/read` and a `prompts/get` were each refused, and each reached
+  the client once allowed. This one was run against a stand-in PDP that
+  logged what it was asked: the names `files_resources/read` and
+  `files_prompts/get`, with the request's params as the input;
 - on a route with two targets, each tool was decided under the name the
   client called it by (`fs_read_file`, `docs_read_file`), and a tool held on
   one target was refused on the other;
@@ -91,7 +95,6 @@ routes:
         methods:
           tools/call: request
           resources/read: request
-          resources/subscribe: request
           prompts/get: request
   backends:
   - mcp:
@@ -176,14 +179,18 @@ The MCP client must also be willing to wait that long.
 
 ## Limits
 
-- **Four methods are decided:** `tools/call`, `resources/read`,
-  `resources/subscribe` and `prompts/get`. The last three are decided as a
-  tool named `<target>_<method>`, for example `files_resources/read`, with
-  the request's params as its input, so a delegation must hold that name
-  before an agent can read a resource or get a prompt. Every other MCP method
-  passes undecided, and `tools/list` is not filtered, for the reason given in
-  [`mcp`](mcp.md#toolslist-is-not-filtered). Only `tools/call` was run against
-  a live agentgateway; the other three method keys are from its documentation.
+- **Three methods are decided:** `tools/call`, `resources/read` and
+  `prompts/get`. The last two are decided as a tool named
+  `<target>_<method>`, for example `files_resources/read`, with the request's
+  params as its input, so a delegation must hold that name before an agent
+  can read a resource or get a prompt. Every other MCP method passes
+  undecided, and `tools/list` is not filtered, for the reason given in
+  [`mcp`](mcp.md#toolslist-is-not-filtered).
+- **`resources/subscribe` is not decided here.** agentgateway 1.7.0 does not
+  send that method to a processor before forwarding it, and warns when a
+  `methods` map asks for it. A subscription tells the client that a resource
+  changed; reading what it changed to is a `resources/read`, which is
+  decided. The stdio [`mcp`](mcp.md) mode does decide it.
 - **Nothing is reported after a call runs.** agentgateway's response-phase
   call does not say which tool or arguments it belongs to.
 - **Only what the processor's `methods` map names is sent.** A route without
