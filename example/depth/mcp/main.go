@@ -327,6 +327,7 @@ func mcpEnv(pdpAddr, agentID, sessionFile string) []string {
 		"STRATIUM_PEP_MCP_UPSTREAM_COMMAND=npx",
 		"STRATIUM_PEP_MCP_UPSTREAM_ARGS=-y,@modelcontextprotocol/server-filesystem,"+exampleDataDir,
 		"STRATIUM_PEP_PDP_ADDR="+pdpAddr,
+		"STRATIUM_PEP_PDP_INSECURE=true", // the local stack's PDP serves plaintext
 		"STRATIUM_PEP_AGENT_ID="+agentID,
 		"STRATIUM_PEP_SUBJECT="+subject,
 		"STRATIUM_PEP_SESSION_FILE="+sessionFile,

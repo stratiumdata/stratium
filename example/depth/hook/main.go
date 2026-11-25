@@ -291,6 +291,7 @@ func denialFromCreateAttempt(err error) (agent.Result, error) {
 func hookEnv(pdpAddr, agentID, sessionFile string) []string {
 	return append(os.Environ(),
 		"STRATIUM_PEP_PDP_ADDR="+pdpAddr,
+		"STRATIUM_PEP_PDP_INSECURE=true", // the local stack's PDP serves plaintext
 		"STRATIUM_PEP_AGENT_ID="+agentID,
 		"STRATIUM_PEP_SUBJECT="+subject,
 		"STRATIUM_PEP_SESSION_FILE="+sessionFile,

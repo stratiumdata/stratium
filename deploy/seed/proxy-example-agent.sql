@@ -43,6 +43,6 @@ SELECT set_config('app.tenant_id', 'tenant-proxy-integration', false);
 -- classification_caps) -- '{}' matches CreateAgent's own "every created
 -- agent starts capless" default. Safe to re-run: ON CONFLICT (id) DO
 -- NOTHING leaves an already-seeded row untouched.
-INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps)
-VALUES ('04ef809a-849f-404a-9a5c-015b7f73a014', 'tenant-proxy-integration', 'proxy-example-agent', 'example', 'llama3.2', 3, true, false, '[]', '{}')
+INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints)
+VALUES ('04ef809a-849f-404a-9a5c-015b7f73a014', 'tenant-proxy-integration', 'proxy-example-agent', 'example', 'llama3.2', 3, true, false, '[]', '{}', '{}')
 ON CONFLICT (id) DO NOTHING;

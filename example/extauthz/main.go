@@ -356,6 +356,7 @@ func runSessionStart(pepBin, pdpAddr string) error {
 	cmd := exec.Command(pepBin, "session-start") //nolint:gosec // G204: pepBin is this example's own fixed configuration, never request data.
 	cmd.Env = append(os.Environ(),
 		"STRATIUM_PEP_PDP_ADDR="+pdpAddr,
+		"STRATIUM_PEP_PDP_INSECURE=true", // the local stack's PDP serves plaintext
 		"STRATIUM_PEP_AGENT_ID="+exampleAgentID,
 		"STRATIUM_PEP_SUBJECT="+exampleSubject,
 		"STRATIUM_PEP_SESSION_FILE="+sessionFile,
