@@ -76,6 +76,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -482,6 +483,19 @@ func TestIntegration_Escalation_ApprovedRetryAllowsAndAuditChainVerifies(t *test
 		t.Fatalf("audit.Verify() over the escalation+approved-retry pair error = %v, want nil", err)
 	}
 	t.Logf("audit.Verify() passed over the escalation and approved-retry pair")
+
+	// The approval is spent: the same call, offering it again, is denied.
+	// Against the real database this is also what shows the serving role may
+	// set used_at (migrations/000023) and that the statement finds the row
+	// under row-level security.
+	third, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, &approvalIDStr))
+	if err != nil {
+		t.Fatalf("third Decide() error = %v", err)
+	}
+	if third.GetEffect() != pdpgrpc.Effect_EFFECT_DENY || !strings.Contains(third.GetReason(), "already been used") {
+		t.Errorf("third Effect = %v, Reason = %q; want EFFECT_DENY saying the approval has been used",
+			third.GetEffect(), third.GetReason())
+	}
 }
 
 // TestIntegration_Escalation_ApprovedRetryStillEnforcesDelegationLeg is the

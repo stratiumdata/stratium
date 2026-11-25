@@ -14,6 +14,18 @@ and in the two arguments handed to `startMCP`.
 
 ## Running it
 
+A stack brought up with `docker compose` alone needs two things first, once:
+the `agent-trial-grant` policy and the filesystem server's tool catalog, both
+in tenant `tenant-pap-e2e-integration`. Steps 0b and 0c of
+[`docs/testing/2026-08-20-agent-integration-test.md`](../../docs/testing/2026-08-20-agent-integration-test.md)
+create them. Without the policy `session-start` fails with `none of the
+requested tools are held by this principal`; without the catalog every read is
+denied on action tier. `depth/mcp` needs the same two.
+
+The examples run `../bin/stratium-pep`; build it with
+`cd services && go build -o ../bin/stratium-pep ./cmd/stratium-pep`, or point
+`EXAMPLE_PEP_BIN` at one.
+
 ```bash
 cd example
 export EXAMPLE_MCP_PAP_ADDR="localhost:$(docker compose -f ../deploy/docker/docker-compose.yml port stratium-pap 8080 | sed -E 's/.*://')"

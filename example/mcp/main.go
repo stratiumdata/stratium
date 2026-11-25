@@ -199,6 +199,7 @@ func mcpEnv(pdpAddr, agentID, subject, sessionFile string) []string {
 		"STRATIUM_PEP_MCP_UPSTREAM_COMMAND=npx",
 		"STRATIUM_PEP_MCP_UPSTREAM_ARGS=-y,@modelcontextprotocol/server-filesystem,"+exampleDataDir,
 		"STRATIUM_PEP_PDP_ADDR="+pdpAddr,
+		"STRATIUM_PEP_PDP_INSECURE=true", // the local stack's PDP serves plaintext
 		"STRATIUM_PEP_AGENT_ID="+agentID,
 		"STRATIUM_PEP_SUBJECT="+subject,
 		"STRATIUM_PEP_SESSION_FILE="+sessionFile,
@@ -216,6 +217,7 @@ func runSessionStart(pepBin, pdpAddr, agentID, subject, sessionFile string, tool
 	cmd := exec.Command(pepBin, "session-start") //nolint:gosec // G204: pepBin is this example's own fixed configuration, never request data.
 	cmd.Env = append(os.Environ(),
 		"STRATIUM_PEP_PDP_ADDR="+pdpAddr,
+		"STRATIUM_PEP_PDP_INSECURE=true", // the local stack's PDP serves plaintext
 		"STRATIUM_PEP_AGENT_ID="+agentID,
 		"STRATIUM_PEP_SUBJECT="+subject,
 		"STRATIUM_PEP_SESSION_FILE="+sessionFile,

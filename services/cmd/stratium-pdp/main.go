@@ -93,6 +93,7 @@ func run(logger *slog.Logger) error {
 	// The private key never leaves this process from here on: signer is
 	// passed to pdpgrpc.NewServer below and nowhere else, so the PDP stays
 	// the sole signing-key holder (spec A4).
+	warnIfBuiltInSigningKey(logger, cfg.TokenSigningKeyPath, builtInKeyDigestPath)
 	signer, err := token.Load(cfg.TokenSigningKeyPath, cfg.TokenPreviousKeyPath)
 	if err != nil {
 		return fmt.Errorf("load signing key: %w", err)
@@ -132,6 +133,9 @@ func run(logger *slog.Logger) error {
 	defer checkCancel()
 	if err := checkNotAuditOwner(checkCtx, db); err != nil {
 		return fmt.Errorf("serving identity startup check: %w", err)
+	}
+	if err := store.CheckServingRole(checkCtx, db); err != nil {
+		return fmt.Errorf("serving identity startup check (STRATIUM_DATABASE_URL): %w", err)
 	}
 
 	repo := store.New(db, cfg.TenantID)

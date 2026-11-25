@@ -26,6 +26,8 @@ func TestShellResourceIDs(t *testing.T) {
 		{"a redirect target", "echo hi > /secret/out.txt", []string{"/secret/out.txt"}},
 		{"the right-hand side of a flag", "rg --file=/secret/patterns x", []string{"/secret/patterns"}},
 		{"a home-relative path", "cat ~/notes.txt", []string{"~/notes.txt"}},
+		{"a bare parent directory", "cat /work/a && cd .. && cat notes", []string{"/work/a", ".."}},
+		{"a single dot is not a path", "cp /work/a .", []string{"/work/a"}},
 		{"a relative path with an extension", "cat notes.txt", []string{"notes.txt"}},
 		{"a dot-relative path", "cat ./config.yaml", []string{"./config.yaml"}},
 

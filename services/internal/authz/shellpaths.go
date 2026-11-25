@@ -113,7 +113,9 @@ func looksLikePath(s string) bool {
 	if s == "" {
 		return false
 	}
-	if strings.Contains(s, "/") || strings.HasPrefix(s, "~") {
+	// A bare ".." names the parent directory: `cd ..` moves a command out of
+	// wherever its other paths said it was.
+	if strings.Contains(s, "/") || strings.HasPrefix(s, "~") || s == ".." {
 		return true
 	}
 	dot := strings.LastIndex(s, ".")

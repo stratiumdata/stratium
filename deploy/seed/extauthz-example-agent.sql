@@ -50,6 +50,6 @@ SELECT set_config('app.tenant_id', 'tenant-extauthz-integration', false);
 -- classification_caps) -- '{}' matches CreateAgent's own "every created
 -- agent starts capless" default. Safe to re-run: ON CONFLICT (id) DO
 -- NOTHING leaves an already-seeded row untouched.
-INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps)
-VALUES ('72d38ebe-2e5c-4918-9e73-b0de3607fbfa', 'tenant-extauthz-integration', 'extauthz-example-agent', 'example', 'llama3.2', 3, true, false, '[]', '{}')
+INSERT INTO agents (id, tenant_id, name, provider, model_id, trust_tier, enabled, suspended, allowed_tools, classification_caps, resource_constraints)
+VALUES ('72d38ebe-2e5c-4918-9e73-b0de3607fbfa', 'tenant-extauthz-integration', 'extauthz-example-agent', 'example', 'llama3.2', 3, true, false, '[]', '{}', '{}')
 ON CONFLICT (id) DO NOTHING;

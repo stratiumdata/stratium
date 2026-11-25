@@ -131,6 +131,9 @@ type fakeStore struct {
 	// needs two distinct approvals loaded within one call.
 	loadApproval    *models.Approval
 	loadApprovalErr error
+	// approvalUsed/useApprovalErr back UseApproval, below.
+	approvalUsed   bool
+	useApprovalErr error
 
 	// catalog/catalogErr back LoadToolCatalog. catalog's zero value (nil) is
 	// deliberately what most tests in this file exercise without setting it
@@ -281,6 +284,18 @@ func (f *fakeStore) LoadApproval(context.Context, uuid.UUID) (*models.Approval, 
 		return nil, f.loadApprovalErr
 	}
 	return f.loadApproval, nil
+}
+
+// UseApproval spends the approval once: true the first time, false after,
+// as the store's own single statement does.
+func (f *fakeStore) UseApproval(context.Context, uuid.UUID, time.Time) (bool, error) {
+	f.calls++
+	if f.useApprovalErr != nil {
+		return false, f.useApprovalErr
+	}
+	spent := !f.approvalUsed
+	f.approvalUsed = true
+	return spent, nil
 }
 
 func (f *fakeStore) LoadToolCatalog(context.Context) ([]models.ToolCatalogEntry, error) {

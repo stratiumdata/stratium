@@ -60,6 +60,9 @@ type Store interface {
 	// interface needed to name it.
 	CreateApproval(ctx context.Context, a *models.Approval) error
 	LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approval, error)
+	// UseApproval spends an approval that has just verified, and reports
+	// false when an earlier call already spent it.
+	UseApproval(ctx context.Context, id uuid.UUID, now time.Time) (bool, error)
 
 	// LoadToolCatalog loads the tenant's per-tool tool_catalog rows (spec
 	// §4.4.2 T1/T2), consulted both for the catalog step of DeriveTier's
