@@ -205,6 +205,10 @@ type Server struct {
 	// operator opted out (cfg.PrincipalAuthInsecure); see resolvePrincipal
 	// (delegation.go), which refuses nil without that opt-out.
 	principals PrincipalVerifier
+
+	// failedTokens caps the audit rows Decide writes for a token that does
+	// not authenticate (token_failure.go).
+	failedTokens failureBudget
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum
@@ -225,6 +229,10 @@ func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, sig
 		policy: principalPolicy,
 		cfg:    cfg,
 		signer: signer,
+		failedTokens: failureBudget{
+			perSecond: cfg.FailedTokenAuditPerSecond,
+			burst:     float64(cfg.FailedTokenAuditBurst),
+		},
 	}
 }
 
@@ -374,11 +382,10 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// third caller here does not risk the three drifting apart.
 	delegationID, jkt, err := s.authenticateToken(req.GetToken())
 	if err != nil {
-		// No epoch to report: loadEpochOrDeny has not run yet on this path,
-		// and there is no legitimate value to substitute for "never read" —
-		// see toResponse's own doc comment on why nil, not zero, is what a
-		// genuinely-never-read epoch must produce on the wire.
-		return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, req.GetSubject(), now, err, nil)
+		// Audited, but at a capped rate and with the caller's text clipped:
+		// see token_failure.go. No epoch either way; loadEpochOrDeny has not
+		// run, and toResponse's own doc comment says why nil, not zero.
+		return s.denyUnauthenticated(ctx, agentID, action, req.GetSubject(), now, err)
 	}
 
 	// Every LOCAL half of the proof-of-possession check (spec §4.7.2 K7),
