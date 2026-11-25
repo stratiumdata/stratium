@@ -182,7 +182,7 @@ func resolveApproval(
 	pollCtx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
 
-	ok, pollReason := pollApproval(pollCtx, client, pollInterval, approvalID)
+	ok, pollReason := pollApproval(pollCtx, client, pollInterval, approvalID, req.GetToken())
 	if !ok {
 		return pdpgrpc.Effect_EFFECT_DENY, fmt.Sprintf("stratium-pep: %s", pollReason)
 	}
@@ -256,14 +256,14 @@ func resolveApproval(
 // or not GetApproval itself answered instantly
 // (TestRunHook_Escalate_PollRespectsInterval_DoesNotBusyWait proves the call
 // count this produces stays bounded).
-func pollApproval(ctx context.Context, client pdpgrpc.PDPServiceClient, interval time.Duration, approvalID string) (ok bool, reason string) {
+func pollApproval(ctx context.Context, client pdpgrpc.PDPServiceClient, interval time.Duration, approvalID, token string) (ok bool, reason string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	timeoutReason := fmt.Sprintf("approval %s did not resolve within the escalation timeout", approvalID)
 
 	for {
-		resp, err := client.GetApproval(ctx, &pdpgrpc.GetApprovalRequest{ApprovalId: approvalID})
+		resp, err := client.GetApproval(ctx, &pdpgrpc.GetApprovalRequest{ApprovalId: approvalID, Token: token})
 		if err != nil {
 			// ctx.Err() takes priority over whatever GetApproval's error says:
 			// when ApprovalTimeout happens to be an exact multiple of interval,

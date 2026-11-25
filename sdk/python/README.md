@@ -96,7 +96,9 @@ to carry on.
   escalation branch returns directly and the `put` is only reachable on the
   path where no wait ever began, the same structure as `stratium-pep`'s
   `local_cache.go`.
-- **Escalation** polls `GetApproval` every `approval_poll_interval` seconds
+- **Escalation** polls `GetApproval`, presenting the session's delegation
+  token (the PDP reports an approval only to a holder of its delegation's
+  token), every `approval_poll_interval` seconds
   (default 2.0) until it sees `approved`, `denied`, or `approval_timeout`
   seconds elapse (default 120.0) — `stratium/_escalation.py`'s
   `resolve_escalation()`, invoked from `Session.check` only when the PDP

@@ -179,8 +179,11 @@ class Client:
             return False
         return resp.matched
 
-    def get_approval(self, approval_id: str) -> str:
+    def get_approval(self, approval_id: str, token: str) -> str:
         """The approval's current status, lowercased.
+
+        token is the delegation token the escalated call was made with: the
+        PDP reports an approval only to a holder of its delegation's token.
 
         Here rather than in _escalation so that nothing outside this class
         touches the stub: a Session reaching into client._stub would couple
@@ -188,7 +191,8 @@ class Client:
         copy the shape.
         """
         resp = self._stub.GetApproval(
-            pdp_pb2.GetApprovalRequest(approval_id=approval_id), timeout=self._timeout
+            pdp_pb2.GetApprovalRequest(approval_id=approval_id, token=token),
+            timeout=self._timeout
         )
         return (resp.status or "").lower()
 
