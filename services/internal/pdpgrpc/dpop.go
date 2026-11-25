@@ -87,29 +87,31 @@ import (
 // DeriveTierDenial), and K10 keeps proof material out of that record; a
 // thumbprint would also tell whoever triggered the denial exactly which key
 // to go looking for.
-// errDelegationBound refuses a token that carries no key binding when its
-// delegation has one. A delegation is bound to at most one key for its whole
+// errDelegationBound refuses a token that is not bound to the key recorded
+// for its delegation. A delegation is bound to at most one key for its whole
 // life (IssueToken and CreateDelegation record it); from that moment its
 // earlier bearer token, which nothing else would expire before the
-// delegation does, stops working everywhere.
-var errDelegationBound = errors.New("this delegation is bound to a key and the token presented is not: " +
+// delegation does, stops working everywhere, and so does a token bound to
+// any other key.
+var errDelegationBound = errors.New("this delegation is bound to a key and the token presented is not bound to it: " +
 	"present the token issued for that key")
 
-// refuseBearerForBoundDelegation returns errDelegationBound when tokenJKT is
-// empty and the delegation has a recorded key. A token that does carry a
-// binding needs no lookup: IssueToken only ever mints one for the recorded
-// key.
-func (s *Server) refuseBearerForBoundDelegation(ctx context.Context, delegationID uuid.UUID, tokenJKT string) error {
-	if tokenJKT != "" {
-		return nil
-	}
-	// ponytail: one extra read per bearer-token call. Fold bound_jkt into
+// requireDelegationKey returns errDelegationBound when the delegation has a
+// recorded key and tokenJKT is not it. tokenJKT is "" for a bearer token.
+//
+// A token that carries a binding is checked too, not trusted: IssueToken
+// only mints one for the recorded key, but a token minted before the key was
+// recorded (by an earlier release, which let a delegation take several) can
+// name another and stays valid until it expires. A delegation with no
+// recorded key accepts any token, bound or not, as before.
+func (s *Server) requireDelegationKey(ctx context.Context, delegationID uuid.UUID, tokenJKT string) error {
+	// ponytail: one extra read per call. Fold bound_jkt into
 	// store.loadDelegationQuery if this shows up in a profile.
 	bound, err := s.store.DelegationKey(ctx, delegationID)
 	if err != nil {
 		return err
 	}
-	if bound != "" {
+	if bound != "" && bound != tokenJKT {
 		return errDelegationBound
 	}
 	return nil

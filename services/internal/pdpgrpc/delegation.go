@@ -471,7 +471,7 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 	}
 	// The parent's bearer token outlives a later binding of the parent, so
 	// the token being unbound is not enough: the parent itself must be.
-	if err := s.refuseBearerForBoundDelegation(ctx, parentID, jkt); err != nil {
+	if err := s.requireDelegationKey(ctx, parentID, jkt); err != nil {
 		if errors.Is(err, errDelegationBound) {
 			return status.Error(codes.PermissionDenied,
 				"the parent delegation is bound to a key: a bound delegation cannot have children")

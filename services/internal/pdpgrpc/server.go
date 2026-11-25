@@ -472,7 +472,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return nil, status.Errorf(codes.Internal, "load chain: %s", err)
 	}
 
-	if err := s.refuseBearerForBoundDelegation(ctx, delegationID, jkt); err != nil {
+	if err := s.requireDelegationKey(ctx, delegationID, jkt); err != nil {
 		if errors.Is(err, errDelegationBound) {
 			return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now, err, &epoch)
 		}

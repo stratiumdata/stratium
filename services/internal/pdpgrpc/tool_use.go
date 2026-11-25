@@ -58,7 +58,7 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 		return nil, status.Error(codes.PermissionDenied,
 			"token is bound to a key: tool-use reports are not accepted for a key-bound delegation")
 	}
-	if err := s.refuseBearerForBoundDelegation(ctx, delegationID, jkt); err != nil {
+	if err := s.requireDelegationKey(ctx, delegationID, jkt); err != nil {
 		if errors.Is(err, errDelegationBound) {
 			return nil, status.Errorf(codes.PermissionDenied, "token: %s", err)
 		}

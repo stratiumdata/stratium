@@ -201,3 +201,31 @@ func TestGetApproval_AnsweredOnlyToTheSessionWaitingOnIt(t *testing.T) {
 		t.Fatalf("GetApproval() with the delegation's own token = %v, %v; want status %q", resp, err, a.Status)
 	}
 }
+
+// A token bound to some other key than the one recorded for the delegation
+// is refused even with a valid proof for its own key. IssueToken never mints
+// one once a key is recorded, but one issued before the delegation's key was
+// recorded can still be in circulation until it expires.
+func TestDecide_TokenBoundToAnotherKeyThanTheDelegations(t *testing.T) {
+	t.Run("another key is denied", func(t *testing.T) {
+		f := newBoundFixture(t)
+		_, f.fs.boundKey = freshJWK(t)
+
+		resp := f.decide(t)
+		if resp.GetEffect() != Effect_EFFECT_DENY || !strings.Contains(resp.GetReason(), "bound to a key") {
+			t.Fatalf("Decide() = %v (%s), want DENY naming the key binding", resp.GetEffect(), resp.GetReason())
+		}
+	})
+	t.Run("the recorded key is allowed", func(t *testing.T) {
+		f := newBoundFixture(t)
+		claims, err := f.signer.Verify(f.req.GetToken())
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		f.fs.boundKey, _ = tokenThumbprint(claims)
+
+		if resp := f.decide(t); resp.GetEffect() != Effect_EFFECT_ALLOW {
+			t.Fatalf("Decide() = %v (%s), want ALLOW", resp.GetEffect(), resp.GetReason())
+		}
+	})
+}
