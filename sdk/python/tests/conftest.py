@@ -21,6 +21,8 @@ class FakePDP(pdp_pb2_grpc.PDPServiceServicer):
         self.approval_calls: list = []
         self.delegation_calls: list = []
         self.report_calls: list = []
+        self.issue_responses: list = []
+        self.issue_calls: list = []
 
     def Decide(self, request, context):
         self.decide_calls.append(request)
@@ -34,6 +36,12 @@ class FakePDP(pdp_pb2_grpc.PDPServiceServicer):
         if not self.delegation_responses:
             context.abort(grpc.StatusCode.INTERNAL, "no scripted response")
         return self.delegation_responses.pop(0)
+
+    def IssueToken(self, request, context):
+        self.issue_calls.append(request)
+        if not self.issue_responses:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, "delegation is expired")
+        return pdp_pb2.IssueTokenResponse(token=self.issue_responses.pop(0))
 
     def ReportToolUse(self, request, context):
         self.report_calls.append(request)

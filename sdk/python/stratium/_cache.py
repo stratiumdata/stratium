@@ -58,8 +58,8 @@ class DecisionCache:
         # afford to be explicit about -- (DelegationID, Tool, InputDigest),
         # cache.go:186. Without it every delegation shares one key space and
         # the only thing separating them is whoever remembers to discard the
-        # cache on a re-mint, which is a thing to remember rather than a thing
-        # that cannot go wrong.
+        # cache, which is a thing to remember rather than a thing that cannot
+        # go wrong.
         #
         # raw_input is already canonical (see _types.canonical_raw_input), so
         # equal arguments hash equal regardless of how the caller spelled them.

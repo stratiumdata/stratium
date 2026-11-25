@@ -48,7 +48,7 @@ with Client(pdp_addr) as client:
 `Session.check(*, tool, raw_input, resource=None)` is the turnkey surface
 (`stratium/_session.py`): it consults an in-memory decision cache first, asks
 the PDP on a miss, resolves an `ESCALATE` by polling for human approval and
-retrying, and re-mints the delegation once if a denial names the token as the
+retrying, and renews its token once if a denial names the token as the
 problem. `stratium/_client.py`'s `Client.decide()` and
 `Client.create_delegation()` are the lower-level calls `Session` is built on,
 for a caller that wants to manage its own delegation lifecycle instead
@@ -67,9 +67,12 @@ token from your identity provider. A root delegation needs it unless the PDP
 runs with principal verification off, and the PDP reads the principal from the
 token. A child is authorized by its parent's token instead, so passing
 `principal_token` together with `parent_delegation_id` raises `ValueError`. A
-`Session` keeps the token to re-mint its delegation, so a re-mint long after
-construction fails at the PDP once the OIDC token has expired: build a new
-`Session` with a fresh token.
+`Session` uses the token once, to create its delegation.
+
+A `Session` holds one delegation for its whole life and never creates
+another. When that delegation expires or is revoked, every `check()` is
+refused; `Session.expired` says when it has expired. Build a new `Session`
+to carry on.
 
 ### What each step is bounded by
 
@@ -79,9 +82,8 @@ construction fails at the PDP once the OIDC token has expired: build a new
   when it was written (default 30s) — all four in `stratium/_cache.py`'s
   `_usable()`. Entries are keyed on
   `(delegation_id, agent_id, subject, tool, raw_input)` — the delegation is
-  part of the key, as it is in `stratium-pep`'s `cacheKey`, so a re-mint is a
-  guaranteed miss by construction rather than something a caller has to
-  remember to invalidate. **Nothing that comes out of the escalation path is
+  part of the key, as it is in `stratium-pep`'s `cacheKey`, so a new `Session`
+  never reads another's entries. **Nothing that comes out of the escalation path is
   cached** —
   not the `ESCALATE` itself (refused on both the write and the read side), and
   not the decision the wait eventually settles on: not the post-approval
@@ -102,18 +104,22 @@ construction fails at the PDP once the OIDC token has expired: build a new
   poll count as well as by the timeout, so no injected `clock` can make it
   unbounded; a non-positive `approval_poll_interval` is refused as a `DENY`
   rather than polled.
-- **Re-issue** happens at most once per `check()` call, only when the denial's
-  reason mentions `"token"` or `"expired"` (`Session._token_is_the_problem`).
-  A second denial after the re-mint is a real denial with a fresh token, not
-  another retry — matching `stratium-pep`'s own `reissue.go`, which makes the
-  same deliberate choice not to loop.
+- **Token renewal** happens at most once per `check()` call, only when the
+  denial's reason mentions `"token"` or `"expired"`
+  (`Session._token_is_the_problem`). The session asks the PDP for a new token
+  for the same delegation (`Client.issue_token`), which the PDP gives only
+  while that delegation is still good. A second denial after the renewal is a
+  real denial with a fresh token, not another retry — matching
+  `stratium-pep`'s own `reissue.go`, which makes the same deliberate choice
+  not to loop.
 
 Verified in `sdk/python/tests/test_session.py`:
 `test_check_allows_and_caches` (one PDP round trip for two identical checks),
 `test_the_cache_expires_and_the_pdp_is_asked_again` (a miss past the
 staleness window), `test_an_escalation_retries_with_the_approval_id_and_can_allow`,
-and `test_a_token_denial_reissues_once_and_the_retry_can_allow` /
-`test_a_token_denial_reissues_only_once_even_if_the_retry_denies_again`.
+`test_a_token_denial_renews_the_token_once_and_the_retry_can_allow`,
+`test_a_token_denial_renews_only_once_even_if_the_retry_denies_again` and
+`test_a_session_never_replaces_its_delegation`.
 
 ## The public surface
 
@@ -195,7 +201,7 @@ asserts the wire request carries `'{"a":1,"b":2}'`.
 
 ## What the SDK owns, and what it does not
 
-**It owns:** the session (minting and re-minting a delegation, in
+**It owns:** the session (creating a delegation and renewing its token, in
 `stratium/_session.py`), escalation (polling and retrying an `ESCALATE`, in
 `stratium/_escalation.py`), and the decision cache (`stratium/_cache.py`, a
 Python port of `services/cmd/stratium-pep/cache.go`'s `cacheEntryUsable`).

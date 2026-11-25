@@ -127,6 +127,17 @@ See [Sender-constrained tokens on `proxy`](../pep.md#sender-constrained-tokens-o
 So `tool_catalog` rows for this surface use method paths as tool names. An
 uncatalogued method is not held by the delegation and denies.
 
+## What the target receives
+
+An allowed call is forwarded with the caller's metadata, less the three
+entries that are addressed to Stratium: `authorization` (the token), `dpop`
+(the proof) and `stratium-approval-id`. Everything else, a `cookie` or an API
+key header included, reaches the target unchanged.
+
+Set `STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS=true` to forward those three too,
+for a target that checks the Stratium token itself. The target then holds a
+token it can present to the PDP, though not a proof for it.
+
 ---
 
 ## What a denial looks like
