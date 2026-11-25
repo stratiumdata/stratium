@@ -31,6 +31,10 @@ func configurePrincipalAuth(logger *slog.Logger, cfg config.Config, srv *pdpgrpc
 		return fmt.Errorf("principal authentication (STRATIUM_PRINCIPAL_OIDC_ISSUER): %w", err)
 	}
 	srv.WithPrincipalVerifier(v)
+	if principal.ChangeableClaim(cfg.PrincipalClaim) {
+		logger.Warn("STRATIUM_PRINCIPAL_CLAIM names a claim that a person or their administrator can change; "+
+			"use one the identity provider never reassigns, such as sub or oid", "claim", cfg.PrincipalClaim)
+	}
 	logger.Info("principal authentication: root delegations require an OIDC token",
 		"issuer", cfg.PrincipalOIDCIssuer, "audience", cfg.PrincipalOIDCAudience, "claim", cfg.PrincipalClaim)
 	return nil

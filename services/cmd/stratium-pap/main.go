@@ -31,6 +31,7 @@ import (
 	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
 
 	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/principal"
 	"github.com/stratiumdata/stratium/internal/store"
 )
 
@@ -139,6 +140,11 @@ func run(logger *slog.Logger) error {
 
 	repo := store.New(db, cfg.TenantID)
 	registry := newPolicyRegistry()
+
+	if principal.ChangeableClaim(cfg.ApproverClaim) {
+		logger.Warn("STRATIUM_PAP_APPROVER_CLAIM names a claim that a person or their administrator can change; "+
+			"use one the identity provider never reassigns, such as sub or oid", "claim", cfg.ApproverClaim)
+	}
 
 	srv := NewServer(verifier, cfg.RoleClaim, cfg.ApproverClaim, cfg.Roles, repo, registry, uiConfig{
 		Issuer:   cfg.OIDCIssuer,

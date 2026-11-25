@@ -162,3 +162,14 @@ func TestVerifier_OutlivesTheContextItWasBuiltWith(t *testing.T) {
 		t.Fatalf("Identify() after the construction context was cancelled = %q, %v", got, err)
 	}
 }
+
+func TestChangeableClaim(t *testing.T) {
+	for claim, want := range map[string]bool{
+		"preferred_username": true, "upn": true, "name": true,
+		"email": false, "sub": false, "oid": false, "": false,
+	} {
+		if got := ChangeableClaim(claim); got != want {
+			t.Errorf("ChangeableClaim(%q) = %v, want %v", claim, got, want)
+		}
+	}
+}

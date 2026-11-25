@@ -418,7 +418,7 @@ the PAP's approver claim to match.
 | `STRATIUM_PAP_OIDC_AUDIENCE` | `stratium-pap` | What this deployment accepts as its own `aud`. Tokens whose audience does not match are rejected. |
 | `STRATIUM_PAP_OIDC_CLIENT_ID` | `stratium-pap` | The public client the **admin UI** authenticates as, served to the browser at `GET /ui-config`. The PAP never uses it itself, and holds no client secret. |
 | `STRATIUM_PAP_ROLE_CLAIM` | `groups` | Which claim carries role/group membership. **Never guessed** — a wrong guess would not fail loudly, it would silently refuse every operator. |
-| `STRATIUM_PAP_APPROVER_CLAIM` | `email` | Which claim identifies the operator for **approval** purposes. A second, independent claim from the role claim — see §4.4. |
+| `STRATIUM_PAP_APPROVER_CLAIM` | `email` | Which claim identifies the operator for **approval** purposes. A second, independent claim from the role claim — see §4.4. The PAP logs a warning at start-up when this names a claim a person can change, such as `preferred_username` or `name`; the PDP does the same for `STRATIUM_PRINCIPAL_CLAIM`. |
 | `STRATIUM_PAP_ADMIN_GROUPS` | `stratium-admins` | Comma-separated claim values mapped to the `admin` role. |
 | `STRATIUM_PAP_EDITOR_GROUPS` | `stratium-editors` | → `editor`. |
 | `STRATIUM_PAP_VIEWER_GROUPS` | `stratium-viewers,all-staff` | → `viewer`. |

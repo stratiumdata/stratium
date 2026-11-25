@@ -30,3 +30,17 @@ func Identity(claims map[string]any, claimName string) string {
 	}
 	return v
 }
+
+// ChangeableClaim reports whether claimName is a standard claim that a
+// person, or their administrator, can change: a display name or a sign-in
+// name. A principal or an approver named by one can be taken over by
+// whoever is next given that name. Both services warn at start-up when
+// configured with one. The list is the well-known names only; an identity
+// provider's own claims are not judged.
+func ChangeableClaim(claimName string) bool {
+	switch claimName {
+	case "preferred_username", "upn", "unique_name", "name", "nickname", "given_name", "family_name":
+		return true
+	}
+	return false
+}
