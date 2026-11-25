@@ -27,15 +27,6 @@ var fileCommands = map[string]bool{
 	"readlink": true, "realpath": true, "source": true, ".": true,
 }
 
-// commandWrappers are words the real command can follow: programs that run
-// another command, and the shell's own reserved words.
-var commandWrappers = map[string]bool{
-	"sudo": true, "env": true, "time": true, "nohup": true, "command": true,
-	"exec": true, "xargs": true, "builtin": true, "nice": true, "timeout": true,
-	"if": true, "then": true, "else": true, "elif": true, "do": true,
-	"while": true, "until": true, "!": true,
-}
-
 // shellUnreadable reports why a command's paths cannot be read from its text,
 // or "" when they can: the shell would rewrite its words after this check.
 //
@@ -158,19 +149,20 @@ func shellSegments(command string) [][]string {
 // looking like a path: every non-flag argument of a fileCommands command, and
 // every redirection target. `cat notes`, `cd build`, `echo x > out`.
 //
-// The command of a segment is its first word that is not an assignment, a
-// flag or a wrapper. After a wrapper the search goes on past words it cannot
-// place (`sudo -u root cat notes`), so a file command anywhere behind one
-// still counts.
+// A file command counts wherever it stands in a simple command, not only as
+// its first word: `sudo -u root cat notes`, `doas cat notes`, `if cat notes`.
+// Looking for it anywhere needs no list of the programs and reserved words
+// that can stand in front of a command, which could never be complete. The
+// price is a refusal for a word after a file command's name used as plain
+// text (`echo cat notes`).
 //
 // A number is skipped (`head -n 5 f`); a file named only in digits is the
 // price. A bare `cd` yields "~", since that is where it goes.
 func shellOperands(command string) []string {
 	var ids []string
 	for _, words := range shellSegments(command) {
-		name, searching, wrapped, operands, redirect := "", true, false, 0, ""
+		name, operands, redirect := "", 0, ""
 		for _, w := range words {
-			base := strings.ToLower(path.Base(w))
 			switch {
 			case w == redirectFile || w == redirectDup:
 				redirect = w
@@ -180,14 +172,10 @@ func shellOperands(command string) []string {
 				}
 				redirect = ""
 			case w == "":
-			case searching && (strings.Contains(w, "=") || strings.HasPrefix(w, "-")):
-			case searching && commandWrappers[base]:
-				wrapped = true
-			case searching && fileCommands[base]:
-				name, searching = base, false
-			case searching:
-				searching = wrapped
 			case name == "":
+				if base := strings.ToLower(path.Base(w)); fileCommands[base] {
+					name = base
+				}
 			case w == "-" || !strings.HasPrefix(w, "-"):
 				operands++
 				if strings.Trim(w, "0123456789") != "" {

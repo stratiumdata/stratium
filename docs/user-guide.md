@@ -1178,10 +1178,12 @@ before you use it:
     - **Bare names that a file command or a redirection uses.** For `cat`,
       `ls`, `cd`, `pushd`, `rm`, `rmdir`, `cp`, `mv`, `ln`, `touch`, `mkdir`,
       `head`, `tail`, `less`, `more`, `tac`, `nl`, `stat`, `du`, `wc`, `file`,
-      `tee`, `readlink`, `realpath` and `source`, every argument that is not a
-      flag or a number counts as a path, and so does the word after `<` or
-      `>`. `cat /workspace/a.txt; cat notes`, `cd build` and `echo x > out`
-      are denied: write the full path. A bare `cd` counts as `~`.
+      `tee`, `readlink`, `realpath` or `source`, wherever it stands in a
+      command (`sudo cat notes` too), every later word that is not a flag or
+      a number counts as a path, and so does the word after `<` or `>`.
+      `cat /workspace/a.txt; cat notes`, `cd build` and `echo x > out` are
+      denied: write the full path. A bare `cd` counts as `~`. This also
+      refuses one of those names used as plain text, as in `echo cat notes`.
     - **Whether the text can be read at all.** A command that uses `$`, a
       backtick, or an unquoted `*`, `?`, `[` or `{` is denied with `command
       uses … cannot be evaluated`, because the shell would change its words

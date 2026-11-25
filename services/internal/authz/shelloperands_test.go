@@ -56,7 +56,11 @@ func TestShellOperands(t *testing.T) {
 		`cat /workspace/a\; notes`:    {"/workspace/a;", "notes"},
 		`cat '/workspace/a|b' notes`:  {"/workspace/a|b", "notes"},
 		"cat /workspace/a \\\n notes": {"/workspace/a", "notes"},
-		// Reserved words and wrapper flags do not hide the command.
+		// Nothing in front of a file command hides it.
+		"doas cat notes":                  {"notes"},
+		"stdbuf -o0 cat notes":            {"notes"},
+		"flock /workspace/l cat notes":    {"notes"},
+		"echo cat notes":                  {"notes"}, // the price: plain text after the name
 		"if true; then cat notes; fi":     {"notes"},
 		"while true; do rm -rf out; done": {"out"},
 		"! cat notes":                     {"notes"},
