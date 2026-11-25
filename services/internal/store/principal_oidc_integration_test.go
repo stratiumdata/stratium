@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 
@@ -17,14 +18,15 @@ import (
 
 // These proofs run against pdp-oidc, the one PDP in the compose stack that
 // authenticates principals the way a production PDP does: against the
-// stack's Keycloak, with the same realm, audience, and claim (email) that
-// stratium-pap uses to identify approvers. Every other PDP in the stack sets
+// stack's Keycloak, with the same realm and claim (email) that stratium-pap
+// uses to identify approvers, and an audience of its own. Every other PDP in the stack sets
 // STRATIUM_PRINCIPAL_AUTH_INSECURE, so nothing else here could show that the
 // verified path works with a real identity provider and real tokens.
 //
-// The tokens are fetched from Keycloak by papAccessToken, the helper the PAP
-// proofs already use, so the PDP and the PAP are shown to accept the same
-// credential and derive the same person from it.
+// The tokens are fetched from Keycloak by principalAccessToken: the same
+// people the PAP proofs sign in as, through the realm's second client, so the
+// PDP and the PAP derive the same person from two tokens neither would take
+// from the other (TestIntegration_PrincipalOIDC_TokensAreNotInterchangeable).
 
 const (
 	oidcViewerEmail = "pap-viewer@example.com" // deploy/docker/keycloak/stratium-realm.json
@@ -76,7 +78,7 @@ func TestIntegration_PrincipalOIDC_RootPrincipalComesFromTheToken(t *testing.T) 
 		fmt.Sprintf(`permit(principal == User::"%s", action, resource);`, oidcViewerEmail), "allow")
 
 	created, err := client.CreateDelegation(t.Context(),
-		oidcRootRequest(agentID, "", papAccessToken(t, papViewerUser, papViewerPass)))
+		oidcRootRequest(agentID, "", principalAccessToken(t, papViewerUser, papViewerPass)))
 	if err != nil {
 		t.Fatalf("CreateDelegation() with a real Keycloak token and no subject: %v", err)
 	}
@@ -111,7 +113,7 @@ func TestIntegration_PrincipalOIDC_RefusesUnprovenOrMismatchedPrincipals(t *test
 	// Permits both people, so the only thing refusing below is authentication.
 	seedPolicy(t, tenant, "oidc-proof2-permit", `permit(principal, action, resource);`, "allow")
 
-	viewerToken := papAccessToken(t, papViewerUser, papViewerPass)
+	viewerToken := principalAccessToken(t, papViewerUser, papViewerPass)
 	tests := []struct {
 		name, subject, token string
 		want                 codes.Code
@@ -136,5 +138,34 @@ func TestIntegration_PrincipalOIDC_RefusesUnprovenOrMismatchedPrincipals(t *test
 	// refusals above are the check and not a broken fixture.
 	if _, err := client.CreateDelegation(t.Context(), oidcRootRequest(agentID, oidcViewerEmail, viewerToken)); err != nil {
 		t.Fatalf("control: CreateDelegation() with a matching subject and token: %v", err)
+	}
+}
+
+// The token a PEP holds to start a session is not an admin-plane credential,
+// and an admin-plane token does not start a session: each service refuses
+// the other's audience, for the same person, from the same realm. Without
+// this, whatever can read the PEP's principal token file could approve that
+// person's own escalations on the PAP.
+func TestIntegration_PrincipalOIDC_TokensAreNotInterchangeable(t *testing.T) {
+	client, tenant := oidcPDP(t)
+	agentID := uuid.New()
+	seedAgent(t, tenant, agentID, "integration-agent-oidc-proof3", models.TrustTierUnverified)
+	seedPolicy(t, tenant, "oidc-proof3-permit", `permit(principal, action, resource);`, "allow")
+
+	principalToken := principalAccessToken(t, papAdminUser, papAdminPass)
+	papToken := papAccessToken(t, papAdminUser, papAdminPass)
+
+	if status, body := papDo(t, papAddr, http.MethodGet, "/v1/approvals", principalToken, nil); status != http.StatusUnauthorized {
+		t.Errorf("PAP with an admin's principal token: status = %d (%s), want 401", status, body)
+	}
+	if status, body := papDo(t, papAddr, http.MethodGet, "/v1/approvals", papToken, nil); status != http.StatusOK {
+		t.Fatalf("control: PAP with the admin's own PAP token: status = %d (%s), want 200", status, body)
+	}
+
+	if _, err := client.CreateDelegation(t.Context(), oidcRootRequest(agentID, "", papToken)); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("PDP with a PAP token: err = %v, want Unauthenticated", err)
+	}
+	if _, err := client.CreateDelegation(t.Context(), oidcRootRequest(agentID, "", principalToken)); err != nil {
+		t.Fatalf("control: PDP with the principal token: %v", err)
 	}
 }

@@ -68,7 +68,8 @@ the identity the token carries. An unreadable or empty file fails
 The token comes from your identity provider: Stratium does not log in for you.
 Obtain it however your provider issues tokens for the audience the PDP expects
 (`STRATIUM_PRINCIPAL_OIDC_AUDIENCE`), and write it to a file only the session's
-user can read. It is a file, not a variable, so the token is not copied into
+user can read. Use a token issued for that audience only, never the one you
+sign in to the admin console with: the PAP must not accept this token. It is a file, not a variable, so the token is not copied into
 child processes' environments. Only `session-start` reads it.
 
 The token is needed only at session start. It is typically short-lived, and

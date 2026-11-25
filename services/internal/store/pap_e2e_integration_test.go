@@ -113,6 +113,10 @@ const (
 	// client id in "aud", which is what go-oidc's ClientID check compares
 	// against (cmd/stratium-pap/oidc.go's NewVerifier).
 	papOIDCClientID = "stratium-pap"
+
+	// principalOIDCClientID is the realm's second public client, whose tokens
+	// carry pdp-oidc's STRATIUM_PRINCIPAL_OIDC_AUDIENCE and not the PAP's.
+	principalOIDCClientID = "stratium-pdp"
 )
 
 // papAccessToken obtains a real access token for username from the real
@@ -135,9 +139,21 @@ const (
 // prove nothing this does not.
 func papAccessToken(t *testing.T, username, password string) string {
 	t.Helper()
+	return accessToken(t, papOIDCClientID, username, password)
+}
+
+// principalAccessToken is papAccessToken for the token a PEP presents to the
+// PDP at session start: same person, same realm, the other audience.
+func principalAccessToken(t *testing.T, username, password string) string {
+	t.Helper()
+	return accessToken(t, principalOIDCClientID, username, password)
+}
+
+func accessToken(t *testing.T, clientID, username, password string) string {
+	t.Helper()
 	form := url.Values{
 		"grant_type": {"password"},
-		"client_id":  {papOIDCClientID},
+		"client_id":  {clientID},
 		"username":   {username},
 		"password":   {password},
 		"scope":      {"openid email"},

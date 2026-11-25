@@ -1051,10 +1051,14 @@ services:
   # is configured the way a production PDP is, against the stack's own
   # Keycloak, so the integration suite can prove with real tokens that a root
   # delegation's principal comes from the token and that a session cannot be
-  # started without one. Same realm, audience, and claim as stratium-pap
+  # started without one. Same realm and claim as stratium-pap
   # (STRATIUM_PAP_APPROVER_CLAIM), which is the requirement in production
   # too: an approval is valid only when the approver the PAP identifies is
-  # the principal this PDP identified. Its own tenant, like every PDP here.
+  # the principal this PDP identified. A DIFFERENT audience from stratium-pap,
+  # which is also the requirement in production: the PEP holds the principal's
+  # token, and a token the PAP would accept too would let whatever can read
+  # that file act as the person on the admin plane. Its own tenant, like
+  # every PDP here.
   pdp-oidc:
     build:
       context: ../..
@@ -1071,7 +1075,7 @@ services:
       STRATIUM_LISTEN_ADDR: :50051
       STRATIUM_GRPC_INSECURE: "true"  # local stack only; production PDPs serve TLS
       STRATIUM_PRINCIPAL_OIDC_ISSUER: http://keycloak:8080/realms/stratium
-      STRATIUM_PRINCIPAL_OIDC_AUDIENCE: stratium-pap
+      STRATIUM_PRINCIPAL_OIDC_AUDIENCE: stratium-pdp
       STRATIUM_PRINCIPAL_CLAIM: email
       STRATIUM_TOKEN_SIGNING_KEY_PATH: /etc/stratium/keys/current.pem
       STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
