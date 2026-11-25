@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -32,6 +33,12 @@ type Config struct {
 	// evaluation that runs past it denies. Zero, which Load never produces,
 	// means no deadline.
 	PolicyEvalTimeout time.Duration // STRATIUM_POLICY_EVAL_TIMEOUT, default 2s
+	// How often Decide may write an audit row for a token that does not
+	// authenticate: a sustained rate and a burst above it. A failure past
+	// both is still denied, and is logged instead (pdpgrpc/token_failure.go). A
+	// zero burst, which Load never produces, means no cap.
+	FailedTokenAuditPerSecond float64 // STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND, default 5
+	FailedTokenAuditBurst     int     // STRATIUM_FAILED_TOKEN_AUDIT_BURST, default 20
 
 	// gRPC transport (see tls.go). TLS is required unless GRPCInsecure is set.
 	TLSCertFile  string // STRATIUM_TLS_CERT_FILE, PEM certificate chain
@@ -149,14 +156,18 @@ var defaultPolicyLanguages = []string{"cedar", "json", "rego", "xacml"}
 
 func Load() (Config, error) {
 	c := Config{
-		ListenAddr:             envOr("STRATIUM_LISTEN_ADDR", ":50051"),
-		MaxDepth:               5,
-		DBTimeout:              5 * time.Second,
-		MaxDelegationTTL:       24 * time.Hour,
-		PolicyEvalTimeout:      2 * time.Second,
-		ApprovalTTL:            24 * time.Hour,
-		SpentProofReapInterval: 5 * time.Minute,
-		PolicyLanguages:        defaultPolicyLanguages,
+		ListenAddr:        envOr("STRATIUM_LISTEN_ADDR", ":50051"),
+		MaxDepth:          5,
+		DBTimeout:         5 * time.Second,
+		MaxDelegationTTL:  24 * time.Hour,
+		PolicyEvalTimeout: 2 * time.Second,
+		// A PEP whose token expired presents it once and re-issues, so real
+		// traffic is a few of these per session.
+		FailedTokenAuditPerSecond: 5,
+		FailedTokenAuditBurst:     20,
+		ApprovalTTL:               24 * time.Hour,
+		SpentProofReapInterval:    5 * time.Minute,
+		PolicyLanguages:           defaultPolicyLanguages,
 	}
 	var err error
 
@@ -239,6 +250,21 @@ func Load() (Config, error) {
 	}
 	if c.PolicyEvalTimeout, err = positiveDuration("STRATIUM_POLICY_EVAL_TIMEOUT", c.PolicyEvalTimeout); err != nil {
 		return c, err
+	}
+	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND"); v != "" {
+		r, err := strconv.ParseFloat(v, 64)
+		// The comparison is written so NaN fails it too.
+		if err != nil || !(r > 0) || math.IsInf(r, 0) {
+			return c, fmt.Errorf("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND must be a number above zero, got %q", v)
+		}
+		c.FailedTokenAuditPerSecond = r
+	}
+	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_BURST"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("STRATIUM_FAILED_TOKEN_AUDIT_BURST must be an integer of at least 1, got %q", v)
+		}
+		c.FailedTokenAuditBurst = n
 	}
 	if v := os.Getenv("STRATIUM_APPROVAL_TTL"); v != "" {
 		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil {

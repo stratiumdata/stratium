@@ -544,3 +544,44 @@ func TestLoad_SpentProofReapIntervalNotPositive(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_FailedTokenAuditRate(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "")
+	t.Setenv("STRATIUM_FAILED_TOKEN_AUDIT_BURST", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.FailedTokenAuditPerSecond != 5 || c.FailedTokenAuditBurst != 20 {
+		t.Errorf("defaults = %v per second, burst %d; want 5 and 20", c.FailedTokenAuditPerSecond, c.FailedTokenAuditBurst)
+	}
+
+	t.Setenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "0.5")
+	t.Setenv("STRATIUM_FAILED_TOKEN_AUDIT_BURST", "3")
+	if c, err = Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.FailedTokenAuditPerSecond != 0.5 || c.FailedTokenAuditBurst != 3 {
+		t.Errorf("got %v per second, burst %d; want 0.5 and 3", c.FailedTokenAuditPerSecond, c.FailedTokenAuditBurst)
+	}
+
+	for _, bad := range [][2]string{
+		{"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "0"},
+		{"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "-1"},
+		{"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "NaN"},
+		{"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "+Inf"},
+		{"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "fast"},
+		{"STRATIUM_FAILED_TOKEN_AUDIT_BURST", "0"},
+		{"STRATIUM_FAILED_TOKEN_AUDIT_BURST", "1.5"},
+	} {
+		t.Run(bad[0]+"="+bad[1], func(t *testing.T) {
+			t.Setenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", "")
+			t.Setenv("STRATIUM_FAILED_TOKEN_AUDIT_BURST", "")
+			t.Setenv(bad[0], bad[1])
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), bad[0]) {
+				t.Errorf("Load() error = %v, want one naming %s", err, bad[0])
+			}
+		})
+	}
+}

@@ -406,6 +406,9 @@ func testConfig() config.Config {
 		MaxDepth:            5,
 		ApprovalTTL:         time.Hour,
 		DPoPFreshnessWindow: testDPoPWindow,
+		// config.Load's defaults.
+		FailedTokenAuditPerSecond: 5,
+		FailedTokenAuditBurst:     20,
 		// Most tests are not about who the principal is, so they run in the
 		// explicit opt-out mode and send a bare subject. The verified path
 		// has its own tests (principal_test.go), which clear this.
