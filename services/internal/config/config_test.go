@@ -585,3 +585,27 @@ func TestLoad_FailedTokenAuditRate(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_DBMaxOpenConns(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_DB_MAX_OPEN_CONNS", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.DBMaxOpenConns != 20 {
+		t.Errorf("default DBMaxOpenConns = %d, want 20", c.DBMaxOpenConns)
+	}
+
+	t.Setenv("STRATIUM_DB_MAX_OPEN_CONNS", "50")
+	if c, err = Load(); err != nil || c.DBMaxOpenConns != 50 {
+		t.Errorf("Load() = %d, %v; want 50, nil", c.DBMaxOpenConns, err)
+	}
+
+	for _, bad := range []string{"0", "-1", "1.5", "many"} {
+		t.Setenv("STRATIUM_DB_MAX_OPEN_CONNS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_DB_MAX_OPEN_CONNS") {
+			t.Errorf("value %q: Load() error = %v, want one naming STRATIUM_DB_MAX_OPEN_CONNS", bad, err)
+		}
+	}
+}

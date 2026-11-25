@@ -34,6 +34,7 @@ func clearPAPEnv(t *testing.T) {
 	t.Setenv("STRATIUM_PAP_OIDC_TIMEOUT", "")
 	t.Setenv("STRATIUM_PAP_OIDC_SCOPE", "")
 	t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "")
+	t.Setenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS", "")
 }
 
 func setAllPAPEnv(t *testing.T, overrides map[string]string) {
@@ -261,4 +262,29 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatal("loadConfig() error = nil, want an error on the unparseable db timeout duration")
 		}
 	})
+}
+
+func TestLoadConfig_DBMaxOpenConns(t *testing.T) {
+	clearPAPEnv(t)
+	setAllPAPEnv(t, nil)
+	t.Setenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS", "")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.DBMaxOpenConns != 10 {
+		t.Errorf("default DBMaxOpenConns = %d, want 10", cfg.DBMaxOpenConns)
+	}
+
+	t.Setenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS", "25")
+	if cfg, err = loadConfig(); err != nil || cfg.DBMaxOpenConns != 25 {
+		t.Errorf("loadConfig() = %d, %v; want 25, nil", cfg.DBMaxOpenConns, err)
+	}
+
+	for _, bad := range []string{"0", "-1", "1.5", "many"} {
+		t.Setenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS", bad)
+		if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "STRATIUM_PAP_DB_MAX_OPEN_CONNS") {
+			t.Errorf("value %q: loadConfig() error = %v, want one naming STRATIUM_PAP_DB_MAX_OPEN_CONNS", bad, err)
+		}
+	}
 }

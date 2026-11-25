@@ -31,6 +31,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -118,12 +119,19 @@ type Config struct {
 	// to guess by leaving it unset, the same "operational tunable, not an
 	// unsafe guess" reasoning ListenAddr and OIDCTimeout above already carry.
 	DBTimeout time.Duration // STRATIUM_PAP_DB_TIMEOUT, default 5s
+
+	// DBMaxOpenConns caps the connection pool (store.LimitPool).
+	DBMaxOpenConns int // STRATIUM_PAP_DB_MAX_OPEN_CONNS, default 10
 }
 
 const defaultListenAddr = ":8080"
 const defaultOIDCScope = "openid profile email"
 const defaultOIDCTimeout = 5 * time.Second
 const defaultDBTimeout = 5 * time.Second
+
+// defaultDBMaxOpenConns is half the PDP's default: the PAP serves people, not
+// agents.
+const defaultDBMaxOpenConns = 10
 
 // loadConfig reads Config from the environment. It is the only config
 // loader this binary has -- one Config struct, one function, one missing
@@ -138,10 +146,11 @@ const defaultDBTimeout = 5 * time.Second
 func loadConfig() (Config, error) {
 	var missing []string
 	cfg := Config{
-		ListenAddr:  defaultListenAddr,
-		OIDCTimeout: defaultOIDCTimeout,
-		OIDCScope:   defaultOIDCScope,
-		DBTimeout:   defaultDBTimeout,
+		ListenAddr:     defaultListenAddr,
+		OIDCTimeout:    defaultOIDCTimeout,
+		OIDCScope:      defaultOIDCScope,
+		DBTimeout:      defaultDBTimeout,
+		DBMaxOpenConns: defaultDBMaxOpenConns,
 	}
 
 	cfg.TenantID = requiredEnv("STRATIUM_PAP_TENANT_ID", &missing)
@@ -212,6 +221,14 @@ func loadConfig() (Config, error) {
 		// already expired, misdescribing a config mistake as an unreachable
 		// database.
 		return Config{}, fmt.Errorf("STRATIUM_PAP_DB_TIMEOUT must be positive, got %s", cfg.DBTimeout)
+	}
+
+	if v := os.Getenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return Config{}, fmt.Errorf("STRATIUM_PAP_DB_MAX_OPEN_CONNS must be an integer of at least 1, got %q", v)
+		}
+		cfg.DBMaxOpenConns = n
 	}
 
 	return cfg, nil
