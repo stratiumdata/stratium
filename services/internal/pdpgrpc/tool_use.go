@@ -47,6 +47,9 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 	if req.GetTool() == "" {
 		return nil, status.Error(codes.InvalidArgument, "tool is required")
 	}
+	if err := overLong(bounded{"tool", req.GetTool(), s.cfg.Limits.ToolBytes}); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	delegationID, _, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "token: %s", err)

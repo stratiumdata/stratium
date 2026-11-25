@@ -203,6 +203,13 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 	// line (the phase's "never log a token or a key" constraint).
 	// Authenticate the call before anything else it asks for is looked at,
 	// including its JWK: see priorTokenBinding.
+	if err := overLong(
+		bounded{"token", req.GetToken(), s.cfg.Limits.CredentialBytes},
+		bounded{"dpop_jwk", req.GetDpopJwk(), s.cfg.Limits.CredentialBytes},
+	); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	priorJKT, err := s.priorTokenBinding(req.GetToken(), id)
 	if err != nil {
 		return nil, err

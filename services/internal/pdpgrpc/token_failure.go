@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	// maxUnauthenticatedFieldBytes is far above any real tool name or subject.
-	maxUnauthenticatedFieldBytes = 256
-	clippedSuffix                = "...[clipped]"
+	// maxAuditedCallerTextBytes is how much of a refused tool name or subject
+	// an audit row keeps.
+	maxAuditedCallerTextBytes = 256
+	clippedSuffix             = "...[clipped]"
 )
 
 // failureBudget is a token bucket: perSecond rows sustained, burst above it
@@ -65,13 +66,13 @@ func (b *failureBudget) take(now time.Time) (ok bool, skipped int64) {
 	return true, skipped
 }
 
-// clipUnauthenticated shortens text an unauthenticated caller chose to what an
-// audit row will hold, on a character boundary.
-func clipUnauthenticated(s string) string {
-	if len(s) <= maxUnauthenticatedFieldBytes {
+// clipCallerText shortens text a caller chose to what an audit row will hold
+// when that text was refused or never authenticated, on a character boundary.
+func clipCallerText(s string) string {
+	if len(s) <= maxAuditedCallerTextBytes {
 		return s
 	}
-	return strings.ToValidUTF8(s[:maxUnauthenticatedFieldBytes], "") + clippedSuffix
+	return strings.ToValidUTF8(s[:maxAuditedCallerTextBytes], "") + clippedSuffix
 }
 
 // denyUnauthenticated is Decide's answer to a token that did not
@@ -90,7 +91,7 @@ func (s *Server) denyUnauthenticated(
 	if skipped > 0 {
 		tokenErr = fmt.Errorf("%w [%d earlier token failures were denied and not recorded]", tokenErr, skipped)
 	}
-	action.Tool = clipUnauthenticated(action.Tool)
+	action.Tool = clipCallerText(action.Tool)
 	// No delegation, chain or epoch: nothing has been loaded on this path.
-	return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, clipUnauthenticated(subject), now, tokenErr, nil)
+	return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, clipCallerText(subject), now, tokenErr, nil)
 }

@@ -73,6 +73,9 @@ const noDenial int16 = -1
 // Handling it here, at the RPC boundary, keeps the convention intact
 // everywhere else rather than special-casing the model types themselves.
 func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequest) (*CreateDelegationResponse, error) {
+	if err := createDelegationFieldLimits(req, s.cfg.Limits); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	agentID, err := parseNonNilUUID(req.GetAgentId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "agent_id: %s", err)

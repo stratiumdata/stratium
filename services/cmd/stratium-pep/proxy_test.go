@@ -1557,7 +1557,10 @@ func TestForward_RelaysHeadersEvenWhenTargetErrorsBeforeAnyMessage(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewStream() error = %v", err)
 	}
-	if err := stream.SendMsg(&proxyFrame{payload: []byte("hello")}); err != nil {
+	// io.EOF is not a failure here: grpc-go's SendMsg returns it when the
+	// stream has already ended, and this target ends it without reading. Which
+	// happens first is a race; the status is read from RecvMsg below either way.
+	if err := stream.SendMsg(&proxyFrame{payload: []byte("hello")}); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("SendMsg() error = %v", err)
 	}
 	if err := stream.CloseSend(); err != nil {

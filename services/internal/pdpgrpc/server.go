@@ -388,6 +388,16 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return s.denyUnauthenticated(ctx, agentID, action, req.GetSubject(), now, err)
 	}
 
+	// The remaining fields are checked for length now that the caller is
+	// known (limits.go). A caller whose token verified gets an audited DENY
+	// for this, like every other refusal past this point, with its own text
+	// clipped in the row; an InvalidArgument here would be a refusal such a
+	// caller could choose that leaves no row.
+	if err := decideFieldLimits(req, s.cfg.Limits); err != nil {
+		action.Tool = clipCallerText(action.Tool)
+		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, clipCallerText(req.GetSubject()), now, err, nil)
+	}
+
 	// Every LOCAL half of the proof-of-possession check (spec §4.7.2 K7),
 	// here beside authenticateToken for the same reason that check sits ahead
 	// of every store call: parse, signature, freshness, thumbprint-versus-
