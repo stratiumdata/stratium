@@ -122,7 +122,10 @@ curl "$LITELLM/key/generate" -H "Authorization: Bearer $MASTER_KEY" -d '{
 | `stratium_tools`, `stratium_tier` | what the delegation asks for |
 
 The guardrail creates a delegation the first time a key is seen and reuses
-it. A client that sends `litellm_session_id` gets a delegation per session.
+it until it expires (`STRATIUM_PEP_TTL_SECONDS`); the next request then
+creates another. A delegation that is revoked is not replaced: the key's
+calls are refused until it expires. A client that sends `litellm_session_id`
+gets a delegation per session.
 
 The PDP must run with principal verification off, or the delegation cannot be
 created: the guardrail has no OIDC token for the subject.

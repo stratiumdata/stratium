@@ -150,6 +150,20 @@ class Client:
             epoch=resp.epoch,
         )
 
+    def issue_token(self, *, delegation_id: str, token: str, ttl_seconds: int) -> str:
+        """A new token for a delegation this caller already holds one for.
+
+        `token` is the one being replaced: the PDP checks its signature and
+        its delegation, not its expiry, and will not issue for a bare id. The
+        new token never outlives the delegation, whatever ttl_seconds asks.
+        Raises on failure, as create_delegation does.
+        """
+        resp = self._stub.IssueToken(
+            pdp_pb2.IssueTokenRequest(
+                delegation_id=delegation_id, ttl_seconds=ttl_seconds, token=token),
+            timeout=self._timeout)
+        return resp.token
+
     def report_tool_use(self, *, token: str, tool: str, raw_input: str | Mapping) -> bool:
         """Tell the PDP a tool call ran, so it can flag one it never allowed.
 

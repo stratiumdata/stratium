@@ -1,8 +1,8 @@
 """A held delegation, and the check loop around it.
 
 Session.check is the turnkey surface: consult the cache, ask the PDP, resolve
-an escalation if one comes back, and re-issue once if the token was the
-problem. Everything it returns is a Decision, including every failure.
+an escalation if one comes back, and renew the token once if it was the
+problem. A session holds one delegation and never creates another. Everything it returns is a Decision, including every failure.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from dataclasses import replace
 from collections.abc import Callable, Mapping, Sequence
 
 from ._cache import DecisionCache
@@ -79,9 +80,6 @@ class Session:
             subject=subject, agent_id=agent_id, tools=list(tools),
             max_action_tier=max_action_tier, purpose=purpose, ttl_seconds=ttl_seconds,
             escalate_at=escalate_at,
-            # Kept because a re-mint (below) needs it again. An OIDC token is
-            # short-lived, so a re-mint long after construction fails at the
-            # PDP unless the caller builds a new Session with a fresh one.
             principal_token=principal_token,
         )
         self._clock = clock
@@ -157,18 +155,8 @@ class Session:
                 clock=self._clock, sleep=self._sleep,
             )
 
-        # The key is recomputed, not reused from the lookup above: _ask may have
-        # re-minted, and this entry belongs to the delegation that ACTUALLY
-        # produced the decision, not the one the question was first asked
-        # under. Epoch and _expires_at are read from the same post-_ask state,
-        # so all three describe one grant. Go states the same rule for its own
-        # write -- storeCacheResult takes "the credential that ACTUALLY
-        # produced resp ... never sess.GetToken(), which stays the session
-        # file's original, possibly-stale value across a reissue"
-        # (local_cache.go:256-262). Go's delegation id survives its reissue
-        # unchanged (reissue.go mints a fresh TOKEN for the same delegation),
-        # so the same rule costs it nothing; here a re-mint is a whole new
-        # delegation and the key has to follow it.
+        # A token renewal inside _ask keeps the delegation, so the key, the
+        # epoch and _expires_at still describe the grant that decided.
         self._cache.put(
             self._key(tool, canonical), decision, epoch=self._grant.epoch,
             delegation_expires_at=self._expires_at,
@@ -197,28 +185,37 @@ class Session:
         if not self._token_is_the_problem(decision):
             return decision
 
-        # Re-issue and retry ONCE. stratium-pep's reissue.go deliberately does
-        # not try to tell "the token expired" from "the policy denied" before
-        # re-issuing -- both reach here, and a second denial with a fresh
-        # token is a real denial.
+        # Renew the token and retry ONCE, as stratium-pep's reissue.go does:
+        # a new token for the SAME delegation, which the PDP issues only
+        # while that delegation is still good. A session never replaces its
+        # delegation. One that has expired or been revoked stays refused,
+        # and whoever owns the session starts a new one.
         try:
-            self._grant = self._client.create_delegation(**self._mint)
+            token = self._client.issue_token(
+                delegation_id=self._grant.delegation_id, token=self._grant.token,
+                ttl_seconds=self._mint["ttl_seconds"])
         except Exception:  # noqa: BLE001
-            # Could not re-mint. The original decision stands, and it was not
-            # an allow.
+            # No new token. The original decision stands, and it was not an
+            # allow.
             return decision
-        self._token_expires_at = token_expiry(self._grant.token)
-        self._expires_at = self._token_expires_at   # the NEW token's, see __init__
+        self._grant = replace(self._grant, token=token)
+        self._token_expires_at = token_expiry(token)
         return self._client.decide(
             agent_id=self._agent_id, subject=self._subject, tool=tool,
             raw_input=raw_input, token=self._grant.token, resource=resource,
             approval_id=approval_id, harness=self._harness,
         )
 
+    @property
+    def expired(self) -> bool:
+        """Whether this session's delegation has run out. Nothing it checks
+        from here on can be allowed."""
+        return self._clock() >= self._expires_at
+
     def _token_is_the_problem(self, decision: Decision) -> bool:
-        # Only a real policy denial mentioning the token is worth re-minting
-        # for. A transport failure (effect None) is not: re-minting would need
-        # the same unreachable PDP.
+        # Only a real policy denial mentioning the token is worth a renewal.
+        # A transport failure (effect None) is not: renewing would need the
+        # same unreachable PDP.
         if decision.effect is not Effect.DENY:
             return False
         reason = decision.reason.lower()

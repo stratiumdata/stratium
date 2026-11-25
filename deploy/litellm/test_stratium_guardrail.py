@@ -30,6 +30,8 @@ def decision(allowed: bool, reason: str = "") -> Decision:
 class FakeClient:
     """Refuses any tool named in `deny`; records what it was asked."""
 
+    exp = 9999999999  # when the tokens it hands out expire
+
     def __init__(self, deny=(), down=False):
         self.deny, self.down = set(deny), down
         self.delegations, self.decisions, self.reports = [], [], []
@@ -38,7 +40,7 @@ class FakeClient:
         if self.down:
             raise ConnectionError("PDP unreachable")
         self.delegations.append(kw)
-        exp = base64.urlsafe_b64encode(b'{"exp":9999999999}').decode().rstrip("=")
+        exp = base64.urlsafe_b64encode(b'{"exp":%d}' % self.exp).decode().rstrip("=")
         return Grant(f"a.{exp}.c", f"d{len(self.delegations)}", Scope(3, ("Read",)), 1)
 
     def decide(self, **kw):
@@ -247,6 +249,20 @@ def test_each_client_session_gets_its_own_delegation():
     for sid in ("s1", "s1", "s2"):
         run(g.async_post_call_success_hook({"litellm_session_id": sid}, AUTH, reply(tool_call(0, "Read", {}))))
     assert len(c.delegations) == 2
+
+
+def test_a_session_whose_delegation_has_expired_is_replaced_by_a_new_one():
+    c = FakeClient()
+    g = guard(c)
+    c.exp = 1  # long past
+    run(g.async_post_call_success_hook({}, AUTH, reply(tool_call(0, "Read", {}))))
+    c.exp = 9999999999
+    for _ in range(2):
+        run(g.async_post_call_success_hook({}, AUTH, reply(tool_call(0, "Read", {}))))
+    # One for the first request, one to replace it once it had expired, and
+    # the third request reused the second.
+    assert len(c.delegations) == 2
+
 
 # --- chat replies, not streamed ---------------------------------------------------
 

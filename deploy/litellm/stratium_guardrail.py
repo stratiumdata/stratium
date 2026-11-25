@@ -42,7 +42,7 @@ TOOLLESS_REPLIES = frozenset({
     "HttpxBinaryResponseContent", "OpenAIModerationResponse",
 })
 # ponytail: one session per key and client session, kept in memory. A proxy
-# with more live sessions than this re-mints the oldest; raise it, or move
+# with more live sessions than this starts the oldest again; raise it, or move
 # the tokens to LiteLLM's cache, if that shows up in the audit trail.
 MAX_SESSIONS = 4096
 
@@ -171,7 +171,9 @@ class Engine:
         ident = (agent, subject, harness, tuple(tools), tier, key_id, client_session)
 
         session = self._sessions.get(ident)
-        if session is None:
+        # A session ends with its delegation. The next request starts another,
+        # as the first request for this key did.
+        if session is None or session.expired:
             # staleness_window=0: every call is decided by the PDP and leaves
             # its own audit row, which is what a report is matched against.
             session = Session(
