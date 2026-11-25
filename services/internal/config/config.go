@@ -42,6 +42,12 @@ type Config struct {
 	// the PEP's default deadline (STRATIUM_PEP_CONNECT_TIMEOUT, 5s), so it
 	// only decides for a caller that set a longer one or none.
 	RequestTimeout time.Duration // STRATIUM_REQUEST_TIMEOUT, default 10s
+	// MaxRequestBytes is the largest request message the PDP reads. It is
+	// what bounds raw_input, the tool call itself; every other field has a
+	// limit of its own (Limits, below). The default is grpc-go's.
+	MaxRequestBytes int // STRATIUM_MAX_REQUEST_BYTES, default 4194304 (4 MiB)
+	// Limits is the longest each request field may be.
+	Limits RequestLimits
 	// How often Decide may write an audit row for a token that does not
 	// authenticate: a sustained rate and a burst above it. A failure past
 	// both is still denied, and is logged instead (pdpgrpc/token_failure.go). A
@@ -172,6 +178,8 @@ func Load() (Config, error) {
 		MaxDelegationTTL:  24 * time.Hour,
 		PolicyEvalTimeout: 2 * time.Second,
 		RequestTimeout:    10 * time.Second,
+		MaxRequestBytes:   4 << 20,
+		Limits:            DefaultRequestLimits(),
 		// A PEP whose token expired presents it once and re-issues, so real
 		// traffic is a few of these per session.
 		FailedTokenAuditPerSecond: 5,
@@ -243,6 +251,31 @@ func Load() (Config, error) {
 	// loaded, a deliberate and common choice outside a rotation window, not a
 	// missing required value.
 	c.TokenPreviousKeyPath = os.Getenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH")
+	if v := os.Getenv("STRATIUM_MAX_REQUEST_BYTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("STRATIUM_MAX_REQUEST_BYTES must be an integer of at least 1, got %q", v)
+		}
+		c.MaxRequestBytes = n
+	}
+	for _, l := range []struct {
+		env string
+		dst *int
+	}{
+		{"STRATIUM_MAX_TOOL_BYTES", &c.Limits.ToolBytes},
+		{"STRATIUM_MAX_NAME_BYTES", &c.Limits.NameBytes},
+		{"STRATIUM_MAX_SUBJECT_BYTES", &c.Limits.SubjectBytes},
+		{"STRATIUM_MAX_PATH_BYTES", &c.Limits.PathBytes},
+		{"STRATIUM_MAX_URI_BYTES", &c.Limits.URIBytes},
+		{"STRATIUM_MAX_PURPOSE_BYTES", &c.Limits.PurposeBytes},
+		{"STRATIUM_MAX_CREDENTIAL_BYTES", &c.Limits.CredentialBytes},
+		{"STRATIUM_MAX_REQUESTED_TOOLS", &c.Limits.RequestedTools},
+		{"STRATIUM_MAX_RESOURCE_ENTRIES", &c.Limits.ResourceEntries},
+	} {
+		if *l.dst, err = positiveInt(l.env, *l.dst); err != nil {
+			return c, err
+		}
+	}
 	if v := os.Getenv("STRATIUM_DB_MAX_OPEN_CONNS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
@@ -344,6 +377,66 @@ func splitPolicyLanguages(v string) ([]string, error) {
 		langs = append(langs, p)
 	}
 	return langs, nil
+}
+
+// RequestLimits is the longest each field of a request to the PDP may be.
+// grpc-go bounds a whole message and nothing inside it, so without these one
+// field could be as long as the message. In a Config built by hand, a zero
+// limit, which Load never produces, means none.
+//
+// raw_input is not here: it is the tool call itself (a file being written, a
+// patch) and is bounded by MaxRequestBytes.
+type RequestLimits struct {
+	// A tool, and one entry of a delegation's requested tools.
+	ToolBytes int // STRATIUM_MAX_TOOL_BYTES, default 8192
+	// A harness, an HTTP method, a resource key.
+	NameBytes int // STRATIUM_MAX_NAME_BYTES, default 256
+	// A principal: an email address, or an identity provider's own id.
+	SubjectBytes int // STRATIUM_MAX_SUBJECT_BYTES, default 512
+	// A working directory, a resource value.
+	PathBytes int // STRATIUM_MAX_PATH_BYTES, default 4096
+	// The URI a DPoP proof was made for.
+	URIBytes     int // STRATIUM_MAX_URI_BYTES, default 16384
+	PurposeBytes int // STRATIUM_MAX_PURPOSE_BYTES, default 1024
+	// A delegation token, an identity provider's token, a DPoP proof or key.
+	CredentialBytes int // STRATIUM_MAX_CREDENTIAL_BYTES, default 16384
+
+	RequestedTools  int // STRATIUM_MAX_REQUESTED_TOOLS, default 1024
+	ResourceEntries int // STRATIUM_MAX_RESOURCE_ENTRIES, default 64
+}
+
+// DefaultRequestLimits is what Load uses for a limit that is not set. Each is
+// far above anything a real caller sends.
+func DefaultRequestLimits() RequestLimits {
+	return RequestLimits{
+		// Long because the ext_authz PEP's tool is an HTTP request's path and
+		// query string, and servers commonly accept those up to 8 KiB.
+		ToolBytes:    8 << 10,
+		NameBytes:    256,
+		SubjectBytes: 512,
+		PathBytes:    4096,
+		// An origin and a path, where the path alone may be as long as a tool.
+		URIBytes:     16 << 10,
+		PurposeBytes: 1024,
+		// Identity tokens that list many groups are the large ones.
+		CredentialBytes: 16 << 10,
+		RequestedTools:  1024,
+		ResourceEntries: 64,
+	}
+}
+
+// positiveInt reads the integer setting k, falling back to def when it is
+// unset, and refuses a value that is not an integer of at least 1.
+func positiveInt(k string, def int) (int, error) {
+	v := os.Getenv(k)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be an integer of at least 1, got %q", k, v)
+	}
+	return n, nil
 }
 
 // positiveDuration reads the duration setting k, falling back to def when it

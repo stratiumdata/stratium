@@ -369,8 +369,29 @@ Three rules run through all three binaries:
 | `STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND` | `5` | number > 0 | How many audit rows a second `Decide` writes for calls whose token does not authenticate. A call past this rate and the burst below is still denied; it is logged instead of audited, and the next such row says how many were left out. Fractions are accepted (`0.5` is one row every two seconds). Counted per PDP process. |
 | `STRATIUM_FAILED_TOKEN_AUDIT_BURST` | `20` | integer ≥ 1 | How many of those rows may be written at once before the per-second rate applies. |
 | `STRATIUM_REQUEST_TIMEOUT` | `10s` | duration > 0 | Longest one call to the PDP may run, start to finish. A call still running then fails with `DEADLINE_EXCEEDED`, which a PEP treats as a denial. A caller's own shorter deadline still applies, so with the PEP's default `STRATIUM_PEP_CONNECT_TIMEOUT` of `5s` this only decides for a caller that set a longer deadline or none. Keep it above `STRATIUM_POLICY_EVAL_TIMEOUT`. |
+| `STRATIUM_MAX_REQUEST_BYTES` | `4194304` (4 MiB) | integer ≥ 1 | Largest request the PDP reads; a larger one is refused with `RESOURCE_EXHAUSTED`. This is what bounds `raw_input`, the tool call itself, so it must stay above the largest file an agent writes or patch it applies in one call. Every other request field has its own limit, listed under "Request field limits" below. |
 | `STRATIUM_SPENT_PROOF_REAP_INTERVAL` | `5m` | duration > 0 | How often the PDP sweeps its own tenant's expired `spent_proofs` rows. A longer interval cannot shorten replay protection — rows only become reapable once past the freshness window — it only delays cleanup. |
 | `STRATIUM_POLICY_LANGUAGES` | `cedar,json,rego,xacml` | any comma-separated subset of those four | Which engines this PDP will evaluate. **A name with no matching engine is a startup failure.** A stray comma (`cedar,,rego`) is rejected rather than silently dropped. A tenant policy in a language this PDP does not run produces an honest deny naming the language — never a silent skip. |
+
+#### Request field limits
+
+The PDP refuses a request with a field longer than these. Each default is far above what a PEP sends. Every value is an integer of at least 1; anything else stops the PDP at start-up with an error naming the variable.
+
+| Variable | Default | Applies to |
+|---|---|---|
+| `STRATIUM_MAX_TOOL_BYTES` | `8192` | `tool`, and each entry of `requested_scope.tools`. On the `ext_authz` surface the tool is the request's path and query string, so keep this above the longest URL you serve. |
+| `STRATIUM_MAX_SUBJECT_BYTES` | `512` | `subject` |
+| `STRATIUM_MAX_PURPOSE_BYTES` | `1024` | `purpose` |
+| `STRATIUM_MAX_PATH_BYTES` | `4096` | `cwd`, and each `resource` value |
+| `STRATIUM_MAX_NAME_BYTES` | `256` | `harness`, `observed_method`, and each `resource` key |
+| `STRATIUM_MAX_URI_BYTES` | `16384` | `observed_uri` |
+| `STRATIUM_MAX_CREDENTIAL_BYTES` | `16384` | `token`, `parent_token`, `principal_token`, `dpop_proof`, `dpop_jwk`. Raise it if your identity provider's tokens list enough groups to exceed it. |
+| `STRATIUM_MAX_REQUESTED_TOOLS` | `1024` | the number of entries in `requested_scope.tools` |
+| `STRATIUM_MAX_RESOURCE_ENTRIES` | `64` | the number of entries in `resource` |
+
+`raw_input` has no limit of its own; `STRATIUM_MAX_REQUEST_BYTES` bounds it.
+
+How a refusal looks depends on the call. `Decide` answers `DENY` and names the field; the denial is in the audit trail like any other, with the tool and subject cut to 256 bytes in that row. An over-long `token` is treated as a token that does not authenticate. `CreateDelegation`, `IssueToken` and `ReportToolUse` fail with `INVALID_ARGUMENT` naming the field.
 
 ```bash
 # a minimal production PDP
