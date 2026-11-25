@@ -196,7 +196,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	principal := authz.Principal{Subject: subject}
 	granted, err := authz.Clamp(ctx, authz.RequestedScope{MaxActionTier: tier, Tools: tools},
 		func(tool string, t models.ActionTier) (bool, error) {
-			return policy.Probe(ctx, set, policy.GrantProbe{Principal: principal, Tool: tool, Tier: t})
+			return policy.Probe(ctx, set, policy.GrantProbe{Principal: principal, Agent: agent, Tool: tool, Tier: t})
 		})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "clamp: %s", err)

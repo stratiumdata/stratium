@@ -11,9 +11,12 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/stratiumdata/stratium/internal/authz"
 	"github.com/stratiumdata/stratium/internal/policy"
 	"github.com/stratiumdata/stratium/internal/policy/cedar"
+	"github.com/stratiumdata/stratium/internal/policy/rego"
 )
 
 // prepareCedar compiles policies with the real Cedar engine — the same one
@@ -165,5 +168,71 @@ func TestProbe_ResourceScopedPolicyDoesNotAllowResourcelessProbe(t *testing.T) {
 	if got {
 		t.Fatal("Probe() = true for a resource-scoped policy against a resourceless probe, want false " +
 			"(deliberate under-granting — see spec §3.8 G6 — do not turn this into a wildcard match)")
+	}
+}
+
+// The probe evaluates policy against the agent the delegation is being
+// created for, so a policy that reserves an agent for one person decides the
+// same way when the session starts as it does on each call. Without the
+// agent, the probe saw a zero agent id and the reservation only bit at
+// decision time, after a delegation had already been granted.
+func TestProbe_AgentReservedForOnePrincipal(t *testing.T) {
+	reserved := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	other := uuid.MustParse("22222222-2222-4222-8222-222222222222")
+	set := prepareCedar(t, []policy.StoredPolicy{
+		{ID: "p1", Name: "everyone-reads", Text: `permit(principal, action == Action::"Read", resource);`},
+		{ID: "p2", Name: "reserved-for-alice", Text: `forbid(principal, action, resource)
+			when { context.agent.id == "11111111-1111-4111-8111-111111111111" && principal != User::"alice" };`},
+	})
+
+	tests := []struct {
+		name    string
+		subject string
+		agent   uuid.UUID
+		want    bool
+	}{
+		{"the reserved agent, its principal", "alice", reserved, true},
+		{"the reserved agent, someone else", "bob", reserved, false},
+		{"another agent, someone else", "bob", other, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := policy.Probe(context.Background(), set, policy.GrantProbe{
+				Principal: authz.Principal{Subject: tt.subject},
+				Agent:     authz.AgentInfo{ID: tt.agent, Enabled: true},
+				Tool:      "Read",
+			})
+			if err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Probe() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The same reservation written in Rego, as the user guide shows it.
+func TestProbe_AgentReservedForOnePrincipal_Rego(t *testing.T) {
+	set, err := rego.New().Prepare(context.Background(), []policy.StoredPolicy{
+		{ID: "p1", Name: "everyone", Text: "package stratium.policy\n\nallow if {\n\tinput.principal.subject != \"\"\n}"},
+		{ID: "p2", Name: "reserved-for-alice", Text: "package stratium.policy\n\ndeny if {\n" +
+			"\tinput.agent.id == \"11111111-1111-4111-8111-111111111111\"\n" +
+			"\tinput.principal.subject != \"alice\"\n}"},
+	})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	reserved := authz.AgentInfo{ID: uuid.MustParse("11111111-1111-4111-8111-111111111111"), Enabled: true}
+	for subject, want := range map[string]bool{"alice": true, "bob": false} {
+		got, err := policy.Probe(context.Background(), set, policy.GrantProbe{
+			Principal: authz.Principal{Subject: subject}, Agent: reserved, Tool: "Read",
+		})
+		if err != nil {
+			t.Fatalf("Probe(%s): %v", subject, err)
+		}
+		if got != want {
+			t.Errorf("Probe(%s) = %v, want %v", subject, got, want)
+		}
 	}
 }
