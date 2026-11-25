@@ -471,6 +471,18 @@ message CreateDelegationRequest {
   // is authorized by parent_token and always acts for its chain's root
   // principal.
   string principal_token = 8;
+
+  // dpop_jwk, when present, binds the new delegation to the caller's key from
+  // the start: the token in the response is sender-constrained (it carries
+  // "cnf"), and no bearer token is ever issued for this delegation. Same
+  // format and rules as IssueTokenRequest.dpop_jwk.
+  //
+  // A delegation is bound to at most one key for its whole life. Leaving
+  // this unset and supplying dpop_jwk to IssueToken later also binds it, at
+  // that moment; from then on the PDP refuses every token for the delegation
+  // that is not bound to that key, the first one included. A bound
+  // delegation cannot have children.
+  optional string dpop_jwk = 9;
 }
 
 // CreateDelegationResponse is the new delegation's id and what it was
@@ -633,6 +645,13 @@ message GetApprovalRequest {
   // declared_tier/approval_id-on-DecideRequest's optional treatment: there
   // is no "ask fresh" case here for presence-tracking to distinguish from.
   string approval_id = 1;
+
+  // token is a current token for the delegation the approval was requested
+  // under. Required: an approval's status is answered only to the session
+  // that is waiting on it. A missing or unverifiable token is
+  // Unauthenticated; a genuine token for another delegation gets the same
+  // NotFound an unknown approval_id does.
+  string token = 2;
 }
 
 // GetApprovalResponse is read-only by construction: calling GetApproval never

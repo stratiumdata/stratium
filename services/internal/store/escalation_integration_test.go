@@ -746,14 +746,13 @@ func TestIntegration_Escalation_CrossTenantCannotReadOrApprove(t *testing.T) {
 	// Read: tenant B's own Server (its own store, scoped to tenantB, no
 	// policy needed since GetApproval never evaluates one) asked for tenant
 	// A's approval id.
-	repoB := store.New(testDB, tenantB)
-	// nil signer, still safe here specifically: unlike escalationServer
-	// (which calls Decide and so needs a real one as of Task 3), this
-	// Server only ever calls GetApproval below — a plain read that never
-	// touches s.signer at all (GetApproval's own doc comment, approval.go).
-	srvB := pdpgrpc.NewServer(repoB, policy.NewMulti(repoB, escalationRegistry()),
-		config.Config{TenantID: tenantB, MaxDepth: 5, ApprovalTTL: time.Hour, PrincipalAuthInsecure: true}, nil)
-	_, err = srvB.GetApproval(t.Context(), &pdpgrpc.GetApprovalRequest{ApprovalId: approvalID.String()})
+	// A genuine token, so the refusal is the tenant boundary and not a
+	// missing credential: tenant B's PDP is asked with a token it signed
+	// itself, naming the very delegation the approval belongs to.
+	srvB, signerB := escalationServer(t, tenantB)
+	_, err = srvB.GetApproval(t.Context(), &pdpgrpc.GetApprovalRequest{
+		ApprovalId: approvalID.String(), Token: escalationToken(t, signerB, delegation.ID),
+	})
 	if err == nil {
 		t.Fatal("GetApproval() from tenant B for tenant A's approval id succeeded, want NotFound")
 	}

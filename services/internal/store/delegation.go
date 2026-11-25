@@ -315,3 +315,64 @@ func (s *Store) ListDelegations(ctx context.Context) ([]models.Delegation, error
 	}
 	return delegations, nil
 }
+
+// A delegation is bound to at most one key for its whole life: bound_jkt
+// (migration 000024) holds that key's RFC 7638 thumbprint, NULL until the
+// first binding. It is read and written by these two methods only, and is
+// deliberately not part of loadDelegationQuery: the caller that needs it
+// (pdpgrpc) asks for it by name.
+const delegationKeyQuery = `SELECT COALESCE(bound_jkt, '') FROM delegations WHERE id = $1`
+
+// bindDelegationKeyQuery records $1 unless a key is already recorded, and
+// returns whichever key the row holds afterwards. One statement, so two
+// callers racing to bind first see the same winner.
+const bindDelegationKeyQuery = `UPDATE delegations SET bound_jkt = COALESCE(bound_jkt, $1) WHERE id = $2 RETURNING bound_jkt`
+
+// DelegationKey returns the thumbprint of the key the delegation is bound
+// to, or "" if it has never been bound.
+func (s *Store) DelegationKey(ctx context.Context, id uuid.UUID) (string, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var jkt string
+	if err := tx.QueryRowContext(ctx, delegationKeyQuery, id.String()).Scan(&jkt); err != nil {
+		return "", delegationKeyError(id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("store: commit: %w", err)
+	}
+	return jkt, nil
+}
+
+// BindDelegationKey records jkt as the delegation's key unless one is
+// already recorded, and returns the key it is bound to afterwards. The
+// caller compares: a different answer means another key got there first.
+func (s *Store) BindDelegationKey(ctx context.Context, id uuid.UUID, jkt string) (string, error) {
+	if jkt == "" {
+		return "", fmt.Errorf("%w: empty key thumbprint", ErrInvalidRequest)
+	}
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var bound string
+	if err := tx.QueryRowContext(ctx, bindDelegationKeyQuery, jkt, id.String()).Scan(&bound); err != nil {
+		return "", delegationKeyError(id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("store: commit: %w", err)
+	}
+	return bound, nil
+}
+
+func delegationKeyError(id uuid.UUID, err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: delegation %s", ErrNotFound, id)
+	}
+	return fmt.Errorf("store: delegation %s key: %w", id, err)
+}

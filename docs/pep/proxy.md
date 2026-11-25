@@ -103,6 +103,8 @@ whatever policy says. To get a bound token, the agent:
 2. calls the PDP's `IssueToken` with the session file's `delegation_id`, the
    session file's `token`, and the public key as a JWK in `dpop_jwk`. The
    reply's token is bound to that key;
+   the delegation is now bound to that key for good, and the session file's
+   own token stops working, so give this surface a session of its own;
 3. signs a new proof for each call: a JWT of type `dpop+jwt`, signed ES256
    with the public key embedded, claiming `htm` `POST`, `htu`
    `STRATIUM_PEP_PROXY_PUBLIC_URI` followed by the full method path

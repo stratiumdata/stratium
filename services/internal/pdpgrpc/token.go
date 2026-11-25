@@ -258,6 +258,10 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 			"delegation %s expired at %s", id, d.ExpiresAt.Format(time.RFC3339))
 	}
 
+	if err := s.bindOrMatchKey(ctx, d.ID, jkt); err != nil {
+		return nil, err
+	}
+
 	requested := now.Add(s.boundedTTL(req.GetTtlSeconds()))
 	tok, expiry, clamped, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, requested, d.ExpiresAt)
 	if err != nil {
@@ -285,6 +289,36 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 // Unauthenticated for a missing or unverifiable token, PermissionDenied for
 // a genuine token that names another delegation. Neither message says more
 // than that: it is the caller who has it wrong.
+// bindOrMatchKey is the rule that a delegation has at most one key. jkt is
+// the thumbprint the token about to be minted will carry ("" for a bearer
+// token).
+//
+//   - The delegation has a recorded key: jkt must be that key. This is what
+//     stops the delegation's first bearer token, which lives as long as the
+//     delegation, from being exchanged for a token bound to another key or
+//     for a fresh bearer token.
+//   - It has none and jkt is set: this is the first binding, and it is
+//     recorded. Two callers racing to be first cannot both win: the store
+//     keeps the first and hands it back, and the loser is refused.
+//   - It has none and jkt is empty: an ordinary bearer re-issue.
+func (s *Server) bindOrMatchKey(ctx context.Context, delegationID uuid.UUID, jkt string) error {
+	var bound string
+	var err error
+	if jkt == "" {
+		bound, err = s.store.DelegationKey(ctx, delegationID)
+	} else {
+		bound, err = s.store.BindDelegationKey(ctx, delegationID, jkt)
+	}
+	if err != nil {
+		return status.Errorf(codes.Internal, "delegation key: %s", err)
+	}
+	if bound != jkt {
+		return status.Error(codes.PermissionDenied,
+			"delegation is bound to a key: dpop_jwk must be present and name the same key")
+	}
+	return nil
+}
+
 func (s *Server) priorTokenBinding(tokenString string, delegationID uuid.UUID) (string, error) {
 	if tokenString == "" {
 		return "", status.Error(codes.Unauthenticated,

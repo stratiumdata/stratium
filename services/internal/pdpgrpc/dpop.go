@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 
 	"github.com/stratiumdata/stratium/internal/dpop"
 	"github.com/stratiumdata/stratium/internal/store"
@@ -86,6 +87,34 @@ import (
 // DeriveTierDenial), and K10 keeps proof material out of that record; a
 // thumbprint would also tell whoever triggered the denial exactly which key
 // to go looking for.
+// errDelegationBound refuses a token that carries no key binding when its
+// delegation has one. A delegation is bound to at most one key for its whole
+// life (IssueToken and CreateDelegation record it); from that moment its
+// earlier bearer token, which nothing else would expire before the
+// delegation does, stops working everywhere.
+var errDelegationBound = errors.New("this delegation is bound to a key and the token presented is not: " +
+	"present the token issued for that key")
+
+// refuseBearerForBoundDelegation returns errDelegationBound when tokenJKT is
+// empty and the delegation has a recorded key. A token that does carry a
+// binding needs no lookup: IssueToken only ever mints one for the recorded
+// key.
+func (s *Server) refuseBearerForBoundDelegation(ctx context.Context, delegationID uuid.UUID, tokenJKT string) error {
+	if tokenJKT != "" {
+		return nil
+	}
+	// ponytail: one extra read per bearer-token call. Fold bound_jkt into
+	// store.loadDelegationQuery if this shows up in a profile.
+	bound, err := s.store.DelegationKey(ctx, delegationID)
+	if err != nil {
+		return err
+	}
+	if bound != "" {
+		return errDelegationBound
+	}
+	return nil
+}
+
 var errNoProof = errors.New("token is sender-constrained but the request carried no dpop proof")
 
 // reapSkewMargin is how much longer than strictly necessary a spent-proof row

@@ -98,6 +98,10 @@ func tierPtr(t models.ActionTier) *models.ActionTier { return &t }
 // never reached — "do not proceed" needs to be provably true, not just
 // asserted by the response code.
 type fakeStore struct {
+	// boundKey is the key thumbprint recorded for the delegation ("" = none).
+	boundKey    string
+	boundKeyErr error
+
 	agent    authz.AgentInfo
 	agentErr error
 	chain    []*models.Delegation
@@ -320,6 +324,24 @@ func (f *fakeStore) LoadResourceLabelRules(context.Context) ([]classification.Ru
 		return nil, f.labelRulesErr
 	}
 	return f.labelRules, nil
+}
+
+// DelegationKey and BindDelegationKey model the one rule the real store's
+// bound_jkt column gives: the first key recorded for a delegation stays.
+func (f *fakeStore) DelegationKey(context.Context, uuid.UUID) (string, error) {
+	f.calls++
+	return f.boundKey, f.boundKeyErr
+}
+
+func (f *fakeStore) BindDelegationKey(_ context.Context, _ uuid.UUID, jkt string) (string, error) {
+	f.calls++
+	if f.boundKeyErr != nil {
+		return "", f.boundKeyErr
+	}
+	if f.boundKey == "" {
+		f.boundKey = jkt
+	}
+	return f.boundKey, nil
 }
 
 func (f *fakeStore) LoadDelegation(context.Context, uuid.UUID) (*models.Delegation, error) {

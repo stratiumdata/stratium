@@ -30,12 +30,22 @@ func (s *Server) GetApproval(ctx context.Context, req *GetApprovalRequest) (*Get
 		return nil, status.Errorf(codes.InvalidArgument, "approval_id: %s", err)
 	}
 
+	delegationID, _, err := s.authenticateToken(req.GetToken())
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated,
+			"token is required: present a current token for the delegation the approval was requested under")
+	}
+
 	a, err := s.store.LoadApproval(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, status.Errorf(codes.NotFound, "approval %s: %s", id, err)
+			return nil, status.Errorf(codes.NotFound, "approval %s: %s", id, store.ErrNotFound)
 		}
 		return nil, status.Errorf(codes.Internal, "load approval: %s", err)
+	}
+	// Another session's approval answers exactly as an unknown id does.
+	if a.DelegationID != delegationID {
+		return nil, status.Errorf(codes.NotFound, "approval %s: %s", id, store.ErrNotFound)
 	}
 
 	return &GetApprovalResponse{

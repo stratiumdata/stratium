@@ -47,9 +47,22 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 	if req.GetTool() == "" {
 		return nil, status.Error(codes.InvalidArgument, "tool is required")
 	}
-	delegationID, _, err := s.authenticateToken(req.GetToken())
+	delegationID, jkt, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "token: %s", err)
+	}
+	// ponytail: this method takes no DPoP proof, so a key-bound token cannot
+	// show its holder has the key. Refused rather than believed; add a proof
+	// field here if a key-bound surface ever needs to report.
+	if jkt != "" {
+		return nil, status.Error(codes.PermissionDenied,
+			"token is bound to a key: tool-use reports are not accepted for a key-bound delegation")
+	}
+	if err := s.refuseBearerForBoundDelegation(ctx, delegationID, jkt); err != nil {
+		if errors.Is(err, errDelegationBound) {
+			return nil, status.Errorf(codes.PermissionDenied, "token: %s", err)
+		}
+		return nil, status.Errorf(codes.Internal, "load delegation key: %s", err)
 	}
 
 	// Loaded for the audit row's agent, principal and chain position, and so

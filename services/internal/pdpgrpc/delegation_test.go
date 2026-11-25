@@ -665,7 +665,7 @@ func TestCreateDelegationRPC_CarriesNoClassificationCapField(t *testing.T) {
 			// remove a classification cap, which is what this guard protects.
 			// PrincipalToken, likewise a credential: it proves who a root is
 			// for (resolvePrincipal) and carries no scope.
-			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds", "ParentToken", "PrincipalToken"}},
+			[]string{"Subject", "AgentId", "RequestedScope", "ParentDelegationId", "Purpose", "TtlSeconds", "ParentToken", "PrincipalToken", "DpopJwk"}},
 		// EscalateAt is not a classification cap, and it can only LOWER a
 		// threshold (effectiveEscalateAt, escalate_at.go), so the docs/pep.md
 		// claim this guards is unchanged by it.
