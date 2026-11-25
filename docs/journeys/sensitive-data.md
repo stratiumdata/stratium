@@ -19,11 +19,11 @@ level. Without it, every unlabelled file is refused once a cap is set.
 
 ```bash
 curl -X POST "http://$PAP/v1/resource-label-rules" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"prefix":"","hierarchy":"nato","level":"UNCLASSIFIED"}'
 
 curl -X POST "http://$PAP/v1/resource-label-rules" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"prefix":"/srv/secret/","hierarchy":"nato","level":"SECRET"}'
 ```
 

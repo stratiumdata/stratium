@@ -254,7 +254,11 @@ var routeTable = []routeSpec{
 	{Pattern: "DELETE /v1/tier-overrides/{id}", MinRole: RoleAdmin, Handler: deleteTierOverride},
 
 	{Pattern: "GET /v1/tool-catalog", MinRole: RoleViewer, Handler: listToolCatalog},
-	{Pattern: "POST /v1/tool-catalog", MinRole: RoleEditor, Handler: createToolCatalogEntry},
+	// Creating an entry fixes a tool's tier and which inputs are read, with
+	// nothing beneath it to compare against, so it is an admin's write. An
+	// editor's PUT may raise an existing entry's tier and nothing else
+	// (store.ErrAdminRequired).
+	{Pattern: "POST /v1/tool-catalog", MinRole: RoleAdmin, Handler: createToolCatalogEntry},
 	{Pattern: "GET /v1/tool-catalog/{id}", MinRole: RoleViewer, Handler: getToolCatalogEntry},
 	{Pattern: "PUT /v1/tool-catalog/{id}", MinRole: RoleEditor, Handler: updateToolCatalogEntry},
 
@@ -270,7 +274,11 @@ var routeTable = []routeSpec{
 	{Pattern: "GET /v1/audit", MinRole: RoleViewer, Handler: listAudit},
 
 	{Pattern: "GET /v1/resource-label-rules", MinRole: RoleViewer, Handler: listResourceLabelRules},
-	{Pattern: "POST /v1/resource-label-rules", MinRole: RoleEditor, Handler: createResourceLabelRule},
+	// Creating a rule labels resources that had no label or a different one,
+	// which can open them to a capped agent, so it is an admin's write. An
+	// editor's PUT may raise an existing rule's level and nothing else
+	// (store.ErrAdminRequired).
+	{Pattern: "POST /v1/resource-label-rules", MinRole: RoleAdmin, Handler: createResourceLabelRule},
 	{Pattern: "GET /v1/resource-label-rules/{id}", MinRole: RoleViewer, Handler: getResourceLabelRule},
 	{Pattern: "PUT /v1/resource-label-rules/{id}", MinRole: RoleEditor, Handler: updateResourceLabelRule},
 	{Pattern: "DELETE /v1/resource-label-rules/{id}", MinRole: RoleAdmin, Handler: deleteResourceLabelRule},

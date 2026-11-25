@@ -71,7 +71,7 @@ func updateAgent(s *Server, w http.ResponseWriter, r *http.Request, op Operator)
 		return
 	}
 
-	updated, err := s.store.UpdateAgent(r.Context(), id, a, op.Subject)
+	updated, err := s.store.UpdateAgent(r.Context(), id, a, op.Subject, op.Role.meets(RoleAdmin))
 	if err != nil {
 		writeStoreError(w, err)
 		return

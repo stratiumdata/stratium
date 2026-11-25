@@ -121,6 +121,11 @@ const listResourceLabelRulesQuery = `SELECT id, tenant_id, prefix, hierarchy, le
 // only to tell "no such row for this tenant" from "updated" — the id is
 // already known to the caller — the identical trick updateToolCatalogEntryQuery
 // uses, and the reason neither needs a separate rows-affected check.
+// getResourceLabelRuleForUpdateQuery locks the row an editor's update is
+// compared against (labelRuleLoosens), so the comparison and the write see
+// the same rule.
+const getResourceLabelRuleForUpdateQuery = getResourceLabelRuleQuery + ` FOR UPDATE`
+
 const updateResourceLabelRuleQuery = `UPDATE resource_label_rules SET prefix = $1, hierarchy = $2, level = $3 ` +
 	`WHERE id = $4 RETURNING id`
 
@@ -440,7 +445,7 @@ func (s *Store) ListResourceLabelRules(ctx context.Context) ([]models.ResourceLa
 // reuse (migrations/000019 declines created_at/created_by too, and says why),
 // so the clock read is unavoidable and is injected rather than called inline.
 func (s *Store) UpdateResourceLabelRule(
-	ctx context.Context, id uuid.UUID, rule models.ResourceLabelRule, actor string, now time.Time,
+	ctx context.Context, id uuid.UUID, rule models.ResourceLabelRule, actor string, now time.Time, mayLoosen bool,
 ) (models.ResourceLabelRule, error) {
 	if err := validateResourceLabelRule(rule.Rule()); err != nil {
 		return models.ResourceLabelRule{}, err
@@ -451,6 +456,19 @@ func (s *Store) UpdateResourceLabelRule(
 		return models.ResourceLabelRule{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if !mayLoosen {
+		old, err := scanResourceLabelRule(tx.QueryRowContext(ctx, getResourceLabelRuleForUpdateQuery, id.String()))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return models.ResourceLabelRule{}, fmt.Errorf("%w: resource label rule %s", ErrNotFound, id)
+			}
+			return models.ResourceLabelRule{}, fmt.Errorf("store: load resource label rule %s: %w", id, err)
+		}
+		if reason := labelRuleLoosens(old, rule); reason != "" {
+			return models.ResourceLabelRule{}, fmt.Errorf("%w: %s", ErrAdminRequired, reason)
+		}
+	}
 
 	row := tx.QueryRowContext(ctx, updateResourceLabelRuleQuery, rule.Prefix, rule.Hierarchy, rule.Level, id.String())
 	if err := row.Scan(&rule.ID); err != nil {

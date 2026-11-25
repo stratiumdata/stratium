@@ -814,10 +814,25 @@ first admin" bootstrap problem because your IdP already knows.
 | Role | Can do |
 |---|---|
 | `viewer` | every `GET` |
-| `editor` | every `GET`, plus `POST` and `PUT` (create and update) |
+| `editor` | every `GET`, plus `POST` and `PUT` (create and update), except the writes below |
 | `admin` | everything, plus `DELETE` and the action endpoints (approve, deny, revoke) |
 
 Roles are ranked, so an admin satisfies every editor and viewer route.
+
+An editor can tighten what an admin's ceilings are measured against, never
+relax it. These need `admin`, and an editor who tries gets a `403` that says
+why:
+
+- **Creating** a resource label rule or a tool catalog entry.
+- **Updating a label rule** in any way except raising its level: lowering the
+  level, or changing the prefix or hierarchy.
+- **Updating a catalog entry** in any way except raising its `action_tier`:
+  lowering or clearing the tier, or changing the tool name, verb, or the input
+  fields.
+- **Updating an agent** so that its `trust_tier` goes up, or `suspended` goes
+  from `true` to `false`, or `enabled` goes from `false` to `true`. An editor
+  can still suspend or disable an agent, lower its trust tier, and change its
+  allowed tools.
 
 ### 5.2 Complete route table
 
@@ -833,19 +848,19 @@ Roles are ranked, so an admin satisfies every editor and viewer route.
 | `GET /v1/agents` | viewer | list agents |
 | `POST /v1/agents` | editor | register an agent |
 | `GET /v1/agents/{id}` | viewer | fetch one agent |
-| `PUT /v1/agents/{id}` | editor | full replace |
+| `PUT /v1/agents/{id}` | editor | full replace; raising the trust tier or resuming needs **admin** (§5.1) |
 | `DELETE /v1/agents/{id}` | **admin** | delete |
 | `GET /v1/agents/{id}/escalation` | viewer | read the agent's escalation threshold |
 | `PUT /v1/agents/{id}/escalation` | **admin** | set it |
 | `DELETE /v1/agents/{id}/escalation` | **admin** | remove it |
 | `GET /v1/tool-catalog` | viewer | list catalog entries |
-| `POST /v1/tool-catalog` | editor | register a tool |
+| `POST /v1/tool-catalog` | **admin** | register a tool |
 | `GET /v1/tool-catalog/{id}` | viewer | fetch one entry |
-| `PUT /v1/tool-catalog/{id}` | editor | full replace |
+| `PUT /v1/tool-catalog/{id}` | editor | full replace; anything but raising the tier needs **admin** (§5.1) |
 | `GET /v1/resource-label-rules` | viewer | list label rules |
-| `POST /v1/resource-label-rules` | editor | create a label rule |
+| `POST /v1/resource-label-rules` | **admin** | create a label rule |
 | `GET /v1/resource-label-rules/{id}` | viewer | fetch one rule |
-| `PUT /v1/resource-label-rules/{id}` | editor | full replace |
+| `PUT /v1/resource-label-rules/{id}` | editor | full replace; anything but raising the level needs **admin** (§5.1) |
 | `DELETE /v1/resource-label-rules/{id}` | **admin** | delete |
 | `GET /v1/tier-overrides` | viewer | list overrides |
 | `POST /v1/tier-overrides` | editor | create an override |
@@ -1105,7 +1120,7 @@ echo "AGENT=$AGENT"
 curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/agents"
 curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/agents/$AGENT"
 
-# suspend without deleting — the reversible kill switch
+# suspend without deleting — the reversible kill switch; resuming needs an admin
 curl -X PUT "http://$PAP/v1/agents/$AGENT" \
   -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
   -d '{"name":"alice-claude-code","provider":"anthropic","model_id":"claude",
@@ -1287,13 +1302,14 @@ classify the command text on every call, server-side.
 
 ```bash
 curl -X POST "http://$PAP/v1/tool-catalog" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"tool_name":"Read","action_tier":1,"verb":"read","resource_field":"file_path"}'
 
 curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/tool-catalog"
+# an editor may raise the tier; any other change needs an admin
 curl -X PUT "http://$PAP/v1/tool-catalog/$ID" \
   -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
-  -d '{"tool_name":"Read","action_tier":1,"verb":"read","resource_field":"file_path"}'
+  -d '{"tool_name":"Read","action_tier":2,"verb":"read","resource_field":"file_path"}'
 ```
 
 There is **no `DELETE`** — see §5.2.
@@ -1348,12 +1364,12 @@ An unknown hierarchy or a level that is not part of the named hierarchy is a
 ```bash
 # the catch-all first — see the warning below
 curl -X POST "http://$PAP/v1/resource-label-rules" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"prefix":"","hierarchy":"nato","level":"UNCLASSIFIED"}'
 
 # then the carve-outs
 curl -X POST "http://$PAP/v1/resource-label-rules" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"prefix":"/srv/secret/","hierarchy":"nato","level":"SECRET"}'
 
 curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/resource-label-rules"

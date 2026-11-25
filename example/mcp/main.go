@@ -240,17 +240,18 @@ func runSessionStart(pepBin, pdpAddr, agentID, subject, sessionFile string, tool
 // docs/user-guide.md §5.7 trap 1) and the secret- prefix at SECRET. Both POSTs are idempotent: a
 // 409 means the rule already exists and is treated as success, exactly like the brief specifies.
 func setUpPolicy(papAddr, kcAddr string) error {
-	tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
+	// ADMIN, not editor: creating a label rule is RoleAdmin.
+	tok, err := agent.MintToken(kcAddr, adminUser, adminPass)
 	if err != nil {
-		return fmt.Errorf("minting editor token: %w", err)
+		return fmt.Errorf("minting admin token: %w", err)
 	}
 	if err := ensureResourceLabelRule(papAddr, tok, "", "nato", "UNCLASSIFIED"); err != nil {
 		return err
 	}
 
-	tok, err = agent.MintToken(kcAddr, editorUser, editorPass) // minted fresh -- operator tokens expire after five minutes; never cache one
+	tok, err = agent.MintToken(kcAddr, adminUser, adminPass) // minted fresh -- operator tokens expire after five minutes; never cache one
 	if err != nil {
-		return fmt.Errorf("minting editor token: %w", err)
+		return fmt.Errorf("minting admin token: %w", err)
 	}
 	return ensureResourceLabelRule(papAddr, tok, exampleDataDir+"/secret-", "nato", "SECRET")
 }

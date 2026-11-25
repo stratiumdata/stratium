@@ -191,6 +191,10 @@ const getToolCatalogEntryQuery = `SELECT id, tenant_id, tool_name, action_tier, 
 const listToolCatalogEntriesQuery = `SELECT id, tenant_id, tool_name, action_tier, verb, resource_field, command_field ` +
 	`FROM tool_catalog ORDER BY tool_name`
 
+// getToolCatalogEntryForUpdateQuery locks the row an editor's update is
+// compared against (catalogEntryLoosens).
+const getToolCatalogEntryForUpdateQuery = getToolCatalogEntryQuery + ` FOR UPDATE`
+
 const updateToolCatalogEntryQuery = `UPDATE tool_catalog SET tool_name = $1, action_tier = $2, verb = $3, resource_field = $4, command_field = $5 ` +
 	`WHERE id = $6 RETURNING id`
 
@@ -413,7 +417,7 @@ func (s *Store) ListToolCatalogEntries(ctx context.Context) ([]models.ToolCatalo
 // id names the row; e.ID and e.TenantID are ignored on input. ErrNotFound if
 // no row with id exists for this tenant.
 func (s *Store) UpdateToolCatalogEntry(
-	ctx context.Context, id uuid.UUID, e models.ToolCatalogEntry, actor string, now time.Time,
+	ctx context.Context, id uuid.UUID, e models.ToolCatalogEntry, actor string, now time.Time, mayLoosen bool,
 ) (models.ToolCatalogEntry, error) {
 	if err := validateToolCatalogFields(e); err != nil {
 		return models.ToolCatalogEntry{}, err
@@ -424,6 +428,19 @@ func (s *Store) UpdateToolCatalogEntry(
 		return models.ToolCatalogEntry{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if !mayLoosen {
+		old, err := scanFullToolCatalogEntry(tx.QueryRowContext(ctx, getToolCatalogEntryForUpdateQuery, id.String()))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return models.ToolCatalogEntry{}, fmt.Errorf("%w: tool catalog entry %s", ErrNotFound, id)
+			}
+			return models.ToolCatalogEntry{}, fmt.Errorf("store: load tool catalog entry %s: %w", id, err)
+		}
+		if reason := catalogEntryLoosens(old, e); reason != "" {
+			return models.ToolCatalogEntry{}, fmt.Errorf("%w: %s", ErrAdminRequired, reason)
+		}
+	}
 
 	row := tx.QueryRowContext(ctx, updateToolCatalogEntryQuery,
 		e.ToolName, e.ActionTier, e.Verb, e.ResourceField, e.CommandField, id.String())

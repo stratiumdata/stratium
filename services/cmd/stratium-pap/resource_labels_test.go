@@ -51,7 +51,7 @@ func TestCreateResourceLabelRule_Success(t *testing.T) {
 	expectResourceLabelRuleWriteAndAudit(f.mock, "INSERT INTO resource_label_rules", id)
 
 	body := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}
-	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/resource-label-rules", f.token(t, "org-editors"), body)
+	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/resource-label-rules", f.token(t, "org-admins"), body)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -84,7 +84,7 @@ func TestCreateResourceLabelRule_EmptyPrefixCatchAllAccepted(t *testing.T) {
 	// field, and a guard rejecting `"prefix": ""` would still let this through
 	// (or vice versa) if the two were not the same path.
 	body := map[string]any{"hierarchy": "commercial", "level": "PUBLIC"}
-	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/resource-label-rules", f.token(t, "org-editors"), body)
+	rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/resource-label-rules", f.token(t, "org-admins"), body)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d (the empty prefix is R7's catch-all, not a missing field), body = %s",
@@ -124,7 +124,7 @@ func TestResourceLabelRuleWrites_LevelOutsideItsHierarchyRefused_NothingPersiste
 			f := newTestServerFixture(t)
 
 			body := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "PUBLIC"}
-			rec := doJSONRequest(t, f.server, tt.method, tt.path, f.token(t, "org-editors"), body)
+			rec := doJSONRequest(t, f.server, tt.method, tt.path, f.token(t, "org-admins"), body)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
@@ -149,7 +149,7 @@ func TestUpdateResourceLabelRule_Success(t *testing.T) {
 	expectResourceLabelRuleWriteAndAudit(f.mock, "UPDATE resource_label_rules", id)
 
 	body := models.ResourceLabelRule{Prefix: "/data/reports/", Hierarchy: "nato", Level: "TOP-SECRET"}
-	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/resource-label-rules/"+id.String(), f.token(t, "org-editors"), body)
+	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/resource-label-rules/"+id.String(), f.token(t, "org-admins"), body)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -233,7 +233,7 @@ func TestResourceLabelRuleRoutes_SufficientRoleReachesHandler(t *testing.T) {
 	}{
 		{"viewer lists", http.MethodGet, "/v1/resource-label-rules", "org-viewers", true},
 		{"viewer reads one", http.MethodGet, "/v1/resource-label-rules/abc-123", "org-viewers", false},
-		{"editor creates", http.MethodPost, "/v1/resource-label-rules", "org-editors", false},
+		{"admin creates", http.MethodPost, "/v1/resource-label-rules", "org-admins", false},
 		{"editor updates", http.MethodPut, "/v1/resource-label-rules/abc-123", "org-editors", false},
 		{"admin deletes", http.MethodDelete, "/v1/resource-label-rules/abc-123", "org-admins", false},
 		// Every role also meets every route with a lower minimum.
@@ -272,6 +272,7 @@ func TestResourceLabelRuleRoutes_InsufficientRoleRefused(t *testing.T) {
 		{"viewer cannot update", http.MethodPut, "/v1/resource-label-rules/abc-123", "org-viewers"},
 		{"viewer cannot delete", http.MethodDelete, "/v1/resource-label-rules/abc-123", "org-viewers"},
 		{"editor cannot delete", http.MethodDelete, "/v1/resource-label-rules/abc-123", "org-editors"},
+		{"editor cannot create", http.MethodPost, "/v1/resource-label-rules", "org-editors"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -287,4 +288,51 @@ func TestResourceLabelRuleRoutes_InsufficientRoleRefused(t *testing.T) {
 	// nonetheless written a row would be a quieter and worse defect than a
 	// missing 403.
 	assertExpectationsMet(t, f.mock)
+}
+
+// expectLabelRuleBeforeRead is the row an editor's update is compared against
+// (store.getResourceLabelRuleForUpdateQuery).
+func expectLabelRuleBeforeRead(mock sqlmock.Sqlmock, id uuid.UUID, level string) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("FROM resource_label_rules WHERE id = .* FOR UPDATE").WillReturnRows(
+		sqlmock.NewRows([]string{"id", "tenant_id", "prefix", "hierarchy", "level"}).
+			AddRow(id.String(), "tenant-test", "/data/reports/", "nato", level))
+}
+
+// An editor may raise an existing rule's level, and nothing else: a lower
+// level would open the prefix to agents an admin capped beneath it.
+func TestUpdateResourceLabelRule_EditorRaisesLevel(t *testing.T) {
+	f := newTestServerFixture(t)
+	id := uuid.New()
+	expectLabelRuleBeforeRead(f.mock, id, "SECRET")
+	f.mock.ExpectQuery("UPDATE resource_label_rules").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(id.String()))
+	f.mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("FROM audit_chain").WillReturnError(sql.ErrNoRows)
+	f.mock.ExpectExec("INSERT INTO audit_chain").WillReturnResult(sqlmock.NewResult(0, 1))
+	f.mock.ExpectCommit()
+
+	body := models.ResourceLabelRule{Prefix: "/data/reports/", Hierarchy: "nato", Level: "TOP-SECRET"}
+	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/resource-label-rules/"+id.String(), f.token(t, "org-editors"), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock)
+}
+
+func TestUpdateResourceLabelRule_EditorCannotLowerLevel(t *testing.T) {
+	f := newTestServerFixture(t)
+	id := uuid.New()
+	expectLabelRuleBeforeRead(f.mock, id, "SECRET")
+	f.mock.ExpectRollback()
+
+	body := models.ResourceLabelRule{Prefix: "/data/reports/", Hierarchy: "nato", Level: "UNCLASSIFIED"}
+	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/resource-label-rules/"+id.String(), f.token(t, "org-editors"), body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if body := rec.Body.String(); !containsAll(body, "admin", "lowers the level") {
+		t.Errorf("body = %q, want it to say an admin is needed and why", body)
+	}
+	assertExpectationsMet(t, f.mock) // no UPDATE, no audit row
 }

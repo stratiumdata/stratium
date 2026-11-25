@@ -83,7 +83,7 @@ func updateToolCatalogEntry(s *Server, w http.ResponseWriter, r *http.Request, o
 		return
 	}
 
-	updated, err := s.store.UpdateToolCatalogEntry(r.Context(), id, e, op.Subject, time.Now())
+	updated, err := s.store.UpdateToolCatalogEntry(r.Context(), id, e, op.Subject, time.Now(), op.Role.meets(RoleAdmin))
 	if err != nil {
 		writeStoreError(w, err)
 		return

@@ -144,3 +144,68 @@ func TestDeleteAgent_StillReferenced_ReturnsConflict(t *testing.T) {
 
 	assertExpectationsMet(t, f.mock)
 }
+
+// expectAgentBeforeReads is what an editor's agent update reads first, in its
+// own transaction: allowed_tools (the containment baseline, which also locks
+// the row) and then the state store.agentLoosens compares against.
+func expectAgentBeforeReads(mock sqlmock.Sqlmock, tier models.AgentTrustTier, enabled, suspended bool) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT allowed_tools FROM agents").WillReturnRows(sqlmock.NewRows([]string{"allowed_tools"}).AddRow([]byte(`[]`)))
+	mock.ExpectQuery("SELECT trust_tier, enabled, suspended FROM agents").WillReturnRows(
+		sqlmock.NewRows([]string{"trust_tier", "enabled", "suspended"}).AddRow(int64(tier), enabled, suspended))
+}
+
+// An editor can stop an agent but not start it again or trust it more: both
+// are an admin's call.
+func TestUpdateAgent_EditorCannotResumeOrRaiseTrust(t *testing.T) {
+	tests := []struct {
+		name   string
+		before models.Agent
+		body   models.Agent
+		reason string
+	}{
+		{"resume", models.Agent{TrustTier: models.TrustTierRegistered, Enabled: true, Suspended: true},
+			models.Agent{Name: "bot", Provider: "anthropic", TrustTier: models.TrustTierRegistered, Enabled: true, AllowedTools: []string{}},
+			"resumes a suspended agent"},
+		{"raise trust tier", models.Agent{TrustTier: models.TrustTierRegistered, Enabled: true},
+			models.Agent{Name: "bot", Provider: "anthropic", TrustTier: models.TrustTierPlatformTrusted, Enabled: true, AllowedTools: []string{}},
+			"raises the agent's trust tier"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newTestServerFixture(t)
+			expectAgentBeforeReads(f.mock, tt.before.TrustTier, tt.before.Enabled, tt.before.Suspended)
+			f.mock.ExpectRollback()
+
+			rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/agents/"+uuid.New().String(), f.token(t, "org-editors"), tt.body)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+			if body := rec.Body.String(); !containsAll(body, "admin", tt.reason) {
+				t.Errorf("body = %q, want it to say an admin is needed and why", body)
+			}
+			assertExpectationsMet(t, f.mock) // no UPDATE, no audit row
+		})
+	}
+}
+
+func TestUpdateAgent_EditorSuspends(t *testing.T) {
+	f := newTestServerFixture(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	expectAgentBeforeReads(f.mock, models.TrustTierRegistered, true, false)
+	f.mock.ExpectQuery("UPDATE agents").WillReturnRows(
+		sqlmock.NewRows([]string{"created_at", "updated_at", "classification_caps", "resource_constraints", "escalate_at"}).
+			AddRow(now, now, []byte(`{}`), []byte(`{}`), nil))
+	f.mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("FROM audit_chain").WillReturnError(sql.ErrNoRows)
+	f.mock.ExpectExec("INSERT INTO audit_chain").WillReturnResult(sqlmock.NewResult(0, 1))
+	f.mock.ExpectCommit()
+
+	body := models.Agent{Name: "bot", Provider: "anthropic", TrustTier: models.TrustTierRegistered, Enabled: true, Suspended: true, AllowedTools: []string{}}
+	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/agents/"+uuid.New().String(), f.token(t, "org-editors"), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock)
+}
