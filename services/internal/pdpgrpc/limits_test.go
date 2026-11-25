@@ -6,10 +6,10 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-
-	"github.com/stratiumdata/stratium/internal/config"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/stratiumdata/stratium/internal/config"
 )
 
 // lim is what testConfig carries: the defaults.
