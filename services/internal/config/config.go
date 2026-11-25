@@ -37,6 +37,11 @@ type Config struct {
 	// evaluation that runs past it denies. Zero, which Load never produces,
 	// means no deadline.
 	PolicyEvalTimeout time.Duration // STRATIUM_POLICY_EVAL_TIMEOUT, default 2s
+	// RequestTimeout is the longest one call may run, start to finish. A
+	// caller's own shorter deadline still applies. The default sits above
+	// the PEP's default deadline (STRATIUM_PEP_CONNECT_TIMEOUT, 5s), so it
+	// only decides for a caller that set a longer one or none.
+	RequestTimeout time.Duration // STRATIUM_REQUEST_TIMEOUT, default 10s
 	// How often Decide may write an audit row for a token that does not
 	// authenticate: a sustained rate and a burst above it. A failure past
 	// both is still denied, and is logged instead (pdpgrpc/token_failure.go). A
@@ -166,6 +171,7 @@ func Load() (Config, error) {
 		DBMaxOpenConns:    20,
 		MaxDelegationTTL:  24 * time.Hour,
 		PolicyEvalTimeout: 2 * time.Second,
+		RequestTimeout:    10 * time.Second,
 		// A PEP whose token expired presents it once and re-issues, so real
 		// traffic is a few of these per session.
 		FailedTokenAuditPerSecond: 5,
@@ -261,6 +267,9 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.PolicyEvalTimeout, err = positiveDuration("STRATIUM_POLICY_EVAL_TIMEOUT", c.PolicyEvalTimeout); err != nil {
+		return c, err
+	}
+	if c.RequestTimeout, err = positiveDuration("STRATIUM_REQUEST_TIMEOUT", c.RequestTimeout); err != nil {
 		return c, err
 	}
 	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND"); v != "" {

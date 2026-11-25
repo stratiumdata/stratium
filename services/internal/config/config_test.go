@@ -609,3 +609,27 @@ func TestLoad_DBMaxOpenConns(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_RequestTimeout(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_REQUEST_TIMEOUT", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.RequestTimeout != 10*time.Second {
+		t.Errorf("default RequestTimeout = %s, want 10s", c.RequestTimeout)
+	}
+
+	t.Setenv("STRATIUM_REQUEST_TIMEOUT", "30s")
+	if c, err = Load(); err != nil || c.RequestTimeout != 30*time.Second {
+		t.Errorf("Load() = %s, %v; want 30s, nil", c.RequestTimeout, err)
+	}
+
+	for _, bad := range []string{"0s", "-1s", "soon"} {
+		t.Setenv("STRATIUM_REQUEST_TIMEOUT", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_REQUEST_TIMEOUT") {
+			t.Errorf("value %q: Load() error = %v, want one naming STRATIUM_REQUEST_TIMEOUT", bad, err)
+		}
+	}
+}
