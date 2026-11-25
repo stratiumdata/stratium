@@ -253,6 +253,8 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -360,6 +362,24 @@ type proxyConfig struct {
 
 	ApprovalPollInterval time.Duration
 	ApprovalTimeout      time.Duration
+
+	// ForwardCredentials sends the caller's Stratium token, DPoP proof and
+	// approval id on to the target (STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS).
+	// Off unless set: they are addressed to this proxy and the PDP.
+	ForwardCredentials bool
+}
+
+// forwardCredentialsVar names the optional setting behind
+// proxyConfig.ForwardCredentials.
+const forwardCredentialsVar = "STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS"
+
+// stratiumMetadataKey reports whether a lower-cased metadata key carries
+// something this proxy reads for the PDP: the token, the DPoP proof or an
+// approval id. Narrower than consumedRequestKey on purpose: a cookie or a
+// proxy-authorization value is kept out of the audit record, but it is the
+// caller's credential for the target, not Stratium's.
+func stratiumMetadataKey(lower string) bool {
+	return lower == authorizationHeaderName || lower == dpopHeaderName || lower == approvalIDHeader
 }
 
 // loadProxyConfigFromEnv reads proxyConfig from the environment, or returns an error naming
@@ -406,6 +426,14 @@ func loadProxyConfigFromEnv() (proxyConfig, error) {
 		return proxyConfig{}, err
 	}
 	cfg.PublicURI = publicURI
+
+	if v := os.Getenv(forwardCredentialsVar); v != "" {
+		forward, err := strconv.ParseBool(v)
+		if err != nil {
+			return proxyConfig{}, fmt.Errorf("%s: %w", forwardCredentialsVar, err)
+		}
+		cfg.ForwardCredentials = forward
+	}
 
 	return cfg, nil
 }
@@ -1135,7 +1163,16 @@ func (p *proxyServer) forward(fullMethod string, serverStream grpc.ServerStream)
 	defer cancel()
 
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		ctx = metadata.NewOutgoingContext(ctx, md.Copy())
+		out := md.Copy()
+		if !p.cfg.ForwardCredentials {
+			// grpc-go lower-cases incoming keys, but nothing here relies on it.
+			for key := range out {
+				if stratiumMetadataKey(strings.ToLower(key)) {
+					delete(out, key)
+				}
+			}
+		}
+		ctx = metadata.NewOutgoingContext(ctx, out)
 	}
 
 	targetStream, err := grpc.NewClientStream(ctx, proxyStreamDesc, p.targetConn, fullMethod, grpc.ForceCodec(proxyCodec{}))

@@ -1353,34 +1353,47 @@ func startMetadataCapturingTarget(t *testing.T) (addr string, capture *metadataC
 	return lis.Addr().String(), capture
 }
 
-// TestHandleStream_Allow_TargetReceivesOriginalCredentials is this task's own bonus mutation,
-// converted into a permanent regression test (see this task's report for the mutation itself and
-// what running it found): the target must still receive the caller's REAL "authorization"
-// metadata on an allowed call, completely unstripped. decideRequestFromStream strips credentials
-// only for the COPY that becomes raw_input; forward (proxy.go) reads the caller's incoming
-// metadata a second, entirely independent time and forwards it to the target verbatim, because
-// the target needs the real credential for its OWN authentication -- this process has no business
-// deciding otherwise. Nothing else in this suite inspects what the TARGET itself received, which
-// is exactly why a mutation that accidentally shared or mutated the stripped copy in place could
-// have shipped undetected without this test.
+// The token, the DPoP proof and an approval id are addressed to this proxy and
+// the PDP, so an allowed call reaches the target without them. Everything
+// else the caller sent, a cookie included, still arrives.
+// STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS=true sends all of it, for a target
+// that checks the Stratium token itself.
 func TestHandleStream_Allow_TargetReceivesOriginalCredentials(t *testing.T) {
-	targetAddr, capture := startMetadataCapturingTarget(t)
-	fake := &fakePDP{resp: allowResponse("")}
-	pdpClient := startFakePDP(t, fake)
-	srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: pdpClient, cfg: testProxyServerCfg()}
-	conn := startProxyServer(t, srv)
+	for _, forward := range []bool{false, true} {
+		t.Run("forward="+strconv.FormatBool(forward), func(t *testing.T) {
+			targetAddr, capture := startMetadataCapturingTarget(t)
+			fake := &fakePDP{resp: allowResponse("")}
+			cfg := testProxyServerCfg()
+			cfg.ForwardCredentials = forward
+			srv := &proxyServer{targetConn: dialInsecure(t, targetAddr), client: startFakePDP(t, fake), cfg: cfg}
+			conn := startProxyServer(t, srv)
 
-	ctx := bearerCtx(context.Background(), testProxyBearerToken)
-	var resp proxyFrame
-	if err := conn.Invoke(ctx, "/inventory.Inventory/GetItem", &proxyFrame{payload: []byte("request")}, &resp, grpc.ForceCodec(proxyCodec{})); err != nil {
-		t.Fatalf("Invoke() error = %v", err)
-	}
+			ctx := metadata.AppendToOutgoingContext(bearerCtx(context.Background(), testProxyBearerToken),
+				"dpop", "a-proof", approvalIDHeader, "3f0e6a1c-0000-4000-8000-000000000001",
+				"cookie", "session=target-own", "x-request-id", "r-1")
+			var resp proxyFrame
+			if err := conn.Invoke(ctx, "/inventory.Inventory/GetItem", &proxyFrame{payload: []byte("request")}, &resp, grpc.ForceCodec(proxyCodec{})); err != nil {
+				t.Fatalf("Invoke() error = %v", err)
+			}
 
-	got := capture.get("authorization")
-	want := "Bearer " + testProxyBearerToken
-	if len(got) != 1 || got[0] != want {
-		t.Errorf("target's own incoming authorization metadata = %v, want [%q] -- an allowed call must "+
-			"still reach the target with its real credential, not this process's audit-only stripped copy", got, want)
+			for _, key := range []string{"authorization", "dpop", approvalIDHeader} {
+				if got := len(capture.get(key)) > 0; got != forward {
+					t.Errorf("target received %q = %v, want %v", key, got, forward)
+				}
+			}
+			if got := capture.get("authorization"); forward && (len(got) != 1 || got[0] != "Bearer "+testProxyBearerToken) {
+				t.Errorf("target's authorization = %v, want the caller's own value unchanged", got)
+			}
+			for key, want := range map[string]string{"cookie": "session=target-own", "x-request-id": "r-1"} {
+				if got := capture.get(key); len(got) != 1 || got[0] != want {
+					t.Errorf("target's %q = %v, want [%q]: it is not Stratium's to remove", key, got, want)
+				}
+			}
+			// The PDP still got what the target did not.
+			if req := fake.lastRequest(); req.GetToken() != testProxyBearerToken || req.GetDpopProof() != "a-proof" {
+				t.Errorf("PDP was not sent the token and proof: %v", req)
+			}
+		})
 	}
 }
 
