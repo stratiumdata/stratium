@@ -33,13 +33,13 @@ func TestFailureBudget_BurstThenRefill(t *testing.T) {
 }
 
 func TestClipUnauthenticated(t *testing.T) {
-	if got := clipUnauthenticated("Bash"); got != "Bash" {
+	if got := clipCallerText("Bash"); got != "Bash" {
 		t.Errorf("short value = %q, want it unchanged", got)
 	}
 	// Multi-byte runes, so a cut at a fixed byte count lands inside one.
-	got := clipUnauthenticated(strings.Repeat("é", maxUnauthenticatedFieldBytes))
-	if len(got) > maxUnauthenticatedFieldBytes+len(clippedSuffix) {
-		t.Errorf("len = %d, want at most %d", len(got), maxUnauthenticatedFieldBytes+len(clippedSuffix))
+	got := clipCallerText(strings.Repeat("é", maxAuditedCallerTextBytes))
+	if len(got) > maxAuditedCallerTextBytes+len(clippedSuffix) {
+		t.Errorf("len = %d, want at most %d", len(got), maxAuditedCallerTextBytes+len(clippedSuffix))
 	}
 	if !utf8.ValidString(got) {
 		t.Error("clipped value is not valid UTF-8; Postgres would refuse the row")
@@ -78,8 +78,8 @@ func TestDecide_TokenFailures_AuditRowsAreCapped(t *testing.T) {
 func TestDecide_TokenFailure_RowCountsWhatWasSkippedAndClipsCallerText(t *testing.T) {
 	fs, req := wellFormedFixture()
 	req.Token = ""
-	req.Tool = strings.Repeat("t", 10*maxUnauthenticatedFieldBytes)
-	req.Subject = strings.Repeat("s", 10*maxUnauthenticatedFieldBytes)
+	req.Tool = strings.Repeat("t", 10*maxAuditedCallerTextBytes)
+	req.Subject = strings.Repeat("s", 10*maxAuditedCallerTextBytes)
 	srv := NewServer(fs, denyAllPolicy(), testConfig(), testSigner(t))
 	srv.failedTokens.tokens, srv.failedTokens.last, srv.failedTokens.skipped = 1, time.Now(), 7
 
@@ -93,7 +93,7 @@ func TestDecide_TokenFailure_RowCountsWhatWasSkippedAndClipsCallerText(t *testin
 	if !strings.Contains(row.Reason, errNoToken.Error()) || !strings.Contains(row.Reason, "7 earlier") {
 		t.Errorf("Reason = %q, want the token failure and the 7 unrecorded ones", row.Reason)
 	}
-	limit := maxUnauthenticatedFieldBytes + len(clippedSuffix)
+	limit := maxAuditedCallerTextBytes + len(clippedSuffix)
 	if len(row.ToolName) > limit || len(row.Actor) > limit {
 		t.Errorf("ToolName is %d bytes and Actor %d, want at most %d each", len(row.ToolName), len(row.Actor), limit)
 	}

@@ -1356,11 +1356,14 @@ type GetApprovalRequest struct {
 	// declared_tier/approval_id-on-DecideRequest's optional treatment: there
 	// is no "ask fresh" case here for presence-tracking to distinguish from.
 	ApprovalId string `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	// token is a current token for the delegation the approval was requested
-	// under. Required: an approval's status is answered only to the session
-	// that is waiting on it. A missing or unverifiable token is
-	// Unauthenticated; a genuine token for another delegation gets the same
-	// NotFound an unknown approval_id does.
+	// token is a token issued for the delegation the approval was requested
+	// under: the one the caller presented on the Decide that escalated.
+	// Required. An approval is reported only to a holder of its own
+	// delegation's token; to anyone else it does not exist.
+	//
+	// Its expiry is not checked, as IssueToken's prior token is not: a caller
+	// may wait for a person longer than a token lasts, and the answer here is
+	// a status, not an allow.
 	Token         string `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

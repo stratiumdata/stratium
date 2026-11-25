@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/store"
 	"github.com/stratiumdata/stratium/pkg/models"
@@ -21,8 +22,8 @@ func approvalFixture() (*fakeStore, *models.Approval) {
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	a := &models.Approval{
 		ID:           uuid.New(),
-		DelegationID: uuid.New(),
 		TenantID:     testTenant,
+		DelegationID: uuid.New(),
 		Status:       "pending",
 		ExpiresAt:    expires,
 	}
@@ -143,5 +144,52 @@ func TestGetApproval_OnlyLoadsNeverWrites(t *testing.T) {
 	if len(fs.createdApprovals) != 0 {
 		t.Errorf("approvals created = %d, want 0: GetApproval must never create or otherwise write a row",
 			len(fs.createdApprovals))
+	}
+}
+
+// The fake signer's token for a delegation is that delegation's bare id.
+
+func TestGetApproval_NoOrBadToken_UnauthenticatedBeforeAnyStoreCall(t *testing.T) {
+	for name, tok := range map[string]string{"absent": "", "does not verify": "not-a-token"} {
+		t.Run(name, func(t *testing.T) {
+			fs, a := approvalFixture()
+			srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+			resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: tok})
+			if resp != nil || status.Code(err) != codes.Unauthenticated {
+				t.Fatalf("GetApproval() = %+v, %v; want nil and Unauthenticated", resp, err)
+			}
+			if fs.calls != 0 {
+				t.Errorf("store calls = %d, want 0: a caller with no token must cost no database work", fs.calls)
+			}
+		})
+	}
+}
+
+// A token for another delegation gets exactly what an unknown id gets, so it
+// cannot be used to learn that an approval exists.
+func TestGetApproval_AnotherDelegationsToken_IsNotFoundLikeAnUnknownID(t *testing.T) {
+	fs, a := approvalFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+	_, other := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: uuid.NewString()})
+
+	fs.loadApprovalErr = fmt.Errorf("%w: approval %s", store.ErrNotFound, a.ID)
+	_, unknown := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: uuid.NewString()})
+
+	if status.Code(other) != codes.NotFound {
+		t.Fatalf("another delegation's token: error = %v, want NotFound", other)
+	}
+	if other.Error() != unknown.Error() {
+		t.Errorf("another delegation's token got %q; an unknown id gets %q; want the same", other, unknown)
+	}
+}
+
+func TestGetApproval_OverLongToken_InvalidArgument(t *testing.T) {
+	fs, a := approvalFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+	_, err := srv.GetApproval(context.Background(),
+		&GetApprovalRequest{ApprovalId: a.ID.String(), Token: long(lim.CredentialBytes)})
+	if status.Code(err) != codes.InvalidArgument || fs.calls != 0 {
+		t.Fatalf("error = %v, store calls = %d; want InvalidArgument and 0", err, fs.calls)
 	}
 }

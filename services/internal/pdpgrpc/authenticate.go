@@ -65,6 +65,10 @@ func (s *Server) authenticateToken(tokenString string) (uuid.UUID, string, error
 		return uuid.Nil, "", errNoToken
 	}
 
+	if err := overLong(bounded{"token", tokenString, s.cfg.Limits.CredentialBytes}); err != nil {
+		return uuid.Nil, "", err
+	}
+
 	claims, err := s.signer.Verify(tokenString)
 	if err != nil {
 		return uuid.Nil, "", err

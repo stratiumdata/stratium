@@ -169,9 +169,8 @@ def test_create_delegation_raises_rather_than_returning_an_empty_grant(fake_pdp)
 def test_get_approval_lowercases_the_status(fake_pdp):
     fake_pdp.approval_responses.append(pdp_pb2.GetApprovalResponse(status="APPROVED"))
     with Client(fake_pdp.addr, insecure=True) as c:
-        assert c.get_approval("ap-1", token="tok-1") == "approved"
+        assert c.get_approval("ap-1", "tok-1") == "approved"
     assert fake_pdp.approval_calls[0].approval_id == "ap-1"
-    # The PDP answers only the session waiting on the approval.
     assert fake_pdp.approval_calls[0].token == "tok-1"
 
 

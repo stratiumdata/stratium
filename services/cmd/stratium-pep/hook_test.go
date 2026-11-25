@@ -250,9 +250,10 @@ func TestRunHook_Escalate_ApprovedRetryAllows_ExitsZero(t *testing.T) {
 	if got := fake.lastGetApprovalRequest().GetApprovalId(); got != approvalID {
 		t.Errorf("last GetApproval request approval_id = %q, want %q", got, approvalID)
 	}
-	// The PDP answers an approval's status only to the session waiting on it.
-	if got, want := fake.lastGetApprovalRequest().GetToken(), wrapped.lastDecideReq.GetToken(); got == "" || got != want {
-		t.Errorf("GetApproval request token = %q, want the session's own token %q", got, want)
+	// The poll carries the token the escalated Decide was made with: the PDP
+	// answers GetApproval only for a holder of the approval's delegation.
+	if got := fake.lastGetApprovalRequest().GetToken(); got != testSessionToken {
+		t.Errorf("GetApproval token = %q, want the session's token %q", got, testSessionToken)
 	}
 	if got := wrapped.lastDecideReq.GetApprovalId(); got != approvalID {
 		t.Errorf("retry Decide request approval_id = %q, want %q", got, approvalID)
@@ -566,7 +567,7 @@ func TestPollApproval_DeadlineReportedByThePDPIsTheEscalationTimeout(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute) // nowhere near done
 	defer cancel()
 
-	ok, reason := pollApproval(ctx, startFakePDP(t, fake), 5*time.Millisecond, uuid.NewString(), "session-token")
+	ok, reason := pollApproval(ctx, startFakePDP(t, fake), 5*time.Millisecond, uuid.NewString(), "token")
 	if ok || !strings.Contains(reason, "did not resolve within the escalation timeout") {
 		t.Errorf("pollApproval() = %v, %q; want a denial naming the escalation timeout", ok, reason)
 	}
@@ -582,7 +583,7 @@ func TestPollApproval_ContextCancelledMidPoll_ReturnsPromptlyAndDenies(t *testin
 	var ok bool
 	var reason string
 	mustReturnWithin(t, 2*time.Second, func() {
-		ok, reason = pollApproval(ctx, client, 5*time.Millisecond, uuid.NewString(), "session-token")
+		ok, reason = pollApproval(ctx, client, 5*time.Millisecond, uuid.NewString(), "token")
 	})
 
 	if ok {

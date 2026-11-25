@@ -646,11 +646,14 @@ message GetApprovalRequest {
   // is no "ask fresh" case here for presence-tracking to distinguish from.
   string approval_id = 1;
 
-  // token is a current token for the delegation the approval was requested
-  // under. Required: an approval's status is answered only to the session
-  // that is waiting on it. A missing or unverifiable token is
-  // Unauthenticated; a genuine token for another delegation gets the same
-  // NotFound an unknown approval_id does.
+  // token is a token issued for the delegation the approval was requested
+  // under: the one the caller presented on the Decide that escalated.
+  // Required. An approval is reported only to a holder of its own
+  // delegation's token; to anyone else it does not exist.
+  //
+  // Its expiry is not checked, as IssueToken's prior token is not: a caller
+  // may wait for a person longer than a token lasts, and the answer here is
+  // a status, not an allow.
   string token = 2;
 }
 

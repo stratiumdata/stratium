@@ -216,8 +216,9 @@ func run(logger *slog.Logger) error {
 
 	// One connection may hold at most maxCallsPerConnection calls in flight,
 	// and one call may run at most cfg.RequestTimeout; grpc-go's own default
-	// for both is no limit.
+	// for both is no limit. One request may be at most cfg.MaxRequestBytes.
 	grpcServer := grpc.NewServer(transport, grpc.MaxConcurrentStreams(maxCallsPerConnection),
+		grpc.MaxRecvMsgSize(cfg.MaxRequestBytes),
 		grpc.UnaryInterceptor(requestDeadline(cfg.RequestTimeout)))
 	pdpgrpc.RegisterPDPServiceServer(grpcServer, srv)
 

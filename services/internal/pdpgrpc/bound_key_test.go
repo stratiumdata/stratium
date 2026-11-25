@@ -180,28 +180,6 @@ func TestReportToolUse_RefusedForABoundDelegation(t *testing.T) {
 	}
 }
 
-func TestGetApproval_AnsweredOnlyToTheSessionWaitingOnIt(t *testing.T) {
-	fs, a := approvalFixture()
-	a.DelegationID = uuid.New()
-	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
-
-	_, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String()})
-	wantCode(t, err, codes.Unauthenticated)
-
-	_, err = srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: "not-a-token"})
-	wantCode(t, err, codes.Unauthenticated)
-
-	// A genuine token for another delegation learns nothing, not even that
-	// the approval exists.
-	_, err = srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: uuid.NewString()})
-	wantCode(t, err, codes.NotFound)
-
-	resp, err := srv.GetApproval(context.Background(), &GetApprovalRequest{ApprovalId: a.ID.String(), Token: a.DelegationID.String()})
-	if err != nil || resp.GetStatus() != a.Status {
-		t.Fatalf("GetApproval() with the delegation's own token = %v, %v; want status %q", resp, err, a.Status)
-	}
-}
-
 // A token bound to some other key than the one recorded for the delegation
 // is refused even with a valid proof for its own key. IssueToken never mints
 // one once a key is recorded, but one issued before the delegation's key was

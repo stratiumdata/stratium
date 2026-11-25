@@ -2,6 +2,7 @@ package config
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -631,5 +632,74 @@ func TestLoad_RequestTimeout(t *testing.T) {
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_REQUEST_TIMEOUT") {
 			t.Errorf("value %q: Load() error = %v, want one naming STRATIUM_REQUEST_TIMEOUT", bad, err)
 		}
+	}
+}
+
+func TestLoad_MaxRequestBytes(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_REQUEST_BYTES", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxRequestBytes != 4<<20 {
+		t.Errorf("default MaxRequestBytes = %d, want %d", c.MaxRequestBytes, 4<<20)
+	}
+
+	t.Setenv("STRATIUM_MAX_REQUEST_BYTES", "1048576")
+	if c, err = Load(); err != nil || c.MaxRequestBytes != 1<<20 {
+		t.Errorf("Load() = %d, %v; want %d, nil", c.MaxRequestBytes, err, 1<<20)
+	}
+
+	for _, bad := range []string{"0", "-1", "1MiB"} {
+		t.Setenv("STRATIUM_MAX_REQUEST_BYTES", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_MAX_REQUEST_BYTES") {
+			t.Errorf("value %q: Load() error = %v, want one naming STRATIUM_MAX_REQUEST_BYTES", bad, err)
+		}
+	}
+}
+
+func TestLoad_RequestLimits(t *testing.T) {
+	names := []string{
+		"STRATIUM_MAX_TOOL_BYTES", "STRATIUM_MAX_NAME_BYTES", "STRATIUM_MAX_SUBJECT_BYTES",
+		"STRATIUM_MAX_PATH_BYTES", "STRATIUM_MAX_URI_BYTES", "STRATIUM_MAX_PURPOSE_BYTES",
+		"STRATIUM_MAX_CREDENTIAL_BYTES", "STRATIUM_MAX_REQUESTED_TOOLS", "STRATIUM_MAX_RESOURCE_ENTRIES",
+	}
+	setValidEnv(t)
+	for _, n := range names {
+		t.Setenv(n, "")
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.Limits != DefaultRequestLimits() {
+		t.Errorf("Limits = %+v, want the defaults %+v", c.Limits, DefaultRequestLimits())
+	}
+
+	// Each variable sets its own limit and no other: give every one a
+	// different value and read them all back.
+	for i, n := range names {
+		t.Setenv(n, strconv.Itoa(100+i))
+	}
+	if c, err = Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	want := RequestLimits{
+		ToolBytes: 100, NameBytes: 101, SubjectBytes: 102, PathBytes: 103, URIBytes: 104,
+		PurposeBytes: 105, CredentialBytes: 106, RequestedTools: 107, ResourceEntries: 108,
+	}
+	if c.Limits != want {
+		t.Errorf("Limits = %+v, want %+v", c.Limits, want)
+	}
+
+	for _, n := range names {
+		for _, bad := range []string{"0", "-1", "big"} {
+			t.Setenv(n, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), n) {
+				t.Errorf("%s=%q: Load() error = %v, want one naming it", n, bad, err)
+			}
+		}
+		t.Setenv(n, "")
 	}
 }
