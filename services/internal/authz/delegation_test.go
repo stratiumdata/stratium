@@ -532,7 +532,7 @@ func TestCheckResourceConstraints_IDPrefix(t *testing.T) {
 
 	t.Run("every id inside satisfies", func(t *testing.T) {
 		ok, reason := checkResourceConstraints(constraints, map[string]string{},
-			[]string{"/workspace/a.txt", "/workspace/b.txt"})
+			[]string{"/workspace/a.txt", "/workspace/b.txt"}, "")
 		if !ok {
 			t.Fatalf("denied (%s), want satisfied", reason)
 		}
@@ -540,14 +540,14 @@ func TestCheckResourceConstraints_IDPrefix(t *testing.T) {
 
 	t.Run("one id outside denies", func(t *testing.T) {
 		ok, _ := checkResourceConstraints(constraints, map[string]string{},
-			[]string{"/workspace/a.txt", "/etc/shadow"})
+			[]string{"/workspace/a.txt", "/etc/shadow"}, "")
 		if ok {
 			t.Fatal("allowed a set containing an id outside the prefix")
 		}
 	})
 
 	t.Run("no ids denies", func(t *testing.T) {
-		ok, _ := checkResourceConstraints(constraints, map[string]string{}, nil)
+		ok, _ := checkResourceConstraints(constraints, map[string]string{}, nil, "")
 		if ok {
 			t.Fatal("allowed with no resource identified; unevaluable must deny")
 		}
@@ -559,13 +559,13 @@ func TestCheckResourceConstraints_IDPrefix(t *testing.T) {
 func TestCheckResourceConstraints_ExactKeysAreUnchanged(t *testing.T) {
 	constraints := map[string]string{"tenant": "acme"}
 
-	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "acme"}, nil); !ok {
+	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "acme"}, nil, ""); !ok {
 		t.Error("an exact key matching its value should satisfy")
 	}
-	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "other"}, nil); ok {
+	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "other"}, nil, ""); ok {
 		t.Error("an exact key with a different value must deny")
 	}
-	if ok, reason := checkResourceConstraints(constraints, map[string]string{}, nil); ok {
+	if ok, reason := checkResourceConstraints(constraints, map[string]string{}, nil, ""); ok {
 		t.Errorf("an exact key absent from the request must deny, got satisfied (%s)", reason)
 	}
 }
@@ -578,14 +578,14 @@ func TestCheckResourceConstraints_PrefixAndExactTogether(t *testing.T) {
 	}
 	resource := map[string]string{"tenant": "acme"}
 
-	if ok, reason := checkResourceConstraints(constraints, resource, []string{"/workspace/a.txt"}); !ok {
+	if ok, reason := checkResourceConstraints(constraints, resource, []string{"/workspace/a.txt"}, ""); !ok {
 		t.Fatalf("denied (%s), want satisfied — both constraints hold", reason)
 	}
 	if ok, _ := checkResourceConstraints(constraints, map[string]string{"tenant": "other"},
-		[]string{"/workspace/a.txt"}); ok {
+		[]string{"/workspace/a.txt"}, ""); ok {
 		t.Error("the exact key failed but the call was allowed")
 	}
-	if ok, _ := checkResourceConstraints(constraints, resource, []string{"/etc/shadow"}); ok {
+	if ok, _ := checkResourceConstraints(constraints, resource, []string{"/etc/shadow"}, ""); ok {
 		t.Error("the prefix failed but the call was allowed")
 	}
 }

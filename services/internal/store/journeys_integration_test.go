@@ -484,6 +484,20 @@ func TestIntegration_Journey43_AScopedDelegationConstrainsEveryPath(t *testing.T
 		}
 	})
 
+	t.Run("a bare name a file command uses is a path, and one the shell would expand is refused", func(t *testing.T) {
+		for command, want := range map[string]string{
+			"cat /workspace/a.txt; cat notes": `"notes"`,
+			"cat /workspace/a.txt > out":      `"out"`,
+			"cat /workspace/$NAME":            "cannot be evaluated",
+			"cat /workspace/*":                "cannot be evaluated",
+		} {
+			got := decide(shellTool, `{"command":"`+command+`"}`)
+			if got.GetEffect() != pdpgrpc.Effect_EFFECT_DENY || !strings.Contains(got.GetReason(), want) {
+				t.Errorf("%q: Decide = %v (%s), want DENY naming %s", command, got.GetEffect(), got.GetReason(), want)
+			}
+		}
+	})
+
 	t.Run("a decoy path cannot buy scope for the one that is out of it", func(t *testing.T) {
 		got := decide(shellTool, `{"command":"cat /workspace/a.txt; cat /etc/shadow"}`)
 		t.Logf("decoy command -> effect=%s reason=%q", got.GetEffect(), got.GetReason())

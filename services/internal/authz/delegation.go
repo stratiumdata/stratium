@@ -2,6 +2,7 @@ package authz
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/stratiumdata/stratium/pkg/classification"
@@ -99,7 +100,7 @@ func DelegationLeg(
 		// gap (CheckCap denies on its own now), leaving only the specificity
 		// argument above -- recorded so a future reader does not wonder why
 		// this comment changed but the order did not.
-		if allowed, reason := checkResourceConstraints(d.ResourceConstraints, resource, resourceIDs); !allowed {
+		if allowed, reason := checkResourceConstraints(d.ResourceConstraints, resource, resourceIDs, a.NormalizedInput); !allowed {
 			return LegResult{Effect: EffectDeny,
 				Reason: fmt.Sprintf("%s (depth %d)", reason, d.Depth)}, d.Depth
 		}
@@ -164,14 +165,25 @@ func DelegationLeg(
 //     propagates forward through a lineage, never backward) -- called out
 //     because a reader who knows §4.3.1 will otherwise expect the strict
 //     reading here too.
-func checkResourceConstraints(constraints, resource map[string]string, ids []string) (bool, string) {
+func checkResourceConstraints(constraints, resource map[string]string, ids []string, command string) (bool, string) {
 	for key, want := range constraints {
 		// The one key with prefix semantics. Checked against the resolved
 		// identities rather than resource[key], because a shell call has
 		// several identities and no "id" attribute at all — writing one
 		// would let a decoy satisfy this while another path did the work.
 		if key == models.ResourceIDPrefixKey {
-			if ok, reason := satisfiesIDPrefix(ids, want); !ok {
+			// A shell command gets two further checks that labelling does not
+			// (shelloperands.go): its text must be readable as written, and the
+			// bare names its file commands and redirections use count as paths.
+			checkIDs := ids
+			if command != "" {
+				if why := shellUnreadable(command); why != "" {
+					return false, fmt.Sprintf("command %s; the delegation's %s constraint cannot be evaluated and therefore denies",
+						why, models.ResourceIDPrefixKey)
+				}
+				checkIDs = append(slices.Clip(ids), shellOperands(command)...)
+			}
+			if ok, reason := satisfiesIDPrefix(checkIDs, want); !ok {
 				return false, reason
 			}
 			continue
