@@ -565,7 +565,7 @@ func TestStore_UpdateToolCatalogEntry_Success(t *testing.T) {
 	// -- an update is a full replace, so this must be as legal as any other
 	// transition between this table's three valid states.
 	e := models.ToolCatalogEntry{ToolName: "Bash", ActionTier: nil, Verb: "execute", CommandField: &commandField}
-	got, err := s.UpdateToolCatalogEntry(context.Background(), id, e, "operator-2", time.Now())
+	got, err := s.UpdateToolCatalogEntry(context.Background(), id, e, "operator-2", time.Now(), true)
 	if err != nil {
 		t.Fatalf("UpdateToolCatalogEntry() error = %v", err)
 	}
@@ -580,7 +580,7 @@ func TestStore_UpdateToolCatalogEntry_MissingTierAndCommandFieldRefusedBeforePer
 	s, mock := newMockStore(t)
 
 	e := models.ToolCatalogEntry{ToolName: "Bash", ActionTier: nil, CommandField: nil}
-	_, err := s.UpdateToolCatalogEntry(context.Background(), uuid.New(), e, "operator-1", time.Now())
+	_, err := s.UpdateToolCatalogEntry(context.Background(), uuid.New(), e, "operator-1", time.Now(), true)
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("UpdateToolCatalogEntry() error = %v, want ErrInvalidRequest", err)
 	}
@@ -599,7 +599,7 @@ func TestStore_UpdateToolCatalogEntry_NotFound(t *testing.T) {
 	mock.ExpectRollback()
 
 	e := models.ToolCatalogEntry{ToolName: "Read", ActionTier: tierPtr(models.ActionTierReadOnly)}
-	if _, err := s.UpdateToolCatalogEntry(context.Background(), id, e, "operator-1", time.Now()); !errors.Is(err, ErrNotFound) {
+	if _, err := s.UpdateToolCatalogEntry(context.Background(), id, e, "operator-1", time.Now(), true); !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdateToolCatalogEntry() error = %v, want ErrNotFound", err)
 	}
 

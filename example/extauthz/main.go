@@ -135,6 +135,11 @@ const (
 	// to.
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
+
+	// adminUser/adminPass register tool catalog entries: POST /v1/tool-catalog
+	// is an admin's write.
+	adminUser = "pap-admin"
+	adminPass = "pap_admin_local_dev_only"
 )
 
 // dpopHTU is the fixed, query-free URI every proof this program mints signs as htu -- see the
@@ -304,13 +309,13 @@ func agentSeededProbe(papAddr, kcAddr string) func() error {
 // blanket-permit cedar policy, through pap-extauthz's own HTTP API -- POST /v1/tool-catalog and
 // POST /v1/policies -- the same idempotent-POST convention example/mcp's setUpPolicy and
 // example/proxy's own setUpCatalogAndPolicy already use: a 201 or a 409 (already exists) both count
-// as success. A fresh editor token is minted before each POST group, never cached, per mintToken's
+// as success. A fresh token is minted before each POST group, never cached, per mintToken's
 // own doc comment: an operator token expires after five minutes.
 func setUpCatalogAndPolicy(papAddr, kcAddr string) error {
 	for _, model := range modelNames {
-		tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
+		tok, err := agent.MintToken(kcAddr, adminUser, adminPass)
 		if err != nil {
-			return fmt.Errorf("minting editor token: %w", err)
+			return fmt.Errorf("minting admin token: %w", err)
 		}
 		if err := ensureToolCatalogEntry(papAddr, tok, toolIdentity(model), "ask_model"); err != nil {
 			return err

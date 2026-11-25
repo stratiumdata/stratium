@@ -334,7 +334,7 @@ func TestStore_UpdateAgent_AuditsAToolWidening(t *testing.T) {
 
 	a := validAgent()
 	a.AllowedTools = []string{} // "every tool" -- the widening
-	if _, err := s.UpdateAgent(context.Background(), id, a, "operator-2"); err != nil {
+	if _, err := s.UpdateAgent(context.Background(), id, a, "operator-2", true); err != nil {
 		t.Fatalf("UpdateAgent() error = %v", err)
 	}
 	if !strings.HasPrefix(reason, "agent grant widened: ") {
@@ -366,7 +366,7 @@ func TestStore_UpdateAgent_NarrowingToolsAuditsOneRow(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	if _, err := s.UpdateAgent(context.Background(), id, validAgent(), "operator-2"); err != nil {
+	if _, err := s.UpdateAgent(context.Background(), id, validAgent(), "operator-2", true); err != nil {
 		t.Fatalf("UpdateAgent() error = %v", err)
 	}
 	assertExpectationsMet(t, mock)

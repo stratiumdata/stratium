@@ -346,7 +346,7 @@ func TestStore_ResourceLabelRuleWrites_InvalidLabelRefusedBeforePersisting(t *te
 			return err
 		},
 		"UpdateResourceLabelRule": func(s *Store, rule models.ResourceLabelRule) error {
-			_, err := s.UpdateResourceLabelRule(context.Background(), uuid.New(), rule, "operator-1", time.Now())
+			_, err := s.UpdateResourceLabelRule(context.Background(), uuid.New(), rule, "operator-1", time.Now(), true)
 			return err
 		},
 	}
@@ -859,7 +859,7 @@ func TestStore_UpdateResourceLabelRule_ReplacesAllThreeColumnsAndAudits(t *testi
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	updated, err := s.UpdateResourceLabelRule(context.Background(), id, rule, "operator-1", time.Now())
+	updated, err := s.UpdateResourceLabelRule(context.Background(), id, rule, "operator-1", time.Now(), true)
 	if err != nil {
 		t.Fatalf("UpdateResourceLabelRule() error = %v", err)
 	}
@@ -888,7 +888,7 @@ func TestStore_UpdateResourceLabelRule_NotFound(t *testing.T) {
 	mock.ExpectRollback()
 
 	rule := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}
-	if _, err := s.UpdateResourceLabelRule(context.Background(), uuid.New(), rule, "operator-1", time.Now()); !errors.Is(err, ErrNotFound) {
+	if _, err := s.UpdateResourceLabelRule(context.Background(), uuid.New(), rule, "operator-1", time.Now(), true); !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdateResourceLabelRule() error = %v, want ErrNotFound", err)
 	}
 
@@ -913,7 +913,7 @@ func TestStore_UpdateResourceLabelRule_DuplicatePrefixIsAlreadyExists(t *testing
 	mock.ExpectRollback()
 
 	rule := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}
-	if _, err := s.UpdateResourceLabelRule(context.Background(), uuid.New(), rule, "operator-1", time.Now()); !errors.Is(err, ErrAlreadyExists) {
+	if _, err := s.UpdateResourceLabelRule(context.Background(), uuid.New(), rule, "operator-1", time.Now(), true); !errors.Is(err, ErrAlreadyExists) {
 		t.Errorf("UpdateResourceLabelRule() error = %v, want ErrAlreadyExists", err)
 	}
 
@@ -939,7 +939,7 @@ func TestStore_UpdateResourceLabelRule_AuditFailureRollsBackWrite(t *testing.T) 
 	mock.ExpectRollback()
 
 	rule := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "SECRET"}
-	if _, err := s.UpdateResourceLabelRule(context.Background(), id, rule, "operator-1", time.Now()); err == nil {
+	if _, err := s.UpdateResourceLabelRule(context.Background(), id, rule, "operator-1", time.Now(), true); err == nil {
 		t.Fatal("UpdateResourceLabelRule() error = nil, want the audit failure to propagate")
 	}
 

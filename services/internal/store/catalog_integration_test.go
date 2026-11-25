@@ -432,7 +432,7 @@ func TestIntegration_PAPCRUD_ToolCatalogRoundTrip(t *testing.T) {
 	// between any of this table's three valid states, not just persist
 	// whichever state it was first created in.
 	updated, err := repo.UpdateToolCatalogEntry(t.Context(), firstCreatedID,
-		models.ToolCatalogEntry{ToolName: "Read", Verb: "read", CommandField: &commandField}, "integration-operator", time.Now())
+		models.ToolCatalogEntry{ToolName: "Read", Verb: "read", CommandField: &commandField}, "integration-operator", time.Now(), true)
 	if err != nil {
 		t.Fatalf("UpdateToolCatalogEntry() error = %v", err)
 	}

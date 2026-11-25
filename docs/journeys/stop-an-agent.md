@@ -40,7 +40,9 @@ curl -X PUT "http://$PAP/v1/agents/$AGENT" \
        "trust_tier":3,"enabled":true,"suspended":true,"allowed_tools":[]}'
 ```
 
-Set `suspended` back to `false` to resume. Nothing else needs to change.
+Set `suspended` back to `false` to resume, with an **admin** token: an editor
+can stop an agent but not start it again. Nothing else needs to change. Send
+the agent's current `trust_tier` too, since raising it also needs an admin.
 
 !!! tip "Suspend, don't delete"
     Deleting an agent that still has live delegations or approvals returns

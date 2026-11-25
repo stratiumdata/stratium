@@ -174,7 +174,7 @@ func TestIntegration_PAPCRUD_AgentRoundTrip(t *testing.T) {
 			Name: "crud-roundtrip-agent-renamed", Provider: "anthropic", TrustTier: models.TrustTierPlatformTrusted,
 			Suspended: true, AllowedTools: []string{},
 		},
-		"integration-operator")
+		"integration-operator", true)
 	if err != nil {
 		t.Fatalf("UpdateAgent() error = %v", err)
 	}
@@ -663,7 +663,7 @@ func TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip(t *testing.T) {
 	// untouched afterwards — a refusal that had nonetheless written is a
 	// quieter defect than no refusal at all.
 	badLevel := models.ResourceLabelRule{Prefix: "/data/", Hierarchy: "nato", Level: "PUBLIC"}
-	if _, err := repo.UpdateResourceLabelRule(t.Context(), created.ID, badLevel, actor, time.Now().UTC()); !errors.Is(err, store.ErrInvalidRequest) {
+	if _, err := repo.UpdateResourceLabelRule(t.Context(), created.ID, badLevel, actor, time.Now().UTC(), true); !errors.Is(err, store.ErrInvalidRequest) {
 		t.Fatalf("UpdateResourceLabelRule(%+v) error = %v, want ErrInvalidRequest — the update path must reach "+
 			"the SAME validateResourceLabelRule the create path does", badLevel, err)
 	}
@@ -673,7 +673,7 @@ func TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip(t *testing.T) {
 	}
 
 	updated, err := repo.UpdateResourceLabelRule(t.Context(), created.ID,
-		models.ResourceLabelRule{Prefix: "/data/reports/", Hierarchy: "nato", Level: "TOP-SECRET"}, actor, time.Now().UTC())
+		models.ResourceLabelRule{Prefix: "/data/reports/", Hierarchy: "nato", Level: "TOP-SECRET"}, actor, time.Now().UTC(), true)
 	if err != nil {
 		t.Fatalf("UpdateResourceLabelRule() error = %v", err)
 	}
@@ -708,7 +708,7 @@ func TestIntegration_PAPCRUD_ResourceLabelRuleRoundTrip(t *testing.T) {
 	// disguise: a row belonging to another tenant is, through this connection,
 	// exactly a row that is not there.
 	if _, err := repo.UpdateResourceLabelRule(t.Context(), created.ID,
-		models.ResourceLabelRule{Prefix: "/gone/", Hierarchy: "nato", Level: "SECRET"}, actor, time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {
+		models.ResourceLabelRule{Prefix: "/gone/", Hierarchy: "nato", Level: "SECRET"}, actor, time.Now().UTC(), true); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("UpdateResourceLabelRule() on a deleted id: error = %v, want ErrNotFound", err)
 	}
 	if err := repo.DeleteResourceLabelRule(t.Context(), created.ID, actor, time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {

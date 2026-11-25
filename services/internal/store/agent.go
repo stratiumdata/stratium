@@ -116,6 +116,10 @@ const updateAgentQuery = `UPDATE agents SET name = $1, provider = $2, model_id =
 // No WHERE tenant_id: RLS is the only tenant boundary in this package.
 const loadAgentToolsForUpdateQuery = `SELECT allowed_tools FROM agents WHERE id = $1 FOR UPDATE`
 
+// loadAgentStateQuery reads what agentLoosens compares an editor's update
+// against.
+const loadAgentStateQuery = `SELECT trust_tier, enabled, suspended FROM agents WHERE id = $1`
+
 const deleteAgentQuery = `DELETE FROM agents WHERE id = $1 RETURNING name`
 
 // scanFullAgent scans one row (Get) or the current row of a *sql.Rows
@@ -351,7 +355,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]models.Agent, error) {
 // unchanged by this call; what a.ClassificationCaps and a.ResourceConstraints
 // hold on return are read back from the row via RETURNING below, not echoed
 // from the request body.
-func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, actor string) (models.Agent, error) {
+func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, actor string, mayLoosen bool) (models.Agent, error) {
 	if err := validateAgentFields(a); err != nil {
 		return models.Agent{}, err
 	}
@@ -385,6 +389,18 @@ func (s *Store) UpdateAgent(ctx context.Context, id uuid.UUID, a models.Agent, a
 	var beforeTools []string
 	if err := json.Unmarshal(beforeToolsJSON, &beforeTools); err != nil {
 		return models.Agent{}, fmt.Errorf("agent %s allowed_tools decode: %w", id, err)
+	}
+
+	if !mayLoosen {
+		// The row is already locked by the allowed_tools read above.
+		var oldTier int64
+		var oldEnabled, oldSuspended bool
+		if err := tx.QueryRowContext(ctx, loadAgentStateQuery, id.String()).Scan(&oldTier, &oldEnabled, &oldSuspended); err != nil {
+			return models.Agent{}, fmt.Errorf("store: load agent %s state: %w", id, err)
+		}
+		if reason := agentLoosens(models.AgentTrustTier(oldTier), a.TrustTier, oldEnabled, a.Enabled, oldSuspended, a.Suspended); reason != "" {
+			return models.Agent{}, fmt.Errorf("%w: %s", ErrAdminRequired, reason)
+		}
 	}
 
 	row := tx.QueryRowContext(ctx, updateAgentQuery,

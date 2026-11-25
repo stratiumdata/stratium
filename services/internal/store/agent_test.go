@@ -441,7 +441,7 @@ func TestStore_UpdateAgent_Success(t *testing.T) {
 		TrustTier: models.TrustTierPlatformTrusted, Enabled: false, Suspended: true,
 		AllowedTools: []string{"Bash"},
 	}
-	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2")
+	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2", true)
 	if err != nil {
 		t.Fatalf("UpdateAgent() error = %v", err)
 	}
@@ -501,7 +501,7 @@ func TestStore_UpdateAgent_PreservesExistingCapsRegardlessOfRequestBody(t *testi
 		ResourceConstraints: map[string]string{models.ResourceIDPrefixKey: "/"},
 		EscalateAt:          nil,
 	}
-	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2")
+	got, err := s.UpdateAgent(context.Background(), id, a, "operator-2", true)
 	if err != nil {
 		t.Fatalf("UpdateAgent() error = %v", err)
 	}
@@ -523,7 +523,7 @@ func TestStore_UpdateAgent_RevalidatesFields(t *testing.T) {
 
 	a := validAgent()
 	a.AllowedTools = nil // the same nil-refused rule Create enforces
-	if _, err := s.UpdateAgent(context.Background(), uuid.New(), a, "operator-1"); !errors.Is(err, ErrAllowedToolsRequired) {
+	if _, err := s.UpdateAgent(context.Background(), uuid.New(), a, "operator-1", true); !errors.Is(err, ErrAllowedToolsRequired) {
 		t.Errorf("UpdateAgent() error = %v, want ErrAllowedToolsRequired", err)
 	}
 
@@ -548,7 +548,7 @@ func TestStore_UpdateAgent_NotFound(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 
-	if _, err := s.UpdateAgent(context.Background(), id, validAgent(), "operator-1"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.UpdateAgent(context.Background(), id, validAgent(), "operator-1", true); !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdateAgent() error = %v, want ErrNotFound", err)
 	}
 

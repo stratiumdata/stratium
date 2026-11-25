@@ -2262,7 +2262,7 @@ def ensure_label_rule(prefix, hierarchy, level):
     """POST one resource-label-rule. Idempotent like ensure_policy: a rerun
     hits UNIQUE (tenant_id, prefix) and 409s rather than erroring.
     """
-    code, body = api("POST", "/v1/resource-label-rules", body={
+    code, body = api("POST", "/v1/resource-label-rules", role="admin", body={
         "prefix": prefix, "hierarchy": hierarchy, "level": level})
     if code == 201:
         return "created"

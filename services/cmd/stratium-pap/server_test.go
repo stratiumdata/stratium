@@ -373,6 +373,11 @@ var actionRoutes = map[string]bool{
 	// escalation's write, RoleAdmin again: raising a threshold lets an agent
 	// act unattended where a human was asked.
 	"PUT /v1/agents/{id}/escalation": true,
+	// Creating a label rule or a catalog entry, RoleAdmin: both set what a
+	// classification cap or an escalation threshold is measured against,
+	// with nothing beneath them to compare a new row to.
+	"POST /v1/resource-label-rules": true,
+	"POST /v1/tool-catalog":         true,
 }
 
 // TestRouteTable_RoleGatingMatchesSpec checks the stated role mapping

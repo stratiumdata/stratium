@@ -137,7 +137,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		// database CHECK should already refuse it -- confirm the API
 		// surfaces that rather than crashing").
 		http.Error(w, err.Error(), http.StatusBadRequest)
-	case errors.Is(err, store.ErrApproverNotRootPrincipal):
+	case errors.Is(err, store.ErrApproverNotRootPrincipal),
+		errors.Is(err, store.ErrAdminRequired):
 		// N7 (spec §4.10.1): the operator's own identity is known (it is not
 		// an authentication failure -- authorize's own 401 already covers
 		// that case, earlier in the request), but it does not equal this

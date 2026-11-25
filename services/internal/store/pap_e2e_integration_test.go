@@ -1495,3 +1495,66 @@ func TestIntegration_PAPE2E_AWideningIsReadableThroughTheAuditRoute(t *testing.T
 			"only a widening may record one", len(after.Entries))
 	}
 }
+
+// An editor can tighten what an admin's ceilings are measured against and
+// never relax it: label rules and catalog tiers go up only, new rows are an
+// admin's, and an agent an editor stopped stays stopped until an admin
+// resumes it. Each refusal is paired with the same request succeeding for an
+// admin, so the 403 is the role and nothing else.
+func TestIntegration_PAP_EditorCannotLoosen(t *testing.T) {
+	admin := papAccessToken(t, papAdminUser, papAdminPass)
+	editor := papAccessToken(t, papEditorUser, papEditorPass)
+	suffix := uuid.NewString()[:8]
+
+	refused := func(t *testing.T, method, path string, body map[string]any) {
+		t.Helper()
+		if status, text := papDo(t, papAddr, method, path, editor, body); status != http.StatusForbidden {
+			t.Errorf("%s %s as editor: status = %d (%s), want 403", method, path, status, text)
+		}
+	}
+
+	t.Run("label rule", func(t *testing.T) {
+		rule := func(level string) map[string]any {
+			return map[string]any{"prefix": "/loosen-" + suffix + "/", "hierarchy": "nato", "level": level}
+		}
+		refused(t, http.MethodPost, "/v1/resource-label-rules", rule("SECRET"))
+		var created models.ResourceLabelRule
+		papJSON(t, papAddr, http.MethodPost, "/v1/resource-label-rules", admin, rule("SECRET"), &created)
+		path := "/v1/resource-label-rules/" + created.ID.String()
+
+		papJSON(t, papAddr, http.MethodPut, path, editor, rule("TOP-SECRET"), nil)
+		refused(t, http.MethodPut, path, rule("UNCLASSIFIED"))
+		papJSON(t, papAddr, http.MethodPut, path, admin, rule("UNCLASSIFIED"), nil)
+	})
+
+	t.Run("tool catalog", func(t *testing.T) {
+		entry := func(tier int) map[string]any {
+			return map[string]any{"tool_name": "loosen-" + suffix, "action_tier": tier, "verb": "write"}
+		}
+		refused(t, http.MethodPost, "/v1/tool-catalog", entry(2))
+		var created models.ToolCatalogEntry
+		papJSON(t, papAddr, http.MethodPost, "/v1/tool-catalog", admin, entry(2), &created)
+		path := "/v1/tool-catalog/" + created.ID.String()
+
+		papJSON(t, papAddr, http.MethodPut, path, editor, entry(3), nil)
+		refused(t, http.MethodPut, path, entry(1))
+		papJSON(t, papAddr, http.MethodPut, path, admin, entry(1), nil)
+	})
+
+	t.Run("agent", func(t *testing.T) {
+		agent := func(tier int, suspended bool) map[string]any {
+			return map[string]any{
+				"name": "loosen-" + suffix, "provider": "example", "model_id": "n/a",
+				"trust_tier": tier, "enabled": true, "suspended": suspended, "allowed_tools": []string{"Read"},
+			}
+		}
+		var created models.Agent
+		papJSON(t, papAddr, http.MethodPost, "/v1/agents", editor, agent(1, false), &created)
+		path := "/v1/agents/" + created.ID.String()
+
+		refused(t, http.MethodPut, path, agent(2, false))
+		papJSON(t, papAddr, http.MethodPut, path, editor, agent(1, true), nil)
+		refused(t, http.MethodPut, path, agent(1, false))
+		papJSON(t, papAddr, http.MethodPut, path, admin, agent(1, false), nil)
+	})
+}

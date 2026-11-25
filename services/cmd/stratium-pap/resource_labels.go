@@ -94,7 +94,7 @@ func updateResourceLabelRule(s *Server, w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	updated, err := s.store.UpdateResourceLabelRule(r.Context(), id, rule, op.Subject, time.Now())
+	updated, err := s.store.UpdateResourceLabelRule(r.Context(), id, rule, op.Subject, time.Now(), op.Role.meets(RoleAdmin))
 	if err != nil {
 		writeStoreError(w, err)
 		return

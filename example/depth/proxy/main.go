@@ -106,6 +106,11 @@ const (
 
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
+
+	// adminUser/adminPass register tool catalog entries: POST /v1/tool-catalog
+	// is an admin's write.
+	adminUser = "pap-admin"
+	adminPass = "pap_admin_local_dev_only"
 )
 
 func main() {
@@ -446,9 +451,9 @@ func setUpCatalogAndPolicy(papAddr, kcAddr string) error {
 		{grpctarget.TargetService_Fetch_FullMethodName, "fetch"},
 		{grpctarget.TargetService_Purge_FullMethodName, "purge"},
 	} {
-		tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
+		tok, err := agent.MintToken(kcAddr, adminUser, adminPass)
 		if err != nil {
-			return fmt.Errorf("minting editor token: %w", err)
+			return fmt.Errorf("minting admin token: %w", err)
 		}
 		if err := ensureToolCatalogEntry(papAddr, tok, row.tool, row.verb); err != nil {
 			return err
