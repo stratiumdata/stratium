@@ -356,7 +356,7 @@ Three rules run through all three binaries:
 | `STRATIUM_TLS_KEY_FILE` | unset | a file path | PEM private key for `STRATIUM_TLS_CERT_FILE`. Setting only one of the two is a startup failure. |
 | `STRATIUM_GRPC_INSECURE` | `false` | `true`, `false` | `true` serves plaintext gRPC. **Local development only**; the PDP logs a warning on every start. Setting it alongside the certificate variables is a startup failure. |
 | `STRATIUM_PRINCIPAL_OIDC_ISSUER` | unset | an issuer URL | OIDC issuer of the identity provider that signs principals' tokens. Discovered at startup; an unreachable or wrong issuer stops the PDP from starting. **Required, with the audience and claim below, unless `STRATIUM_PRINCIPAL_AUTH_INSECURE=true`:** with none of them set, the PDP refuses to start. |
-| `STRATIUM_PRINCIPAL_OIDC_AUDIENCE` | unset | a client id | The audience a principal's token must be issued for. |
+| `STRATIUM_PRINCIPAL_OIDC_AUDIENCE` | unset | a client id | The audience a principal's token must be issued for. Must **not** be the PAP's `STRATIUM_PAP_OIDC_AUDIENCE`: see "Principal authentication" below. |
 | `STRATIUM_PRINCIPAL_CLAIM` | unset | a claim name, for example `email` | The token claim that names the person. With `email`, the token must also carry `email_verified: true`. Must be the same claim, from the same identity provider, as the PAP's `STRATIUM_PAP_APPROVER_CLAIM` (§4.4). Prefer an immutable, provider-verified claim. |
 | `STRATIUM_PRINCIPAL_OIDC_TIMEOUT` | `5s` | duration > 0 | Deadline for issuer discovery at startup and for the provider calls that verifying a token needs. |
 | `STRATIUM_PRINCIPAL_AUTH_INSECURE` | `false` | `true`, `false` | `true` turns principal verification off: the PDP believes the `subject` a caller sends. **Local development only**; the PDP logs a warning on every start. Setting it alongside any of the issuer, audience, or claim variables is a startup failure. |
@@ -405,7 +405,12 @@ it, and it always acts for the root principal of its chain.
 `STRATIUM_PRINCIPAL_CLAIM` must name the same claim, from the same identity
 provider, as the PAP's `STRATIUM_PAP_APPROVER_CLAIM`, because an approval is
 valid only when the approver the PAP identifies equals the principal the PDP
-recorded (§4.4). The opt-out, `STRATIUM_PRINCIPAL_AUTH_INSECURE=true`, is for
+recorded (§4.4). `STRATIUM_PRINCIPAL_OIDC_AUDIENCE` must be a different value
+from the PAP's `STRATIUM_PAP_OIDC_AUDIENCE`, with a separate client at the
+identity provider: the PEP keeps the principal's token in a file the agent's
+user can usually read, and a token the PAP also accepts would let the agent
+sign in to the admin plane as that person and approve its own requests. The
+two services cannot check this for each other. The opt-out, `STRATIUM_PRINCIPAL_AUTH_INSECURE=true`, is for
 the local evaluation stack only, which sets it for you.
 
 For an unattended agent (CI, a scheduled job), use a token for a service
