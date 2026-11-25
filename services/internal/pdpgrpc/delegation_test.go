@@ -33,10 +33,16 @@ type grantSet struct {
 	err          error
 
 	evaluateCalls int
+	// seenAgents is every agent id an evaluation was asked about.
+	seenAgents map[uuid.UUID]int
 }
 
 func (g *grantSet) Evaluate(_ context.Context, in policy.EvaluationInput) ([]authz.PolicyVerdict, error) {
 	g.evaluateCalls++
+	if g.seenAgents == nil {
+		g.seenAgents = map[uuid.UUID]int{}
+	}
+	g.seenAgents[in.Agent.ID]++
 	if g.err != nil {
 		return nil, g.err
 	}
@@ -1028,5 +1034,24 @@ func TestCreateDelegation_ChildSubjectMustBeTheChainsRootPrincipal(t *testing.T)
 	}
 	if len(fs.created) != 0 || len(fs.appended) != 0 {
 		t.Errorf("rows created = %d, audit entries = %d, want 0 and 0", len(fs.created), len(fs.appended))
+	}
+}
+
+// Every policy question asked while clamping a new delegation names the agent
+// the delegation is for, so policy can say who may use which agent at session
+// start and not only on each later call.
+func TestCreateDelegation_PolicyIsAskedAboutTheRequestedAgent(t *testing.T) {
+	fs, req, agentID := wellFormedDelegationFixture()
+	set := permissiveGrantSet()
+	srv := newDelegationServer(fs, set)
+
+	if _, err := srv.CreateDelegation(context.Background(), req); err != nil {
+		t.Fatalf("CreateDelegation() error = %v", err)
+	}
+	if set.evaluateCalls == 0 {
+		t.Fatal("policy was never evaluated")
+	}
+	if got := set.seenAgents[agentID]; got != set.evaluateCalls {
+		t.Errorf("evaluations naming agent %s = %d of %d (saw %v), want all of them", agentID, got, set.evaluateCalls, set.seenAgents)
 	}
 }

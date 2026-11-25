@@ -1260,6 +1260,47 @@ Escalation needs a person to approve, so it fits `hook`, `mcp`, and the SDK,
 which wait. `extauthz` and `proxy` turn an escalation into a denial naming the
 approval id (§6.1).
 
+#### Reserving an agent for particular people
+
+Whoever starts a session names the agent it runs through, and an agent's
+ceilings (classification caps, resource constraints, escalation threshold,
+trust tier, allowed tools) are whatever that agent's record says. Unless
+policy says otherwise, any principal who holds a tool may start a session
+through any agent. If your agents carry different ceilings, say who may use
+which one.
+
+Policy sees the agent by id, both when a session starts and on every call, as
+`context.agent.id` in Cedar and `input.agent.id` in Rego. A `forbid` reserves
+the agent:
+
+```cedar
+// only alice may act through this agent
+forbid(principal, action, resource)
+when {
+  context.agent.id == "50bdd8cc-377f-4135-818d-cfd30b206ce5" &&
+  principal != User::"alice@example.com"
+};
+```
+
+```rego
+package stratium.policy
+
+deny if {
+	input.agent.id == "50bdd8cc-377f-4135-818d-cfd30b206ce5"
+	input.principal.subject != "alice@example.com"
+}
+```
+
+Anyone else who tries to start a session through that agent is refused
+(`none of the requested tools are held by this principal`), and a session
+that already exists is denied on its next call. Use the id, not the name: an
+editor can rename an agent. The `json` and `xacml` languages cannot name an
+agent's id; write this rule in Cedar or Rego.
+
+A `permit` or `forbid` that reads any other `context.agent` field
+(`trust_tier`, `enabled`, `suspended`, `allowed_tools`) is likewise evaluated
+against the real agent at session start.
+
 ### 5.6 CRUD: Tools (the tool catalog)
 
 The tool catalog tells the PDP **how to read a tool's arguments**: which JSON

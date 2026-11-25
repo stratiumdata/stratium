@@ -40,6 +40,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -833,4 +834,49 @@ func journeyDelegationAtTier(
 		t.Fatalf("CreateDelegation(%s) returned no delegation_id", purpose)
 	}
 	return created
+}
+
+// A policy can reserve an agent for one person, and the reservation holds
+// from session start: someone else cannot begin a session through that agent
+// to borrow its ceilings, while the same person through another agent, and
+// the reserved agent's own principal, both can. Both policies are scoped to
+// the two agents created here, so nothing else in this tenant is affected.
+func TestIntegration_Journey_AgentReservedForOnePrincipal(t *testing.T) {
+	admin := papAccessToken(t, papAdminUser, papAdminPass)
+	suffix := uuid.NewString()[:8]
+	reserved := journeyAgent(t, admin, "reserved-"+suffix)
+	open := journeyAgent(t, admin, "open-"+suffix)
+	const owner, other = "owner@example.com", "other@example.com"
+
+	papJSON(t, papAddr, http.MethodPost, "/v1/policies", admin, map[string]any{
+		"name": "reserved-permit-" + suffix, "language": "cedar", "effect": "allow", "enabled": true,
+		"policy_content": fmt.Sprintf(`permit(principal, action, resource) when { context.agent.id == %q || context.agent.id == %q };`,
+			reserved.ID, open.ID),
+	}, nil)
+	papJSON(t, papAddr, http.MethodPost, "/v1/policies", admin, map[string]any{
+		"name": "reserved-forbid-" + suffix, "language": "cedar", "effect": "deny", "enabled": true,
+		"policy_content": fmt.Sprintf(`forbid(principal, action, resource) when { context.agent.id == %q && principal != User::%q };`,
+			reserved.ID, owner),
+	}, nil)
+
+	start := func(principal string, agentID uuid.UUID) error {
+		_, err := papPdpClient.CreateDelegation(t.Context(), &pdpgrpc.CreateDelegationRequest{
+			Subject: principal, AgentId: agentID.String(),
+			RequestedScope: &pdpgrpc.RequestedScope{
+				MaxActionTier: int32(models.ActionTierReadOnly), Tools: []string{"Read"},
+			},
+			Purpose: "agent reservation", TtlSeconds: 600,
+		})
+		return err
+	}
+
+	if err := start(other, reserved.ID); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("session for %s through the reserved agent: err = %v, want PermissionDenied", other, err)
+	}
+	if err := start(owner, reserved.ID); err != nil {
+		t.Errorf("session for %s through the reserved agent: %v", owner, err)
+	}
+	if err := start(other, open.ID); err != nil {
+		t.Errorf("session for %s through the other agent: %v", other, err)
+	}
 }

@@ -17,14 +17,19 @@ import (
 // action anyway.
 type GrantProbe struct {
 	Principal authz.Principal
-	Tool      string // empty when probing the tier ceiling
-	Tier      models.ActionTier
+	// Agent is the agent the delegation is being created for. Policy sees
+	// it here exactly as it does at decision time, so a rule about who may
+	// use which agent holds from the first moment of a session.
+	Agent authz.AgentInfo
+	Tool  string // empty when probing the tier ceiling
+	Tier  models.ActionTier
 }
 
 // Probe asks set whether p's principal may hold what p describes, and
 // reports whether the result allows. It builds an EvaluationInput with no
-// resource and no agent — at delegation-creation time there is neither, only
-// the principal and the dimension being probed — evaluates it against set,
+// resource — at delegation-creation time there is none, only the principal,
+// the agent the delegation is for, and the dimension being probed —
+// evaluates it against set,
 // and folds the verdicts with authz.FoldVerdicts rather than a second
 // combining rule: deny-overrides and default-deny apply here exactly as they
 // do to a runtime decision, and this is precisely why C12's fold moved into
@@ -37,6 +42,7 @@ type GrantProbe struct {
 func Probe(ctx context.Context, set CompiledPolicySet, p GrantProbe) (bool, error) {
 	in := EvaluationInput{
 		Principal:   p.Principal,
+		Agent:       p.Agent,
 		Action:      authz.Action{Tool: p.Tool},
 		DerivedTier: p.Tier,
 		// Resource and Agent are deliberately left at their zero values: a
