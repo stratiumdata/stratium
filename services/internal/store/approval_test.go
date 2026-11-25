@@ -280,6 +280,36 @@ func TestStore_LoadApproval_NotFound(t *testing.T) {
 	assertExpectationsMet(t, mock)
 }
 
+// UseApproval reports whether its one statement changed a row: true for the
+// call that spends the approval, false once it is spent or when no such
+// approval is visible.
+func TestStore_UseApproval_ReportsWhetherItSpentTheApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows int64
+		want bool
+	}{{"first use", 1, true}, {"already used or not found", 0, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, mock := newMockStore(t)
+			id := uuid.New()
+			now := time.Now()
+
+			mock.ExpectBegin()
+			expectSetTenant(mock)
+			mock.ExpectExec(regexp.QuoteMeta(useApprovalQuery)).
+				WithArgs(now, id.String()).
+				WillReturnResult(sqlmock.NewResult(0, tc.rows))
+			mock.ExpectCommit()
+
+			got, err := s.UseApproval(context.Background(), id, now)
+			if err != nil || got != tc.want {
+				t.Fatalf("UseApproval() = %v, %v; want %v, nil", got, err, tc.want)
+			}
+			assertExpectationsMet(t, mock)
+		})
+	}
+}
+
 // A missing row and a real query failure must be distinguishable: only the
 // former is ErrNotFound.
 func TestStore_LoadApproval_QueryError(t *testing.T) {

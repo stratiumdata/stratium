@@ -137,6 +137,9 @@ func run(logger *slog.Logger) error {
 	if err := db.PingContext(pingCtx); err != nil {
 		return fmt.Errorf("connect to database within %s: %w", cfg.DBTimeout, err)
 	}
+	if err := store.CheckServingRole(pingCtx, db); err != nil {
+		return fmt.Errorf("database role startup check: %w", err)
+	}
 
 	repo := store.New(db, cfg.TenantID)
 	registry := newPolicyRegistry()

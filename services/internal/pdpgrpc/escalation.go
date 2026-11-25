@@ -108,6 +108,18 @@ func (s *Server) resolveEscalation(
 		return denyForApproval(result, reason), "", nil
 	}
 
+	// An approval is good for one call. Spent here, after it has verified and
+	// before the allow is returned, so a call that offers it again, or at the
+	// same moment, is denied. A failure to record that denies too: an allow
+	// that could not be recorded as spent could be had twice.
+	spent, err := s.store.UseApproval(ctx, approval.ID, now)
+	if err != nil {
+		return authz.Result{}, "", status.Errorf(codes.Internal, "use approval: %s", err)
+	}
+	if !spent {
+		return denyForApproval(result, fmt.Sprintf("approval %s has already been used", approval.ID)), "", nil
+	}
+
 	result.Effect = authz.EffectAllow
 	result.Reason = fmt.Sprintf("escalation approved by %s (approval %s)", root.UserID, approval.ID)
 	return result, "", nil

@@ -216,7 +216,8 @@ services:
 
 > The PDP Dockerfile generates a **throwaway** EC signing key at build time and
 > bakes it in at `/etc/stratium/keys/current.pem`. That is for local evaluation
-> only. A real deployment mounts an operator-managed key file — see §2.6.
+> only: anyone with the image has the key. A PDP running on it logs a warning
+> at start-up. A real deployment mounts an operator-managed key file — see §2.6.
 
 ### 2.5 Database setup
 
@@ -247,7 +248,14 @@ CREATE ROLE stratium_pap_login LOGIN PASSWORD '<secret>';
 GRANT stratium_pap TO stratium_pap_login;
 
 CREATE DATABASE stratium OWNER stratium_migrate;
+
+-- then, connected to the new database
+\connect stratium
+GRANT CREATE ON SCHEMA public TO stratium_audit_owner;
 ```
+
+The PDP and the PAP each check their own role when they start, and stop if it
+is a superuser or has `BYPASSRLS`.
 
 The complete, commented version is `deploy/docker/init-db.sql` — read it before
 adapting it, because each grant has a reason recorded next to it.
@@ -256,7 +264,7 @@ adapting it, because each grant has a reason recorded next to it.
 `STRATIUM_MIGRATION_DATABASE_URL` is set. Leave it unset and the PDP skips
 migrations and assumes an already-migrated schema, saying so in its logs.
 
-Nineteen migrations ship. `000002_rls` is the one to know about: it enables
+Twenty-three migrations ship. `000002_rls` is the one to know about: it enables
 **and forces** row-level security on every tenant table.
 
 ### 2.6 Token signing keys
@@ -354,7 +362,7 @@ Three rules run through all three binaries:
 | `STRATIUM_PRINCIPAL_AUTH_INSECURE` | `false` | `true`, `false` | `true` turns principal verification off: the PDP believes the `subject` a caller sends. **Local development only**; the PDP logs a warning on every start. Setting it alongside any of the issuer, audience, or claim variables is a startup failure. |
 | `STRATIUM_MAX_DELEGATION_DEPTH` | `5` | integer ≥ 1 | Longest delegation chain permitted. A chain deeper than this denies. |
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
-| `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long a pending approval stays valid. How long you can reasonably expect a human to answer an escalation. |
+| `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long an approval stays valid, from the moment it is requested: the time a person has to answer, plus the time the agent has to use the answer. An approval allows one call. |
 | `STRATIUM_MAX_DELEGATION_TTL` | `24h` | duration > 0 | Longest lifetime a delegation may be created with. `CreateDelegation` refuses a longer `ttl_seconds` and names this maximum. Raise it if your sessions legitimately run longer. |
 | `STRATIUM_POLICY_EVAL_TIMEOUT` | `2s` | duration > 0 | Deadline on one evaluation of the tenant's policies. A policy still running at the deadline is stopped and the call is denied. |
 | `STRATIUM_SPENT_PROOF_REAP_INTERVAL` | `5m` | duration > 0 | How often the PDP sweeps its own tenant's expired `spent_proofs` rows. A longer interval cannot shorten replay protection — rows only become reapable once past the freshness window — it only delays cleanup. |
@@ -1134,7 +1142,7 @@ the same nil-vs-present-empty distinction `allowed_tools` uses (§5.5 above).
 same split classification caps use.
 
 `id_prefix` is currently the only key with defined semantics: every resource
-identity a call resolves to must fall under the prefix. Five things to know
+identity a call resolves to must fall under the prefix. Six things to know
 before you use it:
 
 1. **It applies at the next issuance**, exactly like classification caps: a
@@ -1162,6 +1170,14 @@ before you use it:
    fail-closed, not a bug, but it will surprise operators: naming the scope
    root as a bare argument is denied, and only paths strictly under it
    succeed.
+6. **On a shell tool it is not a boundary.** The PDP reads a command's text
+   and does not run a shell. It checks every word that looks like a path: one
+   with a `/`, one starting with `~`, a bare `..`, or a name with a file
+   extension. A bare name with none of those is not checked, so `cat
+   /workspace/a.txt; cat notes` is allowed whatever `notes` is, and a path
+   built by a variable or a subshell is not seen at all. Use `id_prefix` to
+   keep a well-behaved agent in its lane. To confine a shell, run it where
+   the files outside its scope are not reachable.
 
 A child delegation may narrow `id_prefix` further (`/workspace/service-a/`
 under a parent's `/workspace/`) but may not widen it or drop it — see
@@ -1464,6 +1480,12 @@ curl -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/approvals" \
 curl -X POST -H "Authorization: Bearer $ADMIN" "http://$PAP/v1/approvals/$ID/approve"
 curl -X POST -H "Authorization: Bearer $ADMIN" "http://$PAP/v1/approvals/$ID/deny"
 ```
+
+**An approval allows one call.** It covers the exact call it was requested
+for: the same agent, delegation, tool and input. The PDP marks it used when
+it allows that call, and a second call offering the same approval is denied
+with `approval … has already been used`. Running the same command again
+needs a new approval.
 
 > ### A role is necessary and never sufficient
 >

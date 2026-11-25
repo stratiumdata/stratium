@@ -30,7 +30,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 RUN apk add --no-cache openssl && \
     mkdir -p /out/keys && \
     openssl ecparam -name prime256v1 -genkey -noout -out /out/keys/current.pem && \
-    chmod 0400 /out/keys/current.pem
+    chmod 0400 /out/keys/current.pem && \
+    sha256sum /out/keys/current.pem | cut -d' ' -f1 > /out/built-in-key.sha256
 
 # Runtime: distroless, not golang:alpine. The predecessor shipped a full Go
 # toolchain — plus a shell and a package manager — as its production
@@ -58,6 +59,11 @@ COPY --from=builder /out/stratium-pdp /stratium-pdp
 # ordinary default directory mode (traversable), and only the key file
 # itself is owner-read-only.
 COPY --from=builder --chown=nonroot:nonroot /out/keys/current.pem /etc/stratium/keys/current.pem
+# The built-in key's digest, kept outside the keys directory so that mounting
+# a real key over it leaves this in place. The PDP compares it with the key it
+# loads and warns at start-up when they match: whoever has this image has
+# that key.
+COPY --from=builder /out/built-in-key.sha256 /etc/stratium/built-in-key.sha256
 
 USER nonroot:nonroot
 ENTRYPOINT ["/stratium-pdp"]

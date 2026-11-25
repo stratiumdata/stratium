@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,6 +298,69 @@ func TestDecide_Escalation_ValidApprovalAllowsAndBothDecisionsAudited(t *testing
 	}
 	if fs.appended[1].Decision != "ALLOW" {
 		t.Errorf("second audit Decision = %q, want %q", fs.appended[1].Decision, "ALLOW")
+	}
+}
+
+// An approval is good for one call. The same request, offering the same
+// approval a second time, is denied and says why.
+func TestDecide_Escalation_AnApprovalAllowsOnce(t *testing.T) {
+	fs, req, root := escalationFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+	first := escalate(t, srv, req)
+	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
+	approvalID := first.GetApprovalId()
+	req.ApprovalId = &approvalID
+
+	if resp, err := srv.Decide(context.Background(), req); err != nil || resp.GetEffect() != Effect_EFFECT_ALLOW {
+		t.Fatalf("first use: Effect = %v, err = %v; want EFFECT_ALLOW", resp.GetEffect(), err)
+	}
+	again, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second use: Decide() error = %v", err)
+	}
+	if again.GetEffect() != Effect_EFFECT_DENY || !strings.Contains(again.GetReason(), "already been used") {
+		t.Fatalf("second use: Effect = %v, Reason = %q; want EFFECT_DENY saying it has been used",
+			again.GetEffect(), again.GetReason())
+	}
+}
+
+// A call the approval does not cover is denied without spending it, so the
+// call it was granted for can still use it.
+func TestDecide_Escalation_ARefusedAttemptDoesNotSpendTheApproval(t *testing.T) {
+	fs, req, root := escalationFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+	first := escalate(t, srv, req)
+	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
+	approvalID := first.GetApprovalId()
+	req.ApprovalId = &approvalID
+	approved := req.RawInput
+
+	req.RawInput = "rm -rf / --no-preserve-root"
+	if resp, err := srv.Decide(context.Background(), req); err != nil || resp.GetEffect() != Effect_EFFECT_DENY {
+		t.Fatalf("different input: Effect = %v, err = %v; want EFFECT_DENY", resp.GetEffect(), err)
+	}
+	req.RawInput = approved
+	if resp, err := srv.Decide(context.Background(), req); err != nil || resp.GetEffect() != Effect_EFFECT_ALLOW {
+		t.Fatalf("the approved call: Effect = %v, err = %v, reason %q; want EFFECT_ALLOW",
+			resp.GetEffect(), err, resp.GetReason())
+	}
+}
+
+// An approval that cannot be recorded as spent allows nothing.
+func TestDecide_Escalation_FailureToSpendTheApprovalIsNotAnAllow(t *testing.T) {
+	fs, req, root := escalationFixture()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+	first := escalate(t, srv, req)
+	fs.loadApproval = approveCreatedApproval(fs, root.UserID)
+	approvalID := first.GetApprovalId()
+	req.ApprovalId = &approvalID
+	fs.useApprovalErr = errors.New("database is down")
+
+	if resp, err := srv.Decide(context.Background(), req); err == nil {
+		t.Fatalf("Decide() = %v, want an error and no decision", resp.GetEffect())
 	}
 }
 

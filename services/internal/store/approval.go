@@ -104,6 +104,36 @@ func (s *Store) LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approva
 	return a, nil
 }
 
+// useApprovalQuery marks an approval used, only if it has not been. The
+// check and the write are one statement, so of two calls offering the same
+// approval at once exactly one changes a row.
+const useApprovalQuery = `UPDATE approvals SET used_at = $1 WHERE id = $2 AND used_at IS NULL`
+
+// UseApproval spends an approval: it reports true for the one caller that
+// marks it used, and false for every caller after. An approval is good for
+// one call (migrations/000023). An unknown id, or another tenant's, changes
+// no row and reports false.
+func (s *Store) UseApproval(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, useApprovalQuery, now, id.String())
+	if err != nil {
+		return false, fmt.Errorf("store: use approval %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: use approval %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("store: commit: %w", err)
+	}
+	return n == 1, nil
+}
+
 // scanApproval scans one loadApprovalQuery row into an Approval.
 //
 // derived_tier decodes through models.ParseActionTier — the same
