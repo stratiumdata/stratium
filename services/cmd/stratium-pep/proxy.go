@@ -371,7 +371,7 @@ type proxyConfig struct {
 
 // forwardCredentialsVar names the optional setting behind
 // proxyConfig.ForwardCredentials.
-const forwardCredentialsVar = "STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS"
+const forwardCredentialsVar = "STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS" //nolint:gosec // G101: the name of a setting, not a credential
 
 // stratiumMetadataKey reports whether a lower-cased metadata key carries
 // something this proxy reads for the PDP: the token, the DPoP proof or an
