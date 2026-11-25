@@ -426,3 +426,31 @@ func TestAuthenticateToken_ErrorNeverContainsTheTokenString(t *testing.T) {
 		t.Fatalf("error = %q, contains the raw token string — tokens must never be logged or echoed", err)
 	}
 }
+
+// Input in which two keys of one object differ at most in capitalization can
+// be read two ways, so it is refused before the agent, the chain or any
+// policy is consulted, with an audit row and a reason that says why.
+func TestDecide_AmbiguousRawInput_DeniesBeforeAnythingIsLoaded(t *testing.T) {
+	for name, input := range map[string]string{
+		"key twice":         `{"path":"/tmp/a","path":"/etc/passwd"}`,
+		"key in other case": `{"path":"/tmp/a","Path":"/etc/passwd"}`,
+		"nested":            `{"opts":[{"command":"ls","command":"rm -rf /"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs, req, _ := decideTokenFixture(t)
+			req.RawInput = input
+			srv := NewServer(fs, denyAllPolicy(), testConfig(), &fakeSigner{})
+
+			resp, err := srv.Decide(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Decide() error = %v, want a DENY decision, not an RPC error", err)
+			}
+			if resp.GetEffect() != Effect_EFFECT_DENY || !strings.Contains(resp.GetReason(), "capitalization") {
+				t.Fatalf("Effect = %v, Reason = %q; want EFFECT_DENY naming the keys", resp.GetEffect(), resp.GetReason())
+			}
+			if fs.calls != 1 {
+				t.Errorf("store calls = %d, want exactly 1 (the audit append only)", fs.calls)
+			}
+		})
+	}
+}
