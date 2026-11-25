@@ -69,6 +69,10 @@ export function ApprovalsScreen() {
                 <TCell>
                   {a.status === 'pending' && !decidable(a) ? (
                     <Badge tone="warn">expired</Badge>
+                  ) : a.used_at ? (
+                    // An approval allows one call. Once that call is made it can
+                    // do nothing more, which "approved" alone would not say.
+                    <Badge tone="neutral" title={`used ${timestamp(a.used_at)}`}>used</Badge>
                   ) : (
                     <Badge tone={a.status === 'approved' ? 'good' : a.status === 'denied' ? 'warn' : 'neutral'}>
                       {a.status}

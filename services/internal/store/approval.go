@@ -20,7 +20,7 @@ import (
 // loadApprovalQuery reads every column of one approvals row by id.
 const loadApprovalQuery = `SELECT id, tenant_id, agent_id, delegation_id, root_delegation_id, ` +
 	`subject, root_principal, tool_name, action, derived_tier, input_digest, ` +
-	`status, requested_at, expires_at, approved_by, approved_at ` +
+	`status, requested_at, expires_at, approved_by, approved_at, used_at ` +
 	`FROM approvals WHERE id = $1`
 
 // insertApprovalQuery creates one approvals row. id, tenant_id, and the
@@ -156,12 +156,12 @@ func scanApproval(row rowScanner) (*models.Approval, error) {
 	var derivedTier int64
 	var inputDigest []byte
 	var approvedBy sql.NullString
-	var approvedAt sql.NullTime
+	var approvedAt, usedAt sql.NullTime
 
 	err := row.Scan(
 		&a.ID, &a.TenantID, &a.AgentID, &a.DelegationID, &a.RootDelegationID,
 		&a.Subject, &a.RootPrincipal, &a.ToolName, &a.Action, &derivedTier,
-		&inputDigest, &a.Status, &a.RequestedAt, &a.ExpiresAt, &approvedBy, &approvedAt,
+		&inputDigest, &a.Status, &a.RequestedAt, &a.ExpiresAt, &approvedBy, &approvedAt, &usedAt,
 	)
 	if err != nil {
 		return nil, err // includes sql.ErrNoRows; LoadApproval distinguishes with errors.Is
@@ -190,6 +190,10 @@ func scanApproval(row rowScanner) (*models.Approval, error) {
 	if approvedAt.Valid {
 		v := approvedAt.Time
 		a.ApprovedAt = &v
+	}
+	if usedAt.Valid {
+		v := usedAt.Time
+		a.UsedAt = &v
 	}
 
 	return &a, nil
@@ -403,7 +407,7 @@ func (s *Store) DecideApproval(
 // in the same microsecond must still come back in a stable order.
 const listApprovalsQuery = `SELECT id, tenant_id, agent_id, delegation_id, root_delegation_id, ` +
 	`subject, root_principal, tool_name, action, derived_tier, input_digest, ` +
-	`status, requested_at, expires_at, approved_by, approved_at ` +
+	`status, requested_at, expires_at, approved_by, approved_at, used_at ` +
 	`FROM approvals ORDER BY requested_at DESC, id`
 
 // ListApprovals loads every approval the tenant has, newest first. A tenant

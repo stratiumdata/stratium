@@ -69,6 +69,17 @@ describe('ApprovalsScreen', () => {
     expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
   })
 
+  it('marks an approved approval whose one call has been made as used', async () => {
+    vi.spyOn(api, 'approvals').mockResolvedValue([
+      approval({ status: 'approved', approved_by: 'op@example.com', used_at: '2026-08-23T10:00:30Z' }),
+    ])
+    render(<ApprovalsScreen />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all statuses' }))
+
+    await screen.findByText('used')
+    expect(screen.queryByText('approved')).not.toBeInTheDocument()
+  })
+
   // N7: the approver is fixed to the chain's ROOT PRINCIPAL, and a role is
   // necessary but never sufficient. respond.go's message carries only the
   // approval id -- deliberately not the operator identity or the root

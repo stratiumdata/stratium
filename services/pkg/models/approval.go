@@ -92,6 +92,10 @@ type Approval struct {
 
 	ApprovedBy *string    `json:"approved_by,omitempty" db:"approved_by"`
 	ApprovedAt *time.Time `json:"approved_at,omitempty" db:"approved_at"`
+
+	// UsedAt is when the PDP allowed the one call this approval is good for
+	// (migrations/000023). Nil until then.
+	UsedAt *time.Time `json:"used_at,omitempty" db:"used_at"`
 }
 
 // approvalFields exists only to shed Approval's own JSON methods. A defined
