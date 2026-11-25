@@ -1485,7 +1485,8 @@ curl -X POST -H "Authorization: Bearer $ADMIN" "http://$PAP/v1/approvals/$ID/den
 for: the same agent, delegation, tool and input. The PDP marks it used when
 it allows that call, and a second call offering the same approval is denied
 with `approval … has already been used`. Running the same command again
-needs a new approval.
+needs a new approval. `GET /v1/approvals` returns the time as `used_at`, and
+the approvals screen shows such an approval as **used**.
 
 > ### A role is necessary and never sufficient
 >

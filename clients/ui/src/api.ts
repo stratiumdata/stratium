@@ -217,6 +217,8 @@ export interface Approval {
   expires_at: string
   approved_by?: string
   approved_at?: string
+  /** Set once the one call this approval allows has been made. */
+  used_at?: string
 }
 
 /** models.Delegation */

@@ -47,7 +47,7 @@ func approvalRowColumns() []string {
 	return []string{
 		"id", "tenant_id", "agent_id", "delegation_id", "root_delegation_id",
 		"subject", "root_principal", "tool_name", "action", "derived_tier",
-		"input_digest", "status", "requested_at", "expires_at", "approved_by", "approved_at",
+		"input_digest", "status", "requested_at", "expires_at", "approved_by", "approved_at", "used_at",
 	}
 }
 
@@ -64,7 +64,7 @@ func expectPendingApprovalLoad(mock sqlmock.Sqlmock, id uuid.UUID, rootPrincipal
 		WillReturnRows(sqlmock.NewRows(approvalRowColumns()).AddRow(
 			id.String(), fixtureTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
 			"requesting-subject", rootPrincipal, "Bash", "execute", int64(models.ActionTierExternalComms),
-			make([]byte, 32), "pending", approvalFixtureRequestedAt, approvalFixtureExpiresAt, nil, nil,
+			make([]byte, 32), "pending", approvalFixtureRequestedAt, approvalFixtureExpiresAt, nil, nil, nil,
 		))
 }
 
@@ -310,7 +310,7 @@ func TestApproveApproval_AlreadyDecided_Conflict(t *testing.T) {
 			id.String(), fixtureTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
 			"requesting-subject", rootPrincipal, "Bash", "execute", int64(models.ActionTierExternalComms),
 			make([]byte, 32), "denied", approvalFixtureRequestedAt, approvalFixtureExpiresAt,
-			rootPrincipal, approvalFixtureRequestedAt.Add(5*time.Minute),
+			rootPrincipal, approvalFixtureRequestedAt.Add(5*time.Minute), nil,
 		))
 	f.mock.ExpectRollback()
 
@@ -384,13 +384,13 @@ func TestListApprovals_ViewerRole_ReturnsRows(t *testing.T) {
 		AddRow(
 			pendingID.String(), fixtureTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
 			"requester@example.com", "root@example.com", "Bash", "execute", int64(models.ActionTierExternalComms),
-			digest, "pending", approvalFixtureRequestedAt, approvalFixtureExpiresAt, nil, nil,
+			digest, "pending", approvalFixtureRequestedAt, approvalFixtureExpiresAt, nil, nil, nil,
 		).
 		AddRow(
 			deniedID.String(), fixtureTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
 			"requester@example.com", "root@example.com", "Read", "read", int64(models.ActionTierReadOnly),
 			make([]byte, 32), "denied", approvalFixtureRequestedAt, approvalFixtureExpiresAt,
-			"root@example.com", approvalFixtureRequestedAt,
+			"root@example.com", approvalFixtureRequestedAt, nil,
 		)
 	expectApprovalList(f.mock, rows)
 

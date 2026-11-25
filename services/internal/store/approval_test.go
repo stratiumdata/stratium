@@ -25,7 +25,7 @@ func approvalColumns() []string {
 	return []string{
 		"id", "tenant_id", "agent_id", "delegation_id", "root_delegation_id",
 		"subject", "root_principal", "tool_name", "action", "derived_tier",
-		"input_digest", "status", "requested_at", "expires_at", "approved_by", "approved_at",
+		"input_digest", "status", "requested_at", "expires_at", "approved_by", "approved_at", "used_at",
 	}
 }
 
@@ -151,7 +151,7 @@ func TestStore_LoadApproval_RoundTripsFieldForField(t *testing.T) {
 			id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
 			"requesting-subject", "root-principal", "Bash", "execute", int64(models.ActionTierExternalComms),
 			digest[:], "approved", requestedAt, expiresAt,
-			"approver-principal", approvedAt,
+			"approver-principal", approvedAt, approvedAt.Add(time.Minute),
 		))
 	mock.ExpectCommit()
 
@@ -208,6 +208,9 @@ func TestStore_LoadApproval_RoundTripsFieldForField(t *testing.T) {
 	if got.ApprovedAt == nil || !got.ApprovedAt.Equal(approvedAt) {
 		t.Errorf("ApprovedAt = %v, want %v", got.ApprovedAt, approvedAt)
 	}
+	if want := approvedAt.Add(time.Minute); got.UsedAt == nil || !got.UsedAt.Equal(want) {
+		t.Errorf("UsedAt = %v, want %v", got.UsedAt, want)
+	}
 
 	assertExpectationsMet(t, mock)
 }
@@ -231,7 +234,7 @@ func TestStore_LoadApproval_PendingRowHasNilApprovedFields(t *testing.T) {
 			id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
 			"subject", "root-principal", "Bash", "read", int64(models.ActionTierReadOnly),
 			digest[:], "pending", now, now.Add(time.Hour),
-			nil, nil,
+			nil, nil, nil,
 		))
 	mock.ExpectCommit()
 
@@ -354,7 +357,7 @@ func TestStore_LoadApproval_DerivedTierOutOfRangeFails(t *testing.T) {
 			id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
 			"subject", "root-principal", "Bash", "read", int64(99), // out of range
 			digest[:], "pending", now, now.Add(time.Hour),
-			nil, nil,
+			nil, nil, nil,
 		))
 	mock.ExpectRollback()
 
@@ -381,7 +384,7 @@ func pendingApprovalRow(id, agentID, delegationID, rootDelegationID uuid.UUID, r
 	rows := sqlmock.NewRows(approvalColumns()).AddRow(
 		id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
 		"requesting-subject", rootPrincipal, "Bash", "execute", int64(models.ActionTierExternalComms),
-		digest[:], "pending", requestedAt, requestedAt.Add(time.Hour), nil, nil,
+		digest[:], "pending", requestedAt, requestedAt.Add(time.Hour), nil, nil, nil,
 	)
 	return rows, digest, requestedAt
 }
@@ -570,7 +573,7 @@ func TestStore_DecideApproval_AlreadyDecidedRefused(t *testing.T) {
 	rows := sqlmock.NewRows(approvalColumns()).AddRow(
 		id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
 		"requesting-subject", rootPrincipal, "Bash", "execute", int64(models.ActionTierExternalComms),
-		digest[:], "approved", requestedAt, requestedAt.Add(time.Hour), rootPrincipal, approvedAt,
+		digest[:], "approved", requestedAt, requestedAt.Add(time.Hour), rootPrincipal, approvedAt, nil,
 	)
 
 	mock.ExpectBegin()
@@ -719,7 +722,7 @@ func TestStore_LoadApproval_InputDigestWrongLengthFails(t *testing.T) {
 			id.String(), testTenant, agentID.String(), delegationID.String(), rootDelegationID.String(),
 			"subject", "root-principal", "Bash", "read", int64(models.ActionTierReadOnly),
 			[]byte{0x01, 0x02, 0x03}, "pending", now, now.Add(time.Hour), // 3 bytes, not 32
-			nil, nil,
+			nil, nil, nil,
 		))
 	mock.ExpectRollback()
 
@@ -745,7 +748,7 @@ func listApprovalRow(rows *sqlmock.Rows, id uuid.UUID, status string, requestedA
 	return rows.AddRow(
 		id.String(), testTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
 		"requester@example.com", "root@example.com", "Bash", "execute", int64(models.ActionTierExternalComms),
-		make([]byte, 32), status, requestedAt, requestedAt.Add(time.Hour), approvedBy, approvedAt,
+		make([]byte, 32), status, requestedAt, requestedAt.Add(time.Hour), approvedBy, approvedAt, nil,
 	)
 }
 
@@ -849,7 +852,7 @@ func TestStore_ListApprovals_ScanErrorAborts(t *testing.T) {
 	rows := sqlmock.NewRows(approvalColumns()).AddRow(
 		uuid.New().String(), testTenant, uuid.New().String(), uuid.New().String(), uuid.New().String(),
 		"requester@example.com", "root@example.com", "Bash", "execute", int64(models.ActionTierExternalComms),
-		make([]byte, 8), "pending", requestedAt, requestedAt.Add(time.Hour), nil, nil,
+		make([]byte, 8), "pending", requestedAt, requestedAt.Add(time.Hour), nil, nil, nil,
 	)
 
 	mock.ExpectBegin()
