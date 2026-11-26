@@ -573,6 +573,9 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_PROXY_LISTEN_ADDR` | proxy | `:9292` | Bind address. |
 | `STRATIUM_PEP_PROXY_TARGET_ADDR` | proxy | `payments.internal:50051` | The real gRPC service being fronted. |
 | `STRATIUM_PEP_PROXY_PUBLIC_URI` | proxy | `https://tools.example.com` | This proxy's own stable public identity, and the whole of a DPoP proof's `htu` authority. Deliberately **not** the target address (a proof for one target would replay at any other behind the same proxy), **not** the caller's `:authority`, and **not** the listen address (`:9292` carries no host at all). |
+| `STRATIUM_PEP_PROXY_MAX_STREAM_DURATION` | proxy | `1h` | Optional, default `1h`. Longest one proxied call may stay open; a call still open then ends with `DEADLINE_EXCEEDED` and the caller opens a new one. A call is decided once, when it opens, so this is also the longest a stream can go on after its delegation is revoked. Duration > 0. |
+| `STRATIUM_PEP_MAX_CONCURRENT_STREAMS` | extauthz, extmcp, proxy | `256` | Optional, default `256`. Most calls one client connection may have in flight on this listener; one more waits for one of them to finish. Integer ≥ 1. |
+| `STRATIUM_PEP_MAX_CONNECTION_IDLE` | extauthz, extmcp, proxy | `5m` | Optional, default `5m`. How long a client connection with no call in flight is kept before this listener closes it; the client reconnects on its next call. The listener also pings a quiet connection every minute and closes one that does not answer within 20 seconds. Duration > 0. |
 
 ---
 

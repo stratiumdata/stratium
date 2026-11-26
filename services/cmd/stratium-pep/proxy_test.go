@@ -88,6 +88,7 @@ func TestLoadProxyConfigFromEnv_AllRequiredValuesPresent_ReturnsPopulatedConfig(
 		ConnectTimeout:       5 * time.Second,
 		ApprovalPollInterval: time.Second,
 		ApprovalTimeout:      time.Hour,
+		MaxStreamDuration:    time.Hour, // the default
 	}
 	if cfg != want {
 		t.Errorf("loadProxyConfigFromEnv() = %+v, want %+v", cfg, want)
@@ -2755,5 +2756,22 @@ func TestHandleStream_BoundTokenWithNoProof_DeniedAndTargetNeverContacted(t *tes
 	// never saw the shape of -- and a build that dropped the field would pass on the same status.
 	if req := fake.lastRequest(); req == nil || req.GetDpopProof() != "" {
 		t.Errorf("dpop_proof = %v, want \"\" reported to the PDP", req.GetDpopProof())
+	}
+}
+
+func TestLoadProxyConfigFromEnv_MaxStreamDuration(t *testing.T) {
+	clearProxyEnv(t)
+	setAllProxyEnv(t, nil)
+	t.Setenv(maxStreamDurationVar, "10m")
+	cfg, err := loadProxyConfigFromEnv()
+	if err != nil || cfg.MaxStreamDuration != 10*time.Minute {
+		t.Fatalf("loadProxyConfigFromEnv() MaxStreamDuration = %s, %v; want 10m", cfg.MaxStreamDuration, err)
+	}
+
+	for _, bad := range []string{"0s", "-1m", "forever"} {
+		t.Setenv(maxStreamDurationVar, bad)
+		if _, err := loadProxyConfigFromEnv(); err == nil || !strings.Contains(err.Error(), maxStreamDurationVar) {
+			t.Errorf("%s=%q: error = %v, want one naming it", maxStreamDurationVar, bad, err)
+		}
 	}
 }

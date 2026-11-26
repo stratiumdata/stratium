@@ -48,7 +48,8 @@ func runExtmcpCmd(stderr io.Writer) int {
 	}
 	hookCfg, hookErr := loadHookConfigFromEnv()
 	cacheCfg, cacheErr := loadCacheConfigFromEnv()
-	if err := combineConfigErrors(listenErr, hookErr, cacheErr); err != nil {
+	limits, limitsErr := loadListenerLimitsFromEnv()
+	if err := combineConfigErrors(listenErr, hookErr, cacheErr, limitsErr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
 		return 1
 	}
@@ -66,7 +67,7 @@ func runExtmcpCmd(stderr io.Writer) int {
 		return 1
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(limits.serverOptions()...)
 	extmcp.RegisterExtMcpServer(grpcServer, &extmcpServer{authz: &mcpAuthorizer{
 		client:   pdpgrpc.NewPDPServiceClient(conn),
 		cfg:      hookCfg,
