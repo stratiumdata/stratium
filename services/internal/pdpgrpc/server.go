@@ -26,6 +26,7 @@ import (
 
 	"github.com/stratiumdata/stratium/internal/authz"
 	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/dpop"
 	"github.com/stratiumdata/stratium/internal/policy"
 	"github.com/stratiumdata/stratium/internal/store"
 	"github.com/stratiumdata/stratium/pkg/audit"
@@ -216,6 +217,9 @@ type Server struct {
 	// failedTokens caps the audit rows Decide writes for a token that does
 	// not authenticate (token_failure.go).
 	failedTokens failureBudget
+
+	// budgets holds each session to a rate of calls (budget.go).
+	budgets sessionBudgets
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum
@@ -239,6 +243,10 @@ func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, sig
 		failedTokens: failureBudget{
 			perSecond: cfg.FailedTokenAuditPerSecond,
 			burst:     float64(cfg.FailedTokenAuditBurst),
+		},
+		budgets: sessionBudgets{
+			perSecond: cfg.SessionCallsPerSecond,
+			burst:     float64(cfg.SessionCallsBurst),
 		},
 	}
 }
@@ -387,7 +395,7 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// pre-decision-denial helper a catalog load failure and a DeriveTier
 	// failure already share below — see its own doc comment for why a
 	// third caller here does not risk the three drifting apart.
-	delegationID, jkt, err := s.authenticateToken(req.GetToken())
+	delegationID, jkt, session, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		// Audited, but at a capped rate and with the caller's text clipped:
 		// see token_failure.go. No epoch either way; loadEpochOrDeny has not
@@ -395,39 +403,49 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 		return s.denyUnauthenticated(ctx, agentID, action, req.GetSubject(), now, err)
 	}
 
-	// The remaining fields are checked for length now that the caller is
-	// known (limits.go). A caller whose token verified gets an audited DENY
-	// for this, like every other refusal past this point, with its own text
-	// clipped in the row; an InvalidArgument here would be a refusal such a
-	// caller could choose that leaves no row.
-	if err := decideFieldLimits(req, s.cfg.Limits); err != nil {
-		action.Tool = clipCallerText(action.Tool)
-		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, clipCallerText(req.GetSubject()), now, err, nil)
-	}
-
-	// Every LOCAL half of the proof-of-possession check (spec §4.7.2 K7),
-	// here beside authenticateToken for the same reason that check sits ahead
-	// of every store call: parse, signature, freshness, thumbprint-versus-
-	// cnf.jkt and htm/htu are pure computation over bytes already in hand.
-	// The one part that is NOT local — spending the jti, which is a store
-	// write — deliberately does not run here; it runs after the epoch read
-	// below. dpop.go's package doc carries both reasons for that split.
+	// Everything about the credential that can be checked without the store:
+	// the lengths of the remaining fields (limits.go), then the LOCAL half of
+	// the proof-of-possession check (spec §4.7.2 K7): parse, signature,
+	// freshness, thumbprint-versus-cnf.jkt and htm/htu, all pure computation
+	// over bytes already in hand. The one part that is NOT local, spending the
+	// jti, is a store write and runs after the epoch read below; dpop.go's
+	// package doc carries both reasons for that split.
 	//
 	// matched is nil with a nil error for an unbound (bearer) token, which
 	// still decides normally: K5 puts that refusal at the two network
 	// surfaces, not here, because refusing it here would deny every local-
 	// surface caller (hook, mcp). Reported on the response instead, below.
-	matched, err := s.matchProof(req, jkt, now)
-	if err != nil {
-		// Same shape and same nil epoch as the token failure just above: a
-		// proof that does not verify is a fact about a presented credential,
-		// audited like one, and loadEpochOrDeny still has not run.
-		//
-		// delegationID, NOT uuid.Nil, unlike that failure: the token verified
-		// here, so the id is known and correct, and an operator reading this
-		// row needs to know WHICH delegation's token was presented with a bad
-		// proof. Only chain is still nil — nothing has loaded it yet.
-		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, req.GetSubject(), now, err, nil)
+	credErr := decideFieldLimits(req, s.cfg.Limits)
+	var matched *dpop.Matched
+	if credErr == nil {
+		matched, credErr = s.matchProof(req, jkt, now)
+	}
+
+	// A key-bound token that came without a proof of its key has shown
+	// nothing but the token, which is only half the credential. It is denied
+	// like a token that did not authenticate (token_failure.go: audited at a
+	// capped rate), and it spends none of the session's budget: a copied
+	// token must not be a way to lock its owner out. delegationID, not
+	// uuid.Nil: the token verified, and an operator needs to know which
+	// delegation's token is being presented without its key.
+	if jkt != "" && credErr != nil {
+		return s.denyUnproven(ctx, agentID, delegationID, action, req.GetSubject(), now, credErr)
+	}
+
+	// A session making calls faster than it may is denied here, before the
+	// first store read (budget.go). Not audited call by call: withinBudget
+	// records how many were refused, at most once a minute.
+	if !s.withinBudget(ctx, session, delegationID, &agentID, clipCallerText(req.GetSubject()), now) {
+		return toResponse(authz.DeriveTierDenial(s.errOverBudget()), nil), nil
+	}
+
+	// A bearer token with an over-long field. The caller is known and has
+	// been counted, so this is an audited DENY like every other refusal past
+	// this point, with its own text clipped in the row; an InvalidArgument
+	// here would be a refusal such a caller could choose that leaves no row.
+	if credErr != nil {
+		action.Tool = clipCallerText(action.Tool)
+		return s.denyAndAudit(ctx, agentID, delegationID, nil, action, clipCallerText(req.GetSubject()), now, credErr, nil)
 	}
 
 	// Input that can be read two ways is refused before anything is decided

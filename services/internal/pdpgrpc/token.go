@@ -42,6 +42,10 @@ const (
 	issuedAtClaim = "iat"
 	expiryClaim   = "exp"
 	tokenIDClaim  = "jti" // unique per issuance, including a re-issuance naming the same delegation
+	// rootClaim is the root of the delegation's chain: the session, which is
+	// what a call is counted against (budget.go). Informational like every
+	// other claim: nothing about what a call may do is read from it.
+	rootClaim = "root"
 	// confirmationClaim is RFC 7800 §3.1's "cnf", carrying exactly one
 	// member: thumbprintKey, RFC 9449 §6.1's "jkt".
 	confirmationClaim = "cnf"
@@ -127,10 +131,11 @@ func clampTokenExpiry(requested, delegationExpiresAt time.Time) (expiry time.Tim
 // belongs at the RPC boundary. This function stays what it has always been —
 // clamp, build claims, sign — with no notion of what a JWK is.
 func (s *Server) mintToken(
-	delegationID uuid.UUID, tenantID, jkt string, now, requestedExpiry, delegationExpiresAt time.Time,
+	delegationID, rootID uuid.UUID, tenantID, jkt string, now, requestedExpiry, delegationExpiresAt time.Time,
 ) (token string, expiry time.Time, clamped bool, err error) {
 	expiry, clamped = clampTokenExpiry(requestedExpiry, delegationExpiresAt)
 	claims := tokenClaims(delegationID, tenantID, jkt, now, expiry)
+	claims[rootClaim] = rootID.String()
 	token, err = s.signer.Sign(claims)
 	if err != nil {
 		// err is wrapped, never the claims or the (empty, on this path)
@@ -270,7 +275,7 @@ func (s *Server) IssueToken(ctx context.Context, req *IssueTokenRequest) (*Issue
 	}
 
 	requested := now.Add(s.boundedTTL(req.GetTtlSeconds()))
-	tok, expiry, clamped, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, requested, d.ExpiresAt)
+	tok, expiry, clamped, err := s.mintToken(d.ID, d.RootDelegationID, s.cfg.TenantID, jkt, now, requested, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}

@@ -326,7 +326,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		}
 	}
 
-	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, d.ExpiresAt, d.ExpiresAt)
+	tok, _, _, err := s.mintToken(d.ID, rootID, s.cfg.TenantID, jkt, now, d.ExpiresAt, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}
@@ -461,7 +461,7 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 		return status.Error(codes.Unauthenticated,
 			"parent_token is required: present a current token for the parent delegation")
 	}
-	named, jkt, err := s.authenticateToken(parentToken)
+	named, jkt, session, err := s.authenticateToken(parentToken)
 	if err != nil {
 		return status.Error(codes.Unauthenticated, "parent_token does not verify")
 	}
@@ -471,6 +471,13 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 	if jkt != "" {
 		return status.Error(codes.PermissionDenied,
 			"parent_token is bound to a key: a child cannot be created from a bound token")
+	}
+	// Delegating is a call by the parent's session like any other. Counted
+	// after the refusal above, which reads nothing, so a copy of a key-bound
+	// token spends none of its owner's budget; and before the first store
+	// read, below, so no read goes uncounted.
+	if !s.withinBudget(ctx, session, parentID, nil, budgetActor, time.Now()) {
+		return status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 	// The parent's bearer token outlives a later binding of the parent, so
 	// the token being unbound is not enough: the parent itself must be.

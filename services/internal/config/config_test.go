@@ -751,3 +751,35 @@ func TestLoad_MaxPendingApprovals(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_SessionCallBudget(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_SESSION_CALLS_PER_SECOND", "")
+	t.Setenv("STRATIUM_SESSION_CALLS_BURST", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.SessionCallsPerSecond != 20 || c.SessionCallsBurst != 100 {
+		t.Errorf("defaults = %v a second, burst %d; want 20 and 100", c.SessionCallsPerSecond, c.SessionCallsBurst)
+	}
+
+	t.Setenv("STRATIUM_SESSION_CALLS_PER_SECOND", "2.5")
+	t.Setenv("STRATIUM_SESSION_CALLS_BURST", "7")
+	if c, err = Load(); err != nil || c.SessionCallsPerSecond != 2.5 || c.SessionCallsBurst != 7 {
+		t.Errorf("Load() = %v a second, burst %d, %v; want 2.5, 7, nil", c.SessionCallsPerSecond, c.SessionCallsBurst, err)
+	}
+
+	for _, bad := range [][2]string{
+		{"STRATIUM_SESSION_CALLS_PER_SECOND", "0"}, {"STRATIUM_SESSION_CALLS_PER_SECOND", "NaN"},
+		{"STRATIUM_SESSION_CALLS_PER_SECOND", "fast"}, {"STRATIUM_SESSION_CALLS_BURST", "0"},
+		{"STRATIUM_SESSION_CALLS_BURST", "1.5"},
+	} {
+		t.Setenv("STRATIUM_SESSION_CALLS_PER_SECOND", "")
+		t.Setenv("STRATIUM_SESSION_CALLS_BURST", "")
+		t.Setenv(bad[0], bad[1])
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), bad[0]) {
+			t.Errorf("%s=%q: Load() error = %v, want one naming it", bad[0], bad[1], err)
+		}
+	}
+}

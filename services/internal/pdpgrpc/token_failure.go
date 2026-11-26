@@ -82,16 +82,26 @@ func clipCallerText(s string) string {
 func (s *Server) denyUnauthenticated(
 	ctx context.Context, agentID uuid.UUID, action authz.Action, subject string, now time.Time, tokenErr error,
 ) (*DecideResponse, error) {
+	// No delegation: nothing identified one.
+	return s.denyUnproven(ctx, agentID, uuid.Nil, action, subject, now, tokenErr)
+}
+
+// denyUnproven is the same answer for any credential that fell short: a token
+// that did not authenticate (delegationID is uuid.Nil), or a key-bound token
+// that did but came without a proof of its key.
+func (s *Server) denyUnproven(
+	ctx context.Context, agentID, delegationID uuid.UUID, action authz.Action, subject string, now time.Time, credErr error,
+) (*DecideResponse, error) {
 	ok, skipped := s.failedTokens.take(now)
 	if !ok {
-		slog.Warn("token failure denied but not audited: over the audit rate cap",
-			"agent_id", agentID.String(), "error", tokenErr)
-		return toResponse(authz.DeriveTierDenial(tokenErr), nil), nil
+		slog.Warn("credential failure denied but not audited: over the audit rate cap",
+			"agent_id", agentID.String(), "error", credErr)
+		return toResponse(authz.DeriveTierDenial(credErr), nil), nil
 	}
 	if skipped > 0 {
-		tokenErr = fmt.Errorf("%w [%d earlier token failures were denied and not recorded]", tokenErr, skipped)
+		credErr = fmt.Errorf("%w [%d earlier credential failures were denied and not recorded]", credErr, skipped)
 	}
 	action.Tool = clipCallerText(action.Tool)
-	// No delegation, chain or epoch: nothing has been loaded on this path.
-	return s.denyAndAudit(ctx, agentID, uuid.Nil, nil, action, clipCallerText(subject), now, tokenErr, nil)
+	// No chain or epoch: nothing has been loaded on this path.
+	return s.denyAndAudit(ctx, agentID, delegationID, nil, action, clipCallerText(subject), now, credErr, nil)
 }
