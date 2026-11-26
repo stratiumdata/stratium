@@ -283,7 +283,7 @@ const (
 
 func policyRowColumns() []string {
 	return []string{"id", "tenant_id", "name", "description", "language",
-		"policy_content", "effect", "version", "enabled", "created_at", "updated_at"}
+		"policy_content", "effect", "version", "enabled", "created_at", "updated_at", "protected"}
 }
 
 // --- CreatePolicy ---
@@ -660,12 +660,15 @@ func TestStore_GetPolicy_Success(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(getPolicyQuery)).
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(policyRowColumns()).
-			AddRow(id.String(), testTenant, "p1", "a description", "cedar", validCedarPolicy, "allow", int64(3), true, now, now))
+			AddRow(id.String(), testTenant, "p1", "a description", "cedar", validCedarPolicy, "allow", int64(3), true, now, now, true))
 	mock.ExpectCommit()
 
 	got, err := s.GetPolicy(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetPolicy() error = %v", err)
+	}
+	if !got.Protected {
+		t.Error("Protected = false, want true: the row's protected column was not read back")
 	}
 	if got.Name != "p1" || got.Description != "a description" || got.Version != 3 {
 		t.Errorf("GetPolicy() = %+v, want Name=p1 Description=%q Version=3", got, "a description")
@@ -684,7 +687,7 @@ func TestStore_GetPolicy_NullDescriptionDecodesAsEmptyString(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(getPolicyQuery)).
 		WithArgs(id.String()).
 		WillReturnRows(sqlmock.NewRows(policyRowColumns()).
-			AddRow(id.String(), testTenant, "p1", nil, "cedar", validCedarPolicy, "allow", int64(1), true, now, now))
+			AddRow(id.String(), testTenant, "p1", nil, "cedar", validCedarPolicy, "allow", int64(1), true, now, now, false))
 	mock.ExpectCommit()
 
 	got, err := s.GetPolicy(context.Background(), id)
@@ -728,8 +731,8 @@ func TestStore_ListPolicies_IncludesDisabled(t *testing.T) {
 	expectSetTenant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta(listPoliciesQuery)).
 		WillReturnRows(sqlmock.NewRows(policyRowColumns()).
-			AddRow(uuid.New().String(), testTenant, "enabled-one", "", "cedar", validCedarPolicy, "allow", int64(1), true, now, now).
-			AddRow(uuid.New().String(), testTenant, "disabled-one", "", "rego", validRegoPolicy, "deny", int64(2), false, now, now))
+			AddRow(uuid.New().String(), testTenant, "enabled-one", "", "cedar", validCedarPolicy, "allow", int64(1), true, now, now, false).
+			AddRow(uuid.New().String(), testTenant, "disabled-one", "", "rego", validRegoPolicy, "deny", int64(2), false, now, now, false))
 	mock.ExpectCommit()
 
 	got, err := s.ListPolicies(context.Background())
@@ -785,7 +788,7 @@ func TestStore_UpdatePolicy_Success(t *testing.T) {
 	mock.ExpectCommit()
 
 	p := models.Policy{Name: "renamed", Description: "new description", Language: "rego", Text: validRegoPolicy, Effect: "deny", Enabled: false}
-	got, err := s.UpdatePolicy(context.Background(), registry, id, p, "operator-2")
+	got, err := s.UpdatePolicy(context.Background(), registry, id, p, "operator-2", true)
 	if err != nil {
 		t.Fatalf("UpdatePolicy() error = %v", err)
 	}
@@ -808,7 +811,7 @@ func TestStore_UpdatePolicy_RevalidatesText(t *testing.T) {
 	registry := testRegistry()
 
 	p := models.Policy{Name: "p1", Language: "json", Text: invalidJSONPolicy, Effect: "allow"}
-	_, err := s.UpdatePolicy(context.Background(), registry, uuid.New(), p, "operator-1")
+	_, err := s.UpdatePolicy(context.Background(), registry, uuid.New(), p, "operator-1", true)
 	if err == nil {
 		t.Fatal("UpdatePolicy() error = nil, want a validation error")
 	}
@@ -830,7 +833,7 @@ func TestStore_UpdatePolicy_RevalidatesEffectAgreement(t *testing.T) {
 
 	// permit(...) declares "allow"; the request claims "deny".
 	p := models.Policy{Name: "p1", Language: "cedar", Text: validCedarPolicy, Effect: "deny"}
-	_, err := s.UpdatePolicy(context.Background(), registry, uuid.New(), p, "operator-1")
+	_, err := s.UpdatePolicy(context.Background(), registry, uuid.New(), p, "operator-1", true)
 	if !errors.Is(err, ErrEffectMismatch) {
 		t.Errorf("UpdatePolicy() error = %v, want errors.Is(_, ErrEffectMismatch)", err)
 	}
@@ -850,7 +853,7 @@ func TestStore_UpdatePolicy_NotFound(t *testing.T) {
 	mock.ExpectRollback()
 
 	p := models.Policy{Name: "p1", Language: "cedar", Text: validCedarPolicy, Effect: "allow"}
-	_, err := s.UpdatePolicy(context.Background(), registry, id, p, "operator-1")
+	_, err := s.UpdatePolicy(context.Background(), registry, id, p, "operator-1", true)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdatePolicy() error = %v, want ErrNotFound", err)
 	}

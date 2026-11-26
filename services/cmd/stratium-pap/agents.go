@@ -51,7 +51,7 @@ func createAgent(s *Server, w http.ResponseWriter, r *http.Request, op Operator)
 		return
 	}
 
-	created, err := s.store.CreateAgent(r.Context(), a, op.Subject)
+	created, err := s.store.CreateAgent(r.Context(), a, op.Subject, op.Role.meets(RoleAdmin))
 	if err != nil {
 		writeStoreError(w, err)
 		return

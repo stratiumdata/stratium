@@ -162,3 +162,87 @@ func TestDeletePolicy_Success(t *testing.T) {
 
 	assertExpectationsMet(t, f.mock)
 }
+
+// expectPolicyProtectedRead is what an editor's policy update reads first, in
+// its own transaction: whether an admin has protected the policy.
+func expectPolicyProtectedRead(mock sqlmock.Sqlmock, protected bool) {
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT protected FROM policies WHERE id = \$1 FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"protected"}).AddRow(protected))
+}
+
+// An admin can protect a policy. An editor can then neither rewrite nor
+// disable it: the rule it states stays until an admin says otherwise.
+func TestUpdatePolicy_EditorCannotChangeAProtectedPolicy(t *testing.T) {
+	f := newPolicyTestFixture(t)
+	expectPolicyProtectedRead(f.mock, true)
+	f.mock.ExpectRollback()
+
+	body := models.Policy{Name: "reserved", Language: "cedar", Text: `permit(principal, action, resource);`, Effect: "allow", Enabled: false}
+	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/policies/"+uuid.NewString(), f.token(t, "org-editors"), body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if body := rec.Body.String(); !containsAll(body, "admin", "protected") {
+		t.Errorf("body = %q, want it to say the policy is protected and an admin is needed", body)
+	}
+	assertExpectationsMet(t, f.mock) // no UPDATE, no audit row
+}
+
+func TestUpdatePolicy_EditorChangesAnUnprotectedPolicy(t *testing.T) {
+	f := newPolicyTestFixture(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	expectPolicyProtectedRead(f.mock, false)
+	f.mock.ExpectQuery("UPDATE policies").
+		WillReturnRows(sqlmock.NewRows([]string{"version", "created_at", "updated_at"}).AddRow(int64(2), now, now))
+	f.mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
+	f.mock.ExpectQuery("FROM audit_chain").WillReturnError(sql.ErrNoRows)
+	f.mock.ExpectExec("INSERT INTO audit_chain").WillReturnResult(sqlmock.NewResult(0, 1))
+	f.mock.ExpectCommit()
+
+	body := models.Policy{Name: "renamed", Language: "cedar", Text: `permit(principal, action, resource);`, Effect: "allow", Enabled: true}
+	rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/policies/"+uuid.NewString(), f.token(t, "org-editors"), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	assertExpectationsMet(t, f.mock)
+}
+
+func TestSetPolicyProtection(t *testing.T) {
+	t.Run("an admin protects a policy", func(t *testing.T) {
+		f := newPolicyTestFixture(t)
+		id := uuid.New()
+		expectWriteAndAudit(f.mock, "UPDATE policies SET protected",
+			sqlmock.NewRows([]string{"name"}).AddRow("reserved-for-alice"))
+
+		rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/policies/"+id.String()+"/protection",
+			f.token(t, "org-admins"), map[string]any{"protected": true})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		got := decodeBody[models.PolicyProtectionView](t, rec)
+		if got.PolicyID != id || !got.Protected {
+			t.Errorf("response = %+v, want policy %s protected", got, id)
+		}
+		assertExpectationsMet(t, f.mock)
+	})
+	t.Run("an editor cannot", func(t *testing.T) {
+		f := newPolicyTestFixture(t)
+		rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/policies/"+uuid.NewString()+"/protection",
+			f.token(t, "org-editors"), map[string]any{"protected": false})
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+		}
+		assertExpectationsMet(t, f.mock)
+	})
+	t.Run("the value must be stated", func(t *testing.T) {
+		f := newPolicyTestFixture(t)
+		rec := doJSONRequest(t, f.server, http.MethodPut, "/v1/policies/"+uuid.NewString()+"/protection",
+			f.token(t, "org-admins"), map[string]any{})
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+		assertExpectationsMet(t, f.mock)
+	})
+}

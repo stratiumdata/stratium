@@ -107,7 +107,7 @@ func TestIntegration_PAPCRUD_PolicyRoundTrip(t *testing.T) {
 			// never an operator's own claim.
 			Effect: "deny", Enabled: false,
 		},
-		"integration-operator")
+		"integration-operator", true)
 	if err != nil {
 		t.Fatalf("UpdatePolicy() error = %v", err)
 	}
@@ -143,7 +143,7 @@ func TestIntegration_PAPCRUD_AgentRoundTrip(t *testing.T) {
 			Name: "crud-roundtrip-agent", Provider: "anthropic", ModelID: "claude-opus",
 			TrustTier: models.TrustTierCertified, Enabled: true, AllowedTools: []string{"Read", "Bash"},
 		},
-		"integration-operator")
+		"integration-operator", true)
 	if err != nil {
 		t.Fatalf("CreateAgent() error = %v", err)
 	}
@@ -431,7 +431,7 @@ func TestIntegration_PAPCRUD_DeleteAgent_StillReferencedReturnsConflict(t *testi
 			Name: "blocked-by-a-live-delegation", Provider: "anthropic", TrustTier: models.TrustTierCertified,
 			Enabled: true, AllowedTools: []string{"Read"},
 		},
-		"integration-operator")
+		"integration-operator", true)
 	if err != nil {
 		t.Fatalf("CreateAgent() error = %v", err)
 	}

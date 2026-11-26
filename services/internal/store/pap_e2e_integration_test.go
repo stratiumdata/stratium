@@ -276,7 +276,7 @@ func papJSON(t *testing.T, addr, method, path, token string, body, out any) {
 // Drift is caught in ONE direction here and in the other direction there,
 // and it took a review to notice the asymmetry. A route this table names but
 // the server does not register fails here (it answers 404 where a 401/403 is
-// asserted), and proof 2's own `writes != 26` catches a write route deleted
+// asserted), and proof 2's own `writes != 27` catches a write route deleted
 // from this copy. Neither catches a route ADDED to server.go: proof 2 would
 // still count 24 and pass, proof 3's "everywhere" sweep would never touch
 // the new route, and C5's machine-checked pointer would go on citing proof 3
@@ -312,6 +312,7 @@ func papRouteTable(id string) []papRoute {
 		{http.MethodGet, "/v1/policies/" + id, false},
 		{http.MethodPut, "/v1/policies/" + id, true},
 		{http.MethodDelete, "/v1/policies/" + id, true},
+		{http.MethodPut, "/v1/policies/" + id + "/protection", true},
 		{http.MethodPost, "/v1/policies/validate", true},
 		{http.MethodPost, "/v1/policies/test", true},
 
@@ -553,8 +554,8 @@ func TestIntegration_PAPE2E_ViewerIsRefusedEveryWrite(t *testing.T) {
 	// server.go is caught by TestRouteTable_CoversEveryCRUDRouteForEveryResource
 	// instead -- see papRoute's own doc comment for why the two halves live
 	// in different packages and must agree.
-	if writes != 26 {
-		t.Errorf("swept %d write routes, want 26 -- papRouteTable has drifted from "+
+	if writes != 27 {
+		t.Errorf("swept %d write routes, want 27 -- papRouteTable has drifted from "+
 			"cmd/stratium-pap/server.go's routeTable", writes)
 	}
 
@@ -1433,7 +1434,7 @@ func TestIntegration_PAPE2E_AWideningIsReadableThroughTheAuditRoute(t *testing.T
 	var created models.Agent
 	papJSON(t, papAddr, http.MethodPost, "/v1/agents", editor, map[string]any{
 		"name": "audit-read-widening-" + uuid.NewString()[:8], "provider": "example",
-		"model_id": "n/a", "trust_tier": 3, "enabled": true, "suspended": false,
+		"model_id": "n/a", "trust_tier": 0, "enabled": true, "suspended": false,
 		"allowed_tools": []string{"Read"},
 	}, &created)
 
@@ -1548,13 +1549,49 @@ func TestIntegration_PAP_EditorCannotLoosen(t *testing.T) {
 				"trust_tier": tier, "enabled": true, "suspended": suspended, "allowed_tools": []string{"Read"},
 			}
 		}
+		// A new agent above the lowest tier is an admin's, like raising one.
+		refused(t, http.MethodPost, "/v1/agents", agent(1, false))
 		var created models.Agent
-		papJSON(t, papAddr, http.MethodPost, "/v1/agents", editor, agent(1, false), &created)
+		papJSON(t, papAddr, http.MethodPost, "/v1/agents", admin, agent(1, false), &created)
 		path := "/v1/agents/" + created.ID.String()
 
 		refused(t, http.MethodPut, path, agent(2, false))
 		papJSON(t, papAddr, http.MethodPut, path, editor, agent(1, true), nil)
 		refused(t, http.MethodPut, path, agent(1, false))
 		papJSON(t, papAddr, http.MethodPut, path, admin, agent(1, false), nil)
+	})
+
+	// An admin can protect a policy; an editor can then neither rewrite nor
+	// disable it, and cannot lift the protection.
+	t.Run("protected policy", func(t *testing.T) {
+		policy := func(enabled bool) map[string]any {
+			return map[string]any{
+				"name": "loosen-" + suffix, "language": "cedar", "effect": "deny", "enabled": enabled,
+				"policy_content": fmt.Sprintf(`forbid(principal, action, resource) when { context.agent.id == %q };`, uuid.NewString()),
+			}
+		}
+		var created models.Policy
+		papJSON(t, papAddr, http.MethodPost, "/v1/policies", editor, policy(true), &created)
+		path := "/v1/policies/" + created.ID.String()
+
+		refused(t, http.MethodPut, path+"/protection", map[string]any{"protected": true})
+		papJSON(t, papAddr, http.MethodPut, path+"/protection", admin, map[string]any{"protected": true}, nil)
+
+		refused(t, http.MethodPut, path, policy(false))
+		refused(t, http.MethodPut, path+"/protection", map[string]any{"protected": false})
+		var read models.Policy
+		papJSON(t, papAddr, http.MethodGet, path, admin, nil, &read)
+		if !read.Protected || !read.Enabled {
+			t.Errorf("after the refused writes: protected = %v, enabled = %v, want both true", read.Protected, read.Enabled)
+		}
+
+		// An admin's own update keeps the protection in place.
+		papJSON(t, papAddr, http.MethodPut, path, admin, policy(true), nil)
+		papJSON(t, papAddr, http.MethodGet, path, admin, nil, &read)
+		if !read.Protected {
+			t.Error("an admin's PUT cleared the protection, want it left set")
+		}
+		papJSON(t, papAddr, http.MethodPut, path+"/protection", admin, map[string]any{"protected": false}, nil)
+		papJSON(t, papAddr, http.MethodPut, path, editor, policy(false), nil)
 	})
 }

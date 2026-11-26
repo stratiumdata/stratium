@@ -76,7 +76,7 @@ func updatePolicy(s *Server, w http.ResponseWriter, r *http.Request, op Operator
 		return
 	}
 
-	updated, err := s.store.UpdatePolicy(r.Context(), s.registry, id, p, op.Subject)
+	updated, err := s.store.UpdatePolicy(r.Context(), s.registry, id, p, op.Subject, op.Role.meets(RoleAdmin))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -97,4 +97,32 @@ func deletePolicy(s *Server, w http.ResponseWriter, r *http.Request, op Operator
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// protectionRequest is PUT /v1/policies/{id}/protection's body. A pointer so
+// a body that leaves the value out is refused rather than read as false.
+type protectionRequest struct {
+	Protected *bool `json:"protected"`
+}
+
+func putPolicyProtection(s *Server, w http.ResponseWriter, r *http.Request, op Operator) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req protectionRequest
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Protected == nil {
+		http.Error(w, "protected is required: true or false", http.StatusBadRequest)
+		return
+	}
+	view, err := s.store.SetPolicyProtection(r.Context(), id, *req.Protected, op.Subject, time.Now())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }

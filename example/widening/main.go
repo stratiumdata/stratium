@@ -123,6 +123,11 @@ const (
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
 
+	// adminUser/adminPass register the example's agents: POST /v1/agents
+	// above the lowest trust tier is an admin's write.
+	adminUser = "pap-admin"
+	adminPass = "pap_admin_local_dev_only"
+
 	// GET /v1/audit is a viewer read. Using the LOWEST role that can do it
 	// is the point, not incidental: it shows that reading the forensic
 	// record does not require the role that can change anything.
@@ -181,7 +186,7 @@ func run() int {
 	}
 
 	fmt.Println("stratium-example: registering the agent and this example's own scoped policy...")
-	tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
+	tok, err := agent.MintToken(kcAddr, adminUser, adminPass)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting editor token:", err)
 		return 1

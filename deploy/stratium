@@ -2249,7 +2249,7 @@ def ensure_agent(state):
         if code == 200:
             return state["agent_id"], state.get("agent_name", "?"), "reused"
     name = "quickstart-" + uuid.uuid4().hex[:6]
-    code, body = api("POST", "/v1/agents", body={
+    code, body = api("POST", "/v1/agents", role="admin", body={
         "name": name, "provider": "anthropic", "model_id": "claude",
         "trust_tier": DEMO_TIER, "enabled": True, "suspended": False,
         "allowed_tools": []})

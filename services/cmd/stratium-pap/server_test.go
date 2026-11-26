@@ -136,7 +136,7 @@ func doRequest(t *testing.T, server *Server, method, path, bearer string) *httpt
 // empty result set shaped like it, never its own logic.
 func policyListColumns() []string {
 	return []string{"id", "tenant_id", "name", "description", "language",
-		"policy_content", "effect", "version", "enabled", "created_at", "updated_at"}
+		"policy_content", "effect", "version", "enabled", "created_at", "updated_at", "protected"}
 }
 
 // expectEmptyPolicyList registers the ordered sqlmock sequence
@@ -376,8 +376,9 @@ var actionRoutes = map[string]bool{
 	// Creating a label rule or a catalog entry, RoleAdmin: both set what a
 	// classification cap or an escalation threshold is measured against,
 	// with nothing beneath them to compare a new row to.
-	"POST /v1/resource-label-rules": true,
-	"POST /v1/tool-catalog":         true,
+	"PUT /v1/policies/{id}/protection": true,
+	"POST /v1/resource-label-rules":    true,
+	"POST /v1/tool-catalog":            true,
 }
 
 // TestRouteTable_RoleGatingMatchesSpec checks the stated role mapping
@@ -452,13 +453,13 @@ func TestRouteTable_RoleGatingMatchesSpec(t *testing.T) {
 // a wrong rule can only edit it -- and every rule that exists matches
 // something, so there is no edit that means "off."
 func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
-	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1 + 1 + 1 + 3
+	const wantTotal = 15 + 4 + 3 + 2 + 2 + 5 + 3 + 1 + 3 + 1 + 1 + 1 + 3 + 1
 	if len(routeTable) != wantTotal {
 		t.Fatalf("routeTable has %d routes, want %d (15 Task-3 CRUD routes + 4 tool-catalog + 3 action routes + "+
 			"2 Task-5 authoring routes + 2 Task-6 list routes + 5 resource-label-rules routes + "+
 			"3 Task-7 classification-caps routes + 1 Task-2 configuration route + "+
 			"3 resource-constraints routes + 1 principals/effective route + 1 containment route + "+
-			"1 audit read route + 3 escalation routes)",
+			"1 audit read route + 3 escalation routes + 1 policy protection route)",
 			len(routeTable), wantTotal)
 	}
 
@@ -480,7 +481,7 @@ func TestRouteTable_CoversEveryCRUDRouteForEveryResource(t *testing.T) {
 			writes++
 		}
 	}
-	const wantWrites = 19 + 2 + 2 + 1 + 2 // escalation adds PUT and DELETE .../escalation, admin like caps and scope.
+	const wantWrites = 19 + 2 + 2 + 1 + 2 + 1 // the last is PUT .../policies/{id}/protection, admin; escalation adds PUT and DELETE .../escalation, admin like caps and scope.
 	// Task 7 adds PUT and DELETE .../classification-caps; resource-constraints adds
 	// PUT and DELETE .../resource-constraints the same way; both GETs are not writes. The containment route adds
 	// one more: POST /v1/containment is RoleEditor like every other POST here, so it counts as gated above

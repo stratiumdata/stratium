@@ -27,7 +27,7 @@ import {
 
 const BLANK: Policy = {
   id: '', name: '', description: '', language: '', policy_content: '',
-  effect: 'deny', version: 0, enabled: true, created_at: '', updated_at: '',
+  effect: 'deny', version: 0, enabled: true, protected: false, created_at: '', updated_at: '',
 }
 
 /** A complete, valid test request for the given language and text, so the
@@ -295,6 +295,13 @@ export function PoliciesScreen() {
     )
   }, [reload])
 
+  const setProtection = useCallback((p: Policy, isProtected: boolean) => {
+    api.setPolicyProtection(p.id, isProtected).then(
+      () => { setActionError(null); reload() },
+      (err: unknown) => { setActionError(describeError(err)) },
+    )
+  }, [reload])
+
   if (editor.draft !== null) {
     return (
       <Panel title={editor.editingID === null ? 'New policy' : 'Edit policy'} onClose={editor.close}>
@@ -356,7 +363,14 @@ export function PoliciesScreen() {
               return (
                 <TRow key={p.id}>
                   <TCell>
-                    <div className="font-medium">{p.name}</div>
+                    <div className="font-medium">
+                      {p.name}
+                      {p.protected ? (
+                        <span className="ml-2" title="Only an admin can change or disable this policy">
+                          <Badge tone="warn">protected</Badge>
+                        </span>
+                      ) : null}
+                    </div>
                     {p.description ? (
                       <div className="text-xs text-muted-foreground">{p.description}</div>
                     ) : null}
@@ -376,6 +390,9 @@ export function PoliciesScreen() {
                   <TCell>{timestamp(p.updated_at)}</TCell>
                   <TCell className="text-right">
                     <Button variant="ghost" size="sm" onClick={() => editor.edit(p.id)}>Edit</Button>
+                    <Button variant="ghost" size="sm" onClick={() => setProtection(p, !p.protected)}>
+                      {p.protected ? 'Unprotect' : 'Protect'}
+                    </Button>
                     <Button variant="ghost" size="sm" onClick={() => setConfirming(p)}>Delete</Button>
                   </TCell>
                 </TRow>

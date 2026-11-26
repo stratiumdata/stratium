@@ -99,6 +99,11 @@ const (
 	editorUser = "pap-editor"
 	editorPass = "pap_editor_local_dev_only"
 
+	// adminUser/adminPass register the example's agents: POST /v1/agents
+	// above the lowest trust tier is an admin's write.
+	adminUser = "pap-admin"
+	adminPass = "pap_admin_local_dev_only"
+
 	policyName = "example-depth-mcp-permit"
 	// policyContent is scoped to THIS example's own subject, not a tenant-wide blanket permit:
 	// this program shares its tenant (tenant-pap-e2e-integration) with example/mcp and
@@ -167,7 +172,7 @@ func run() int {
 	}
 
 	fmt.Println("stratium-example: registering the orchestrator and worker agents, and this example's own scoped policy...")
-	tok, err := agent.MintToken(kcAddr, editorUser, editorPass)
+	tok, err := agent.MintToken(kcAddr, adminUser, adminPass)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting editor token:", err)
 		return 1
@@ -178,7 +183,7 @@ func run() int {
 		return 1
 	}
 
-	tok, err = agent.MintToken(kcAddr, editorUser, editorPass) // minted fresh -- operator tokens expire after five minutes
+	tok, err = agent.MintToken(kcAddr, adminUser, adminPass) // minted fresh -- operator tokens expire after five minutes
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting editor token:", err)
 		return 1

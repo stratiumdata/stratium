@@ -66,6 +66,18 @@ type Policy struct {
 
 	Enabled bool `json:"enabled" db:"enabled"`
 
+	// Protected is set by an admin through PUT /v1/policies/{id}/protection
+	// and nothing else: create and update accept the field and ignore it,
+	// so a client can send back what it read. While it is set, only an admin
+	// may change or disable the policy.
+	Protected bool `json:"protected" db:"protected"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// PolicyProtectionView is what PUT /v1/policies/{id}/protection returns.
+type PolicyProtectionView struct {
+	PolicyID  uuid.UUID `json:"policy_id"`
+	Protected bool      `json:"protected"`
 }

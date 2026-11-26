@@ -213,6 +213,10 @@ var routeTable = []routeSpec{
 	{Pattern: "GET /v1/policies/{id}", MinRole: RoleViewer, Handler: getPolicy},
 	{Pattern: "PUT /v1/policies/{id}", MinRole: RoleEditor, Handler: updatePolicy},
 	{Pattern: "DELETE /v1/policies/{id}", MinRole: RoleAdmin, Handler: deletePolicy},
+	// protection is an admin's switch on someone's policy: once set, an
+	// editor's PUT on that policy is refused (store.ErrAdminRequired), so a
+	// rule such as an agent reservation cannot be rewritten or disabled.
+	{Pattern: "PUT /v1/policies/{id}/protection", MinRole: RoleAdmin, Handler: putPolicyProtection},
 	{Pattern: "POST /v1/policies/validate", MinRole: RoleEditor, Handler: validatePolicy},
 	{Pattern: "POST /v1/policies/test", MinRole: RoleEditor, Handler: testPolicyAgainstSampleInput},
 	{Pattern: "POST /v1/containment", MinRole: RoleEditor, Handler: checkContainment},
