@@ -468,10 +468,6 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 	if named != parentID {
 		return status.Error(codes.PermissionDenied, "parent_token was not issued for the parent delegation")
 	}
-	// Delegating is a call by the parent's session like any other.
-	if !s.withinBudget(ctx, session, parentID, nil, budgetActor, time.Now()) {
-		return status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
-	}
 	if jkt != "" {
 		return status.Error(codes.PermissionDenied,
 			"parent_token is bound to a key: a child cannot be created from a bound token")
@@ -484,6 +480,12 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 				"the parent delegation is bound to a key: a bound delegation cannot have children")
 		}
 		return status.Errorf(codes.Internal, "load delegation key: %s", err)
+	}
+	// Delegating is a call by the parent's session like any other. Counted
+	// only now, after both refusals of a token that cannot show its key: a
+	// copy of such a token must not spend its owner's budget.
+	if !s.withinBudget(ctx, session, parentID, nil, budgetActor, time.Now()) {
+		return status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 	return nil
 }

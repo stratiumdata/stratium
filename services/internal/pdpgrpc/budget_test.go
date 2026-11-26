@@ -155,3 +155,44 @@ func TestSessionOfToken_IsTheRootClaim_OrTheDelegationWithoutOne(t *testing.T) {
 		t.Fatalf("a token with no root claim: session = %s, %v; want the delegation %s", gotSession, err, child)
 	}
 }
+
+// A key-bound token presented without its proof spends nothing: only the
+// holder of the key can draw on the session's budget. Otherwise a copied
+// token, useless on its own, could still be used to lock its owner out.
+func TestDecide_BoundTokenWithoutItsProof_SpendsNoBudget(t *testing.T) {
+	f := newBoundFixture(t)
+	f.srv.budgets = sessionBudgets{perSecond: 0.001, burst: 1}
+	good := f.req.GetDpopProof()
+
+	f.req.DpopProof = ""
+	for range 5 {
+		resp := f.decide(t)
+		if resp.GetEffect() != Effect_EFFECT_DENY || strings.Contains(resp.GetReason(), "faster than the PDP allows") {
+			t.Fatalf("without a proof: Effect = %v, Reason = %q; want a DENY about the proof", resp.GetEffect(), resp.GetReason())
+		}
+	}
+	if n := len(f.srv.budgets.sessions); n != 0 {
+		t.Errorf("sessions charged = %d, want 0", n)
+	}
+
+	f.req.DpopProof = good
+	if resp := f.decide(t); resp.GetEffect() != Effect_EFFECT_ALLOW {
+		t.Fatalf("the key holder's call after them: Effect = %v, Reason = %q; want ALLOW", resp.GetEffect(), resp.GetReason())
+	}
+}
+
+// ReportToolUse refuses a key-bound token outright, so it must do that before
+// counting the call.
+func TestReportToolUse_BoundToken_IsRefusedWithoutSpendingBudget(t *testing.T) {
+	f := newBoundFixture(t)
+	f.srv.budgets = sessionBudgets{perSecond: 0.001, burst: 1}
+	req := &ReportToolUseRequest{Token: f.req.GetToken(), Tool: "Bash", RawInput: "{}"}
+	for range 5 {
+		if _, err := f.srv.ReportToolUse(context.Background(), req); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("ReportToolUse() with a bound token: error = %v, want PermissionDenied", err)
+		}
+	}
+	if n := len(f.srv.budgets.sessions); n != 0 {
+		t.Errorf("sessions charged = %d, want 0", n)
+	}
+}

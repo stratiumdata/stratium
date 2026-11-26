@@ -54,9 +54,6 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "token: %s", err)
 	}
-	if !s.withinBudget(ctx, session, delegationID, nil, budgetActor, time.Now()) {
-		return nil, status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
-	}
 	// ponytail: this method takes no DPoP proof, so a key-bound token cannot
 	// show its holder has the key. Refused rather than believed; add a proof
 	// field here if a key-bound surface ever needs to report.
@@ -69,6 +66,11 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 			return nil, status.Errorf(codes.PermissionDenied, "token: %s", err)
 		}
 		return nil, status.Errorf(codes.Internal, "load delegation key: %s", err)
+	}
+	// Counted only now, after both refusals of a token that cannot show its
+	// key: a copy of such a token must not spend its owner's budget.
+	if !s.withinBudget(ctx, session, delegationID, nil, budgetActor, time.Now()) {
+		return nil, status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 
 	// Loaded for the audit row's agent, principal and chain position, and so
