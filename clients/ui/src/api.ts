@@ -21,8 +21,17 @@ export interface Policy {
   effect: string
   version: number
   enabled: boolean
+  /** Set only through PUT /v1/policies/{id}/protection (admin). While true,
+   *  an editor's update is refused. Create and update ignore the field. */
+  protected: boolean
   created_at: string
   updated_at: string
+}
+
+/** models.PolicyProtectionView */
+export interface PolicyProtection {
+  policy_id: string
+  protected: boolean
 }
 
 /** models.Agent */
@@ -338,6 +347,11 @@ export const api = {
   updatePolicy: (id: string, p: Policy) =>
     request<Policy>('PUT', `/v1/policies/${encodeURIComponent(id)}`, p),
   deletePolicy: (id: string) => request<void>('DELETE', `/v1/policies/${encodeURIComponent(id)}`),
+  // Admin-only on the server; offered to everyone here for the same reason
+  // revokeDelegation is (N14).
+  setPolicyProtection: (id: string, isProtected: boolean) =>
+    request<PolicyProtection>('PUT', `/v1/policies/${encodeURIComponent(id)}/protection`,
+      { protected: isProtected }),
 
   // validate answers 200 {valid:true} or a 400 carrying the engine's own
   // message. The 400 is the useful case, and APIError already carries its

@@ -209,3 +209,33 @@ func TestUpdateAgent_EditorSuspends(t *testing.T) {
 	}
 	assertExpectationsMet(t, f.mock)
 }
+
+// An editor may register an agent only at the lowest trust tier: a new agent
+// at a higher tier is the same grant as raising an existing one, which is an
+// admin's.
+func TestCreateAgent_EditorOnlyAtTheLowestTrustTier(t *testing.T) {
+	t.Run("a higher tier is refused before anything is written", func(t *testing.T) {
+		f := newTestServerFixture(t)
+		body := models.Agent{Name: "bot", Provider: "anthropic", TrustTier: models.TrustTierRegistered, Enabled: true, AllowedTools: []string{"Read"}}
+		rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/agents", f.token(t, "org-editors"), body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+		}
+		if body := rec.Body.String(); !containsAll(body, "admin", "trust tier") {
+			t.Errorf("body = %q, want it to say an admin is needed and why", body)
+		}
+		assertExpectationsMet(t, f.mock) // zero expectations: nothing reached the database
+	})
+	t.Run("the lowest tier is created", func(t *testing.T) {
+		f := newTestServerFixture(t)
+		now := time.Now().UTC().Truncate(time.Second)
+		expectWriteAndAudit(f.mock, "INSERT INTO agents",
+			sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.NewString(), now, now))
+		body := models.Agent{Name: "bot", Provider: "anthropic", TrustTier: models.TrustTierUnverified, Enabled: true, AllowedTools: []string{"Read"}}
+		rec := doJSONRequest(t, f.server, http.MethodPost, "/v1/agents", f.token(t, "org-editors"), body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+		assertExpectationsMet(t, f.mock)
+	})
+}

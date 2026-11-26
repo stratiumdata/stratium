@@ -57,7 +57,7 @@ func TestStore_CreateAgent_Success(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(insertAuditQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	got, err := s.CreateAgent(context.Background(), validAgent(), "operator-1")
+	got, err := s.CreateAgent(context.Background(), validAgent(), "operator-1", true)
 	if err != nil {
 		t.Fatalf("CreateAgent() error = %v", err)
 	}
@@ -94,7 +94,7 @@ func TestStore_CreateAgent_RequiredFieldsRefusedBeforePersisting(t *testing.T) {
 			a := validAgent()
 			tt.mutate(&a)
 
-			_, err := s.CreateAgent(context.Background(), a, "operator-1")
+			_, err := s.CreateAgent(context.Background(), a, "operator-1", true)
 			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("CreateAgent() error = %v, want %v", err, tt.wantErr)
 			}
@@ -128,7 +128,7 @@ func TestStore_CreateAgent_EmptyAllowedToolsIsAccepted(t *testing.T) {
 
 	a := validAgent()
 	a.AllowedTools = []string{} // explicit, non-nil, empty -- "every tool"
-	if _, err := s.CreateAgent(context.Background(), a, "operator-1"); err != nil {
+	if _, err := s.CreateAgent(context.Background(), a, "operator-1", true); err != nil {
 		t.Fatalf("CreateAgent() error = %v, want nil for an explicit empty allowed_tools", err)
 	}
 
@@ -144,7 +144,7 @@ func TestStore_CreateAgent_DuplicateNameIsAlreadyExists(t *testing.T) {
 		WillReturnError(&pq.Error{Code: sqlStateUniqueViolation, Message: `duplicate key value violates unique constraint "agents_tenant_id_name_key"`})
 	mock.ExpectRollback()
 
-	_, err := s.CreateAgent(context.Background(), validAgent(), "operator-1")
+	_, err := s.CreateAgent(context.Background(), validAgent(), "operator-1", true)
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Errorf("CreateAgent() error = %v, want ErrAlreadyExists", err)
 	}
@@ -169,7 +169,7 @@ func TestStore_CreateAgent_AuditFailureRollsBackWrite(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(auditTailQuery)).WillReturnError(tailErr)
 	mock.ExpectRollback()
 
-	if _, err := s.CreateAgent(context.Background(), validAgent(), "operator-1"); err == nil {
+	if _, err := s.CreateAgent(context.Background(), validAgent(), "operator-1", true); err == nil {
 		t.Fatal("CreateAgent() error = nil, want the audit tail-read failure to propagate")
 	}
 
@@ -206,7 +206,7 @@ func TestCreateAgent_IgnoresCallerSuppliedClassificationCaps(t *testing.T) {
 		Enabled: true, AllowedTools: []string{},
 		// A caller trying to set a cap at creation time. It must be ignored.
 		ClassificationCaps: map[string]string{"nato": "CONFIDENTIAL"},
-	}, "operator@example.com")
+	}, "operator@example.com", true)
 	if err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestCreateAgent_NilCapsPersistsAsEmptyObject(t *testing.T) {
 	got, err := s.CreateAgent(context.Background(), models.Agent{
 		Name: "uncapped", Provider: "anthropic", TrustTier: models.TrustTierCertified,
 		Enabled: true, AllowedTools: []string{}, ClassificationCaps: nil,
-	}, "operator@example.com")
+	}, "operator@example.com", true)
 	if err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}

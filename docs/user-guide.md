@@ -264,7 +264,7 @@ adapting it, because each grant has a reason recorded next to it.
 `STRATIUM_MIGRATION_DATABASE_URL` is set. Leave it unset and the PDP skips
 migrations and assumes an already-migrated schema, saying so in its logs.
 
-Twenty-four migrations ship. `000002_rls` is the one to know about: it enables
+Twenty-five migrations ship. `000002_rls` is the one to know about: it enables
 **and forces** row-level security on every tenant table.
 
 ### 2.6 Token signing keys
@@ -845,7 +845,10 @@ An editor can tighten what an admin's ceilings are measured against, never
 relax it. These need `admin`, and an editor who tries gets a `403` that says
 why:
 
-- **Creating** a resource label rule or a tool catalog entry.
+- **Creating** a resource label rule or a tool catalog entry, or an agent
+  above the lowest trust tier (`trust_tier` 0).
+- **Changing or disabling a protected policy**, and protecting or
+  unprotecting one (§5.4).
 - **Updating a label rule** in any way except raising its level: lowering the
   level, or changing the prefix or hierarchy.
 - **Updating a catalog entry** in any way except raising its `action_tier`:
@@ -863,12 +866,13 @@ why:
 | `GET /v1/policies` | viewer | list policies, ordered by name |
 | `POST /v1/policies` | editor | create a policy |
 | `GET /v1/policies/{id}` | viewer | fetch one policy, including its full text |
-| `PUT /v1/policies/{id}` | editor | full replace |
+| `PUT /v1/policies/{id}` | editor | full replace; a protected policy needs **admin** (§5.4) |
+| `PUT /v1/policies/{id}/protection` | **admin** | protect or unprotect a policy |
 | `DELETE /v1/policies/{id}` | **admin** | delete |
 | `POST /v1/policies/validate` | editor | syntax/semantic check, persists nothing |
 | `POST /v1/policies/test` | editor | evaluate a candidate against sample input |
 | `GET /v1/agents` | viewer | list agents |
-| `POST /v1/agents` | editor | register an agent |
+| `POST /v1/agents` | editor | register an agent; above `trust_tier` 0 needs **admin** (§5.1) |
 | `GET /v1/agents/{id}` | viewer | fetch one agent |
 | `PUT /v1/agents/{id}` | editor | full replace; raising the trust tier or resuming needs **admin** (§5.1) |
 | `DELETE /v1/agents/{id}` | **admin** | delete |
@@ -960,6 +964,7 @@ for. It can never widen what a delegation or an agent's own record allows.
 | `policy_content` | string | **required**, the policy text; validated by its own engine before anything is written |
 | `effect` | string | **required**, `allow` or `deny` — see the rule below |
 | `enabled` | bool | disabled policies are not evaluated |
+| `protected` | bool | server-owned; set through `PUT /v1/policies/{id}/protection`. Sending it on create or update has no effect |
 | `version` | int64 | server-owned; incremented on every update |
 | `id`, `tenant_id`, `created_at`, `updated_at` | — | server-owned |
 
@@ -1020,6 +1025,25 @@ curl -X PUT "http://$PAP/v1/policies/$ID" \
 ```bash
 curl -X DELETE -H "Authorization: Bearer $ADMIN" "http://$PAP/v1/policies/$ID"   # 204
 ```
+
+**Protecting a policy** — admin only.
+
+Editors write policy, which means an editor can rewrite or disable any rule,
+including a `forbid` an admin depends on. Protecting a policy takes that away
+for that one policy:
+
+```bash
+curl -X PUT "http://$PAP/v1/policies/$ID/protection" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"protected":true}'
+```
+
+While a policy is protected, an editor's `PUT` on it returns `403`; an admin
+can still change it, and it stays protected. Only this route sets or clears
+the flag: `{"protected":false}` lifts it. A protected `forbid` holds whatever
+editors add, because a deny from any policy overrides every allow. Protecting
+or unprotecting writes a `policy_protected` or `policy_unprotected` audit
+entry.
 
 **Validate without saving** — editor.
 
@@ -1129,7 +1153,7 @@ with.
 
 ```bash
 export AGENT=$(curl -sS -X POST "http://$PAP/v1/agents" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"name":"alice-claude-code","provider":"anthropic","model_id":"claude",
        "trust_tier":3,"enabled":true,"suspended":false,"allowed_tools":[]}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -1311,6 +1335,9 @@ deny if {
 	input.principal.subject != "alice@example.com"
 }
 ```
+
+Then protect the policy, so that an editor cannot rewrite or disable it
+(§5.4, "Protecting a policy").
 
 Anyone else who tries to start a session through that agent is refused
 (`none of the requested tools are held by this principal`), and a session
@@ -1848,7 +1875,7 @@ Against the local evaluation stack (§2.2), use its `$PDP` and
 
 ```bash
 export AGENT=$(curl -sS -X POST "http://$PAP/v1/agents" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"name":"alice-claude-code","provider":"anthropic","model_id":"claude",
        "trust_tier":3,"enabled":true,"suspended":false,"allowed_tools":[]}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')

@@ -312,6 +312,7 @@ func papRouteTable(id string) []papRoute {
 		{http.MethodGet, "/v1/policies/" + id, false},
 		{http.MethodPut, "/v1/policies/" + id, true},
 		{http.MethodDelete, "/v1/policies/" + id, true},
+		{http.MethodPut, "/v1/policies/" + id + "/protection", true},
 		{http.MethodPost, "/v1/policies/validate", true},
 		{http.MethodPost, "/v1/policies/test", true},
 
@@ -1433,7 +1434,7 @@ func TestIntegration_PAPE2E_AWideningIsReadableThroughTheAuditRoute(t *testing.T
 	var created models.Agent
 	papJSON(t, papAddr, http.MethodPost, "/v1/agents", editor, map[string]any{
 		"name": "audit-read-widening-" + uuid.NewString()[:8], "provider": "example",
-		"model_id": "n/a", "trust_tier": 3, "enabled": true, "suspended": false,
+		"model_id": "n/a", "trust_tier": 0, "enabled": true, "suspended": false,
 		"allowed_tools": []string{"Read"},
 	}, &created)
 
@@ -1548,13 +1549,49 @@ func TestIntegration_PAP_EditorCannotLoosen(t *testing.T) {
 				"trust_tier": tier, "enabled": true, "suspended": suspended, "allowed_tools": []string{"Read"},
 			}
 		}
+		// A new agent above the lowest tier is an admin's, like raising one.
+		refused(t, http.MethodPost, "/v1/agents", agent(1, false))
 		var created models.Agent
-		papJSON(t, papAddr, http.MethodPost, "/v1/agents", editor, agent(1, false), &created)
+		papJSON(t, papAddr, http.MethodPost, "/v1/agents", admin, agent(1, false), &created)
 		path := "/v1/agents/" + created.ID.String()
 
 		refused(t, http.MethodPut, path, agent(2, false))
 		papJSON(t, papAddr, http.MethodPut, path, editor, agent(1, true), nil)
 		refused(t, http.MethodPut, path, agent(1, false))
 		papJSON(t, papAddr, http.MethodPut, path, admin, agent(1, false), nil)
+	})
+
+	// An admin can protect a policy; an editor can then neither rewrite nor
+	// disable it, and cannot lift the protection.
+	t.Run("protected policy", func(t *testing.T) {
+		policy := func(enabled bool) map[string]any {
+			return map[string]any{
+				"name": "loosen-" + suffix, "language": "cedar", "effect": "deny", "enabled": enabled,
+				"policy_content": fmt.Sprintf(`forbid(principal, action, resource) when { context.agent.id == %q };`, uuid.NewString()),
+			}
+		}
+		var created models.Policy
+		papJSON(t, papAddr, http.MethodPost, "/v1/policies", editor, policy(true), &created)
+		path := "/v1/policies/" + created.ID.String()
+
+		refused(t, http.MethodPut, path+"/protection", map[string]any{"protected": true})
+		papJSON(t, papAddr, http.MethodPut, path+"/protection", admin, map[string]any{"protected": true}, nil)
+
+		refused(t, http.MethodPut, path, policy(false))
+		refused(t, http.MethodPut, path+"/protection", map[string]any{"protected": false})
+		var read models.Policy
+		papJSON(t, papAddr, http.MethodGet, path, admin, nil, &read)
+		if !read.Protected || !read.Enabled {
+			t.Errorf("after the refused writes: protected = %v, enabled = %v, want both true", read.Protected, read.Enabled)
+		}
+
+		// An admin's own update keeps the protection in place.
+		papJSON(t, papAddr, http.MethodPut, path, admin, policy(true), nil)
+		papJSON(t, papAddr, http.MethodGet, path, admin, nil, &read)
+		if !read.Protected {
+			t.Error("an admin's PUT cleared the protection, want it left set")
+		}
+		papJSON(t, papAddr, http.MethodPut, path+"/protection", admin, map[string]any{"protected": false}, nil)
+		papJSON(t, papAddr, http.MethodPut, path, editor, policy(false), nil)
 	})
 }

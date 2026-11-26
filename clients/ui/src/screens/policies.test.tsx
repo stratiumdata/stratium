@@ -18,6 +18,7 @@ function policy(over: Partial<Policy>): Policy {
     effect: 'allow',
     version: 1,
     enabled: true,
+    protected: false,
     created_at: '2026-08-15T10:00:00Z',
     updated_at: '2026-08-15T10:00:00Z',
     ...over,
@@ -63,6 +64,48 @@ describe('PoliciesScreen', () => {
     vi.spyOn(api, 'policies').mockResolvedValue([])
     render(<PoliciesScreen />)
     expect(await screen.findByText('No policies.')).toBeInTheDocument()
+  })
+})
+
+describe('PoliciesScreen protection', () => {
+  // A protected policy is one an editor cannot change. The list has to say
+  // which ones are, or an editor learns it only from a refused save.
+  it('marks a protected policy and offers to unprotect it', async () => {
+    vi.spyOn(api, 'policies').mockResolvedValue([
+      policy({ name: 'reserved-for-alice', protected: true }),
+      policy({ name: 'ordinary' }),
+    ])
+
+    render(<PoliciesScreen />)
+    await screen.findByText('reserved-for-alice')
+    expect(screen.getAllByText('protected')).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Unprotect' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Protect' })).toHaveLength(1)
+  })
+
+  it('asks the server to protect a policy and reloads the list', async () => {
+    const p = policy({ name: 'ordinary' })
+    const list = vi.spyOn(api, 'policies').mockResolvedValue([p])
+    const set = vi.spyOn(api, 'setPolicyProtection').mockResolvedValue({ policy_id: p.id, protected: true })
+
+    render(<PoliciesScreen />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Protect' }))
+
+    await waitFor(() => expect(set).toHaveBeenCalledWith(p.id, true))
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+  })
+
+  // Offered to every operator, refused by the server below admin (N14): the
+  // refusal has to be shown, in the server's own words.
+  it('shows the server’s refusal when the operator may not protect', async () => {
+    vi.spyOn(api, 'policies').mockResolvedValue([policy({ name: 'ordinary' })])
+    vi.spyOn(api, 'setPolicyProtection').mockRejectedValue(
+      new APIError(403, 'this action requires role admin; your token carries editor'))
+
+    render(<PoliciesScreen />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Protect' }))
+
+    expect(await screen.findByText(/requires role admin/)).toBeInTheDocument()
   })
 })
 

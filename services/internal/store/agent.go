@@ -196,7 +196,12 @@ func validateAgentFields(a models.Agent) error {
 // and a.ResourceConstraints are ALSO ignored on input, every created agent
 // starts capless ({}) and unconstrained ({}) -- see the marshal calls below
 // for why.
-func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string) (models.Agent, error) {
+func (s *Store) CreateAgent(ctx context.Context, a models.Agent, actor string, mayLoosen bool) (models.Agent, error) {
+	// A new agent above the lowest trust tier is the same grant as raising
+	// an existing one (agentLoosens), so it takes the same role.
+	if !mayLoosen && a.TrustTier > models.TrustTierUnverified {
+		return models.Agent{}, fmt.Errorf("%w: it creates an agent above the lowest trust tier", ErrAdminRequired)
+	}
 	if err := validateAgentFields(a); err != nil {
 		return models.Agent{}, err
 	}

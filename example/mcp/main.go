@@ -122,7 +122,7 @@ func run() int {
 		return 1
 	}
 
-	agentTok, err := agent.MintToken(kcAddr, editorUser, editorPass)
+	agentTok, err := agent.MintToken(kcAddr, adminUser, adminPass)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stratium-example: minting editor token:", err)
 		return 1

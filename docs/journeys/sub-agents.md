@@ -22,7 +22,7 @@ record:
 
 ```bash
 curl -sS -X POST "http://$PAP/v1/agents" \
-  -H "Authorization: Bearer $EDITOR" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"name":"report-worker","provider":"anthropic","model_id":"claude",
        "trust_tier":1,"enabled":true,"suspended":false,"allowed_tools":["Read"]}'
 ```

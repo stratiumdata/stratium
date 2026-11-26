@@ -323,14 +323,14 @@ var ErrPolicyInvalid = errors.New("store: policy failed validation")
 const insertPolicyQuery = `INSERT INTO policies (tenant_id, name, description, language, policy_content, effect, enabled) ` +
 	`VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at, updated_at`
 
-const getPolicyQuery = `SELECT id, tenant_id, name, description, language, policy_content, effect, version, enabled, created_at, updated_at ` +
+const getPolicyQuery = `SELECT id, tenant_id, name, description, language, policy_content, effect, version, enabled, created_at, updated_at, protected ` +
 	`FROM policies WHERE id = $1`
 
 // listPoliciesQuery orders by name, the PAP admin screen's natural,
 // human-facing order — unlike loadAllPoliciesQuery's ORDER BY id above,
 // nothing downstream of this list gives compiled-set identity a reason to
 // stay stable across calls, so there is no reason to prefer id here.
-const listPoliciesQuery = `SELECT id, tenant_id, name, description, language, policy_content, effect, version, enabled, created_at, updated_at ` +
+const listPoliciesQuery = `SELECT id, tenant_id, name, description, language, policy_content, effect, version, enabled, created_at, updated_at, protected ` +
 	`FROM policies ORDER BY name`
 
 // updatePolicyQuery leaves version and updated_at to Postgres (version =
@@ -343,6 +343,20 @@ const listPoliciesQuery = `SELECT id, tenant_id, name, description, language, po
 const updatePolicyQuery = `UPDATE policies SET name = $1, description = $2, language = $3, policy_content = $4, ` +
 	`effect = $5, enabled = $6, version = version + 1, updated_at = NOW() ` +
 	`WHERE id = $7 RETURNING version, created_at, updated_at`
+
+// loadPolicyProtectedForUpdateQuery locks the row an editor's update is
+// checked against: a protected policy is an admin's to change.
+const loadPolicyProtectedForUpdateQuery = `SELECT protected FROM policies WHERE id = $1 FOR UPDATE`
+
+// setPolicyProtectionQuery is the only statement that writes the protected
+// column. updatePolicyQuery leaves it alone on purpose: a full replace that
+// omitted the field must not be able to clear it.
+const setPolicyProtectionQuery = `UPDATE policies SET protected = $1, updated_at = NOW() WHERE id = $2 RETURNING name`
+
+const (
+	eventTypePolicyProtected   = "policy_protected"
+	eventTypePolicyUnprotected = "policy_unprotected"
+)
 
 const deletePolicyQuery = `DELETE FROM policies WHERE id = $1 RETURNING name`
 
@@ -409,7 +423,7 @@ func scanFullPolicy(row rowScanner) (models.Policy, error) {
 	var p models.Policy
 	var description sql.NullString
 	err := row.Scan(&p.ID, &p.TenantID, &p.Name, &description, &p.Language, &p.Text, &p.Effect,
-		&p.Version, &p.Enabled, &p.CreatedAt, &p.UpdatedAt)
+		&p.Version, &p.Enabled, &p.CreatedAt, &p.UpdatedAt, &p.Protected)
 	if err != nil {
 		return models.Policy{}, err
 	}
@@ -570,7 +584,7 @@ func (s *Store) ListPolicies(ctx context.Context) ([]models.Policy, error) {
 // row with id exists for this tenant (RLS makes "another tenant's row" and
 // "no such row" indistinguishable, per the package doc).
 func (s *Store) UpdatePolicy(
-	ctx context.Context, registry policy.Registry, id uuid.UUID, p models.Policy, actor string,
+	ctx context.Context, registry policy.Registry, id uuid.UUID, p models.Policy, actor string, mayLoosen bool,
 ) (models.Policy, error) {
 	if err := validatePolicyName(p.Name); err != nil {
 		return models.Policy{}, err
@@ -590,6 +604,21 @@ func (s *Store) UpdatePolicy(
 		return models.Policy{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// The stored flag, not the request's: protection is set through
+	// SetPolicyProtection only, and a body cannot claim or clear it.
+	var protected bool
+	if !mayLoosen {
+		if err := tx.QueryRowContext(ctx, loadPolicyProtectedForUpdateQuery, id.String()).Scan(&protected); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return models.Policy{}, fmt.Errorf("%w: policy %s", ErrNotFound, id)
+			}
+			return models.Policy{}, fmt.Errorf("store: load policy %s protection: %w", id, err)
+		}
+		if protected {
+			return models.Policy{}, fmt.Errorf("%w: the policy is protected", ErrAdminRequired)
+		}
+	}
 
 	row := tx.QueryRowContext(ctx, updatePolicyQuery,
 		p.Name, p.Description, p.Language, p.Text, p.Effect, p.Enabled, id.String())
@@ -670,4 +699,49 @@ func (s *Store) DeletePolicy(ctx context.Context, id uuid.UUID, actor string, no
 		return fmt.Errorf("store: commit: %w", err)
 	}
 	return nil
+}
+
+// SetPolicyProtection marks a policy protected or not. A protected policy can
+// be changed or disabled only by an admin (UpdatePolicy's mayLoosen); deleting
+// any policy already needs one. It is how an admin makes a rule an editor
+// wrote, or one of their own, stay: an agent reservation, a forbid.
+func (s *Store) SetPolicyProtection(
+	ctx context.Context, id uuid.UUID, protected bool, actor string, now time.Time,
+) (models.PolicyProtectionView, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return models.PolicyProtectionView{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var name string
+	if err := tx.QueryRowContext(ctx, setPolicyProtectionQuery, protected, id.String()).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.PolicyProtectionView{}, fmt.Errorf("%w: policy %s", ErrNotFound, id)
+		}
+		return models.PolicyProtectionView{}, fmt.Errorf("store: set policy %s protection: %w", id, err)
+	}
+
+	eventType := eventTypePolicyUnprotected
+	if protected {
+		eventType = eventTypePolicyProtected
+	}
+	entry := audit.Entry{
+		TenantID:      s.tenantID,
+		OccurredAt:    now,
+		EventType:     eventType,
+		Actor:         actor,
+		PolicyID:      id.String(),
+		Decision:      "ALLOW",
+		DeniedAtDepth: noDenial,
+		Reason:        name,
+	}
+	if err := s.appendAuditTx(ctx, tx, entry); err != nil {
+		return models.PolicyProtectionView{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return models.PolicyProtectionView{}, fmt.Errorf("store: commit: %w", err)
+	}
+	return models.PolicyProtectionView{PolicyID: id, Protected: protected}, nil
 }
