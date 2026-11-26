@@ -97,6 +97,11 @@ type Config struct {
 	// deployment, unlike DatabaseURL/TenantID, where guessing is unsafe at
 	// any value.
 	ApprovalTTL time.Duration // STRATIUM_APPROVAL_TTL, default 24h
+	// MaxPendingApprovals is how many approvals one session, a root
+	// delegation and everything delegated under it, may have waiting for an
+	// answer at once. A call that would need one more is denied. Zero, which
+	// Load never produces, means no maximum.
+	MaxPendingApprovals int // STRATIUM_MAX_PENDING_APPROVALS, default 20
 
 	// DPoPFreshnessWindow is how far a DPoP proof's iat may sit from the PDP's
 	// own clock, in either direction, before internal/dpop.Verify refuses it as
@@ -278,6 +283,9 @@ func Load() (Config, error) {
 		if *l.dst, err = positiveInt(l.env, *l.dst); err != nil {
 			return c, err
 		}
+	}
+	if c.MaxPendingApprovals, err = positiveInt("STRATIUM_MAX_PENDING_APPROVALS", 20); err != nil {
+		return c, err
 	}
 	if v := os.Getenv("STRATIUM_DB_MAX_OPEN_CONNS"); v != "" {
 		n, err := strconv.Atoi(v)

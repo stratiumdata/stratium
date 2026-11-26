@@ -107,6 +107,11 @@ type fakeStore struct {
 	chain    []*models.Delegation
 	chainErr error
 
+	// pendingApproval, when set, is the approval RequestApproval reports as
+	// already waiting. lastMaxPending is the maximum it was last given.
+	pendingApproval uuid.UUID
+	lastMaxPending  int
+
 	appendErr error
 	appended  []audit.Entry
 
@@ -273,13 +278,24 @@ func (f *fakeStore) CreateDelegation(_ context.Context, d *models.Delegation) er
 	return nil
 }
 
-func (f *fakeStore) CreateApproval(_ context.Context, a *models.Approval) error {
+// RequestApproval records a as created and returns its id, unless
+// createApprovalErr is set, or pendingApproval names one already waiting.
+func (f *fakeStore) RequestApproval(_ context.Context, a *models.Approval, _ time.Time, maxPending int) (uuid.UUID, error) {
 	f.calls++
+	f.lastMaxPending = maxPending
 	if f.createApprovalErr != nil {
-		return f.createApprovalErr
+		return uuid.Nil, f.createApprovalErr
+	}
+	if f.pendingApproval != uuid.Nil {
+		return f.pendingApproval, nil
+	}
+	// nil only from TestFakeStore_EveryStoreMethodCountsItsCall, which calls
+	// every method with zero values.
+	if a == nil {
+		return uuid.Nil, nil
 	}
 	f.createdApprovals = append(f.createdApprovals, a)
-	return nil
+	return a.ID, nil
 }
 
 func (f *fakeStore) LoadApproval(context.Context, uuid.UUID) (*models.Approval, error) {
@@ -432,6 +448,7 @@ func testConfig() config.Config {
 		FailedTokenAuditPerSecond: 5,
 		FailedTokenAuditBurst:     20,
 		Limits:                    config.DefaultRequestLimits(),
+		MaxPendingApprovals:       20,
 		// Most tests are not about who the principal is, so they run in the
 		// explicit opt-out mode and send a bare subject. The verified path
 		// has its own tests (principal_test.go), which clear this.

@@ -864,3 +864,83 @@ func TestStore_ListApprovals_ScanErrorAborts(t *testing.T) {
 		t.Fatal("ListApprovals() error = nil for a row with a truncated input_digest, want an error")
 	}
 }
+
+// --- RequestApproval ---
+
+func expectApprovalRequestStart(mock sqlmock.Sqlmock, a *models.Approval, now time.Time) *sqlmock.ExpectedQuery {
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectExec(regexp.QuoteMeta(approvalRequestLockQuery)).
+		WithArgs("approval-request:" + a.RootDelegationID.String()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	return mock.ExpectQuery(regexp.QuoteMeta(findPendingApprovalQuery)).
+		WithArgs(a.RootDelegationID.String(), a.DelegationID.String(), a.ToolName, a.Action,
+			int64(a.DerivedTier), a.InputDigest[:], now)
+}
+
+func TestStore_RequestApproval_NothingPending_Inserts(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+
+	expectApprovalRequestStart(mock, a, now).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(countPendingApprovalsQuery)).
+		WithArgs(a.RootDelegationID.String(), now).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	mock.ExpectExec(regexp.QuoteMeta(insertApprovalQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	id, err := s.RequestApproval(context.Background(), a, now, 3)
+	if err != nil || id != a.ID {
+		t.Fatalf("RequestApproval() = %s, %v; want the new approval %s", id, err, a.ID)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// Asking again for the same call returns the approval already waiting and
+// writes nothing, even when the session is at its maximum.
+func TestStore_RequestApproval_SameCallPending_ReturnsItAndInsertsNothing(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+	waiting := uuid.New()
+
+	expectApprovalRequestStart(mock, a, now).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(waiting.String()))
+	mock.ExpectCommit()
+
+	id, err := s.RequestApproval(context.Background(), a, now, 1)
+	if err != nil || id != waiting {
+		t.Fatalf("RequestApproval() = %s, %v; want the waiting approval %s", id, err, waiting)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_RequestApproval_AtTheMaximum_RefusesAndInsertsNothing(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+
+	expectApprovalRequestStart(mock, a, now).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(countPendingApprovalsQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	mock.ExpectRollback()
+
+	_, err := s.RequestApproval(context.Background(), a, now, 3)
+	if !errors.Is(err, ErrTooManyPendingApprovals) {
+		t.Fatalf("RequestApproval() error = %v, want ErrTooManyPendingApprovals", err)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// Zero is no maximum: nothing is counted.
+func TestStore_RequestApproval_NoMaximum_DoesNotCount(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+
+	expectApprovalRequestStart(mock, a, now).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec(regexp.QuoteMeta(insertApprovalQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if _, err := s.RequestApproval(context.Background(), a, now, 0); err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	assertExpectationsMet(t, mock)
+}
