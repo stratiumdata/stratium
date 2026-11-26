@@ -160,6 +160,9 @@ func run(logger *slog.Logger) error {
 	// expired longer ago than cfg.SessionRetention (session_reaper.go).
 	go reapSessions(reaperCtx, logger, repo.ReapExpiredSessions,
 		cfg.SessionRetention, cfg.SessionReapInterval, cfg.DBTimeout)
+	// And the budget rows of sessions that have gone quiet.
+	go reapSessionBudgets(reaperCtx, logger, repo.ReapSessionBudgets,
+		budgetIdleTime(cfg.SessionCallsPerSecond, cfg.SessionCallsBurst), cfg.SessionReapInterval, cfg.DBTimeout)
 
 	// policy.Multi is wired in with a real, non-empty registry (built above,
 	// from cfg.PolicyLanguages, before this process opened any network
@@ -203,6 +206,9 @@ func run(logger *slog.Logger) error {
 	// with a compiled set via PrepareAll, so repo and an engine no longer
 	// need to be passed to NewServer a second time raw.
 	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry).WithEvalTimeout(cfg.PolicyEvalTimeout), cfg, signer)
+	// repo is also where each session's call budget is kept, so every PDP for
+	// this tenant draws on the same one (pdpgrpc/budget.go).
+	srv.WithSessionBudgetStore(repo)
 	if err := configurePrincipalAuth(logger, cfg, srv); err != nil {
 		return err
 	}

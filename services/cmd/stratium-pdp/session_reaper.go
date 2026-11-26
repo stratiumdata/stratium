@@ -58,3 +58,40 @@ func sweepSessions(ctx context.Context, reap reapSessionsFunc, cutoff time.Time,
 		}
 	}
 }
+
+// reapBudgetsFunc deletes the budget rows of sessions untouched since
+// idleSince and returns how many went (store.ReapSessionBudgets).
+type reapBudgetsFunc func(ctx context.Context, idleSince time.Time) (int64, error)
+
+// budgetIdleTime is how long a session's budget row may sit untouched before
+// it is deleted: as long as an empty bucket takes to fill, and at least an
+// hour. A row left that long is full, which is what having no row means.
+func budgetIdleTime(perSecond float64, burst int) time.Duration {
+	fill := time.Duration(float64(burst) / perSecond * float64(time.Second))
+	return max(time.Hour, fill)
+}
+
+// reapSessionBudgets deletes, every interval, the budget rows of sessions
+// nobody has called under for idle, until ctx ends. A failed sweep is logged
+// and tried again: the rows it would have deleted cost only space.
+func reapSessionBudgets(
+	ctx context.Context, logger *slog.Logger, reap reapBudgetsFunc, idle, interval, timeout time.Duration,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweepCtx, cancel := context.WithTimeout(ctx, timeout)
+			_, err := reap(sweepCtx, time.Now().Add(-idle))
+			cancel()
+			if err != nil {
+				logger.Error("session budget reap failed: rows for idle sessions are accumulating",
+					"error", err, "interval", interval)
+			}
+		}
+	}
+}
