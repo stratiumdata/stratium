@@ -302,6 +302,11 @@ func runExtauthzCmd(stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
 		return 1
 	}
+	limits, err := loadListenerLimitsFromEnv()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
+		return 1
+	}
 
 	// grpc.NewClient dials lazily -- the same non-blocking choice hook.go's
 	// runHookCmd makes for the identical call -- so this succeeding proves
@@ -323,7 +328,7 @@ func runExtauthzCmd(stderr io.Writer) int {
 		return 1
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(limits.serverOptions()...)
 	authv3.RegisterAuthorizationServer(grpcServer, &extauthzServer{
 		client: pdpgrpc.NewPDPServiceClient(conn),
 		cfg:    cfg,
