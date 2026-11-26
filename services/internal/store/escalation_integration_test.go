@@ -74,6 +74,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -788,5 +789,67 @@ func TestIntegration_Escalation_CrossTenantCannotReadOrApprove(t *testing.T) {
 	}
 	if stillPending.Status != "pending" || stillPending.ApprovedBy != nil {
 		t.Errorf("approval after tenant B's attempts = %+v, want unchanged (status=pending, approved_by=nil)", stillPending)
+	}
+}
+
+// Asking twice for the same call is one approval, and a session may have only
+// so many waiting. Against real Postgres, since both rules are SQL.
+func TestIntegration_Escalation_AskingAgainIsOneApproval_AndASessionHasAMaximum(t *testing.T) {
+	const tenant = "tenant-escalation-flood-integration"
+	const rootPrincipal = "root-flood@example.com"
+	srv, signer := escalationServer(t, tenant)
+
+	agentID := uuid.New()
+	seedAgent(t, tenant, agentID, "escalation-flood-agent", models.TrustTierPlatformTrusted)
+	delegation := escalatingRootDelegation(t, tenant, agentID, rootPrincipal, models.ActionTierDestructive, "approval flood proof")
+
+	ask := func() string {
+		t.Helper()
+		resp, err := srv.Decide(t.Context(), escalationDecideRequest(t, signer, delegation.ID, agentID, rootPrincipal, nil))
+		if err != nil {
+			t.Fatalf("Decide() error = %v", err)
+		}
+		if resp.GetEffect() != pdpgrpc.Effect_EFFECT_ESCALATE {
+			t.Fatalf("Effect = %v, want EFFECT_ESCALATE (reason: %s)", resp.GetEffect(), resp.GetReason())
+		}
+		return resp.GetApprovalId()
+	}
+	first := ask()
+	for range 3 {
+		if again := ask(); again != first {
+			t.Fatalf("asking again returned approval %s, want the one already waiting, %s", again, first)
+		}
+	}
+	if n := countApprovals(t, tenant); n != 1 {
+		t.Fatalf("approvals rows = %d after four asks for one call, want 1", n)
+	}
+
+	// A different call from the same session: the waiting row with a new id
+	// and a new input digest.
+	repo := store.New(testDB, tenant)
+	waiting, err := repo.LoadApproval(t.Context(), uuid.MustParse(first))
+	if err != nil {
+		t.Fatalf("LoadApproval() error = %v", err)
+	}
+	other := *waiting
+	other.ID = uuid.New()
+	other.InputDigest = sha256.Sum256([]byte("a different call"))
+	other.ExpiresAt = time.Now().Add(time.Hour)
+
+	if _, err := repo.RequestApproval(t.Context(), &other, time.Now(), 1); !errors.Is(err, store.ErrTooManyPendingApprovals) {
+		t.Fatalf("a second pending approval with a maximum of 1: error = %v, want ErrTooManyPendingApprovals", err)
+	}
+	if n := countApprovals(t, tenant); n != 1 {
+		t.Fatalf("approvals rows = %d after the refusal, want still 1", n)
+	}
+	id, err := repo.RequestApproval(t.Context(), &other, time.Now(), 2)
+	if err != nil || id != other.ID {
+		t.Fatalf("with a maximum of 2: RequestApproval() = %s, %v; want the new approval %s", id, err, other.ID)
+	}
+
+	// An answered approval no longer counts, and is not handed out again.
+	approveApproval(t, tenant, uuid.MustParse(first), rootPrincipal)
+	if again := ask(); again == first {
+		t.Fatal("an approved approval was returned as still waiting")
 	}
 }

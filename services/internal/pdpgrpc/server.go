@@ -58,7 +58,7 @@ type Store interface {
 	// models.Approval, not a pdpgrpc-local type: see that type's own doc
 	// comment for why Task 3 moved it out of package store once this
 	// interface needed to name it.
-	CreateApproval(ctx context.Context, a *models.Approval) error
+	RequestApproval(ctx context.Context, a *models.Approval, now time.Time, maxPending int) (uuid.UUID, error)
 	LoadApproval(ctx context.Context, id uuid.UUID) (*models.Approval, error)
 	// UseApproval spends an approval that has just verified, and reports
 	// false when an earlier call already spent it.

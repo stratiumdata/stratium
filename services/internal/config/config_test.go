@@ -727,3 +727,27 @@ func TestLoad_PrincipalOIDCKeyRefresh(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_MaxPendingApprovals(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_PENDING_APPROVALS", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxPendingApprovals != 20 {
+		t.Errorf("default MaxPendingApprovals = %d, want 20", c.MaxPendingApprovals)
+	}
+
+	t.Setenv("STRATIUM_MAX_PENDING_APPROVALS", "5")
+	if c, err = Load(); err != nil || c.MaxPendingApprovals != 5 {
+		t.Errorf("Load() = %d, %v; want 5, nil", c.MaxPendingApprovals, err)
+	}
+
+	for _, bad := range []string{"0", "-1", "lots"} {
+		t.Setenv("STRATIUM_MAX_PENDING_APPROVALS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_MAX_PENDING_APPROVALS") {
+			t.Errorf("value %q: Load() error = %v, want one naming the variable", bad, err)
+		}
+	}
+}

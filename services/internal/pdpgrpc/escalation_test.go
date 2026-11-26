@@ -586,3 +586,45 @@ func TestDecide_Escalation_ValidApproval_PolicyDenyStillDenies(t *testing.T) {
 			second.GetDeniedLeg(), "principal")
 	}
 }
+
+// A second ask for a call that already has an approval waiting gets that
+// approval's id back, and creates nothing.
+func TestDecide_Escalation_SameCallAlreadyPending_ReturnsTheWaitingApproval(t *testing.T) {
+	fs, req, _ := escalationFixture()
+	fs.pendingApproval = uuid.New()
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+	resp := escalate(t, srv, req)
+
+	if resp.GetApprovalId() != fs.pendingApproval.String() {
+		t.Errorf("ApprovalId = %q, want the waiting approval %s", resp.GetApprovalId(), fs.pendingApproval)
+	}
+	if len(fs.createdApprovals) != 0 {
+		t.Errorf("approvals created = %d, want 0", len(fs.createdApprovals))
+	}
+	if fs.lastMaxPending != testConfig().MaxPendingApprovals {
+		t.Errorf("maximum passed to the store = %d, want the configured %d", fs.lastMaxPending, testConfig().MaxPendingApprovals)
+	}
+}
+
+// A session at its maximum is denied, and the denial is audited like any
+// other: it is a decision, not a failure.
+func TestDecide_Escalation_TooManyPending_IsAnAuditedDeny(t *testing.T) {
+	fs, req, _ := escalationFixture()
+	fs.createApprovalErr = fmt.Errorf("%w: 20", store.ErrTooManyPendingApprovals)
+	srv := NewServer(fs, escalationPolicy(), testConfig(), &fakeSigner{})
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v, want a DENY decision", err)
+	}
+	if resp.GetEffect() != Effect_EFFECT_DENY || !strings.Contains(resp.GetReason(), "approvals waiting") {
+		t.Fatalf("Effect = %v, Reason = %q; want a DENY saying approvals are waiting", resp.GetEffect(), resp.GetReason())
+	}
+	if resp.GetApprovalId() != "" {
+		t.Errorf("ApprovalId = %q, want none", resp.GetApprovalId())
+	}
+	if len(fs.appended) != 1 || fs.appended[0].Decision != "DENY" {
+		t.Errorf("want one audit row recording DENY, got %d rows", len(fs.appended))
+	}
+}

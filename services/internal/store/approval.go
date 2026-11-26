@@ -64,7 +64,17 @@ func (s *Store) CreateApproval(ctx context.Context, a *models.Approval) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.ExecContext(ctx, insertApprovalQuery,
+	if err := s.insertApprovalTx(ctx, tx, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) insertApprovalTx(ctx context.Context, tx *sql.Tx, a *models.Approval) error {
+	_, err := tx.ExecContext(ctx, insertApprovalQuery,
 		a.ID.String(), s.tenantID, a.AgentID.String(), a.DelegationID.String(), a.RootDelegationID.String(),
 		a.Subject, a.RootPrincipal, a.ToolName, a.Action, int64(a.DerivedTier),
 		a.InputDigest[:], a.ExpiresAt,
@@ -72,11 +82,82 @@ func (s *Store) CreateApproval(ctx context.Context, a *models.Approval) error {
 	if err != nil {
 		return fmt.Errorf("store: insert approval %s: %w", a.ID, err)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit: %w", err)
-	}
 	return nil
+}
+
+// ErrTooManyPendingApprovals is RequestApproval's refusal to add to a session
+// that already has as many approvals waiting as it may.
+var ErrTooManyPendingApprovals = errors.New("store: too many approvals are already pending")
+
+// approvalRequestLockQuery serialises RequestApproval per session, so two
+// calls at once cannot both find nothing pending and both insert.
+const approvalRequestLockQuery = `SELECT pg_advisory_xact_lock(hashtext($1))`
+
+// findPendingApprovalQuery finds an approval already waiting for this exact
+// call: the same delegation, tool, action, tier and input. An approval that
+// has expired is not waiting, whatever its status column says (see the
+// table's own comment on why nothing ever writes 'expired').
+const findPendingApprovalQuery = `SELECT id FROM approvals ` +
+	`WHERE root_delegation_id = $1 AND delegation_id = $2 AND tool_name = $3 AND action = $4 ` +
+	`AND derived_tier = $5 AND input_digest = $6 AND status = 'pending' AND expires_at > $7 ` +
+	`ORDER BY requested_at LIMIT 1`
+
+// countPendingApprovalsQuery counts what one session has waiting, across
+// every delegation in its chain: they all go to the same person.
+const countPendingApprovalsQuery = `SELECT count(*) FROM approvals ` +
+	`WHERE root_delegation_id = $1 AND status = 'pending' AND expires_at > $2`
+
+// RequestApproval is how a decision asks for a person's approval. It returns
+// the id to wait on, which is a's own unless an approval for the same call is
+// already pending, in which case it is that one's and nothing is written:
+// asking twice is one question.
+//
+// A session, meaning a root delegation and everything delegated under it, may
+// have at most maxPending approvals waiting. Past that this returns
+// ErrTooManyPendingApprovals. Zero means no maximum.
+func (s *Store) RequestApproval(ctx context.Context, a *models.Approval, now time.Time, maxPending int) (uuid.UUID, error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	root := a.RootDelegationID.String()
+	if _, err := tx.ExecContext(ctx, approvalRequestLockQuery, "approval-request:"+root); err != nil {
+		return uuid.Nil, fmt.Errorf("store: lock approval requests: %w", err)
+	}
+
+	var existing uuid.UUID
+	err = tx.QueryRowContext(ctx, findPendingApprovalQuery,
+		root, a.DelegationID.String(), a.ToolName, a.Action, int64(a.DerivedTier), a.InputDigest[:], now,
+	).Scan(&existing)
+	switch {
+	case err == nil:
+		if err := tx.Commit(); err != nil {
+			return uuid.Nil, fmt.Errorf("store: commit: %w", err)
+		}
+		return existing, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return uuid.Nil, fmt.Errorf("store: find pending approval: %w", err)
+	}
+
+	if maxPending > 0 {
+		var pending int
+		if err := tx.QueryRowContext(ctx, countPendingApprovalsQuery, root, now).Scan(&pending); err != nil {
+			return uuid.Nil, fmt.Errorf("store: count pending approvals: %w", err)
+		}
+		if pending >= maxPending {
+			return uuid.Nil, fmt.Errorf("%w: %d", ErrTooManyPendingApprovals, pending)
+		}
+	}
+
+	if err := s.insertApprovalTx(ctx, tx, a); err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return uuid.Nil, fmt.Errorf("store: commit: %w", err)
+	}
+	return a.ID, nil
 }
 
 // LoadApproval loads one approvals row by id. RLS scopes it to the tenant
