@@ -52,6 +52,12 @@ type Config struct {
 	// MaxConnectionIdle is how long a connection with no call in flight is
 	// kept before the PDP closes it. The client reconnects on its next call.
 	MaxConnectionIdle time.Duration // STRATIUM_MAX_CONNECTION_IDLE, default 5m
+	// MaxConnections is the most client connections the PDP holds open, and
+	// MaxConnectionsPerIP the most from one address (internal/connlimit). One
+	// past either is closed as soon as it is accepted. Zero, which Load never
+	// produces, means no limit.
+	MaxConnections      int // STRATIUM_MAX_CONNECTIONS, default 10000
+	MaxConnectionsPerIP int // STRATIUM_MAX_CONNECTIONS_PER_IP, default 100
 	// Limits is the longest each request field may be.
 	Limits RequestLimits
 	// How often Decide may write an audit row for a token that does not
@@ -201,6 +207,8 @@ func Load() (Config, error) {
 		MaxRequestBytes:      4 << 20,
 		MaxConcurrentStreams: 256,
 		MaxConnectionIdle:    5 * time.Minute,
+		MaxConnections:       10000,
+		MaxConnectionsPerIP:  100,
 		Limits:               DefaultRequestLimits(),
 		// A PEP whose token expired presents it once and re-issues, so real
 		// traffic is a few of these per session.
@@ -285,6 +293,12 @@ func Load() (Config, error) {
 		c.MaxConcurrentStreams = uint32(n)
 	}
 	if c.MaxConnectionIdle, err = positiveDuration("STRATIUM_MAX_CONNECTION_IDLE", c.MaxConnectionIdle); err != nil {
+		return c, err
+	}
+	if c.MaxConnections, err = positiveInt("STRATIUM_MAX_CONNECTIONS", c.MaxConnections); err != nil {
+		return c, err
+	}
+	if c.MaxConnectionsPerIP, err = positiveInt("STRATIUM_MAX_CONNECTIONS_PER_IP", c.MaxConnectionsPerIP); err != nil {
 		return c, err
 	}
 	if v := os.Getenv("STRATIUM_MAX_REQUEST_BYTES"); v != "" {

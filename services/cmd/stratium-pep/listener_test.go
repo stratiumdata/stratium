@@ -16,6 +16,8 @@ import (
 func TestLoadListenerLimitsFromEnv(t *testing.T) {
 	t.Setenv("STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "")
 	t.Setenv("STRATIUM_PEP_MAX_CONNECTION_IDLE", "")
+	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS", "")
+	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS_PER_IP", "")
 	got, err := loadListenerLimitsFromEnv()
 	if err != nil {
 		t.Fatalf("loadListenerLimitsFromEnv() error = %v", err)
@@ -23,6 +25,17 @@ func TestLoadListenerLimitsFromEnv(t *testing.T) {
 	if got.MaxConcurrentStreams != 256 || got.MaxConnectionIdle != 5*time.Minute {
 		t.Errorf("defaults = %d streams, idle %s; want 256 and 5m", got.MaxConcurrentStreams, got.MaxConnectionIdle)
 	}
+	if got.MaxConnections != 10000 || got.MaxConnectionsPerIP != 100 {
+		t.Errorf("defaults = %d connections, %d per address; want 10000 and 100", got.MaxConnections, got.MaxConnectionsPerIP)
+	}
+
+	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS", "400")
+	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS_PER_IP", "8")
+	if got, err = loadListenerLimitsFromEnv(); err != nil || got.MaxConnections != 400 || got.MaxConnectionsPerIP != 8 {
+		t.Errorf("loadListenerLimitsFromEnv() = %+v, %v; want 400 connections, 8 per address", got, err)
+	}
+	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS", "")
+	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS_PER_IP", "")
 
 	t.Setenv("STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "32")
 	t.Setenv("STRATIUM_PEP_MAX_CONNECTION_IDLE", "90s")
@@ -34,9 +47,13 @@ func TestLoadListenerLimitsFromEnv(t *testing.T) {
 		{"STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "0"}, {"STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "-1"},
 		{"STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "lots"}, {"STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "5000000000"},
 		{"STRATIUM_PEP_MAX_CONNECTION_IDLE", "0s"}, {"STRATIUM_PEP_MAX_CONNECTION_IDLE", "soon"},
+		{"STRATIUM_PEP_MAX_CONNECTIONS", "0"}, {"STRATIUM_PEP_MAX_CONNECTIONS", "many"},
+		{"STRATIUM_PEP_MAX_CONNECTIONS_PER_IP", "0"}, {"STRATIUM_PEP_MAX_CONNECTIONS_PER_IP", "1.5"},
 	} {
 		t.Setenv("STRATIUM_PEP_MAX_CONCURRENT_STREAMS", "")
 		t.Setenv("STRATIUM_PEP_MAX_CONNECTION_IDLE", "")
+		t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS", "")
+		t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS_PER_IP", "")
 		t.Setenv(bad[0], bad[1])
 		if _, err := loadListenerLimitsFromEnv(); err == nil || !strings.Contains(err.Error(), bad[0]) {
 			t.Errorf("%s=%q: error = %v, want one naming it", bad[0], bad[1], err)

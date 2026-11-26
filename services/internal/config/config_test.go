@@ -815,3 +815,33 @@ func TestLoad_ConnectionLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_MaxConnections(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_CONNECTIONS", "")
+	t.Setenv("STRATIUM_MAX_CONNECTIONS_PER_IP", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxConnections != 10000 || c.MaxConnectionsPerIP != 100 {
+		t.Errorf("defaults = %d in all, %d per address; want 10000 and 100", c.MaxConnections, c.MaxConnectionsPerIP)
+	}
+
+	t.Setenv("STRATIUM_MAX_CONNECTIONS", "500")
+	t.Setenv("STRATIUM_MAX_CONNECTIONS_PER_IP", "20")
+	if c, err = Load(); err != nil || c.MaxConnections != 500 || c.MaxConnectionsPerIP != 20 {
+		t.Errorf("Load() = %d, %d, %v; want 500, 20, nil", c.MaxConnections, c.MaxConnectionsPerIP, err)
+	}
+
+	for _, name := range []string{"STRATIUM_MAX_CONNECTIONS", "STRATIUM_MAX_CONNECTIONS_PER_IP"} {
+		for _, bad := range []string{"0", "-1", "many"} {
+			t.Setenv("STRATIUM_MAX_CONNECTIONS", "")
+			t.Setenv("STRATIUM_MAX_CONNECTIONS_PER_IP", "")
+			t.Setenv(name, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s=%q: Load() error = %v, want one naming it", name, bad, err)
+			}
+		}
+	}
+}

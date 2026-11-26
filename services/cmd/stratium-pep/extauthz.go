@@ -327,6 +327,7 @@ func runExtauthzCmd(stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not listen on %s: %s\n", cfg.ListenAddr, err)
 		return 1
 	}
+	lis = limits.listen(lis)
 
 	grpcServer := grpc.NewServer(limits.serverOptions()...)
 	authv3.RegisterAuthorizationServer(grpcServer, &extauthzServer{

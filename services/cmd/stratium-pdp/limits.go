@@ -16,6 +16,12 @@ import (
 const (
 	keepaliveTime    = time.Minute
 	keepaliveTimeout = 20 * time.Second
+
+	// handshakeTimeout is how long a new connection has to finish its TLS and
+	// HTTP/2 handshakes. Until it does it holds a connection slot
+	// (internal/connlimit) having shown nothing; grpc-go's own default lets
+	// it do that for two minutes.
+	handshakeTimeout = 10 * time.Second
 )
 
 // connectionLimits bounds what one client connection may hold open. grpc-go's
@@ -27,6 +33,7 @@ const (
 func connectionLimits(cfg config.Config) []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.MaxConcurrentStreams(cfg.MaxConcurrentStreams),
+		grpc.ConnectionTimeout(handshakeTimeout),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle: cfg.MaxConnectionIdle,
 			Time:              keepaliveTime,

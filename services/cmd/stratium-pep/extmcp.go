@@ -66,6 +66,7 @@ func runExtmcpCmd(stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not listen on %s: %s\n", listenAddr, err)
 		return 1
 	}
+	lis = limits.listen(lis)
 
 	grpcServer := grpc.NewServer(limits.serverOptions()...)
 	extmcp.RegisterExtMcpServer(grpcServer, &extmcpServer{authz: &mcpAuthorizer{
