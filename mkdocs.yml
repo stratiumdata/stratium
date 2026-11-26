@@ -95,6 +95,7 @@ nav:
   - Operate:
       - User guide: user-guide.md
       - Release notes:
+          - v0.1.0: releases/2026-11-26-v0.1.0.md
           - Sender-constrained tokens (DPoP): releases/2026-08-17-sender-constrained-tokens.md
   - Enforcement (PEP):
       - pep/README.md
