@@ -159,8 +159,13 @@ deploy/stratium install --claude --bin "$PWD/bin/stratium-pep"
 **Observed:**
 
 ```
-installed SessionStart + PreToolUse (matcher '*', command '/Users/you/stratium/bin/stratium-pep') in .claude/settings.json
+installed SessionStart + PreToolUse + PostToolUse + PostToolUseFailure (matcher '*', command '/Users/you/stratium/bin/stratium-pep') in /Users/you/stratium/.claude/settings.json
+
+NEXT — start the agent with `deploy/stratium run claude`. It resolves the stack's ports and sets the 10 variables the hooks read. Starting `claude` any other way leaves every tool call denied.
 ```
+
+`SessionStart` starts the session, `PreToolUse` decides each call, and the two
+`PostToolUse` hooks tell the PDP which calls ran.
 
 > **This gags every agent session already open in this project — including one
 > you may be reading this guide with.** Installation takes effect live, and a
@@ -301,23 +306,34 @@ Each run uses a fresh uuid-tagged resource path.
 deploy/stratium doctor
 ```
 
-**Observed**, run from a shell that is not the launcher:
+**Observed**, with the hooks installed, run from a shell that is not the
+launcher:
 
 ```
   OK  toolchain    docker, docker compose, go
   OK  stack        24 services running
-  OK  ports        pap=localhost:51465 pdp=localhost:51458
-  OK  state        quickstart-46384b (0f8f833a-ef4c-4e7e-bbb5-00d259cf5c19)
+  OK  ports        pap=localhost:49415 pdp=localhost:49399
+  OK  state        quickstart-cf50a3 (b51ce46a-f4de-4493-932b-81fb8afcf5ea)
   OK  binary       /Users/you/stratium/bin/stratium-pep
-  --  hooks        none in any scope
-  XX  environment  11 of 11 missing in this shell
+  OK  hooks        claude project       SessionStart /Users/you/stratium/bin/stratium-pep session-start
+!!  hooks        claude project       hook entry writable by you: /Users/you/stratium/.claude/settings.json
+!!  hooks        claude project       binary writable by you: /Users/you/stratium/bin/stratium-pep
+  OK  hooks        claude project       PreToolUse   /Users/you/stratium/bin/stratium-pep hook
+  OK  hooks        claude project       PostToolUse  /Users/you/stratium/bin/stratium-pep report
+  OK  hooks        claude project       PostToolUseFailure /Users/you/stratium/bin/stratium-pep report
+     note: the agent runs as you, so it can change this and stop being governed; `sudo -E deploy/stratium --claude install --system` puts it out of reach
+  XX  environment  10 of 11 missing in this shell
      -> you are outside the launcher -- use: deploy/stratium run claude
-  OK  delegation   1f9a667e-1e50-426d-a2c9-f9e9b0321cdb grants Read,Grep,Glob
+  OK  delegation   a114c0c4-8e31-470e-b53b-7f92474e7f1b grants Read,Grep,Glob
   OK  caps         {"nato": "CONFIDENTIAL"} -- classification enforcement is on
 ```
 
 It walks the layers in dependency order and names the fix for whatever is broken.
 Exit `1` if anything is wrong.
+
+The `!!` lines are a warning, not a fault: a per-project install leaves the hook
+entry and the binary where the agent can change them. That is fine for trying
+Stratium out; see [What the install protects](pep/hook.md#what-the-install-protects).
 
 The `environment XX` above is not a fault — it is `doctor` correctly reporting
 that *this* shell is not the launcher. That line is green only inside
@@ -422,6 +438,14 @@ delegation on every session start, discarding one you built by hand.
 
 ## 10. Things that will bite you
 
+- **`up` stops with `container docker-postgres-1 exited (1)`.** The cause is in
+  the container's log, which `up` prints below the error. `No space left on
+  device` means Docker's own disk is full: `docker system df` shows what is
+  using it, and `docker builder prune` frees the build cache.
+- **Keycloak needs port 8080 on your machine.** Every other port is chosen by
+  Docker, but the sign-in page's address is fixed in the realm. If something
+  else is listening on 8080, `up` fails with `port is already allocated`; stop
+  the other program first.
 - **A hook installed inside a running session takes effect immediately.** So does
   a removal. Do not install `matcher: "*"` from a session you are using.
 - **`session-start`'s eight variables are not `hook`'s seven.** They overlap in
