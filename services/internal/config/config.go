@@ -54,6 +54,12 @@ type Config struct {
 	// zero burst, which Load never produces, means no cap.
 	FailedTokenAuditPerSecond float64 // STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND, default 5
 	FailedTokenAuditBurst     int     // STRATIUM_FAILED_TOKEN_AUDIT_BURST, default 20
+	// How fast one session, a root delegation and everything delegated
+	// under it, may call the PDP: a sustained rate and a burst above it. A
+	// call past both is refused before any store work (pdpgrpc/budget.go).
+	// A zero burst, which Load never produces, means no budget.
+	SessionCallsPerSecond float64 // STRATIUM_SESSION_CALLS_PER_SECOND, default 20
+	SessionCallsBurst     int     // STRATIUM_SESSION_CALLS_BURST, default 100
 
 	// gRPC transport (see tls.go). TLS is required unless GRPCInsecure is set.
 	TLSCertFile  string // STRATIUM_TLS_CERT_FILE, PEM certificate chain
@@ -192,9 +198,13 @@ func Load() (Config, error) {
 		// traffic is a few of these per session.
 		FailedTokenAuditPerSecond: 5,
 		FailedTokenAuditBurst:     20,
-		ApprovalTTL:               24 * time.Hour,
-		SpentProofReapInterval:    5 * time.Minute,
-		PolicyLanguages:           defaultPolicyLanguages,
+		// An agent makes a few tool calls a second at most, each one or two
+		// calls here; the burst covers a batch of parallel ones.
+		SessionCallsPerSecond:  20,
+		SessionCallsBurst:      100,
+		ApprovalTTL:            24 * time.Hour,
+		SpentProofReapInterval: 5 * time.Minute,
+		PolicyLanguages:        defaultPolicyLanguages,
 	}
 	var err error
 
@@ -316,13 +326,16 @@ func Load() (Config, error) {
 	if c.RequestTimeout, err = positiveDuration("STRATIUM_REQUEST_TIMEOUT", c.RequestTimeout); err != nil {
 		return c, err
 	}
-	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND"); v != "" {
-		r, err := strconv.ParseFloat(v, 64)
-		// The comparison is written so NaN fails it too.
-		if err != nil || !(r > 0) || math.IsInf(r, 0) {
-			return c, fmt.Errorf("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND must be a number above zero, got %q", v)
-		}
-		c.FailedTokenAuditPerSecond = r
+	if c.FailedTokenAuditPerSecond, err = positiveFloat(
+		"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", c.FailedTokenAuditPerSecond); err != nil {
+		return c, err
+	}
+	if c.SessionCallsPerSecond, err = positiveFloat(
+		"STRATIUM_SESSION_CALLS_PER_SECOND", c.SessionCallsPerSecond); err != nil {
+		return c, err
+	}
+	if c.SessionCallsBurst, err = positiveInt("STRATIUM_SESSION_CALLS_BURST", c.SessionCallsBurst); err != nil {
+		return c, err
 	}
 	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_BURST"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -434,6 +447,21 @@ func DefaultRequestLimits() RequestLimits {
 		RequestedTools:  1024,
 		ResourceEntries: 64,
 	}
+}
+
+// positiveFloat reads the number setting k, falling back to def when it is
+// unset, and refuses a value that is not a finite number above zero.
+func positiveFloat(k string, def float64) (float64, error) {
+	v := os.Getenv(k)
+	if v == "" {
+		return def, nil
+	}
+	r, err := strconv.ParseFloat(v, 64)
+	// The comparison is written so NaN fails it too.
+	if err != nil || !(r > 0) || math.IsInf(r, 0) {
+		return 0, fmt.Errorf("%s must be a number above zero, got %q", k, v)
+	}
+	return r, nil
 }
 
 // positiveInt reads the integer setting k, falling back to def when it is

@@ -412,7 +412,7 @@ func TestCreateDelegation_ReturnsVerifiableTokenNamingTheDelegationWithNoScopeFi
 		t.Errorf("token sub = %v, want %s (the delegation this token was returned alongside)",
 			got, resp.GetDelegationId())
 	}
-	if got := claimKeys(claims); !slices.Equal(got, identifyingClaimKeys) {
+	if got := claimKeys(claims); !slices.Equal(got, mintedClaimKeys) {
 		t.Fatalf("token claim keys = %v, want exactly %v: no scope field may ride along "+
 			"(spec K3 — a token is a reference, not a capability)", got, identifyingClaimKeys)
 	}

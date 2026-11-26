@@ -216,6 +216,9 @@ type Server struct {
 	// failedTokens caps the audit rows Decide writes for a token that does
 	// not authenticate (token_failure.go).
 	failedTokens failureBudget
+
+	// budgets holds each session to a rate of calls (budget.go).
+	budgets sessionBudgets
 }
 
 // NewServer wires a Server. cfg supplies the tenant and the maximum
@@ -239,6 +242,10 @@ func NewServer(store Store, principalPolicy policy.Multi, cfg config.Config, sig
 		failedTokens: failureBudget{
 			perSecond: cfg.FailedTokenAuditPerSecond,
 			burst:     float64(cfg.FailedTokenAuditBurst),
+		},
+		budgets: sessionBudgets{
+			perSecond: cfg.SessionCallsPerSecond,
+			burst:     float64(cfg.SessionCallsBurst),
 		},
 	}
 }
@@ -387,12 +394,19 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 	// pre-decision-denial helper a catalog load failure and a DeriveTier
 	// failure already share below — see its own doc comment for why a
 	// third caller here does not risk the three drifting apart.
-	delegationID, jkt, err := s.authenticateToken(req.GetToken())
+	delegationID, jkt, session, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		// Audited, but at a capped rate and with the caller's text clipped:
 		// see token_failure.go. No epoch either way; loadEpochOrDeny has not
 		// run, and toResponse's own doc comment says why nil, not zero.
 		return s.denyUnauthenticated(ctx, agentID, action, req.GetSubject(), now, err)
+	}
+
+	// A session making calls faster than it may is denied here, before the
+	// first store read (budget.go). Not audited call by call: withinBudget
+	// records how many were refused, at most once a minute.
+	if !s.withinBudget(ctx, session, delegationID, &agentID, clipCallerText(req.GetSubject()), now) {
+		return toResponse(authz.DeriveTierDenial(s.errOverBudget()), nil), nil
 	}
 
 	// The remaining fields are checked for length now that the caller is

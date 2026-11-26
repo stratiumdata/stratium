@@ -326,7 +326,7 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 		}
 	}
 
-	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, d.ExpiresAt, d.ExpiresAt)
+	tok, _, _, err := s.mintToken(d.ID, rootID, s.cfg.TenantID, jkt, now, d.ExpiresAt, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}
@@ -461,12 +461,16 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 		return status.Error(codes.Unauthenticated,
 			"parent_token is required: present a current token for the parent delegation")
 	}
-	named, jkt, err := s.authenticateToken(parentToken)
+	named, jkt, session, err := s.authenticateToken(parentToken)
 	if err != nil {
 		return status.Error(codes.Unauthenticated, "parent_token does not verify")
 	}
 	if named != parentID {
 		return status.Error(codes.PermissionDenied, "parent_token was not issued for the parent delegation")
+	}
+	// Delegating is a call by the parent's session like any other.
+	if !s.withinBudget(ctx, session, parentID, nil, budgetActor, time.Now()) {
+		return status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 	if jkt != "" {
 		return status.Error(codes.PermissionDenied,

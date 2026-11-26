@@ -50,9 +50,12 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 	if err := overLong(bounded{"tool", req.GetTool(), s.cfg.Limits.ToolBytes}); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	delegationID, jkt, err := s.authenticateToken(req.GetToken())
+	delegationID, jkt, session, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "token: %s", err)
+	}
+	if !s.withinBudget(ctx, session, delegationID, nil, budgetActor, time.Now()) {
+		return nil, status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 	// ponytail: this method takes no DPoP proof, so a key-bound token cannot
 	// show its holder has the key. Refused rather than believed; add a proof

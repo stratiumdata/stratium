@@ -60,18 +60,18 @@ var errNoToken = errors.New("no token provided")
 // echoing the token or the key, and this function's own errors about a bad
 // "sub" claim name only the claim's key, never a value decoded from the
 // token.
-func (s *Server) authenticateToken(tokenString string) (uuid.UUID, string, error) {
+func (s *Server) authenticateToken(tokenString string) (delegationID uuid.UUID, jkt string, session uuid.UUID, err error) {
 	if tokenString == "" {
-		return uuid.Nil, "", errNoToken
+		return uuid.Nil, "", uuid.Nil, errNoToken
 	}
 
 	if err := overLong(bounded{"token", tokenString, s.cfg.Limits.CredentialBytes}); err != nil {
-		return uuid.Nil, "", err
+		return uuid.Nil, "", uuid.Nil, err
 	}
 
 	claims, err := s.signer.Verify(tokenString)
 	if err != nil {
-		return uuid.Nil, "", err
+		return uuid.Nil, "", uuid.Nil, err
 	}
 
 	// claims is otherwise unvalidated by internal/token.Verify — that
@@ -93,15 +93,23 @@ func (s *Server) authenticateToken(tokenString string) (uuid.UUID, string, error
 	// Go-level, one RLS-level, free to silently disagree.
 	sub, ok := claims[subjectClaim].(string)
 	if !ok {
-		return uuid.Nil, "", fmt.Errorf("token: claim %q is missing or not a string", subjectClaim)
+		return uuid.Nil, "", uuid.Nil, fmt.Errorf("token: claim %q is missing or not a string", subjectClaim)
 	}
-	delegationID, err := parseNonNilUUID(sub)
+	delegationID, err = parseNonNilUUID(sub)
 	if err != nil {
-		return uuid.Nil, "", fmt.Errorf("token: claim %q: %w", subjectClaim, err)
+		return uuid.Nil, "", uuid.Nil, fmt.Errorf("token: claim %q: %w", subjectClaim, err)
 	}
-	jkt, err := tokenThumbprint(claims)
+	jkt, err = tokenThumbprint(claims)
 	if err != nil {
-		return uuid.Nil, "", err
+		return uuid.Nil, "", uuid.Nil, err
 	}
-	return delegationID, jkt, nil
+	// The session a call is counted against (budget.go). A token minted
+	// before the claim existed has none; its delegation stands in.
+	session = delegationID
+	if root, ok := claims[rootClaim].(string); ok {
+		if id, err := parseNonNilUUID(root); err == nil {
+			session = id
+		}
+	}
+	return delegationID, jkt, session, nil
 }
