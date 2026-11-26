@@ -845,3 +845,33 @@ func TestLoad_MaxConnections(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_SessionRetention(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_SESSION_RETENTION", "")
+	t.Setenv("STRATIUM_SESSION_REAP_INTERVAL", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.SessionRetention != 90*24*time.Hour || c.SessionReapInterval != time.Hour {
+		t.Errorf("defaults = retention %s, interval %s; want 2160h and 1h", c.SessionRetention, c.SessionReapInterval)
+	}
+
+	t.Setenv("STRATIUM_SESSION_RETENTION", "720h")
+	t.Setenv("STRATIUM_SESSION_REAP_INTERVAL", "15m")
+	if c, err = Load(); err != nil || c.SessionRetention != 720*time.Hour || c.SessionReapInterval != 15*time.Minute {
+		t.Errorf("Load() = retention %s, interval %s, %v; want 720h, 15m, nil", c.SessionRetention, c.SessionReapInterval, err)
+	}
+
+	for _, name := range []string{"STRATIUM_SESSION_RETENTION", "STRATIUM_SESSION_REAP_INTERVAL"} {
+		for _, bad := range []string{"0s", "-1h", "90d"} {
+			t.Setenv("STRATIUM_SESSION_RETENTION", "")
+			t.Setenv("STRATIUM_SESSION_REAP_INTERVAL", "")
+			t.Setenv(name, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s=%q: Load() error = %v, want one naming it", name, bad, err)
+			}
+		}
+	}
+}

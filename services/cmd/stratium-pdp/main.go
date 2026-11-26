@@ -156,6 +156,10 @@ func run(logger *slog.Logger) error {
 	reaperCtx, stopReaper := context.WithCancel(context.Background())
 	defer stopReaper()
 	go reapSpentProofs(reaperCtx, logger, repo.ReapSpentProofs, cfg.SpentProofReapInterval, cfg.DBTimeout)
+	// Old sessions go the same way: delegations and approvals that wholly
+	// expired longer ago than cfg.SessionRetention (session_reaper.go).
+	go reapSessions(reaperCtx, logger, repo.ReapExpiredSessions,
+		cfg.SessionRetention, cfg.SessionReapInterval, cfg.DBTimeout)
 
 	// policy.Multi is wired in with a real, non-empty registry (built above,
 	// from cfg.PolicyLanguages, before this process opened any network
