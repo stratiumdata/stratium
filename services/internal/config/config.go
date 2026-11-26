@@ -168,6 +168,13 @@ type Config struct {
 	// is also making no decisions.
 	SpentProofReapInterval time.Duration // STRATIUM_SPENT_PROOF_REAP_INTERVAL, default 5m
 
+	// SessionRetention is how long a session's rows are kept after the last
+	// of them expired: the root delegation, the delegations made under it and
+	// their approvals. The PDP then deletes them; the audit chain keeps the
+	// history. SessionReapInterval is how often it looks.
+	SessionRetention    time.Duration // STRATIUM_SESSION_RETENTION, default 2160h (90 days)
+	SessionReapInterval time.Duration // STRATIUM_SESSION_REAP_INTERVAL, default 1h
+
 	// PolicyLanguages is the deployment's enabled set of policy engines —
 	// STRATIUM_POLICY_LANGUAGES, a comma-separated list, default every
 	// language this build ships (defaultPolicyLanguages below). Unlike
@@ -220,6 +227,8 @@ func Load() (Config, error) {
 		SessionCallsBurst:      100,
 		ApprovalTTL:            24 * time.Hour,
 		SpentProofReapInterval: 5 * time.Minute,
+		SessionRetention:       90 * 24 * time.Hour,
+		SessionReapInterval:    time.Hour,
 		PolicyLanguages:        defaultPolicyLanguages,
 	}
 	var err error
@@ -299,6 +308,12 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.MaxConnectionsPerIP, err = positiveInt("STRATIUM_MAX_CONNECTIONS_PER_IP", c.MaxConnectionsPerIP); err != nil {
+		return c, err
+	}
+	if c.SessionRetention, err = positiveDuration("STRATIUM_SESSION_RETENTION", c.SessionRetention); err != nil {
+		return c, err
+	}
+	if c.SessionReapInterval, err = positiveDuration("STRATIUM_SESSION_REAP_INTERVAL", c.SessionReapInterval); err != nil {
 		return c, err
 	}
 	if v := os.Getenv("STRATIUM_MAX_REQUEST_BYTES"); v != "" {
