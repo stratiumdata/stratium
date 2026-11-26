@@ -2176,6 +2176,25 @@ STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS=api.example.com,api.eu.example.com
 "tool" and choose its `resource_field` deliberately — the PDP sees an HTTP
 request, not a tool call with named arguments.
 
+The example also shows the limits a listener in front of `stratium-pep`
+should have, each commented where it is set:
+
+- a cap on open connections, and on requests at once per connection;
+- how long a client has to send its headers and its request, how long a
+  stream may sit idle, and the longest any request may take;
+- a rate limit ahead of the `ext_authz` filter, so a flood is answered `429`
+  by Envoy and never becomes a call to `stratium-pep` or the PDP;
+- circuit breakers on each upstream, the `stratium-pep` cluster included.
+
+The numbers are starting points. Two things the example cannot decide for
+you, and says so in its header: the rate limit is one bucket for the whole
+listener, so limiting each client separately needs more configuration, and
+Envoy must be told how to read a client's address (`use_remote_address`,
+`xff_num_trusted_hops`) before any per-client limit means anything. The
+example's routes use `timeout: 0s` only because of how the integration tests
+check requests; in your own configuration a route `timeout` is the usual way
+to bound a request.
+
 **gRPC services:**
 
 ```bash
