@@ -119,6 +119,29 @@ func TestIntegration_SessionRetention_ReapsOnlyWhollyExpiredSessions(t *testing.
 	if _, err := servingDelete(`DELETE FROM delegations WHERE id = $1`, live.ID); err == nil {
 		t.Error("the serving role deleted a live delegation, want the database to refuse")
 	}
+	// The guard asks the catalog whether the login is a superuser. A temporary
+	// table named like that catalog view is found first unless the guard pins
+	// where it looks; the serving role making one must change nothing.
+	shadowed := func() error {
+		tx, err := servingDB.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		for _, stmt := range []string{
+			`SELECT set_config('app.tenant_id', '` + tenant + `', true)`,
+			`CREATE TEMP TABLE pg_roles ON COMMIT DROP AS SELECT session_user::name AS rolname, true AS rolsuper`,
+		} {
+			if _, err := tx.ExecContext(t.Context(), stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+		_, err = tx.ExecContext(t.Context(), `DELETE FROM delegations WHERE id = $1`, live.ID.String())
+		return err
+	}
+	if err := shadowed(); err == nil {
+		t.Error("the serving role deleted a live delegation after shadowing pg_roles with a temporary table")
+	}
 	// By cascade: the root has expired, the child it would take with it has not.
 	if _, err := servingDelete(`DELETE FROM delegations WHERE id = $1`, oldRoot.ID); err == nil {
 		t.Error("the serving role deleted an expired root whose child is live, want the database to refuse")

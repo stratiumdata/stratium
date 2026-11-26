@@ -25,17 +25,24 @@ CREATE POLICY serving_deletes_only_expired ON approvals
 -- looks at session_user, the role that logged in, because a cascade runs as
 -- the table's owner and current_user would name that instead.
 --
+-- Every name it uses is written with its schema, and its search path is
+-- pinned with pg_temp last. Otherwise the role it guards against could make
+-- a temporary table called pg_roles, which is found before the real one, and
+-- answer the superuser question below for itself.
+--
 -- pg_has_role, not a look at who was granted stratium_app directly: it
 -- follows a grant through any roles in between, and it is true for
 -- stratium_app itself. It is also true of every superuser, who is a member of
 -- everything, so superusers are excepted by name: they bypass row security
 -- already and are not what this guards against.
 CREATE FUNCTION forbid_serving_delete_of_live_delegation() RETURNS trigger
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 BEGIN
-    IF OLD.expires_at >= now()
-       AND pg_has_role(session_user, 'stratium_app', 'MEMBER')
-       AND NOT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user)
+    IF OLD.expires_at >= pg_catalog.now()
+       AND pg_catalog.pg_has_role(session_user, 'stratium_app', 'MEMBER')
+       AND NOT (SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = session_user)
     THEN
         RAISE EXCEPTION 'delegation % has not expired; the serving role may delete only expired delegations', OLD.id
             USING ERRCODE = 'insufficient_privilege';
