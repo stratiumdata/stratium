@@ -30,7 +30,7 @@ type listenerLimits struct {
 	// and MaxConnectionsPerIP the most from one address (internal/connlimit).
 	// One past either is closed as soon as it is accepted.
 	MaxConnections      int // STRATIUM_PEP_MAX_CONNECTIONS, default 10000
-	MaxConnectionsPerIP int // STRATIUM_PEP_MAX_CONNECTIONS_PER_IP, default 1000
+	MaxConnectionsPerIP int // STRATIUM_PEP_MAX_CONNECTIONS_PER_IP, default 100
 }
 
 const (
@@ -44,13 +44,19 @@ const (
 	// own default is a ping every two hours.
 	keepaliveTime    = time.Minute
 	keepaliveTimeout = 20 * time.Second
+
+	// handshakeTimeout is how long a new connection has to finish its HTTP/2
+	// handshake. Until it does it holds a connection slot (internal/connlimit)
+	// having shown nothing; grpc-go's own default lets it do that for two
+	// minutes.
+	handshakeTimeout = 10 * time.Second
 )
 
 // loadListenerLimitsFromEnv reads the limits, each with a default.
 func loadListenerLimitsFromEnv() (listenerLimits, error) {
 	l := listenerLimits{
 		MaxConcurrentStreams: 256, MaxConnectionIdle: 5 * time.Minute,
-		MaxConnections: 10000, MaxConnectionsPerIP: 1000,
+		MaxConnections: 10000, MaxConnectionsPerIP: 100,
 	}
 	for _, v := range []struct {
 		name string
@@ -96,6 +102,7 @@ func (l listenerLimits) listen(lis net.Listener) net.Listener {
 func (l listenerLimits) serverOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.MaxConcurrentStreams(l.MaxConcurrentStreams),
+		grpc.ConnectionTimeout(handshakeTimeout),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle: l.MaxConnectionIdle,
 			Time:              keepaliveTime,

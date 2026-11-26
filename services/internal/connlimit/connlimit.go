@@ -7,6 +7,16 @@
 // straight away and backs off, and nothing queues in the kernel's backlog
 // behind connections that will never be served.
 //
+// What the two limits give is different. The total protects this process: its
+// memory and file descriptors. It does not keep the service available, since
+// the slots are one pool that anyone may take. The per-source limit is what
+// stops one client taking them all, and Max divided by MaxPerSource is how
+// many sources it takes to fill the pool between them. Keep that ratio high.
+//
+// IPv6 sources are counted by /64, the usual allocation to one client. A
+// client holding a larger block has that many sources; counting by a wider
+// prefix would instead lump unrelated clients of one provider together.
+//
 // The per-source limit means what it says only when clients connect
 // directly. Behind a load balancer that connects from its own addresses,
 // every client is one source; set that limit as high as the total there, and

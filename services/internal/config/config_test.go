@@ -824,8 +824,8 @@ func TestLoad_MaxConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if c.MaxConnections != 10000 || c.MaxConnectionsPerIP != 1000 {
-		t.Errorf("defaults = %d in all, %d per address; want 10000 and 1000", c.MaxConnections, c.MaxConnectionsPerIP)
+	if c.MaxConnections != 10000 || c.MaxConnectionsPerIP != 100 {
+		t.Errorf("defaults = %d in all, %d per address; want 10000 and 100", c.MaxConnections, c.MaxConnectionsPerIP)
 	}
 
 	t.Setenv("STRATIUM_MAX_CONNECTIONS", "500")

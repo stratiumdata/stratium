@@ -57,7 +57,7 @@ type Config struct {
 	// past either is closed as soon as it is accepted. Zero, which Load never
 	// produces, means no limit.
 	MaxConnections      int // STRATIUM_MAX_CONNECTIONS, default 10000
-	MaxConnectionsPerIP int // STRATIUM_MAX_CONNECTIONS_PER_IP, default 1000
+	MaxConnectionsPerIP int // STRATIUM_MAX_CONNECTIONS_PER_IP, default 100
 	// Limits is the longest each request field may be.
 	Limits RequestLimits
 	// How often Decide may write an audit row for a token that does not
@@ -208,7 +208,7 @@ func Load() (Config, error) {
 		MaxConcurrentStreams: 256,
 		MaxConnectionIdle:    5 * time.Minute,
 		MaxConnections:       10000,
-		MaxConnectionsPerIP:  1000,
+		MaxConnectionsPerIP:  100,
 		Limits:               DefaultRequestLimits(),
 		// A PEP whose token expired presents it once and re-issues, so real
 		// traffic is a few of these per session.

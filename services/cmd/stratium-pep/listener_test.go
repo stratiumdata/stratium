@@ -25,8 +25,8 @@ func TestLoadListenerLimitsFromEnv(t *testing.T) {
 	if got.MaxConcurrentStreams != 256 || got.MaxConnectionIdle != 5*time.Minute {
 		t.Errorf("defaults = %d streams, idle %s; want 256 and 5m", got.MaxConcurrentStreams, got.MaxConnectionIdle)
 	}
-	if got.MaxConnections != 10000 || got.MaxConnectionsPerIP != 1000 {
-		t.Errorf("defaults = %d connections, %d per address; want 10000 and 1000", got.MaxConnections, got.MaxConnectionsPerIP)
+	if got.MaxConnections != 10000 || got.MaxConnectionsPerIP != 100 {
+		t.Errorf("defaults = %d connections, %d per address; want 10000 and 100", got.MaxConnections, got.MaxConnectionsPerIP)
 	}
 
 	t.Setenv("STRATIUM_PEP_MAX_CONNECTIONS", "400")
