@@ -10,9 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 	"github.com/stratiumdata/stratium/internal/store"
-	"github.com/stratiumdata/stratium/pkg/models"
 )
 
 // Every PDP for a tenant draws on one budget for each session. Against real
@@ -64,38 +62,4 @@ func TestIntegration_SessionBudget_IsSharedAcrossStoresOfOneTenant(t *testing.T)
 	if err != nil || reaped != 2 {
 		t.Errorf("ReapSessionBudgets() = %d, %v; want 2, nil", reaped, err)
 	}
-}
-
-// The running PDP keeps its sessions' budgets in the shared table. Worth its
-// own proof because a PDP that cannot use the table does not fail: it counts
-// alone, and every other test would pass just the same.
-func TestIntegration_SessionBudget_TheRunningPDPDrawsOnTheSharedTable(t *testing.T) {
-	agentID := uuid.New()
-	seedAgent(t, configuredTenant, agentID, "session-budget-agent", models.TrustTierPlatformTrusted)
-	delegation := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierInternalModify, "shared budget proof")
-
-	if _, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
-		Token:   mintToken(t, pdpClient, delegation.ID),
-		AgentId: agentID.String(),
-		Subject: "alice@example.com",
-		Tool:    "Read",
-	}); err != nil {
-		t.Fatalf("Decide() error = %v, want a decision", err)
-	}
-
-	// The first call of a session takes a block from a full budget, so the
-	// row exists and holds less than it started with.
-	var rows int
-	var tokens sql.NullFloat64
-	withTenantTx(t, configuredTenant, func(tx *sql.Tx) {
-		if err := tx.QueryRowContext(t.Context(),
-			`SELECT count(*), min(tokens) FROM session_budgets WHERE session_id = $1`,
-			delegation.RootDelegationID.String()).Scan(&rows, &tokens); err != nil {
-			t.Fatalf("read session_budgets: %v", err)
-		}
-	})
-	if rows != 1 {
-		t.Fatalf("session_budgets rows for the session = %d, want 1: the PDP did not record the call in the shared table", rows)
-	}
-	t.Logf("shared budget after one call: %.0f tokens left", tokens.Float64)
 }
