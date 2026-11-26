@@ -30,10 +30,11 @@ function chainPath(names: Map<string, string>, chain: string[] | undefined): str
 /** A delegation has no name, so one is composed: its agent, plus its purpose
  *  when it has one (purpose is free text and some rows leave it empty).
  *
- *  Returns null when the id names a delegation not in the list. Every parent
- *  and root resolves today -- GET /v1/delegations neither filters nor
- *  paginates -- but inventing a label for a delegation we cannot see would be
- *  worse than showing the caller only the id it already has. */
+ *  Returns null when the id names a delegation not in the list. api.delegations
+ *  reads every page the admin plane offers, up to a ceiling, so a parent or
+ *  root is missing only for a tenant past that ceiling -- and inventing a
+ *  label for a delegation we cannot see would be worse than showing the
+ *  caller only the id it already has. */
 function delegationLabel(
   byId: Map<string, Delegation>,
   names: Map<string, string>,
@@ -156,8 +157,8 @@ export function DelegationsScreen() {
     () => new Map((agents ?? []).map((a) => [a.id, a.name])),
     [agents],
   )
-  // Parent and root are references to other delegations in this same list --
-  // GET /v1/delegations neither filters nor paginates, so they resolve.
+  // Parent and root are references to other delegations in this same list,
+  // which api.delegations reads in full (every page, up to its ceiling).
   const byId = useMemo(
     () => new Map((rows ?? []).map((d) => [d.id, d])),
     [rows],

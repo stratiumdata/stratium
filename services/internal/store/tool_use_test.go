@@ -58,7 +58,7 @@ func TestStore_CountUnmatchedToolUses(t *testing.T) {
 			AddRow(a.String(), int64(2)).AddRow(b.String(), int64(1)))
 	mock.ExpectCommit()
 
-	got, err := s.CountUnmatchedToolUses(context.Background())
+	got, err := s.CountUnmatchedToolUses(context.Background(), []uuid.UUID{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}

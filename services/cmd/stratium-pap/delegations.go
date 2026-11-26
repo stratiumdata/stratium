@@ -9,27 +9,39 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/stratiumdata/stratium/pkg/models"
 )
 
-// listDelegations returns every delegation the tenant has, revoked and
-// expired ones included -- see internal/store.listDelegationsQuery's own doc
-// comment. Gated at RoleViewer and unaudited, matching every other list route
-// and GET handler in this package.
+// listDelegations returns a page of the tenant's delegations, newest first,
+// revoked and expired ones included -- see internal/store.listDelegationsQuery's
+// own doc comment, and paging.go for the page parameters. Gated at RoleViewer
+// and unaudited, matching every other list route and GET handler in this
+// package.
 func listDelegations(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {
-	delegations, err := s.store.ListDelegations(r.Context())
+	before, limit, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+	delegations, next, err := s.store.ListDelegations(r.Context(), before, limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	// One grouped read rather than a column on the delegation: the count
 	// lives in the audit log, which is the only place an unmatched tool use
-	// is recorded.
-	unmatched, err := s.store.CountUnmatchedToolUses(r.Context())
+	// is recorded. For this page's delegations only.
+	ids := make([]uuid.UUID, len(delegations))
+	for i, d := range delegations {
+		ids[i] = d.ID
+	}
+	unmatched, err := s.store.CountUnmatchedToolUses(r.Context(), ids)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	linkNext(w, r, next)
 	out := make([]listedDelegation, len(delegations))
 	for i, d := range delegations {
 		out[i] = listedDelegation{Delegation: d, UnmatchedToolUses: unmatched[d.ID]}
