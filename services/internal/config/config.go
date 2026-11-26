@@ -46,6 +46,12 @@ type Config struct {
 	// what bounds raw_input, the tool call itself; every other field has a
 	// limit of its own (Limits, below). The default is grpc-go's.
 	MaxRequestBytes int // STRATIUM_MAX_REQUEST_BYTES, default 4194304 (4 MiB)
+	// MaxConcurrentStreams is the most calls one client connection may have
+	// in flight; one more waits for one of them to finish.
+	MaxConcurrentStreams uint32 // STRATIUM_MAX_CONCURRENT_STREAMS, default 256
+	// MaxConnectionIdle is how long a connection with no call in flight is
+	// kept before the PDP closes it. The client reconnects on its next call.
+	MaxConnectionIdle time.Duration // STRATIUM_MAX_CONNECTION_IDLE, default 5m
 	// Limits is the longest each request field may be.
 	Limits RequestLimits
 	// How often Decide may write an audit row for a token that does not
@@ -185,15 +191,17 @@ var defaultPolicyLanguages = []string{"cedar", "json", "rego", "xacml"}
 
 func Load() (Config, error) {
 	c := Config{
-		ListenAddr:        envOr("STRATIUM_LISTEN_ADDR", ":50051"),
-		MaxDepth:          5,
-		DBTimeout:         5 * time.Second,
-		DBMaxOpenConns:    20,
-		MaxDelegationTTL:  24 * time.Hour,
-		PolicyEvalTimeout: 2 * time.Second,
-		RequestTimeout:    10 * time.Second,
-		MaxRequestBytes:   4 << 20,
-		Limits:            DefaultRequestLimits(),
+		ListenAddr:           envOr("STRATIUM_LISTEN_ADDR", ":50051"),
+		MaxDepth:             5,
+		DBTimeout:            5 * time.Second,
+		DBMaxOpenConns:       20,
+		MaxDelegationTTL:     24 * time.Hour,
+		PolicyEvalTimeout:    2 * time.Second,
+		RequestTimeout:       10 * time.Second,
+		MaxRequestBytes:      4 << 20,
+		MaxConcurrentStreams: 256,
+		MaxConnectionIdle:    5 * time.Minute,
+		Limits:               DefaultRequestLimits(),
 		// A PEP whose token expired presents it once and re-issues, so real
 		// traffic is a few of these per session.
 		FailedTokenAuditPerSecond: 5,
@@ -269,6 +277,16 @@ func Load() (Config, error) {
 	// loaded, a deliberate and common choice outside a rotation window, not a
 	// missing required value.
 	c.TokenPreviousKeyPath = os.Getenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH")
+	if v := os.Getenv("STRATIUM_MAX_CONCURRENT_STREAMS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("STRATIUM_MAX_CONCURRENT_STREAMS must be an integer of at least 1, got %q", v)
+		}
+		c.MaxConcurrentStreams = uint32(n)
+	}
+	if c.MaxConnectionIdle, err = positiveDuration("STRATIUM_MAX_CONNECTION_IDLE", c.MaxConnectionIdle); err != nil {
+		return c, err
+	}
 	if v := os.Getenv("STRATIUM_MAX_REQUEST_BYTES"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
