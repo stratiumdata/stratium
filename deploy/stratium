@@ -104,13 +104,13 @@ REQUIRED_ENV = {
 # A worked value for each variable, from the agent-integration test plan. The
 # first two are per-run: the PDP port is a docker ephemeral port that changes on
 # every `compose up`, so it is resolved rather than quoted, and the agent id
-# comes from whatever row 0d created.
+# is whichever agent row the session is for.
 EXAMPLES = {
     "STRATIUM_PEP_PDP_ADDR": ('"localhost:$(dc port pdp-pap 50051 | sed -E \'s/.*://\')"',
                               "ephemeral — re-resolve after every `compose up`"),
-    "STRATIUM_PEP_AGENT_ID": ('"$AGENT"', "the agent row from 0d"),
+    "STRATIUM_PEP_AGENT_ID": ('"$AGENT"', "the agent's id, from GET /v1/agents"),
     "STRATIUM_PEP_SUBJECT": '"agent-tester@example.com"',
-    "STRATIUM_PEP_SESSION_FILE": '"/tmp/stratium-session.json"',
+    "STRATIUM_PEP_SESSION_FILE": '"$PWD/.stratium-session.json"',
     "STRATIUM_PEP_CONNECT_TIMEOUT": "5s",
     "STRATIUM_PEP_REQUESTED_TIER": "3",
     "STRATIUM_PEP_REQUESTED_TOOLS": '"Read,Grep,Glob,Write,Bash"',
@@ -135,6 +135,14 @@ def next_steps(events, agent="claude", binary="stratium-pep"):
             if v not in need:
                 need.append(v)
     gone = [v for v in need if not os.environ.get(v)]
+
+    # After `up`, the launcher sets every one of these. Listing them would send
+    # the reader off to do by hand what one command does.
+    if load_state().get("agent_id") and agent in ("claude", "codex"):
+        print(f"\nNEXT — start the agent with `deploy/stratium run {agent}`. It resolves the "
+              f"stack's ports and sets the {len(need)} variables the hooks read. "
+              f"Starting `{agent}` any other way leaves every tool call denied.")
+        return
 
     print(f"\nNEXT — the hooks read their configuration from the environment of the "
           f"shell that launches `{agent}`, not from this one.")
@@ -1911,6 +1919,20 @@ def compose(*args, **kw):
     return sh(["docker", "compose", "-f", COMPOSE, *args], **kw)
 
 
+def exited_container_log(message):
+    """The last log lines of a container compose says exited.
+
+    Compose reports only that it exited. The cause -- a full disk, a port in
+    use -- is in the container's own log.
+    """
+    m = re.search(r"container (\S+) exited", message)
+    if not m:
+        return ""
+    r = subprocess.run(["docker", "logs", "--tail", "8", m.group(1)],
+                       text=True, capture_output=True)
+    return f"\n\nlast lines of {m.group(1)}:\n{(r.stdout + r.stderr).strip()}"
+
+
 def compose_project():
     """The compose project these commands act on.
 
@@ -2304,7 +2326,10 @@ def cmd_up(args):
     ok("docker, docker compose and go are present")
 
     step("Stack up (this is the slow one -- it builds images)")
-    ensure_stack()
+    try:
+        ensure_stack()
+    except Fail as e:
+        raise Fail(str(e) + exited_container_log(str(e))) from None
     project = compose_project()
     ok(f"compose project: {project}")
     ok(f"pap={port('stratium-pap', 8080)}  pdp={port('pdp-pap', 50051)}  "
@@ -2519,7 +2544,7 @@ def cmd_doctor(args):
               "           observed. If a session still denies with clean scopes here,\n"
               "           the hook is defined somewhere this list does not cover --\n"
               "           check `/hooks` inside that session, then restart it.")
-    exposed_any = False
+    exposed_seen = set()
     for scope, path, event, command, timeout in found:
         runnable = command and resolves(command)
         line("OK" if runnable else "XX", "hooks",
@@ -2531,11 +2556,11 @@ def cmd_doctor(args):
                                 f"{hook_timeout(hook_env(command))}",
                  TIMEOUT_FIX)
         for what, hit in [("hook entry", writable_here(path))] + exposed(command):
-            if hit:
+            if hit and (scope, what, hit) not in exposed_seen:
                 print(f"!!  {'hooks':<12} {scope:<20} {what} writable by you: {hit}")
-                exposed_any = True
-    if exposed_any:
-        print(f"     note: {EXPOSED_FIX}")
+                exposed_seen.add((scope, what, hit))
+    for harness in sorted({scope.split()[0] for scope, _, _ in exposed_seen}):
+        print(f"     note: {EXPOSED_FIX.format(harness)}")
 
     if state.get("agent_id"):
         gone = [v for v in sorted(set(REQUIRED_ENV["SessionStart"]) |
@@ -2580,8 +2605,9 @@ def cmd_down(args):
             a.settings = scope_path
             if os.path.exists(scope_path):
                 uninstall(a)
-    note("an agent session already open keeps the hooks it read at startup -- "
-         "restart it, or it will deny every call once the stack is down")
+    note("a running Claude Code session drops the hooks on its next tool call. A "
+         "harness that reads hooks only at startup keeps them until restarted, "
+         "and denies every call once the stack is down")
 
     step("Stack down")
     project, recorded = compose_project(), load_state().get("project")
