@@ -563,7 +563,7 @@ func TestStore_ListDelegations_IncludesRevoked(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listDelegationsQuery)).WillReturnRows(rows)
 	mock.ExpectCommit()
 
-	got, err := s.ListDelegations(context.Background())
+	got, _, err := s.ListDelegations(context.Background(), nil, 0)
 	if err != nil {
 		t.Fatalf("ListDelegations() error = %v", err)
 	}
@@ -587,9 +587,12 @@ func TestStore_ListDelegations_IncludesRevoked(t *testing.T) {
 // TestStore_ListApprovals_QueryHasNoTenantPredicate for why this is asserted
 // on the query text and not on behaviour.
 func TestStore_ListDelegations_QueryHasNoTenantPredicate(t *testing.T) {
-	if strings.Contains(strings.ToLower(listDelegationsQuery), "where") {
-		t.Errorf("listDelegationsQuery = %q, want no WHERE clause: RLS is the only tenant boundary and this list is unfiltered",
-			listDelegationsQuery)
+	where := listWhereClause(t, listDelegationsQuery)
+	for _, banned := range []string{"tenant", "revoked", "expires_at", "user_id"} {
+		if strings.Contains(where, banned) {
+			t.Errorf("listDelegationsQuery filters on %q (%q): RLS is the only tenant boundary and this list is unfiltered",
+				banned, where)
+		}
 	}
 }
 
@@ -601,7 +604,7 @@ func TestStore_ListDelegations_EmptyIsNotAnError(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listDelegationsQuery)).WillReturnRows(sqlmock.NewRows(delegationColumns()))
 	mock.ExpectCommit()
 
-	got, err := s.ListDelegations(context.Background())
+	got, _, err := s.ListDelegations(context.Background(), nil, 0)
 	if err != nil {
 		t.Fatalf("ListDelegations() error = %v, want nil", err)
 	}

@@ -290,7 +290,7 @@ export function describeError(err: unknown): string {
  *  read: sending `Content-Type: application/json` with no body invites a 400
  *  from a strict decoder, and several routes here are POSTs that genuinely
  *  carry nothing (approve, deny, revoke). */
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function send(method: string, path: string, body?: unknown): Promise<Response> {
   const header = authHeader()
   if (!header) throw new APIError(401, 'not signed in')
 
@@ -311,8 +311,33 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     const body = (await res.text()).trim()
     throw new APIError(res.status, body || `${method} ${path} failed with ${res.status}`)
   }
+  return res
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await send(method, path, body)
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
+}
+
+/** The approvals and delegations lists come a page at a time, newest first,
+ *  with the next page's URL in a Link header (rel="next"). These screens want
+ *  the whole list: a delegation's parent and root are looked up in it.
+ *
+ *  ponytail: reads up to MAX_LIST_PAGES pages, 10,000 rows, and silently stops
+ *  there. Give the screens a "load older" control if a tenant gets that big. */
+const LIST_PAGE_SIZE = 500
+const MAX_LIST_PAGES = 20
+
+async function requestAll<T>(path: string): Promise<T[]> {
+  const rows: T[] = []
+  let next: string | null = `${path}?limit=${LIST_PAGE_SIZE}`
+  for (let page = 0; next !== null && page < MAX_LIST_PAGES; page++) {
+    const res = await send('GET', next)
+    rows.push(...((await res.json()) as T[]))
+    next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('Link') ?? '')?.[1] ?? null
+  }
+  return rows
 }
 
 /** The PAP's public, unauthenticated configuration endpoint. Fetched before
@@ -329,8 +354,8 @@ export const api = {
   agents: () => request<Agent[]>('GET', '/v1/agents'),
   tierOverrides: () => request<TierOverride[]>('GET', '/v1/tier-overrides'),
   toolCatalog: () => request<ToolCatalogEntry[]>('GET', '/v1/tool-catalog'),
-  approvals: () => request<Approval[]>('GET', '/v1/approvals'),
-  delegations: () => request<Delegation[]>('GET', '/v1/delegations'),
+  approvals: () => requestAll<Approval>('/v1/approvals'),
+  delegations: () => requestAll<Delegation>('/v1/delegations'),
 
   // The one write this application performs. Offered to every signed-in
   // operator: the server refuses it below RoleAdmin, and hiding the button

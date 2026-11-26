@@ -13,6 +13,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -59,6 +60,9 @@ func effectiveFor(all []models.Delegation, principalID string, now time.Time) ef
 	}
 }
 
+// maxSessionsCounted is the most live sessions one answer reads.
+const maxSessionsCounted = 1000
+
 func getPrincipalEffective(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {
 	// Not pathID: a principal id is the OIDC subject string, not a uuid.
 	principalID := r.PathValue("id")
@@ -66,10 +70,19 @@ func getPrincipalEffective(s *Server, w http.ResponseWriter, r *http.Request, _ 
 		http.Error(w, "principal id is required", http.StatusBadRequest)
 		return
 	}
-	all, err := s.store.ListDelegations(r.Context())
+	now := time.Now().UTC()
+	live, more, err := s.store.ListActiveRootDelegations(r.Context(), principalID, now, maxSessionsCounted)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, effectiveFor(all, principalID, time.Now().UTC()))
+	resp := effectiveFor(live, principalID, now)
+	if more {
+		// Said, not hidden: the union is of the newest sessions only, so it
+		// may understate what this principal has delegated.
+		resp.Imprecision = append(resp.Imprecision, fmt.Sprintf(
+			"this principal has more than %d live sessions; only the newest %d are counted",
+			maxSessionsCounted, maxSessionsCounted))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

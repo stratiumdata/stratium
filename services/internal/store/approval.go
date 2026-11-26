@@ -489,7 +489,9 @@ func (s *Store) DecideApproval(
 const listApprovalsQuery = `SELECT id, tenant_id, agent_id, delegation_id, root_delegation_id, ` +
 	`subject, root_principal, tool_name, action, derived_tier, input_digest, ` +
 	`status, requested_at, expires_at, approved_by, approved_at, used_at ` +
-	`FROM approvals ORDER BY requested_at DESC, id`
+	`FROM approvals ` +
+	`WHERE ($1::timestamptz IS NULL OR (requested_at, id) < ($1::timestamptz, $2::uuid)) ` +
+	`ORDER BY requested_at DESC, id DESC LIMIT $3`
 
 // ListApprovals loads every approval the tenant has, newest first. A tenant
 // with none is an ordinary, empty result — never an error, and never a nil
@@ -503,36 +505,42 @@ const listApprovalsQuery = `SELECT id, tenant_id, agent_id, delegation_id, root_
 // This read is not audited. N4 covers writes; no GET handler in the PAP
 // audits, and an entry per list would bury the write records that chain
 // exists to preserve under reads of them.
-func (s *Store) ListApprovals(ctx context.Context) ([]models.Approval, error) {
+func (s *Store) ListApprovals(ctx context.Context, before *ListCursor, limit int) ([]models.Approval, *ListCursor, error) {
+	limit = clampListLimit(limit)
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, listApprovalsQuery)
+	at, id := cursorArgs(before)
+	// One more than the page, to learn whether there is a next one.
+	rows, err := tx.QueryContext(ctx, listApprovalsQuery, at, id, int64(limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("store: list approvals: %w", err)
+		return nil, nil, fmt.Errorf("store: list approvals: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	// make, not var: an empty list must marshal as [] and never as null — a
-	// UI should not have to tell "no approvals" apart from "the field is
-	// missing."
 	approvals := make([]models.Approval, 0)
 	for rows.Next() {
 		a, err := scanApproval(rows)
 		if err != nil {
-			return nil, fmt.Errorf("store: scan approval row: %w", err)
+			return nil, nil, fmt.Errorf("store: scan approval row: %w", err)
 		}
 		approvals = append(approvals, *a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate approval rows: %w", err)
+		return nil, nil, fmt.Errorf("store: iterate approval rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("store: commit: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: commit: %w", err)
+	var next *ListCursor
+	if len(approvals) > limit {
+		approvals = approvals[:limit]
+		last := approvals[limit-1]
+		next = &ListCursor{At: last.RequestedAt, ID: last.ID}
 	}
-	return approvals, nil
+	return approvals, next, nil
 }

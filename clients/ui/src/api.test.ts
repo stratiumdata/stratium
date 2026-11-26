@@ -107,3 +107,35 @@ describe('request', () => {
     expect(call[0]).toBe('/v1/agents/a1/classification-caps?allow_uncovered=true')
   })
 })
+
+describe('paged lists', () => {
+  function page(rows: unknown[], next?: string) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (next) headers.Link = `<${next}>; rel="next"`
+    return Promise.resolve(new Response(JSON.stringify(rows), { status: 200, headers }))
+  }
+
+  it('follows the Link header until there is none and returns every row in order', async () => {
+    const f = vi.spyOn(globalThis, 'fetch')
+      .mockReturnValueOnce(page([{ id: 'a' }, { id: 'b' }], '/v1/approvals?before=cursor-1&limit=500'))
+      .mockReturnValueOnce(page([{ id: 'c' }]))
+
+    const rows = await api.approvals()
+
+    expect(rows.map((r) => r.id)).toEqual(['a', 'b', 'c'])
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      '/v1/approvals?limit=500',
+      '/v1/approvals?before=cursor-1&limit=500',
+    ])
+  })
+
+  it('stops after a fixed number of pages even if the server always offers another', async () => {
+    const f = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(() => page([{ id: 'x' }], '/v1/delegations?before=again&limit=500'))
+
+    const rows = await api.delegations()
+
+    expect(f).toHaveBeenCalledTimes(20)
+    expect(rows).toHaveLength(20)
+  })
+})

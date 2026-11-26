@@ -898,10 +898,10 @@ why:
 | `GET /v1/tier-overrides/{id}` | viewer | fetch one override |
 | `PUT /v1/tier-overrides/{id}` | editor | full replace |
 | `DELETE /v1/tier-overrides/{id}` | **admin** | delete |
-| `GET /v1/approvals` | viewer | list approvals, every status |
+| `GET /v1/approvals` | viewer | list approvals, every status, newest first, a page at a time (see "Paged lists" below) |
 | `POST /v1/approvals/{id}/approve` | **admin** + identity | approve a pending escalation |
 | `POST /v1/approvals/{id}/deny` | **admin** + identity | deny it |
-| `GET /v1/delegations` | viewer | list delegations |
+| `GET /v1/delegations` | viewer | list delegations, newest first, a page at a time (see "Paged lists" below) |
 | `POST /v1/delegations/{id}/revoke` | **admin** | revoke a delegation |
 | `POST /v1/containment` | editor | does a candidate permission set allow anything a baseline forbids? Persists nothing |
 | `GET /v1/principals/{id}/effective` | viewer | the union of one principal's live root delegations |
@@ -921,6 +921,18 @@ why:
   over gRPC by `stratium-pep session-start`. Revoke is this table's sanctioned
   "delete" — it sets `revoked`/`revoked_at` rather than removing the row, so the
   audit trail stays intact.
+
+**Paged lists.** `GET /v1/approvals` and `GET /v1/delegations` return the newest rows first, 100 at a time. The body is a JSON array, as it always was.
+
+- `?limit=N` sets the page size. The most is 500; a larger value gets 500.
+- When there are older rows, the response has a `Link` header whose `rel="next"` URL is the next page. Request that URL as it is. A response with no such header is the last page.
+
+```bash
+curl -sD - -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/delegations?limit=500" | grep -i '^link:'
+# link: </v1/delegations?before=2026-11-25T14%3A03%3A11.482Z~6d1f...&limit=500>; rel="next"
+```
+
+A script that read the whole list in one request now reads the newest 100 and must follow `Link` for the rest. The admin console does this itself. `GET /v1/principals/{id}/effective` counts at most a principal's newest 1,000 live sessions and says so in `imprecision` when there are more.
 
 ### 5.3 Common conventions
 

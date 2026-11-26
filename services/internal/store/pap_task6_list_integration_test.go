@@ -56,7 +56,7 @@ func TestIntegration_ListApprovals_EveryStatusUnderThePAPRole(t *testing.T) {
 		t.Fatalf("DecideApproval() error = %v", err)
 	}
 
-	listed, err := repo.ListApprovals(t.Context())
+	listed, _, err := repo.ListApprovals(t.Context(), nil, 0)
 	if err != nil {
 		t.Fatalf("ListApprovals() error = %v", err)
 	}
@@ -95,7 +95,7 @@ func TestIntegration_ListDelegations_IncludesRevokedUnderThePAPRole(t *testing.T
 		t.Fatalf("RevokeDelegation() error = %v", err)
 	}
 
-	listed, err := repo.ListDelegations(t.Context())
+	listed, _, err := repo.ListDelegations(t.Context(), nil, 0)
 	if err != nil {
 		t.Fatalf("ListDelegations() error = %v", err)
 	}
@@ -146,7 +146,7 @@ func TestIntegration_ListsAreScopedByRLSNotByAPredicate(t *testing.T) {
 		t.Helper()
 		repo := store.New(papDB, tenant)
 
-		approvals, err := repo.ListApprovals(t.Context())
+		approvals, _, err := repo.ListApprovals(t.Context(), nil, 0)
 		if err != nil {
 			t.Fatalf("ListApprovals() as %s error = %v", tenant, err)
 		}
@@ -161,7 +161,7 @@ func TestIntegration_ListsAreScopedByRLSNotByAPredicate(t *testing.T) {
 			t.Errorf("ListApprovals() as %s returned ANOTHER TENANT'S approval %s: RLS is not scoping this query", tenant, notApproval)
 		}
 
-		delegations, err := repo.ListDelegations(t.Context())
+		delegations, _, err := repo.ListDelegations(t.Context(), nil, 0)
 		if err != nil {
 			t.Fatalf("ListDelegations() as %s error = %v", tenant, err)
 		}
