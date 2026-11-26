@@ -37,7 +37,7 @@ const fixtureTenant = "tenant-server-test"
 func newTestServerFixture(t *testing.T) *testServerFixture {
 	t.Helper()
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}

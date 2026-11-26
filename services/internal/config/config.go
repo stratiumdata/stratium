@@ -66,7 +66,10 @@ type Config struct {
 	PrincipalOIDCAudience string        // STRATIUM_PRINCIPAL_OIDC_AUDIENCE
 	PrincipalClaim        string        // STRATIUM_PRINCIPAL_CLAIM, the claim naming the person (match the PAP's approver claim)
 	PrincipalOIDCTimeout  time.Duration // STRATIUM_PRINCIPAL_OIDC_TIMEOUT, default 5s
-	PrincipalAuthInsecure bool          // STRATIUM_PRINCIPAL_AUTH_INSECURE, trust the request's subject (local development only)
+	// PrincipalOIDCKeyRefresh is the least time between two fetches of the
+	// identity provider's signing keys (principal.KeyFetchClient).
+	PrincipalOIDCKeyRefresh time.Duration // STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL, default 30s
+	PrincipalAuthInsecure   bool          // STRATIUM_PRINCIPAL_AUTH_INSECURE, trust the request's subject (local development only)
 
 	// TokenSigningKeyPath is the filesystem path to a PEM-encoded EC private
 	// key: the PDP's current delegation-token signing key, which also

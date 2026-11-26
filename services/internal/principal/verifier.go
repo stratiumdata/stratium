@@ -28,9 +28,10 @@ type Verifier struct {
 //
 // Discovery happens here, once, so a PDP pointed at an unreachable or wrong
 // issuer fails at startup rather than refusing every session later. Keys are
-// fetched and cached by go-oidc, which also re-fetches on an unknown key id,
-// so a provider's key rotation needs no restart.
-func NewVerifier(ctx context.Context, issuer, audience, claim string, timeout time.Duration) (*Verifier, error) {
+// fetched and cached by go-oidc, which also re-fetches when a signature does
+// not verify, so a provider's key rotation needs no restart; keyRefresh is
+// the least time between two such fetches.
+func NewVerifier(ctx context.Context, issuer, audience, claim string, timeout, keyRefresh time.Duration) (*Verifier, error) {
 	if claim == "" {
 		return nil, errors.New("principal: identity claim name is empty")
 	}
@@ -42,8 +43,9 @@ func NewVerifier(ctx context.Context, issuer, audience, claim string, timeout ti
 	// The key set fetches signing keys later, on demand, for as long as the
 	// process runs. ctx is a startup context its caller cancels on return,
 	// so the key set gets one that keeps ctx's values but not its
-	// cancellation or deadline; each fetch is bounded by client's timeout.
-	keyCtx := oidc.ClientContext(context.WithoutCancel(ctx), client)
+	// cancellation or deadline; each fetch is bounded by timeout, and they
+	// are at least keyRefresh apart (KeyFetchClient).
+	keyCtx := oidc.ClientContext(context.WithoutCancel(ctx), KeyFetchClient(timeout, keyRefresh))
 	return &Verifier{
 		inner: provider.VerifierContext(keyCtx, &oidc.Config{ClientID: audience}),
 		claim: claim,

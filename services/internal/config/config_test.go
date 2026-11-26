@@ -703,3 +703,27 @@ func TestLoad_RequestLimits(t *testing.T) {
 		t.Setenv(n, "")
 	}
 }
+
+func TestLoad_PrincipalOIDCKeyRefresh(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.PrincipalOIDCKeyRefresh != 30*time.Second {
+		t.Errorf("default PrincipalOIDCKeyRefresh = %s, want 30s", c.PrincipalOIDCKeyRefresh)
+	}
+
+	t.Setenv("STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL", "2m")
+	if c, err = Load(); err != nil || c.PrincipalOIDCKeyRefresh != 2*time.Minute {
+		t.Errorf("Load() = %s, %v; want 2m, nil", c.PrincipalOIDCKeyRefresh, err)
+	}
+
+	for _, bad := range []string{"0s", "-1s", "often"} {
+		t.Setenv("STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL") {
+			t.Errorf("value %q: Load() error = %v, want one naming the variable", bad, err)
+		}
+	}
+}

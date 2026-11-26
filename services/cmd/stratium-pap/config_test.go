@@ -35,6 +35,7 @@ func clearPAPEnv(t *testing.T) {
 	t.Setenv("STRATIUM_PAP_OIDC_SCOPE", "")
 	t.Setenv("STRATIUM_PAP_DB_TIMEOUT", "")
 	t.Setenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS", "")
+	t.Setenv("STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL", "")
 }
 
 func setAllPAPEnv(t *testing.T, overrides map[string]string) {
@@ -285,6 +286,30 @@ func TestLoadConfig_DBMaxOpenConns(t *testing.T) {
 		t.Setenv("STRATIUM_PAP_DB_MAX_OPEN_CONNS", bad)
 		if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "STRATIUM_PAP_DB_MAX_OPEN_CONNS") {
 			t.Errorf("value %q: loadConfig() error = %v, want one naming STRATIUM_PAP_DB_MAX_OPEN_CONNS", bad, err)
+		}
+	}
+}
+
+func TestLoadConfig_OIDCKeyRefresh(t *testing.T) {
+	clearPAPEnv(t)
+	setAllPAPEnv(t, nil)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.OIDCKeyRefresh != 30*time.Second {
+		t.Errorf("default OIDCKeyRefresh = %s, want 30s", cfg.OIDCKeyRefresh)
+	}
+
+	t.Setenv("STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL", "2m")
+	if cfg, err = loadConfig(); err != nil || cfg.OIDCKeyRefresh != 2*time.Minute {
+		t.Errorf("loadConfig() = %s, %v; want 2m, nil", cfg.OIDCKeyRefresh, err)
+	}
+
+	for _, bad := range []string{"0s", "-1s", "often"} {
+		t.Setenv("STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL", bad)
+		if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL") {
+			t.Errorf("value %q: loadConfig() error = %v, want one naming the variable", bad, err)
 		}
 	}
 }
