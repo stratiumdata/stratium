@@ -1,82 +1,113 @@
 # Stratium
 
-Multi-tenant authorization platform for AI agents. Decides, per action, whether a
-specific agent — acting under a specific person's delegated authority, at a
-specific point in a delegation chain — may perform a specific action.
+**Authorization for AI agents, decided per tool call.**
 
-**📖 Documentation: [docs.stratium.dev](https://docs.stratium.dev)**: concepts,
-quickstart, the enforcement surfaces, and the full user guide. The site is
-built from [`docs/`](docs/), so the same pages also read fine on GitHub.
+An agent acting on someone's behalf makes thousands of tool calls an hour, with
+the same credentials the whole time. Most authorization stops at "is this
+session valid". Stratium asks a narrower question, every time:
 
-## Layout
+> May **this agent**, acting under **this person's** delegated authority, at
+> **this point in a delegation chain**, perform **this action** on **this
+> resource**, right now?
 
-- `services/` — the Go module (`module github.com/stratiumdata/stratium`). PDP, PAP, and PEP.
-- `clients/` — Python SDK and admin UI.
-- `deploy/` — Docker and Postgres setup.
-- `proto/` — service contracts.
-- `docs/` — design specs and implementation plans.
+`Bash("ls -la")` and `Bash("rm -rf /")` are the same tool, agent, session and
+credentials. To Stratium they are different questions.
+
+**📖 Documentation: [docs.stratium.dev](https://docs.stratium.dev)** ·
+[Quickstart](https://docs.stratium.dev/quickstart/) ·
+[Concepts](https://docs.stratium.dev/concepts/) ·
+[What it does not stop](https://docs.stratium.dev/limits/)
+
+> Stratium is a **pre-release** (`v0.1.0`). Settings, wire contracts and
+> defaults can still change between versions.
+
+## What it does
+
+- **Decides every tool call on the server.** The enforcement point beside the
+  agent forwards the call's arguments as they are. The decision point derives
+  how dangerous the action is and what it touches. The component being policed
+  never classifies its own actions.
+- **Bounds an agent by a delegation.** A person hands an agent a tool list, a
+  danger ceiling, a path scope and a data classification cap. No policy can
+  raise them, and a sub-agent can only be handed less.
+- **Asks a person when it matters.** Above a threshold you set, a call waits
+  for the person the agent is acting for to approve that one call.
+- **Stops an agent now.** Revoke a session or suspend an agent and the next
+  tool call is refused.
+- **Records every decision** in a tamper-evident audit chain.
+- **Denies when unsure.** An unreachable decision point, an unreadable
+  session, an unlabelled resource under a cap: each is a denial.
+
+Policies are written in [Cedar](https://www.cedarpolicy.com),
+[Rego](https://www.openpolicyagent.org/docs/latest/policy-language/), XACML or
+JSON, and can be mixed.
+
+## Where it sits
+
+| You run | Stratium enforces through |
+|---|---|
+| A coding agent: Claude Code, Codex, Cursor, Copilot CLI, Goose, OpenCode, Kiro CLI, Devin, Antigravity CLI | a hook the harness calls before each tool call |
+| An MCP server | a stdio proxy in front of it, or [agentgateway](https://agentgateway.dev) |
+| A LiteLLM proxy | a guardrail |
+| An HTTP API behind Envoy | `ext_authz` |
+| A gRPC service | a proxy |
+| Your own agent loop | the Python SDK |
+
+[Which one do I want?](https://docs.stratium.dev/pep/) Each harness page says
+how it was verified.
+
+## Try it
+
+You need Docker with `docker compose`, Go, Python 3 and Node.js.
+
+```bash
+git clone https://github.com/stratiumdata/stratium.git && cd stratium
+deploy/stratium up --harness claude    # or: --harness codex
+```
+
+That builds and starts a local stack, registers an agent, starts a session and
+wires the hook, ending on a denial you can see. The
+[quickstart](https://docs.stratium.dev/quickstart/) walks through each step
+with the output to expect, and how to take it all down again.
+
+## What it does not stop
+
+Stratium is not a sandbox. A hook installed per project can be removed by the
+agent it governs, the shell classifier is a heuristic, and a path scope checks
+a command's words and not its effects.
+[Read the limits](https://docs.stratium.dev/limits/) before you rely on it.
+
+## Three parts
+
+| Part | Binary | What it does |
+|---|---|---|
+| Decision point (PDP) | `stratium-pdp` | Answers one question, `Decide`. Owns all classification and token verification. |
+| Administration point (PAP) | `stratium-pap` | Policies, agents, approvals and audit, with a web console. People sign in over OIDC. |
+| Enforcement point (PEP) | `stratium-pep` | Runs beside the agent. Turns a tool call into a question, and the answer into a block or a pass. Not trusted, by design. |
+
+## Repository layout
+
+- `services/`: the Go module. PDP, PAP and PEP.
+- `clients/ui/`: the admin console. `sdk/python/`: the Python SDK.
+- `deploy/`: the Docker stack, seed data and the quickstart script.
+- `example/`: runnable examples against a local model.
+- `docs/`: the source of [docs.stratium.dev](https://docs.stratium.dev).
 
 ## Development
 
-    make build      # compile (builds the admin UI first — see below)
-    make test       # Go tests with -race, plus the admin UI's lint and tests
-    make lint       # golangci-lint
+    make build        # builds the admin console, then the Go binaries
+    make test         # Go tests with -race, plus the console's lint and tests
+    make lint
     make conformance  # authorization conformance properties
-    make integration  # the live-stack proofs (see below)
+    make integration  # the whole stack in Docker, and the tests against it
 
-`make integration` brings up the whole stack in Docker — 24 services:
-Postgres, ten PDP instances, two PEPs, a real Envoy and its upstream, a real
-gRPC target, three `stratium-pap` instances, a real Keycloak, and two real
-LiteLLM proxies, one of them with the Stratium guardrails in front of a mock
-model and a mock MCP server — runs the integration-tagged tests against it,
-and tears it down again with its volumes, always. CI runs it on every pull
-request. It therefore needs Docker and, on a cold machine, network access to
-pull `postgres`, `envoyproxy/envoy`, `quay.io/keycloak/keycloak`, and
-`ghcr.io/berriai/litellm`. The Keycloak realm is imported from
-`deploy/docker/keycloak/stratium-realm.json`; nothing in it is a credential
-to anything outside this stack.
-
-**Use `make`, not `go build` directly.** The admin UI (`clients/ui`) is
-embedded into the `stratium-pap` binary with `//go:embed dist`, and `dist/` is
-a git-ignored build output. On a fresh checkout every Go command that compiles
-`cmd/stratium-pap` — `go build`, `go vet`, `go test`, `golangci-lint` — fails
-with:
-
-    pattern dist: no matching files found
-
-until the UI has been built. `make build`, `make test`, `make vet`, and
-`make lint` each depend on the `ui` target, which runs `npm ci` and the Vite
-build only when the UI's own inputs have changed. Node is therefore a build
-dependency of this repository, not only of the UI. `make ui` on its own is
-enough to unblock bare `go` commands afterwards.
-
-One consequence of this: `go install github.com/stratiumdata/stratium/services/cmd/stratium-pap@…` can never
-work. There is no `make ui` step in a module install, and `dist/` — git-ignored
-for the reason above — is never part of the module's source either way.
-Building `stratium-pap` means cloning this repository and running `make`.
-
-`dist/` is deliberately never committed: a checked-in build output would make
-the embed test (`services/cmd/stratium-pap/ui_test.go`) pass forever whether or
-not anyone rebuilt the UI, which is the only thing that test exists to detect.
-
-New here? [`docs/concepts.md`](docs/concepts.md) explains what the system
-decides and why it holds, in concepts rather than code.
-[`docs/validation-journeys.md`](docs/validation-journeys.md) is the pre-launch
-validation list and an honest account of where the model is too tight.
-[`docs/default-posture.md`](docs/default-posture.md) answers "what should I
-actually set?" for a first real agent.
-
-Design of record: `docs/superpowers/specs/2026-08-08-agent-authorization-redesign-design.md`
-
-## Installing the enforcement surfaces
-
-`services/cmd/stratium-pep` is the client-side binary that gates a real
-agent's tool calls against the PDP, as a Claude Code `PreToolUse` hook or as
-an MCP proxy. See [`docs/pep.md`](docs/pep.md) for the `.claude/settings.json`
-hook entry, launching the MCP proxy in place of a real server, required
-environment variables, and how to start a session — **every tool call is
-denied until a session is started and a policy permits it.**
+Use `make`, not `go build` directly: the admin console is embedded in
+`stratium-pap`, so Go commands fail until it has been built.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) explains why, and what `make integration`
+needs.
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md). Security reports: [`SECURITY.md`](SECURITY.md).
+Apache-2.0. See [`LICENSE`](LICENSE). Contributing:
+[`CONTRIBUTING.md`](CONTRIBUTING.md). Security reports:
+[`SECURITY.md`](SECURITY.md).

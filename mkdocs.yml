@@ -92,6 +92,7 @@ nav:
   - Get started:
       - Quickstart: quickstart.md
       - A default posture: default-posture.md
+      - What it does not stop: limits.md
   - Operate:
       - User guide: user-guide.md
       - Release notes:
