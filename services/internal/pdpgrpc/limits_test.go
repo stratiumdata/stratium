@@ -106,6 +106,10 @@ func TestCreateDelegation_OverLongField_IsRefused(t *testing.T) {
 		"subject":         func(r *CreateDelegationRequest) { r.Subject = long(lim.SubjectBytes) },
 		"principal_token": func(r *CreateDelegationRequest) { r.PrincipalToken = long(lim.CredentialBytes) },
 		"parent_token":    func(r *CreateDelegationRequest) { r.ParentToken = long(lim.CredentialBytes) },
+		"dpop_jwk": func(r *CreateDelegationRequest) {
+			jwk := long(lim.CredentialBytes)
+			r.DpopJwk = &jwk
+		},
 		"requested_scope.tools[1]": func(r *CreateDelegationRequest) {
 			r.RequestedScope.Tools = []string{"Bash", long(lim.ToolBytes)}
 		},

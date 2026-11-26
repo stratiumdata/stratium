@@ -207,6 +207,8 @@ def test_an_escalation_retries_with_the_approval_id_and_can_allow(fake_pdp):
     assert d
     assert len(fake_pdp.decide_calls) == 2
     assert fake_pdp.decide_calls[1].approval_id == "ap-9"
+    # The poll names the waiting session: the PDP answers no one else.
+    assert fake_pdp.approval_calls[0].token == fake_pdp.decide_calls[0].token != ""
 
 
 # The grant is what the PDP gave, not what was asked for.

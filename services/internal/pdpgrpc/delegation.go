@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/dpop"
 	"github.com/stratiumdata/stratium/internal/policy"
 	"github.com/stratiumdata/stratium/internal/store"
 	"github.com/stratiumdata/stratium/pkg/audit"
@@ -123,8 +124,15 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 
 	// A child is authorized by the parent's own token, checked before any
 	// store call: see authorizeChild.
+	var jkt string
+	if req.DpopJwk != nil {
+		if jkt, err = dpop.Thumbprint([]byte(req.GetDpopJwk())); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "dpop_jwk: %s", err)
+		}
+	}
+
 	if parentID != nil {
-		if err := s.authorizeChild(req.GetParentToken(), *parentID); err != nil {
+		if err := s.authorizeChild(ctx, req.GetParentToken(), *parentID); err != nil {
 			return nil, err
 		}
 	}
@@ -310,7 +318,15 @@ func (s *Server) CreateDelegation(ctx context.Context, req *CreateDelegationRequ
 	// call has no JWK to bind to and CreateDelegationRequest deliberately
 	// does not carry one, since the caller creating a delegation is not
 	// necessarily the party that will later hold and use its token.
-	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, "", now, d.ExpiresAt, d.ExpiresAt)
+	// Bound from the start when the caller supplied a key: recorded before
+	// any token exists, so no bearer token is ever issued for it.
+	if jkt != "" {
+		if err := s.bindOrMatchKey(ctx, d.ID, jkt); err != nil {
+			return nil, err
+		}
+	}
+
+	tok, _, _, err := s.mintToken(d.ID, s.cfg.TenantID, jkt, now, d.ExpiresAt, d.ExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign token: %s", err)
 	}
@@ -440,7 +456,7 @@ func toProtoGrantedScope(g authz.GrantedScope) *GrantedScope {
 // possession, and a child's token is always issued unbound, so accepting
 // one would turn a stolen bound token, inert on its own, into a usable
 // bearer token for the child.
-func (s *Server) authorizeChild(parentToken string, parentID uuid.UUID) error {
+func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentID uuid.UUID) error {
 	if parentToken == "" {
 		return status.Error(codes.Unauthenticated,
 			"parent_token is required: present a current token for the parent delegation")
@@ -455,6 +471,15 @@ func (s *Server) authorizeChild(parentToken string, parentID uuid.UUID) error {
 	if jkt != "" {
 		return status.Error(codes.PermissionDenied,
 			"parent_token is bound to a key: a child cannot be created from a bound token")
+	}
+	// The parent's bearer token outlives a later binding of the parent, so
+	// the token being unbound is not enough: the parent itself must be.
+	if err := s.requireDelegationKey(ctx, parentID, jkt); err != nil {
+		if errors.Is(err, errDelegationBound) {
+			return status.Error(codes.PermissionDenied,
+				"the parent delegation is bound to a key: a bound delegation cannot have children")
+		}
+		return status.Errorf(codes.Internal, "load delegation key: %s", err)
 	}
 	return nil
 }

@@ -104,6 +104,13 @@ type Store interface {
 	// not a redundant one.
 	LoadDelegation(ctx context.Context, id uuid.UUID) (*models.Delegation, error)
 
+	// DelegationKey returns the thumbprint of the key the delegation is
+	// bound to, or "" if it has never been bound. BindDelegationKey records
+	// jkt as that key unless one is already recorded, and returns whichever
+	// key the delegation is bound to afterwards: the first key stays.
+	DelegationKey(ctx context.Context, id uuid.UUID) (string, error)
+	BindDelegationKey(ctx context.Context, id uuid.UUID, jkt string) (string, error)
+
 	// LoadTenantEpoch reads the tenant's current revocation epoch (spec
 	// §4.8.1 V3). loadEpochOrDeny (below) is this interface's only caller,
 	// and it calls this method first, before any other method on this
@@ -473,6 +480,13 @@ func (s *Server) Decide(ctx context.Context, req *DecideRequest) (*DecideRespons
 			return nil, status.Errorf(codes.NotFound, "delegation %s: %s", delegationID, err)
 		}
 		return nil, status.Errorf(codes.Internal, "load chain: %s", err)
+	}
+
+	if err := s.requireDelegationKey(ctx, delegationID, jkt); err != nil {
+		if errors.Is(err, errDelegationBound) {
+			return s.denyAndAudit(ctx, agentID, delegationID, chain, action, req.GetSubject(), now, err, &epoch)
+		}
+		return nil, status.Errorf(codes.Internal, "load delegation key: %s", err)
 	}
 
 	principal := authz.Principal{Subject: req.GetSubject()}

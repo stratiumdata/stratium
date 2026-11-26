@@ -59,6 +59,7 @@ func createDelegationFieldLimits(req *CreateDelegationRequest, lim config.Reques
 		bounded{"purpose", req.GetPurpose(), lim.PurposeBytes},
 		bounded{"parent_token", req.GetParentToken(), lim.CredentialBytes},
 		bounded{"principal_token", req.GetPrincipalToken(), lim.CredentialBytes},
+		bounded{"dpop_jwk", req.GetDpopJwk(), lim.CredentialBytes},
 	); err != nil {
 		return err
 	}

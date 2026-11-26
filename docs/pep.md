@@ -973,6 +973,16 @@ consequences an operator meets immediately:
   reason that says so; it is not a policy denial and no policy change fixes
   it. Bearer tokens stay legitimate on `hook` and `mcp`, where the caller
   already holds the session file the token lives in.
+- **A delegation is bound to one key, once.** The first `dpop_jwk` the PDP
+  accepts for a delegation is recorded, and from then on the PDP refuses
+  every token for that delegation that is not bound to that key. That
+  includes the bearer token `CreateDelegation` returned: it can no longer be
+  used to decide, to report a tool call, to create a child, or to obtain a
+  token for another key. So do not share one session between a bound surface
+  and `hook` or `mcp`; start a separate session for each. To have no bearer
+  token at all, pass `dpop_jwk` to `CreateDelegation` itself, and the first
+  token is already bound. If binding your key is refused with `delegation is
+  bound to a key`, another key was bound first: revoke the delegation.
 - **Sign the proof's `htu` against the address you *addressed*, not the one
   you dialled, and never the target's.** `htu` here is
   `STRATIUM_PEP_PROXY_PUBLIC_URI` plus the full method path

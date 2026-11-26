@@ -264,7 +264,7 @@ adapting it, because each grant has a reason recorded next to it.
 `STRATIUM_MIGRATION_DATABASE_URL` is set. Leave it unset and the PDP skips
 migrations and assumes an already-migrated schema, saying so in its logs.
 
-Twenty-three migrations ship. `000002_rls` is the one to know about: it enables
+Twenty-four migrations ship. `000002_rls` is the one to know about: it enables
 **and forces** row-level security on every tenant table.
 
 ### 2.6 Token signing keys
