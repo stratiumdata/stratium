@@ -1375,6 +1375,7 @@ func runProxyCmd(stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not listen on %s: %s\n", cfg.ListenAddr, err)
 		return 1
 	}
+	lis = limits.listen(lis)
 
 	srv := &proxyServer{targetConn: targetConn, client: pdpgrpc.NewPDPServiceClient(pdpConn), cfg: cfg}
 	grpcServer := newProxyGRPCServer(srv.handleStream, limits.serverOptions()...)

@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/connlimit"
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 	"github.com/stratiumdata/stratium/internal/policy"
 	"github.com/stratiumdata/stratium/internal/store"
@@ -211,6 +212,8 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
+	// Under the TLS handshake, so a connection past a limit costs none.
+	lis = connlimit.Listen(lis, connlimit.Limits{Max: cfg.MaxConnections, MaxPerSource: cfg.MaxConnectionsPerIP})
 
 	// One call may run at most cfg.RequestTimeout, where grpc-go's own
 	// default is no limit, and one request may be at most cfg.MaxRequestBytes.
