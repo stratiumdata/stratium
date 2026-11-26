@@ -43,8 +43,6 @@ import (
 // not prevent the process from exiting once a shutdown signal arrives.
 const shutdownTimeout = 10 * time.Second
 
-const maxCallsPerConnection = 256
-
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	// SetDefault as well as passing logger explicitly. Everything in this
@@ -214,12 +212,12 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 
-	// One connection may hold at most maxCallsPerConnection calls in flight,
-	// and one call may run at most cfg.RequestTimeout; grpc-go's own default
-	// for both is no limit. One request may be at most cfg.MaxRequestBytes.
-	grpcServer := grpc.NewServer(transport, grpc.MaxConcurrentStreams(maxCallsPerConnection),
+	// One call may run at most cfg.RequestTimeout, where grpc-go's own
+	// default is no limit, and one request may be at most cfg.MaxRequestBytes.
+	// connectionLimits (limits.go) bounds what one connection may hold open.
+	grpcServer := grpc.NewServer(append(connectionLimits(cfg), transport,
 		grpc.MaxRecvMsgSize(cfg.MaxRequestBytes),
-		grpc.UnaryInterceptor(requestDeadline(cfg.RequestTimeout)))
+		grpc.UnaryInterceptor(requestDeadline(cfg.RequestTimeout)))...)
 	pdpgrpc.RegisterPDPServiceServer(grpcServer, srv)
 
 	// The standard health service, nothing else registered alongside it: no

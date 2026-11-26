@@ -783,3 +783,35 @@ func TestLoad_SessionCallBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_ConnectionLimits(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_CONCURRENT_STREAMS", "")
+	t.Setenv("STRATIUM_MAX_CONNECTION_IDLE", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxConcurrentStreams != 256 || c.MaxConnectionIdle != 5*time.Minute {
+		t.Errorf("defaults = %d streams, idle %s; want 256 and 5m", c.MaxConcurrentStreams, c.MaxConnectionIdle)
+	}
+
+	t.Setenv("STRATIUM_MAX_CONCURRENT_STREAMS", "64")
+	t.Setenv("STRATIUM_MAX_CONNECTION_IDLE", "90s")
+	if c, err = Load(); err != nil || c.MaxConcurrentStreams != 64 || c.MaxConnectionIdle != 90*time.Second {
+		t.Errorf("Load() = %d streams, idle %s, %v; want 64, 90s, nil", c.MaxConcurrentStreams, c.MaxConnectionIdle, err)
+	}
+
+	for _, bad := range [][2]string{
+		{"STRATIUM_MAX_CONCURRENT_STREAMS", "0"}, {"STRATIUM_MAX_CONCURRENT_STREAMS", "-1"},
+		{"STRATIUM_MAX_CONCURRENT_STREAMS", "lots"}, {"STRATIUM_MAX_CONCURRENT_STREAMS", "5000000000"},
+		{"STRATIUM_MAX_CONNECTION_IDLE", "0s"}, {"STRATIUM_MAX_CONNECTION_IDLE", "soon"},
+	} {
+		t.Setenv("STRATIUM_MAX_CONCURRENT_STREAMS", "")
+		t.Setenv("STRATIUM_MAX_CONNECTION_IDLE", "")
+		t.Setenv(bad[0], bad[1])
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), bad[0]) {
+			t.Errorf("%s=%q: Load() error = %v, want one naming it", bad[0], bad[1], err)
+		}
+	}
+}
