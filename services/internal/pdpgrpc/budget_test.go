@@ -2,7 +2,9 @@ package pdpgrpc
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,17 +19,17 @@ func TestSessionBudgets_BurstThenRefill_PerSession(t *testing.T) {
 	now := time.Now()
 
 	for i := range 3 {
-		if ok, _ := b.take(a, now); !ok {
+		if ok, _ := b.take(context.Background(), a, now); !ok {
 			t.Fatalf("call %d inside the burst was refused", i)
 		}
 	}
-	if ok, _ := b.take(a, now); ok {
+	if ok, _ := b.take(context.Background(), a, now); ok {
 		t.Fatal("a call past the burst was allowed")
 	}
-	if ok, _ := b.take(other, now); !ok {
+	if ok, _ := b.take(context.Background(), other, now); !ok {
 		t.Fatal("another session was refused because of this one")
 	}
-	if ok, _ := b.take(a, now.Add(time.Second)); !ok {
+	if ok, _ := b.take(context.Background(), a, now.Add(time.Second)); !ok {
 		t.Fatal("a call after a second's refill was refused")
 	}
 }
@@ -39,18 +41,18 @@ func TestSessionBudgets_ReportsRefusalsAtMostOncePerInterval(t *testing.T) {
 	b := sessionBudgets{perSecond: 1, burst: 1}
 	id := uuid.New()
 	now := time.Now()
-	b.take(id, now) // the burst
+	b.take(context.Background(), id, now) // the burst
 
-	if ok, report := b.take(id, now); ok || report != 1 {
+	if ok, report := b.take(context.Background(), id, now); ok || report != 1 {
 		t.Fatalf("first refusal = (%v, %d), want (false, 1): reported at once", ok, report)
 	}
 	for range 5 {
-		if ok, report := b.take(id, now); ok || report != 0 {
+		if ok, report := b.take(context.Background(), id, now); ok || report != 0 {
 			t.Fatalf("a refusal inside the interval = (%v, %d), want (false, 0)", ok, report)
 		}
 	}
 	later := now.Add(budgetAuditInterval)
-	if ok, report := b.take(id, later); !ok || report != 5 {
+	if ok, report := b.take(context.Background(), id, later); !ok || report != 5 {
 		t.Fatalf("an allowed call after the interval = (%v, %d), want (true, 5)", ok, report)
 	}
 }
@@ -59,9 +61,9 @@ func TestSessionBudgets_ForgetsIdleSessions(t *testing.T) {
 	b := sessionBudgets{perSecond: 1, burst: 2}
 	now := time.Now()
 	for range 50 {
-		b.take(uuid.New(), now)
+		b.take(context.Background(), uuid.New(), now)
 	}
-	b.take(uuid.New(), now.Add(2*budgetSweepInterval))
+	b.take(context.Background(), uuid.New(), now.Add(2*budgetSweepInterval))
 	if n := len(b.sessions); n != 1 {
 		t.Errorf("sessions remembered = %d, want 1: the idle ones were full again and had nothing to report", n)
 	}
@@ -71,7 +73,7 @@ func TestSessionBudgets_ZeroValueHasNoBudget(t *testing.T) {
 	var b sessionBudgets
 	id, now := uuid.New(), time.Now()
 	for i := range 100 {
-		if ok, _ := b.take(id, now); !ok {
+		if ok, _ := b.take(context.Background(), id, now); !ok {
 			t.Fatalf("call %d on a zero budget was refused", i)
 		}
 	}
@@ -217,5 +219,172 @@ func TestReportToolUse_OverTheSessionBudget_ReadsNothing(t *testing.T) {
 	}
 	if got := fs.calls - before; got != 0 {
 		t.Errorf("store calls for 5 refused reports = %d, want 0", got)
+	}
+}
+
+// sharedBucket stands in for the store every PDP shares: one token bucket for
+// each session, with a clock the test moves.
+type sharedBucket struct {
+	mu       sync.Mutex
+	now      time.Time
+	tokens   map[uuid.UUID]float64
+	touched  map[uuid.UUID]time.Time
+	leases   int
+	leaseErr error
+}
+
+func (s *sharedBucket) LeaseSessionTokens(_ context.Context, session uuid.UUID, burst, perSecond float64, want int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leases++
+	if s.leaseErr != nil {
+		return 0, s.leaseErr
+	}
+	if s.tokens == nil {
+		s.tokens, s.touched = map[uuid.UUID]float64{}, map[uuid.UUID]time.Time{}
+	}
+	have, seen := s.tokens[session]
+	if !seen {
+		have = burst
+	} else {
+		have = min(burst, have+s.now.Sub(s.touched[session]).Seconds()*perSecond)
+	}
+	got := min(want, int(have))
+	s.tokens[session], s.touched[session] = have-float64(got), s.now
+	return got, nil
+}
+
+// Two PDPs that share a store allow one session its budget between them, not
+// each: the point of sharing.
+func TestSessionBudgets_Shared_TwoServersShareOneBudget(t *testing.T) {
+	shared := &sharedBucket{now: time.Now()}
+	a := sessionBudgets{perSecond: 2, burst: 6, shared: shared}
+	b := sessionBudgets{perSecond: 2, burst: 6, shared: shared}
+	session := uuid.New()
+
+	allowed := 0
+	for range 20 {
+		for _, pdp := range []*sessionBudgets{&a, &b} {
+			if ok, _ := pdp.take(context.Background(), session, shared.now); ok {
+				allowed++
+			}
+		}
+	}
+	if allowed != 6 {
+		t.Errorf("calls allowed across two PDPs = %d, want the one budget of 6", allowed)
+	}
+
+	// A second later two more tokens exist, whichever PDP is asked.
+	shared.now = shared.now.Add(time.Second)
+	allowed = 0
+	for range 10 {
+		for _, pdp := range []*sessionBudgets{&a, &b} {
+			if ok, _ := pdp.take(context.Background(), session, shared.now); ok {
+				allowed++
+			}
+		}
+	}
+	if allowed != 2 {
+		t.Errorf("calls allowed a second later = %d, want 2", allowed)
+	}
+}
+
+// Tokens come from the store in blocks, and a session that has run out is not
+// asked about again until a token could exist: calls are far more numerous
+// than store calls, allowed or refused.
+func TestSessionBudgets_Shared_AsksTheStoreRarely(t *testing.T) {
+	shared := &sharedBucket{now: time.Now()}
+	b := sessionBudgets{perSecond: 20, burst: 100, shared: shared}
+	session := uuid.New()
+
+	for range 100 {
+		if ok, _ := b.take(context.Background(), session, shared.now); !ok {
+			t.Fatal("a call inside the burst was refused")
+		}
+	}
+	if shared.leases != 5 {
+		t.Errorf("store calls for 100 allowed calls = %d, want 5 (blocks of 20)", shared.leases)
+	}
+	for range 500 {
+		if ok, _ := b.take(context.Background(), session, shared.now); ok {
+			t.Fatal("a call past the burst was allowed")
+		}
+	}
+	if shared.leases != 6 {
+		t.Errorf("store calls after 500 refused calls = %d, want 6: one that found nothing, then none", shared.leases)
+	}
+}
+
+// A store that cannot be asked does not fail a call. The PDP counts the
+// session on its own meanwhile, asks the store again only after a pause, and
+// goes back to it once it answers.
+func TestSessionBudgets_Shared_StoreFailureFallsBackToCountingAlone(t *testing.T) {
+	shared := &sharedBucket{now: time.Now(), leaseErr: errors.New("database is down")}
+	b := sessionBudgets{perSecond: 0.001, burst: 3, shared: shared}
+	session := uuid.New()
+	now := shared.now
+
+	allowed := 0
+	for range 10 {
+		if ok, _ := b.take(context.Background(), session, now); ok {
+			allowed++
+		}
+	}
+	if allowed != 3 {
+		t.Errorf("calls allowed while the store is down = %d, want 3: still held to the burst, by this PDP alone", allowed)
+	}
+	if shared.leases != 1 {
+		t.Errorf("store calls while it is down = %d, want 1: asked once, then left alone for the pause", shared.leases)
+	}
+
+	// The store is back, and the pause is over: the next call but one is
+	// counted by the store again.
+	shared.leaseErr = nil
+	later := now.Add(leaseRetryInterval)
+	shared.now = later
+	b.take(context.Background(), session, later)
+	before := shared.leases
+	if ok, _ := b.take(context.Background(), session, later); !ok {
+		t.Error("a call after the store came back was refused, want it allowed from the shared budget")
+	}
+	if shared.leases != before+1 {
+		t.Errorf("store calls after it came back = %d more, want 1: the session is shared again", shared.leases-before)
+	}
+}
+
+// Decide with the store down still decides.
+func TestDecide_Shared_StoreFailureDoesNotFailTheCall(t *testing.T) {
+	fs, req, _ := decideTokenFixture(t)
+	shared := &sharedBucket{now: time.Now(), leaseErr: errors.New("database is down")}
+	cfg := testConfig()
+	cfg.SessionCallsPerSecond, cfg.SessionCallsBurst = 20, 100
+	srv := NewServer(fs, denyAllPolicy(), cfg, &fakeSigner{}).WithSessionBudgetStore(shared)
+
+	resp, err := srv.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Decide() error = %v, want a decision", err)
+	}
+	if resp.GetDeniedLeg() != "principal" {
+		t.Errorf("DeniedLeg = %q (reason %q), want principal: the call must reach the policy", resp.GetDeniedLeg(), resp.GetReason())
+	}
+}
+
+// An outage that lasts through several retries is one burst, not one at each.
+func TestSessionBudgets_Shared_LongOutageIsNotAFreshBurstAtEveryRetry(t *testing.T) {
+	shared := &sharedBucket{now: time.Now(), leaseErr: errors.New("database is down")}
+	b := sessionBudgets{perSecond: 0.001, burst: 3, shared: shared}
+	session := uuid.New()
+
+	allowed := 0
+	for retry := range 5 {
+		now := shared.now.Add(time.Duration(retry) * leaseRetryInterval)
+		for range 10 {
+			if ok, _ := b.take(context.Background(), session, now); ok {
+				allowed++
+			}
+		}
+	}
+	if allowed != 3 {
+		t.Errorf("calls allowed across five retries of a store that stayed down = %d, want 3", allowed)
 	}
 }

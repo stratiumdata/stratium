@@ -9,15 +9,16 @@
 // audit entry says how many there were, at most one entry a minute for each
 // session, so the record of a flood is not itself a flood.
 //
-// ponytail: buckets live in this process's memory. Several PDPs for one
-// tenant each allow the full rate; share the counters (the database, or a
-// cache) if the rate has to hold across them.
+// The count is shared by every PDP for the tenant when the server is given a
+// SessionBudgetStore, which the PDP binary always does: each takes tokens
+// from the store a block at a time. A server without one counts alone.
 package pdpgrpc
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -35,22 +36,60 @@ const (
 	budgetAuditInterval = time.Minute
 	// budgetSweepInterval is how often idle sessions are forgotten.
 	budgetSweepInterval = time.Minute
+	// leaseRetryInterval is how long a session is counted by this process
+	// alone after the shared store could not be asked, before it is asked
+	// again. leaseFailureLogInterval is the least time between log lines
+	// about that.
+	leaseRetryInterval = 5 * time.Second
+	// leaseTimeout is how long one request for tokens may take.
+	leaseTimeout            = time.Second
+	leaseFailureLogInterval = time.Minute
 	// budgetActor is who a refused-calls entry is attributed to when the
 	// call carried no subject of its own.
 	budgetActor = "stratium-pdp"
 )
 
+// SessionBudgetStore is where a session's budget is kept when it is shared by
+// every PDP for the tenant. *store.Store in production.
+type SessionBudgetStore interface {
+	// LeaseSessionTokens takes up to want tokens from session's budget, of
+	// burst tokens refilling at perSecond, and returns how many it got.
+	LeaseSessionTokens(ctx context.Context, session uuid.UUID, burst, perSecond float64, want int) (int, error)
+}
+
 type sessionBudgets struct {
 	perSecond, burst float64
 
-	mu        sync.Mutex
-	sessions  map[uuid.UUID]*sessionBucket
-	lastSweep time.Time
+	// shared, when set, holds the budgets (WithSessionBudgetStore). This
+	// process then takes a session's tokens from it a block at a time and
+	// spends them from memory, so the store is written about once per block
+	// and the rate holds across every PDP that shares it. Left nil, this
+	// process keeps the whole count itself.
+	shared SessionBudgetStore
+
+	mu                  sync.Mutex
+	sessions            map[uuid.UUID]*sessionBucket
+	lastSweep           time.Time
+	lastLeaseFailureLog time.Time
 }
 
 type sessionBucket struct {
+	// mu orders one session's calls, a lease included, without holding up
+	// any other session's.
+	mu sync.Mutex
+
+	// tokens is the bucket itself when this process keeps the count.
 	tokens float64
-	last   time.Time
+	// leased is what is left of the last block taken from the shared store,
+	// and nextLease the earliest another may be asked for after the store
+	// said there were none: a refused call must not cost a store call each.
+	leased    int
+	nextLease time.Time
+	// alone is set while the shared store cannot be asked: this process
+	// counts the session itself, in tokens, until nextLease.
+	alone bool
+
+	last time.Time
 	// refused counts calls refused since the last audit entry about them.
 	refused   int64
 	lastAudit time.Time
@@ -60,30 +99,60 @@ type sessionBucket struct {
 // ahead. report, when above zero, is how many calls have been refused since
 // the last audit entry said so: the caller writes one now.
 //
+// A shared store that cannot be asked does not fail the call. This process
+// counts the session on its own until the store answers again, so the call is
+// still held to the rate, by this PDP if not across all of them.
+//
 // A zero burst, which config.Load never produces, means no budget.
-func (b *sessionBudgets) take(session uuid.UUID, now time.Time) (ok bool, report int64) {
+func (b *sessionBudgets) take(ctx context.Context, session uuid.UUID, now time.Time) (ok bool, report int64) {
 	if b.burst <= 0 {
 		return true, 0
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.sweep(now)
+	s := b.bucket(session, now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	s := b.sessions[session]
-	if s == nil {
-		if b.sessions == nil {
-			b.sessions = map[uuid.UUID]*sessionBucket{}
+	alone := b.shared == nil || s.alone
+	if !alone && s.leased == 0 && !now.Before(s.nextLease) {
+		// Its own short deadline: a store that hangs must not use up the
+		// call's time before the decision has begun.
+		leaseCtx, cancel := context.WithTimeout(ctx, leaseTimeout)
+		got, err := b.shared.LeaseSessionTokens(leaseCtx, session, b.burst, b.perSecond, b.block())
+		cancel()
+		switch {
+		case err != nil:
+			// Count alone from here and ask the store again after a pause,
+			// not on every call. tokens is this process's own bucket for the
+			// session: full the first time, since nothing has drawn on it,
+			// and where it was left on any later one, so an outage is not a
+			// fresh burst at every retry.
+			b.logLeaseFailure(now, err)
+			s.alone, s.nextLease = true, now.Add(leaseRetryInterval)
+			alone = true
+		case got == 0:
+			// One token's worth of time: there cannot be one sooner.
+			s.nextLease = now.Add(time.Duration(float64(time.Second) / b.perSecond))
+		default:
+			s.leased = got
 		}
-		s = &sessionBucket{tokens: b.burst}
-		b.sessions[session] = s
-	} else {
+	}
+
+	if alone {
 		s.tokens = min(b.burst, s.tokens+now.Sub(s.last).Seconds()*b.perSecond)
+		if ok = s.tokens >= 1; ok {
+			s.tokens--
+		}
+		// Back to the shared store once the pause is over. Whatever this
+		// process allowed meanwhile was never taken from it.
+		if s.alone && !now.Before(s.nextLease) {
+			s.alone = false
+		}
+	} else if ok = s.leased > 0; ok {
+		s.leased--
 	}
 	s.last = now
 
-	if ok = s.tokens >= 1; ok {
-		s.tokens--
-	} else {
+	if !ok {
 		s.refused++
 	}
 	if s.refused > 0 && now.Sub(s.lastAudit) >= budgetAuditInterval {
@@ -92,8 +161,44 @@ func (b *sessionBudgets) take(session uuid.UUID, now time.Time) (ok bool, report
 	return ok, report
 }
 
-// sweep forgets sessions with nothing left to say: a full bucket and no
-// refusals waiting to be reported. Called with mu held.
+// logLeaseFailure says the shared store could not be asked, at most once
+// every leaseFailureLogInterval however many calls find it so.
+func (b *sessionBudgets) logLeaseFailure(now time.Time, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Sub(b.lastLeaseFailureLog) < leaseFailureLogInterval {
+		return
+	}
+	b.lastLeaseFailureLog = now
+	slog.Warn("session budgets cannot be shared: this PDP is counting sessions on its own until the store answers",
+		"error", err)
+}
+
+// block is how many tokens are taken from the shared store at once: about a
+// second's worth, and never more than the bucket holds.
+func (b *sessionBudgets) block() int {
+	return max(1, int(min(math.Ceil(b.perSecond), b.burst)))
+}
+
+// bucket returns session's bucket, making a full one if it has none.
+func (b *sessionBudgets) bucket(session uuid.UUID, now time.Time) *sessionBucket {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sweep(now)
+	s := b.sessions[session]
+	if s == nil {
+		if b.sessions == nil {
+			b.sessions = map[uuid.UUID]*sessionBucket{}
+		}
+		s = &sessionBucket{tokens: b.burst, last: now}
+		b.sessions[session] = s
+	}
+	return s
+}
+
+// sweep forgets sessions with nothing left to say: idle for as long as a
+// bucket takes to fill, and no refusals waiting to be reported. Tokens such a
+// session still held from the shared store go with it. Called with mu held.
 func (b *sessionBudgets) sweep(now time.Time) {
 	if now.Sub(b.lastSweep) < budgetSweepInterval {
 		return
@@ -101,10 +206,23 @@ func (b *sessionBudgets) sweep(now time.Time) {
 	b.lastSweep = now
 	full := time.Duration(b.burst / b.perSecond * float64(time.Second))
 	for id, s := range b.sessions {
-		if s.refused == 0 && now.Sub(s.last) >= full {
+		// A bucket in use right now is not idle.
+		if !s.mu.TryLock() {
+			continue
+		}
+		idle := s.refused == 0 && now.Sub(s.last) >= full
+		s.mu.Unlock()
+		if idle {
 			delete(b.sessions, id)
 		}
 	}
+}
+
+// WithSessionBudgetStore has every PDP that shares st share one budget for
+// each session. Without it this process counts on its own.
+func (s *Server) WithSessionBudgetStore(st SessionBudgetStore) *Server {
+	s.budgets.shared = st
+	return s
 }
 
 // withinBudget counts one call against session and reports whether it may go
@@ -113,7 +231,7 @@ func (b *sessionBudgets) sweep(now time.Time) {
 func (s *Server) withinBudget(
 	ctx context.Context, session, delegationID uuid.UUID, agentID *uuid.UUID, actor string, now time.Time,
 ) bool {
-	ok, report := s.budgets.take(session, now)
+	ok, report := s.budgets.take(ctx, session, now)
 	if report == 0 {
 		return ok
 	}

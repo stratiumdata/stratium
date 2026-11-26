@@ -45,3 +45,15 @@ func TestSweepSessions_StopsAtAFailure(t *testing.T) {
 		t.Fatalf("sweepSessions() = %d, %v after %d batches; want %d and the failure after 2", total, err, calls, sessionReapBatch)
 	}
 }
+
+func TestBudgetIdleTime(t *testing.T) {
+	// The default budget fills in five seconds: the hour is the floor.
+	if got := budgetIdleTime(20, 100); got != time.Hour {
+		t.Errorf("budgetIdleTime(20, 100) = %s, want 1h", got)
+	}
+	// A bucket that takes a day to fill is kept a day, or deleting its row
+	// would hand the session a full budget early.
+	if got := budgetIdleTime(1.0/864, 100); got < 23*time.Hour || got > 25*time.Hour {
+		t.Errorf("budgetIdleTime for a bucket that fills in a day = %s, want about 24h", got)
+	}
+}
