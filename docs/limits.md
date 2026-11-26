@@ -89,6 +89,12 @@ See [Concepts](concepts.md) and
 ## Approvals need a person
 
 - **One approval covers one call**, bound to its exact input.
+- **The approver does not see the command.** An approval request shows the
+  tool, the kind of action, its tier, who must approve and a digest of the
+  input. Raw tool inputs are never stored, so the console cannot show the
+  command itself. The person approving needs to know what the agent is doing
+  from the agent's own session; the digest proves the approval applies to
+  that one input and no other.
 - **Unattended runs have no one to approve.** Keep an overnight or CI agent's
   ceiling below the approval threshold, or expect it to stop there.
 
