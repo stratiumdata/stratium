@@ -13,6 +13,13 @@ session valid". Stratium asks a narrower question, every time:
 `Bash("ls -la")` and `Bash("rm -rf /")` are the same tool, agent, session and
 credentials. To Stratium they are different questions.
 
+![A Claude Code session. Asked to read a file labelled SECRET, the Read call is refused with the reason "resource classification SECRET exceeds delegation cap CONFIDENTIAL". Asked to run rm -rf build/, the Bash call waits on Stratium's hook for several seconds while a person approves it, then runs.](docs/assets/demo.gif)
+
+*A real Claude Code session against a local stack. The read is refused. The
+`rm -rf` waits until the person the agent is acting for approves it, then
+runs. The recording is cropped to leave out the terminal's status row and the
+account's plan name.*
+
 **📖 Documentation: [docs.stratium.dev](https://docs.stratium.dev)** ·
 [Quickstart](https://docs.stratium.dev/quickstart/) ·
 [Concepts](https://docs.stratium.dev/concepts/) ·
@@ -37,6 +44,11 @@ credentials. To Stratium they are different questions.
 - **Records every decision** in a tamper-evident audit chain.
 - **Denies when unsure.** An unreachable decision point, an unreadable
   session, an unlabelled resource under a cap: each is a denial.
+
+![The admin console's approvals screen, listing two pending requests: tool, tier, the person who must approve, and Approve and Deny buttons.](docs/assets/approvals.png)
+
+*A call above the threshold waits here. Only the person the agent is acting
+for can approve it.*
 
 Policies are written in [Cedar](https://www.cedarpolicy.com),
 [Rego](https://www.openpolicyagent.org/docs/latest/policy-language/), XACML or
