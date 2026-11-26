@@ -72,7 +72,7 @@ func TestIntegration_SessionBudget_IsSharedAcrossStoresOfOneTenant(t *testing.T)
 func TestIntegration_SessionBudget_TheRunningPDPDrawsOnTheSharedTable(t *testing.T) {
 	agentID := uuid.New()
 	seedAgent(t, configuredTenant, agentID, "session-budget-agent", models.TrustTierPlatformTrusted)
-	delegation := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierWrite, "shared budget proof")
+	delegation := singleHopDelegation(t, configuredTenant, agentID, models.ActionTierInternalModify, "shared budget proof")
 
 	if _, err := pdpClient.Decide(t.Context(), &pdpgrpc.DecideRequest{
 		Token:   mintToken(t, pdpClient, delegation.ID),
