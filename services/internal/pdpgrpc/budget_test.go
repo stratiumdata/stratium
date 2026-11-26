@@ -196,3 +196,26 @@ func TestReportToolUse_BoundToken_IsRefusedWithoutSpendingBudget(t *testing.T) {
 		t.Errorf("sessions charged = %d, want 0", n)
 	}
 }
+
+// ReportToolUse counts the call before it reads anything, so a caller over
+// its budget costs no store work.
+func TestReportToolUse_OverTheSessionBudget_ReadsNothing(t *testing.T) {
+	fs, _, delegationID := decideTokenFixture(t)
+	srv := budgetServer(fs)
+	req := &ReportToolUseRequest{Token: delegationID.String(), Tool: "Bash", RawInput: "{}"}
+	for range 2 {
+		_, _ = srv.ReportToolUse(context.Background(), req)
+	}
+	// The first refusal writes the one audit entry about refusals; after it,
+	// nothing.
+	_, _ = srv.ReportToolUse(context.Background(), req)
+	before := fs.calls
+	for range 5 {
+		if _, err := srv.ReportToolUse(context.Background(), req); status.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("over the budget: error = %v, want ResourceExhausted", err)
+		}
+	}
+	if got := fs.calls - before; got != 0 {
+		t.Errorf("store calls for 5 refused reports = %d, want 0", got)
+	}
+}

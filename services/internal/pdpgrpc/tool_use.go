@@ -61,16 +61,17 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 		return nil, status.Error(codes.PermissionDenied,
 			"token is bound to a key: tool-use reports are not accepted for a key-bound delegation")
 	}
+	// Counted after the refusal above, which reads nothing, so a copy of a
+	// key-bound token spends none of its owner's budget; and before the first
+	// store read, below, so no read goes uncounted.
+	if !s.withinBudget(ctx, session, delegationID, nil, budgetActor, time.Now()) {
+		return nil, status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
+	}
 	if err := s.requireDelegationKey(ctx, delegationID, jkt); err != nil {
 		if errors.Is(err, errDelegationBound) {
 			return nil, status.Errorf(codes.PermissionDenied, "token: %s", err)
 		}
 		return nil, status.Errorf(codes.Internal, "load delegation key: %s", err)
-	}
-	// Counted only now, after both refusals of a token that cannot show its
-	// key: a copy of such a token must not spend its owner's budget.
-	if !s.withinBudget(ctx, session, delegationID, nil, budgetActor, time.Now()) {
-		return nil, status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 
 	// Loaded for the audit row's agent, principal and chain position, and so

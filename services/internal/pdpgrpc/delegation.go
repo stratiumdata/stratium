@@ -472,6 +472,13 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 		return status.Error(codes.PermissionDenied,
 			"parent_token is bound to a key: a child cannot be created from a bound token")
 	}
+	// Delegating is a call by the parent's session like any other. Counted
+	// after the refusal above, which reads nothing, so a copy of a key-bound
+	// token spends none of its owner's budget; and before the first store
+	// read, below, so no read goes uncounted.
+	if !s.withinBudget(ctx, session, parentID, nil, budgetActor, time.Now()) {
+		return status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
+	}
 	// The parent's bearer token outlives a later binding of the parent, so
 	// the token being unbound is not enough: the parent itself must be.
 	if err := s.requireDelegationKey(ctx, parentID, jkt); err != nil {
@@ -480,12 +487,6 @@ func (s *Server) authorizeChild(ctx context.Context, parentToken string, parentI
 				"the parent delegation is bound to a key: a bound delegation cannot have children")
 		}
 		return status.Errorf(codes.Internal, "load delegation key: %s", err)
-	}
-	// Delegating is a call by the parent's session like any other. Counted
-	// only now, after both refusals of a token that cannot show its key: a
-	// copy of such a token must not spend its owner's budget.
-	if !s.withinBudget(ctx, session, parentID, nil, budgetActor, time.Now()) {
-		return status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 	return nil
 }
