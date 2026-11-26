@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ import (
 type testIdP struct {
 	server *httptest.Server
 	signer *rsa.PrivateKey // the key this IdP vouches for via its JWKS
+
+	// keyFetches counts requests for the JWKS.
+	keyFetches atomic.Int32
 }
 
 const testKeyID = "test-key-1"
@@ -69,6 +73,7 @@ func newTestIdP(t *testing.T) *testIdP {
 		})
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		idp.keyFetches.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		jwk := jose.JSONWebKey{Key: &idp.signer.PublicKey, KeyID: testKeyID, Algorithm: "RS256", Use: "sig"}
 		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}})
@@ -111,7 +116,7 @@ func mintToken(t *testing.T, signer *rsa.PrivateKey, kid string, claims jwt.MapC
 
 func TestNewVerifier_DiscoversProviderAndVerifiesValidToken(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v, want nil", err)
 	}
@@ -135,7 +140,7 @@ func TestNewVerifier_UnreachableIssuer_FailsFast(t *testing.T) {
 	idp := newTestIdP(t)
 	idp.server.Close() // the URL now refuses connections immediately
 
-	_, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 2*time.Second)
+	_, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 2*time.Second, 0)
 	if err == nil {
 		t.Fatal("NewVerifier() error = nil, want discovery against an unreachable issuer to fail startup")
 	}
@@ -151,7 +156,7 @@ func TestNewVerifier_UnreachableIssuer_FailsFast(t *testing.T) {
 
 func TestVerifier_ExpiredToken_Refused(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -166,7 +171,7 @@ func TestVerifier_ExpiredToken_Refused(t *testing.T) {
 
 func TestVerifier_WronglySignedToken_Refused(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -187,7 +192,7 @@ func TestVerifier_WronglySignedToken_Refused(t *testing.T) {
 
 func TestVerifier_WrongAudience_Refused(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -201,7 +206,7 @@ func TestVerifier_WrongAudience_Refused(t *testing.T) {
 
 func TestVerifier_WrongIssuer_Refused(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -216,7 +221,7 @@ func TestVerifier_WrongIssuer_Refused(t *testing.T) {
 
 func TestVerifier_MalformedToken_Refused(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -239,7 +244,7 @@ func TestVerifier_MalformedToken_Refused(t *testing.T) {
 // value -- this test is what would catch that swallow being removed.
 func TestVerifier_RefusalErrorNeverEchoesTokenClaims(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -266,7 +271,7 @@ func TestVerifier_RefusalErrorNeverEchoesTokenClaims(t *testing.T) {
 // token exchange for every IdP that serves it from a different host.
 func TestNewVerifier_CapturesTheDiscoveredBrowserEndpoints(t *testing.T) {
 	idp := newTestIdP(t)
-	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
 	}
@@ -277,5 +282,36 @@ func TestNewVerifier_CapturesTheDiscoveredBrowserEndpoints(t *testing.T) {
 		t.Errorf("BrowserEndpoints() = %v, want %v -- these come from the discovery document and "+
 			"nowhere else; without them the admin UI's connect-src cannot name the token endpoint's origin",
 			got, want)
+	}
+}
+
+// The PAP is wired to the spaced-out key fetch (principal.KeyFetchClient,
+// whose own test covers the behaviour in full): tokens that fail their
+// signature check do not each fetch the identity provider's keys.
+func TestVerifier_ForgedTokensDoNotEachFetchKeys(t *testing.T) {
+	idp := newTestIdP(t)
+	v, err := NewVerifier(context.Background(), idp.server.URL, "stratium-pap", 5*time.Second, time.Hour)
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := mintToken(t, idp.signer, testKeyID, idp.validClaims("stratium-pap"))
+	if _, err := v.Verify(context.Background(), good); err != nil {
+		t.Fatalf("a valid token: %v", err)
+	}
+	forged := mintToken(t, stranger, testKeyID, idp.validClaims("stratium-pap"))
+	for range 25 {
+		if _, err := v.Verify(context.Background(), forged); err == nil {
+			t.Fatal("a forged token verified")
+		}
+	}
+	if got := idp.keyFetches.Load(); got != 1 {
+		t.Errorf("key fetches = %d, want 1", got)
+	}
+	if _, err := v.Verify(context.Background(), good); err != nil {
+		t.Errorf("a valid token after the forged ones: %v, want it still accepted", err)
 	}
 }

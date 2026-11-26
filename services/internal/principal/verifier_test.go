@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 type fakeIssuer struct {
 	srv *httptest.Server
 	key *rsa.PrivateKey
+
+	// keyFetches counts requests for the JWKS.
+	keyFetches atomic.Int32
 }
 
 func newFakeIssuer(t *testing.T) *fakeIssuer {
@@ -38,6 +42,7 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 		})
 	})
 	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		f.keyFetches.Add(1)
 		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
 			{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"},
 		}})
@@ -64,7 +69,7 @@ func TestVerifier_Identify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := NewVerifier(context.Background(), iss.srv.URL, "stratium", "email", 5*time.Second)
+	v, err := NewVerifier(context.Background(), iss.srv.URL, "stratium", "email", 5*time.Second, time.Minute)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -111,11 +116,11 @@ func TestVerifier_Identify(t *testing.T) {
 }
 
 func TestNewVerifier_FailsAtStartupForAnUnreachableOrWrongIssuer(t *testing.T) {
-	if _, err := NewVerifier(context.Background(), "http://127.0.0.1:1/nope", "a", "email", time.Second); err == nil {
+	if _, err := NewVerifier(context.Background(), "http://127.0.0.1:1/nope", "a", "email", time.Second, 0); err == nil {
 		t.Error("unreachable issuer: want an error at construction")
 	}
 	iss := newFakeIssuer(t)
-	if _, err := NewVerifier(context.Background(), iss.srv.URL, "a", "", time.Second); err == nil {
+	if _, err := NewVerifier(context.Background(), iss.srv.URL, "a", "", time.Second, 0); err == nil {
 		t.Error("empty claim name: want an error")
 	}
 }
@@ -147,7 +152,7 @@ func TestIdentity(t *testing.T) {
 func TestVerifier_OutlivesTheContextItWasBuiltWith(t *testing.T) {
 	iss := newFakeIssuer(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	v, err := NewVerifier(ctx, iss.srv.URL, "stratium", "email", 5*time.Second)
+	v, err := NewVerifier(ctx, iss.srv.URL, "stratium", "email", 5*time.Second, time.Minute)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -171,5 +176,63 @@ func TestChangeableClaim(t *testing.T) {
 		if got := ChangeableClaim(claim); got != want {
 			t.Errorf("ChangeableClaim(%q) = %v, want %v", claim, got, want)
 		}
+	}
+}
+
+// A token that fails its signature check makes go-oidc fetch the issuer's
+// keys again, in case they rotated. Those fetches are spaced out, however
+// many such tokens arrive, and the keys already held keep working.
+func TestVerifier_KeyFetchesAreSpacedOut(t *testing.T) {
+	iss := newFakeIssuer(t)
+	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := func() jwt.MapClaims {
+		return jwt.MapClaims{
+			"iss": iss.srv.URL, "aud": "stratium", "sub": "u-1",
+			"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
+			"email": "alice@example.com", "email_verified": true,
+		}
+	}
+	identify := func(v *Verifier, key *rsa.PrivateKey) error {
+		_, err := v.Identify(context.Background(), iss.token(t, key, claims()))
+		return err
+	}
+
+	v, err := NewVerifier(context.Background(), iss.srv.URL, "stratium", "email", 5*time.Second, time.Hour)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	if err := identify(v, iss.key); err != nil {
+		t.Fatalf("a valid token: %v", err)
+	}
+	if got := iss.keyFetches.Load(); got != 1 {
+		t.Fatalf("key fetches after the first token = %d, want 1", got)
+	}
+	for range 25 {
+		if err := identify(v, stranger); !errors.Is(err, ErrNotIdentified) {
+			t.Fatalf("a token signed by an unpublished key: err = %v, want ErrNotIdentified", err)
+		}
+	}
+	if got := iss.keyFetches.Load(); got != 1 {
+		t.Errorf("key fetches after 25 forged tokens = %d, want still 1", got)
+	}
+	if err := identify(v, iss.key); err != nil {
+		t.Errorf("a valid token after the forged ones: %v, want it still accepted", err)
+	}
+
+	// Once the interval has passed, a failing token fetches again: this is
+	// how a rotated key is picked up.
+	quick, err := NewVerifier(context.Background(), iss.srv.URL, "stratium", "email", 5*time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	before := iss.keyFetches.Load()
+	_ = identify(quick, stranger)
+	time.Sleep(20 * time.Millisecond)
+	_ = identify(quick, stranger)
+	if got := iss.keyFetches.Load() - before; got != 2 {
+		t.Errorf("key fetches by two failures an interval apart = %d, want 2", got)
 	}
 }

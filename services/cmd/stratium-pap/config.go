@@ -47,6 +47,9 @@ type Config struct {
 	OIDCIssuer   string        // STRATIUM_PAP_OIDC_ISSUER (required)
 	OIDCAudience string        // STRATIUM_PAP_OIDC_AUDIENCE (required)
 	OIDCTimeout  time.Duration // STRATIUM_PAP_OIDC_TIMEOUT, default 5s
+	// OIDCKeyRefresh is the least time between two fetches of the identity
+	// provider's signing keys (principal.KeyFetchClient).
+	OIDCKeyRefresh time.Duration // STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL, default 30s
 
 	// OIDCClientID is the public client the admin UI authenticates as
 	// (Task 6). Served to the browser at GET /ui-config, never used by this
@@ -127,6 +130,11 @@ type Config struct {
 const defaultListenAddr = ":8080"
 const defaultOIDCScope = "openid profile email"
 const defaultOIDCTimeout = 5 * time.Second
+
+// defaultOIDCKeyRefresh is how long a newly rotated signing key can go
+// unrecognised at worst. Providers publish a new key well before signing
+// with it, so in practice the wait is not seen.
+const defaultOIDCKeyRefresh = 30 * time.Second
 const defaultDBTimeout = 5 * time.Second
 
 // defaultDBMaxOpenConns is half the PDP's default: the PAP serves people, not
@@ -148,6 +156,7 @@ func loadConfig() (Config, error) {
 	cfg := Config{
 		ListenAddr:     defaultListenAddr,
 		OIDCTimeout:    defaultOIDCTimeout,
+		OIDCKeyRefresh: defaultOIDCKeyRefresh,
 		OIDCScope:      defaultOIDCScope,
 		DBTimeout:      defaultDBTimeout,
 		DBMaxOpenConns: defaultDBMaxOpenConns,
@@ -205,6 +214,14 @@ func loadConfig() (Config, error) {
 		// and the resulting error would misdescribe a config mistake as an
 		// unreachable IdP.
 		return Config{}, fmt.Errorf("STRATIUM_PAP_OIDC_TIMEOUT must be positive, got %s", cfg.OIDCTimeout)
+	}
+
+	if v := os.Getenv("STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL must be a duration above zero, got %q", v)
+		}
+		cfg.OIDCKeyRefresh = d
 	}
 
 	if v := os.Getenv("STRATIUM_PAP_DB_TIMEOUT"); v != "" {

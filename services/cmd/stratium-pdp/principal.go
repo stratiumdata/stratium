@@ -26,7 +26,7 @@ func configurePrincipalAuth(logger *slog.Logger, cfg config.Config, srv *pdpgrpc
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PrincipalOIDCTimeout)
 	defer cancel()
 	v, err := principal.NewVerifier(ctx, cfg.PrincipalOIDCIssuer, cfg.PrincipalOIDCAudience,
-		cfg.PrincipalClaim, cfg.PrincipalOIDCTimeout)
+		cfg.PrincipalClaim, cfg.PrincipalOIDCTimeout, cfg.PrincipalOIDCKeyRefresh)
 	if err != nil {
 		return fmt.Errorf("principal authentication (STRATIUM_PRINCIPAL_OIDC_ISSUER): %w", err)
 	}

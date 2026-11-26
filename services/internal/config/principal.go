@@ -34,6 +34,14 @@ func loadPrincipalAuth(c *Config) error {
 		}
 		c.PrincipalOIDCTimeout = d
 	}
+	// How long a newly rotated signing key can go unrecognised at worst.
+	// Providers publish a new key well before signing with it, so in
+	// practice the wait is not seen.
+	var err error
+	if c.PrincipalOIDCKeyRefresh, err = positiveDuration(
+		"STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL", 30*time.Second); err != nil {
+		return err
+	}
 	if v := os.Getenv("STRATIUM_PRINCIPAL_AUTH_INSECURE"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {

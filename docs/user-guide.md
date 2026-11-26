@@ -359,6 +359,7 @@ Three rules run through all three binaries:
 | `STRATIUM_PRINCIPAL_OIDC_AUDIENCE` | unset | a client id | The audience a principal's token must be issued for. Must **not** be the PAP's `STRATIUM_PAP_OIDC_AUDIENCE`: see "Principal authentication" below. |
 | `STRATIUM_PRINCIPAL_CLAIM` | unset | a claim name, for example `email` | The token claim that names the person. With `email`, the token must also carry `email_verified: true`. Must be the same claim, from the same identity provider, as the PAP's `STRATIUM_PAP_APPROVER_CLAIM` (§4.4). Prefer an immutable, provider-verified claim. |
 | `STRATIUM_PRINCIPAL_OIDC_TIMEOUT` | `5s` | duration > 0 | Deadline for issuer discovery at startup and for the provider calls that verifying a token needs. |
+| `STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL` | `30s` | duration > 0 | Least time between two fetches of the identity provider's signing keys. The PDP fetches them again when a principal token's signature does not verify, which is how a rotated key is picked up; this spaces those fetches out however many such tokens arrive. A token signed with a key the PDP has not fetched yet is refused until the next fetch, so this is also the longest a newly rotated key can go unrecognised. |
 | `STRATIUM_PRINCIPAL_AUTH_INSECURE` | `false` | `true`, `false` | `true` turns principal verification off: the PDP believes the `subject` a caller sends. **Local development only**; the PDP logs a warning on every start. Setting it alongside any of the issuer, audience, or claim variables is a startup failure. |
 | `STRATIUM_MAX_DELEGATION_DEPTH` | `5` | integer ≥ 1 | Longest delegation chain permitted. A chain deeper than this denies. |
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
@@ -472,6 +473,7 @@ means an intended administrator is refused entirely.
 | `STRATIUM_PAP_LISTEN_ADDR` | `:8080` | The PAP serves plain HTTP. **Terminate TLS upstream** — an ingress or reverse proxy. This is the only internet-facing component. |
 | `STRATIUM_PAP_OIDC_SCOPE` | `openid profile email` | The scope string the UI requests. Add your IdP's group scope here if it needs one (Okta's `groups`, for instance). **Do not add `offline_access`** — it mints a refresh token, a longer-lived credential the browser has nowhere safe to keep. |
 | `STRATIUM_PAP_OIDC_TIMEOUT` | `5s` | Bounds **every** HTTP call the OIDC library makes for the life of the process, including background JWKS refreshes — not just the initial discovery. |
+| `STRATIUM_PAP_OIDC_KEY_REFRESH_INTERVAL` | `30s` | Least time between two fetches of the identity provider's signing keys; a duration above zero. Same meaning as the PDP's `STRATIUM_PRINCIPAL_OIDC_KEY_REFRESH_INTERVAL`: it is also the longest a newly rotated key can go unrecognised. |
 | `STRATIUM_PAP_DB_TIMEOUT` | `5s` | Database connect/ping deadline. |
 | `STRATIUM_PAP_DB_MAX_OPEN_CONNS` | `10` | Most database connections the PAP holds at once; an integer of at least 1. A request that needs one while all are in use waits. See `STRATIUM_DB_MAX_OPEN_CONNS` for how to size it against Postgres. |
 

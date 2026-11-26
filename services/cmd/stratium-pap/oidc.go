@@ -43,6 +43,8 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+
+	"github.com/stratiumdata/stratium/internal/principal"
 )
 
 // errTokenInvalid is the one error Verify ever returns for a rejected
@@ -90,24 +92,19 @@ func (v *Verifier) BrowserEndpoints() []string {
 // before the process serves a single request.
 //
 // timeout bounds every HTTP call go-oidc makes for the lifetime of the
-// returned Verifier -- not only this discovery request. oidc.ClientContext
-// stores the client on ctx; oidc.NewProvider captures ctx's client onto
-// the Provider it returns; and Provider.Verifier's own doc comment says
-// its remote key set "uses a background context for all requests to the
-// upstream JWKs endpoint" -- built, per go-oidc's own source
-// (oidc/jwks.go's newRemoteKeySet), from that captured client wrapped in
-// context.WithoutCancel, detached from any request's cancellation. A later
-// Verify call's context bounds how long THAT call waits on an in-flight
-// JWKS refresh (oidc/jwks.go's keysFromRemote selects on ctx.Done()), but
-// not the refresh's own HTTP round trip once started -- only this client's
-// Timeout does. Without it, one slow or hung IdP JWKS endpoint could leave
-// a fetch goroutine blocked indefinitely on an unrecognised kid, and
-// because RemoteKeySet runs only one refresh at a time (its own inflight
-// field), every subsequent verification of a token signed by a newly
-// rotated key would queue behind that stuck goroutine forever -- a key
-// rotation silently and permanently breaking verification, discoverable
-// only by restarting the process.
-func NewVerifier(ctx context.Context, issuer, audience string, timeout time.Duration) (*Verifier, error) {
+// returned Verifier -- not only this discovery request. Discovery uses a
+// client with that timeout; the key set, which fetches for as long as the
+// process runs, gets a second one with the same timeout (keyCtx below). A
+// later Verify call's context bounds how long THAT call waits on an in-flight
+// key fetch (oidc/jwks.go's keysFromRemote selects on ctx.Done()), but not
+// the fetch's own HTTP round trip once started -- only the client's Timeout
+// does. Without it, one slow or hung IdP JWKS endpoint could leave a fetch
+// goroutine blocked indefinitely, and because RemoteKeySet runs only one
+// fetch at a time (its own inflight field), every later verification of a
+// token signed by a newly rotated key would queue behind it forever.
+//
+// keyRefresh is the least time between two key fetches.
+func NewVerifier(ctx context.Context, issuer, audience string, timeout, keyRefresh time.Duration) (*Verifier, error) {
 	client := &http.Client{Timeout: timeout}
 	ctx = oidc.ClientContext(ctx, client)
 
@@ -132,8 +129,13 @@ func NewVerifier(ctx context.Context, issuer, audience string, timeout time.Dura
 	// deliberately delegated to a library. Its type is named nowhere here, so
 	// this does not add golang.org/x/oauth2 as a direct dependency.
 	endpoint := provider.Endpoint()
+	// The key set gets its own client: the same timeout, and fetches at least
+	// keyRefresh apart (principal.KeyFetchClient says why). Its context keeps
+	// ctx's values without its cancellation, since ctx is a startup context
+	// and keys are fetched for as long as the process runs.
+	keyCtx := oidc.ClientContext(context.WithoutCancel(ctx), principal.KeyFetchClient(timeout, keyRefresh))
 	return &Verifier{
-		inner:    provider.Verifier(&oidc.Config{ClientID: audience}),
+		inner:    provider.VerifierContext(keyCtx, &oidc.Config{ClientID: audience}),
 		authURL:  endpoint.AuthURL,
 		tokenURL: endpoint.TokenURL,
 	}, nil

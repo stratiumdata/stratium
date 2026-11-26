@@ -106,7 +106,7 @@ func run(logger *slog.Logger) error {
 	// separately after its own config.Load.
 	oidcCtx, oidcCancel := context.WithTimeout(context.Background(), cfg.OIDCTimeout)
 	defer oidcCancel()
-	verifier, err := NewVerifier(oidcCtx, cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCTimeout)
+	verifier, err := NewVerifier(oidcCtx, cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCTimeout, cfg.OIDCKeyRefresh)
 	if err != nil {
 		return fmt.Errorf("initialize OIDC verifier: %w", err)
 	}
