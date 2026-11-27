@@ -117,6 +117,11 @@ flowchart LR
     people -- "policies, approvals, revocation" --> pap
     people -. "sign in" .-> idp
     idp -. "identity" .-> pap
+
+    classDef plain fill:transparent,stroke:#d0d7de,stroke-width:1px
+    class agent,pep,tool,pdp,pap,db,people,idp plain
+    style beside fill:transparent,stroke:#d0d7de,stroke-dasharray:4 3
+    style yours fill:transparent,stroke:#d0d7de,stroke-dasharray:4 3
 ```
 
 The enforcement point forwards a tool call and enforces the answer. The
