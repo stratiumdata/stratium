@@ -21,6 +21,7 @@ runs. The recording is cropped to leave out the terminal's status row and the
 account's plan name.*
 
 **📖 Documentation: [docs.stratium.dev](https://docs.stratium.dev)** ·
+[Hosted demo](https://docs.stratium.dev/demo/) ·
 [Quickstart](https://docs.stratium.dev/quickstart/) ·
 [Concepts](https://docs.stratium.dev/concepts/) ·
 [What it does not stop](https://docs.stratium.dev/limits/)
