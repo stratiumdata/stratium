@@ -79,13 +79,35 @@ ok "signed-in demo user reads the admin API"
 ok "demo user is refused an admin-only call"
 
 # A signed-in visitor cannot change the shared account. Still holding the
-# sign-in session cookie, ask for each account action the way the UI could.
+# sign-in session cookie, ask for an account action every way Keycloak takes
+# one: in the query, in a POSTed form, inside a request object, and on a path
+# dressed up to slip past the proxy's matching.
+pkce="-d code_challenge_method=S256 -d code_challenge=$challenge"
 for act in UPDATE_PASSWORD UPDATE_PROFILE UPDATE_EMAIL CONFIGURE_TOTP delete_account; do
-	[ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' -d code_challenge_method=S256 -d "code_challenge=$challenge" -d "kc_action=$act")" = 404 ] ||
-		fail "kc_action=$act is routed to Keycloak"
+	[ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' $pkce -d "kc_action=$act")" = 404 ] || fail "kc_action=$act in the query is routed"
 done
-[ "$(status -b "$jar" "$realm/login-actions/required-action?execution=UPDATE_PASSWORD")" = 404 ] || fail "required-action is routed to Keycloak"
-ok "account actions on the shared login are not reachable"
+# 405, not 404: the admin plane answers it, and has that path for no method but GET's fallback.
+[ "$(status -b "$jar" -d client_id=stratium-pap -d response_type=code -d kc_action=UPDATE_PASSWORD \
+	--data-urlencode "redirect_uri=$redirect" $pkce "$realm/protocol/openid-connect/auth")" = 405 ] || fail "a POST to the sign-in endpoint is routed"
+[ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' $pkce -d request=e30.e30.)" = 404 ] || fail "a request object is routed"
+[ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' $pkce -d request_uri=https://example.com/r)" = 404 ] || fail "a request_uri is routed"
+for path in "/protocol/openid-connect/auth;kc_action=UPDATE_PASSWORD" "/protocol/openid-connect/auth%3Bx" \
+	"/login-actions/required-action?execution=UPDATE_PASSWORD" "/protocol/openid-connect/userinfo"; do
+	[ "$(status -b "$jar" --path-as-is "$realm$path")" = 404 ] || fail "$path is routed"
+done
+for path in "/resources/../realms/stratium/account/" "/resources/..%2frealms/stratium/account/" "/resources/%2e%2e/realms/stratium/account/"; do
+	[ "$(status -b "$jar" --path-as-is "$base$path")" != 200 ] || fail "$path reaches the account console"
+done
+ok "account actions on the shared login are not reachable through the proxy"
+
+# The control the proxy only backs up: no account action is enabled in the
+# realm at all. Read from Keycloak's own database, so local runs only.
+if [ "${1:-}" != --live ]; then
+	enabled="$(docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T postgres psql -U postgres -d keycloak -Atc \
+		"select count(*) from required_action_provider a join realm r on r.id = a.realm_id where r.name = 'stratium' and a.enabled")"
+	[ "$enabled" = 0 ] || fail "$enabled account action(s) enabled in the realm"
+	ok "no account action is enabled in the realm"
+fi
 
 # gRPC reaches the PDP: an empty Decide is answered by the PDP itself, with a
 # gRPC status, not by Caddy or the admin plane.

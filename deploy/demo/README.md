@@ -50,12 +50,16 @@ Postgres does not re-run its initialisation against an existing volume.
 
 ## What is and is not exposed
 
-| Path | Goes to |
+| Request | Goes to |
 |---|---|
 | gRPC (`Content-Type: application/grpc`) | the PDP |
-| `/realms/stratium/*`, `/resources/*` | Keycloak sign-in |
-| `/realms/stratium/account*`, `…/login-actions/required-action*`, any `kc_action` | not routed: a visitor must not change the shared login |
+| `GET` the realm's discovery document, signing keys, sign-in page and `/resources/*`; `POST` its token endpoint and sign-in form | Keycloak |
 | everything else | the admin plane |
+
+Keycloak is reached by allowlist, so its account console and every other
+endpoint are not routed. The shared login cannot be changed by a visitor
+because `realm.json` disables every account action in the realm; the
+allowlist is a second layer.
 
 Keycloak's admin console and master realm are not routed, and no Keycloak
 administrator account exists. Postgres publishes no port.
