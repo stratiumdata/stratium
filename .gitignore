@@ -57,3 +57,6 @@ __pycache__/
 
 # MkDocs build output
 /site/
+
+# deploy/demo — the hosted demo's signing key (its .env is covered above)
+/deploy/demo/secrets/

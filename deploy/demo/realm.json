@@ -1,0 +1,115 @@
+{
+  "realm": "stratium",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "requiredActions": [
+    { "alias": "UPDATE_PASSWORD", "name": "UPDATE_PASSWORD", "providerId": "UPDATE_PASSWORD", "enabled": false, "defaultAction": false, "priority": 10 },
+    { "alias": "UPDATE_PROFILE", "name": "UPDATE_PROFILE", "providerId": "UPDATE_PROFILE", "enabled": false, "defaultAction": false, "priority": 20 },
+    { "alias": "VERIFY_PROFILE", "name": "VERIFY_PROFILE", "providerId": "VERIFY_PROFILE", "enabled": false, "defaultAction": false, "priority": 30 },
+    { "alias": "UPDATE_EMAIL", "name": "UPDATE_EMAIL", "providerId": "UPDATE_EMAIL", "enabled": false, "defaultAction": false, "priority": 40 },
+    { "alias": "VERIFY_EMAIL", "name": "VERIFY_EMAIL", "providerId": "VERIFY_EMAIL", "enabled": false, "defaultAction": false, "priority": 50 },
+    { "alias": "CONFIGURE_TOTP", "name": "CONFIGURE_TOTP", "providerId": "CONFIGURE_TOTP", "enabled": false, "defaultAction": false, "priority": 60 },
+    { "alias": "CONFIGURE_RECOVERY_AUTHN_CODES", "name": "CONFIGURE_RECOVERY_AUTHN_CODES", "providerId": "CONFIGURE_RECOVERY_AUTHN_CODES", "enabled": false, "defaultAction": false, "priority": 70 },
+    { "alias": "webauthn-register", "name": "webauthn-register", "providerId": "webauthn-register", "enabled": false, "defaultAction": false, "priority": 80 },
+    { "alias": "webauthn-register-passwordless", "name": "webauthn-register-passwordless", "providerId": "webauthn-register-passwordless", "enabled": false, "defaultAction": false, "priority": 90 },
+    { "alias": "delete_account", "name": "delete_account", "providerId": "delete_account", "enabled": false, "defaultAction": false, "priority": 100 },
+    { "alias": "delete_credential", "name": "delete_credential", "providerId": "delete_credential", "enabled": false, "defaultAction": false, "priority": 110 },
+    { "alias": "idp_link", "name": "idp_link", "providerId": "idp_link", "enabled": false, "defaultAction": false, "priority": 120 },
+    { "alias": "update_user_locale", "name": "update_user_locale", "providerId": "update_user_locale", "enabled": false, "defaultAction": false, "priority": 130 },
+    { "alias": "TERMS_AND_CONDITIONS", "name": "TERMS_AND_CONDITIONS", "providerId": "TERMS_AND_CONDITIONS", "enabled": false, "defaultAction": false, "priority": 140 }
+  ],
+  "groups": [
+    { "name": "stratium-admins" },
+    { "name": "stratium-editors" },
+    { "name": "stratium-viewers" }
+  ],
+  "clients": [
+    {
+      "clientId": "stratium-pap",
+      "name": "Stratium admin plane",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://${DEMO_HOST}/callback.html"],
+      "webOrigins": ["https://${DEMO_HOST}"],
+      "attributes": { "pkce.code.challenge.method": "S256" },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "full.path": "false",
+            "claim.name": "groups",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "stratium-pap-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "stratium-pap",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "stratium-pdp",
+      "name": "Stratium sessions (principal tokens for the PDP)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "stratium-pdp-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "stratium-pdp",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "demo",
+      "email": "demo@example.com",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Visitor",
+      "enabled": true,
+      "groups": ["/stratium-editors"],
+      "credentials": [
+        { "type": "password", "value": "${DEMO_USER_PASSWORD}", "temporary": false }
+      ]
+    },
+    {
+      "username": "admin",
+      "email": "admin@example.com",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "enabled": true,
+      "groups": ["/stratium-admins"],
+      "credentials": [
+        { "type": "password", "value": "${DEMO_ADMIN_PASSWORD}", "temporary": false }
+      ]
+    }
+  ]
+}

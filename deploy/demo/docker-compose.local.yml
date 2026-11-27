@@ -1,0 +1,22 @@
+# Local smoke test only: `./smoke-test.sh` layers this over docker-compose.yml.
+# A public name can't get a real certificate on a laptop, so Caddy serves one
+# signed by a throwaway authority that the PDP and PAP are told to trust, and
+# the ports stay on loopback.
+services:
+  caddy:
+    environment:
+      DEMO_TLS: tls /certs/cert.pem /certs/key.pem
+    ports: !override
+      - "127.0.0.1:443:443"
+    volumes:
+      - ./secrets/local:/certs:ro
+  pdp:
+    environment:
+      SSL_CERT_FILE: /certs/ca.pem
+    volumes:
+      - ./secrets/local/ca.pem:/certs/ca.pem:ro
+  stratium-pap:
+    environment:
+      SSL_CERT_FILE: /certs/ca.pem
+    volumes:
+      - ./secrets/local/ca.pem:/certs/ca.pem:ro

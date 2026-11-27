@@ -1,0 +1,180 @@
+# The hosted demo: one tenant, reachable from the internet on port 443 only.
+# Four services from the test stack (Postgres, one PDP, one PAP, Keycloak)
+# plus Caddy, which holds the certificate and is the only published port.
+#
+# Deliberately a separate file from ../docker/docker-compose.yml, and a
+# separate compose project (the `name:` below): that file is the test rig
+# `make integration` and the quickstart own, with committed development
+# credentials, and nothing here may change how it behaves.
+#
+# Every secret comes from ./.env, which ./setup.sh generates and git ignores.
+# See README.md for how to bring this up on a fresh instance.
+name: stratium-demo
+
+x-common: &common
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  # Bounded, so a flood of requests can't fill the disk with logs.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  caddy:
+    <<: *common
+    image: caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    environment:
+      DEMO_HOST: ${DEMO_HOST:?run ./setup.sh}
+      DEMO_TLS: ${DEMO_TLS:-}
+    ports:
+      - "443:443"
+      # Port 80 only redirects to 443 and answers the certificate challenge.
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    networks:
+      default:
+        # The PDP and PAP verify tokens against the issuer's PUBLIC URL, the
+        # same one a browser uses. This alias makes that name resolve to
+        # Caddy inside the compose network, so the lookup never leaves the
+        # host and does not depend on the instance reaching its own public
+        # address.
+        aliases:
+          - ${DEMO_HOST:?run ./setup.sh}
+
+  postgres:
+    <<: *common
+    image: postgres:18@sha256:f5cbc081c25690710f3fc6f4c61a7565382bae01ca0d0f2028a53d7926b85a20
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./setup.sh}
+      POSTGRES_DB: postgres
+      STRATIUM_MIGRATE_DB_PASSWORD: ${STRATIUM_MIGRATE_DB_PASSWORD:?run ./setup.sh}
+      STRATIUM_DB_PASSWORD: ${STRATIUM_DB_PASSWORD:?run ./setup.sh}
+      STRATIUM_PAP_DB_PASSWORD: ${STRATIUM_PAP_DB_PASSWORD:?run ./setup.sh}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?run ./setup.sh}
+    volumes:
+      # The test stack's own role layout, reused unchanged so the two cannot
+      # drift. It creates the roles with the committed development passwords;
+      # 20-set-passwords.sql replaces every one of them in the same bootstrap
+      # run, before Postgres accepts a network connection.
+      - ../docker/init-db.sql:/docker-entrypoint-initdb.d/10-init-db.sql:ro
+      - ./set-passwords.sql:/docker-entrypoint-initdb.d/20-set-passwords.sql:ro
+      - pgdata:/var/lib/postgresql
+    # No `ports:`. Nothing outside the compose network reaches Postgres.
+    healthcheck:
+      # Over TCP, not the socket: see the same check in the test stack.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  keycloak:
+    <<: *common
+    image: quay.io/keycloak/keycloak:26.8@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    # `start`, not the test stack's `start-dev`. No bootstrap admin is set, so
+    # the master realm has no account anyone could sign in to; the realm below
+    # is the whole configuration, and a reset re-imports it.
+    command: ["start", "--import-realm"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?run ./setup.sh}
+      KC_HOSTNAME: https://${DEMO_HOST:?run ./setup.sh}
+      # Caddy terminates TLS and forwards plain HTTP inside the network.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      # Read by realm.json's ${...} placeholders at import.
+      DEMO_HOST: ${DEMO_HOST:?run ./setup.sh}
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?run ./setup.sh}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?run ./setup.sh}
+    volumes:
+      - ./realm.json:/opt/keycloak/data/import/realm.json:ro
+    healthcheck:
+      # The realm's discovery document, since that is what the PDP and PAP
+      # need at startup. The image has no curl; bash's /dev/tcp stands in.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /realms/stratium/.well-known/openid-configuration HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"issuer"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  pdp:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    cap_drop: [ALL]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+    environment:
+      STRATIUM_MIGRATION_DATABASE_URL: postgres://stratium_migrate:${STRATIUM_MIGRATE_DB_PASSWORD}@postgres:5432/stratium?sslmode=disable
+      STRATIUM_DATABASE_URL: postgres://stratium:${STRATIUM_DB_PASSWORD}@postgres:5432/stratium?sslmode=disable
+      STRATIUM_TENANT_ID: demo
+      STRATIUM_LISTEN_ADDR: :50051
+      # ponytail: plaintext between Caddy and the PDP, on this host's own
+      # bridge network only; clients always reach the PDP over Caddy's TLS.
+      # Give the PDP its own certificate (STRATIUM_TLS_CERT_FILE) if the two
+      # ever run on different hosts.
+      STRATIUM_GRPC_INSECURE: "true"
+      # Principals are verified: a session needs the person's own token.
+      STRATIUM_PRINCIPAL_OIDC_ISSUER: https://${DEMO_HOST}/realms/stratium
+      STRATIUM_PRINCIPAL_OIDC_AUDIENCE: stratium-pdp
+      STRATIUM_PRINCIPAL_CLAIM: email
+      # Mounted, not the key the image builds in: it survives a rebuild and
+      # exists nowhere but this host.
+      STRATIUM_TOKEN_SIGNING_KEY_PATH: /run/stratium/signing.pem
+      STRATIUM_DPOP_FRESHNESS_WINDOW: 30s
+    volumes:
+      - ./secrets/signing.pem:/run/stratium/signing.pem:ro
+
+  stratium-pap:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.pap
+    cap_drop: [ALL]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+      # The PDP runs the migrations; the PAP only reads the schema they made.
+      pdp:
+        condition: service_started
+    environment:
+      STRATIUM_PAP_TENANT_ID: demo
+      STRATIUM_PAP_DATABASE_URL: postgres://stratium_pap_login:${STRATIUM_PAP_DB_PASSWORD}@postgres:5432/stratium?sslmode=disable
+      STRATIUM_PAP_OIDC_ISSUER: https://${DEMO_HOST}/realms/stratium
+      STRATIUM_PAP_OIDC_AUDIENCE: stratium-pap
+      STRATIUM_PAP_OIDC_CLIENT_ID: stratium-pap
+      STRATIUM_PAP_ROLE_CLAIM: groups
+      STRATIUM_PAP_APPROVER_CLAIM: email
+      STRATIUM_PAP_ADMIN_GROUPS: stratium-admins
+      STRATIUM_PAP_EDITOR_GROUPS: stratium-editors
+      STRATIUM_PAP_VIEWER_GROUPS: stratium-viewers
+      STRATIUM_PAP_LISTEN_ADDR: :8080
+
+volumes:
+  pgdata:
+  caddy_data:

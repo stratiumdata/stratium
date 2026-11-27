@@ -1,0 +1,55 @@
+# One hostname, one certificate, three backends. Caddy obtains and renews the
+# certificate itself; DEMO_TLS is empty in production and set only by the
+# local smoke test, which has no public name to get a certificate for.
+{$DEMO_HOST} {
+	{$DEMO_TLS}
+
+	# The PDP: gRPC from every visitor's enforcement point.
+	@grpc header Content-Type application/grpc*
+	handle @grpc {
+		reverse_proxy h2c://pdp:50051
+	}
+
+	# Keycloak, by allowlist: exactly the requests sign-in makes, and nothing
+	# else of Keycloak's. The admin console, the master realm and the account
+	# console are therefore not routed.
+	#
+	# The demo login is shared, so nothing that changes an account may be
+	# reachable: one visitor changing its password, email or second factor
+	# would lock out or impersonate every other. realm.json is what prevents
+	# that, by disabling every account action in the realm. This allowlist is
+	# a second layer and not a substitute: it refuses the ways of asking for
+	# one (kc_action in the query, a POST to the sign-in endpoint carrying it
+	# in the body, a request object carrying it inside a token).
+	@kc_read {
+		method GET
+		path /resources/* /realms/stratium/.well-known/openid-configuration /realms/stratium/protocol/openid-connect/certs
+	}
+	# The sign-in page takes only the parameters the admin UI sends, matched
+	# against the raw query string. Naming what is allowed, instead of what is
+	# not, means a query this proxy and Keycloak would read differently (an
+	# encoded parameter name, a ';', a bad escape) is refused, not passed on.
+	@kc_signin {
+		method GET
+		path /realms/stratium/protocol/openid-connect/auth
+		expression `{http.request.uri.query}.matches('^((response_type|client_id|redirect_uri|scope|state|code_challenge|code_challenge_method|audience)=[A-Za-z0-9_.~*%+-]*(&|$))+$')`
+	}
+	@kc_post {
+		method POST
+		path /realms/stratium/protocol/openid-connect/token /realms/stratium/login-actions/authenticate
+	}
+	handle @kc_read {
+		reverse_proxy keycloak:8080
+	}
+	handle @kc_signin {
+		reverse_proxy keycloak:8080
+	}
+	handle @kc_post {
+		reverse_proxy keycloak:8080
+	}
+
+	# Everything else is the admin plane and its embedded UI.
+	handle {
+		reverse_proxy stratium-pap:8080
+	}
+}

@@ -19,6 +19,7 @@ session valid". Stratium asks a much narrower question, every time:
 credentials. To Stratium they are different questions.
 
 [Get started](quickstart.md){ .md-button .md-button--primary }
+[Try the hosted demo](demo.md){ .md-button }
 [Read the concepts](concepts.md){ .md-button }
 [GitHub](https://github.com/stratiumdata/stratium){ .md-button }
 
@@ -63,8 +64,8 @@ classification itself. The test for any change:
     From a fresh clone to a coding agent whose tool calls are authorized,
     with one script.
 
-    [Quickstart](quickstart.md) · [A default posture](default-posture.md) ·
-    [What it does not stop](limits.md)
+    [Try the hosted demo](demo.md) · [Quickstart](quickstart.md) ·
+    [A default posture](default-posture.md) · [What it does not stop](limits.md)
 
 -   :material-lightbulb-on: **Understand it**
 
