@@ -89,6 +89,10 @@ done
 # 405, not 404: the admin plane answers it, and has that path for no method but GET's fallback.
 [ "$(status -b "$jar" -d client_id=stratium-pap -d response_type=code -d kc_action=UPDATE_PASSWORD \
 	--data-urlencode "redirect_uri=$redirect" $pkce "$realm/protocol/openid-connect/auth")" = 405 ] || fail "a POST to the sign-in endpoint is routed"
+# Queries the proxy and Keycloak could read differently.
+for extra in 'kc%5Faction=UPDATE_PASSWORD' '%6bc_action=UPDATE_PASSWORD' 'x=a;kc_action=UPDATE_PASSWORD' 'kc_action=UPDATE_PASSWORD&x=%zz' 'x=1'; do
+	[ "$(status -b "$jar" "$realm/protocol/openid-connect/auth?client_id=stratium-pap&response_type=code&$extra")" = 404 ] || fail "sign-in with '$extra' is routed"
+done
 [ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' $pkce -d request=e30.e30.)" = 404 ] || fail "a request object is routed"
 [ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' $pkce -d request_uri=https://example.com/r)" = 404 ] || fail "a request_uri is routed"
 for path in "/protocol/openid-connect/auth;kc_action=UPDATE_PASSWORD" "/protocol/openid-connect/auth%3Bx" \

@@ -25,12 +25,14 @@
 		method GET
 		path /resources/* /realms/stratium/.well-known/openid-configuration /realms/stratium/protocol/openid-connect/certs
 	}
+	# The sign-in page takes only the parameters the admin UI sends, matched
+	# against the raw query string. Naming what is allowed, instead of what is
+	# not, means a query this proxy and Keycloak would read differently (an
+	# encoded parameter name, a ';', a bad escape) is refused, not passed on.
 	@kc_signin {
 		method GET
 		path /realms/stratium/protocol/openid-connect/auth
-		not query kc_action=*
-		not query request=*
-		not query request_uri=*
+		expression `{http.request.uri.query}.matches('^((response_type|client_id|redirect_uri|scope|state|code_challenge|code_challenge_method)=[A-Za-z0-9_.~*%+-]*(&|$))+$')`
 	}
 	@kc_post {
 		method POST
