@@ -90,6 +90,7 @@ nav:
       - Stop an agent now: journeys/stop-an-agent.md
       - Investigate what an agent did: journeys/investigate.md
   - Get started:
+      - Try the hosted demo: demo.md
       - Quickstart: quickstart.md
       - A default posture: default-posture.md
   - Operate:

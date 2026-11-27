@@ -33,6 +33,7 @@ scratch by a reset.
     cd deploy/demo
     ./setup.sh demo.example.com        # writes .env and secrets/signing.pem
     docker compose up -d --build --wait
+    ./seed.sh                          # the agent, policy and label rules docs/demo.md relies on
     ./smoke-test.sh --live
 
 `setup.sh` generates every password. The two a person needs are in `.env`:
@@ -41,9 +42,11 @@ scratch by a reset.
 
 ## Reset
 
-    docker compose down -v && docker compose up -d --wait
+    docker compose down -v && docker compose up -d --wait && ./seed.sh
 
-This drops every policy, agent and session, and re-imports the realm. Keep
+This drops every policy, agent and session, re-imports the realm, and puts
+back what `seed.sql` describes, which is the state the visitor walkthrough
+(`docs/demo.md`) assumes. Keep
 `.env`: the new database is initialised with the same passwords. If the first
 start fails partway through database initialisation, reset before retrying;
 Postgres does not re-run its initialisation against an existing volume.
