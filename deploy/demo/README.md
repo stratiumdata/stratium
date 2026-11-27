@@ -54,7 +54,7 @@ Postgres does not re-run its initialisation against an existing volume.
 |---|---|
 | gRPC (`Content-Type: application/grpc`) | the PDP |
 | `/realms/stratium/*`, `/resources/*` | Keycloak sign-in |
-| `/realms/stratium/account*` | not routed: a visitor must not change the shared password |
+| `/realms/stratium/account*`, `…/login-actions/required-action*`, any `kc_action` | not routed: a visitor must not change the shared login |
 | everything else | the admin plane |
 
 Keycloak's admin console and master realm are not routed, and no Keycloak

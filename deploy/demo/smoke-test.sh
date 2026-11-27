@@ -51,14 +51,25 @@ ok "demo user gets a principal token"
 
 # Browser sign-in, then the admin API with the resulting token.
 redirect="$base/callback.html"
-action="$(c -c "$jar" -G "$realm/protocol/openid-connect/auth" -d client_id=stratium-pap -d response_type=code \
-	--data-urlencode 'scope=openid profile email' --data-urlencode "redirect_uri=$redirect" |
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+verifier="$(openssl rand 32 | b64url)"
+challenge="$(printf %s "$verifier" | openssl dgst -sha256 -binary | b64url)"
+auth() { c -G "$realm/protocol/openid-connect/auth" -d client_id=stratium-pap -d response_type=code \
+	--data-urlencode 'scope=openid profile email' --data-urlencode "redirect_uri=$redirect" "$@"; }
+
+# Sign-in without a proof key is refused, as is a redirect anywhere but the UI's callback.
+auth -o /dev/null -w '%{http_code} %{redirect_url}' | grep -Eq '^400|error=invalid_request' || fail "sign-in without PKCE is accepted"
+[ "$(c -o /dev/null -w '%{http_code}' -G "$realm/protocol/openid-connect/auth" -d client_id=stratium-pap -d response_type=code \
+	--data-urlencode "redirect_uri=$base/elsewhere")" = 400 ] || fail "a redirect other than callback.html is accepted"
+ok "sign-in requires a proof key and the UI's own callback"
+
+action="$(auth -c "$jar" -d code_challenge_method=S256 -d "code_challenge=$challenge" |
 	sed -n 's/.*action="\([^"]*\)".*/\1/p' | head -1 | sed 's/&amp;/\&/g')"
 [ -n "$action" ] || fail "no sign-in form"
 code="$(c -b "$jar" -o /dev/null -w '%{redirect_url}' -d username=demo -d "password=$DEMO_USER_PASSWORD" "$action" |
 	sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')"
 [ -n "$code" ] || fail "sign-in did not return a code"
-token="$(c -d grant_type=authorization_code -d client_id=stratium-pap -d "code=$code" \
+token="$(c -d grant_type=authorization_code -d client_id=stratium-pap -d "code=$code" -d "code_verifier=$verifier" \
 	--data-urlencode "redirect_uri=$redirect" "$realm/protocol/openid-connect/token" |
 	sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
 [ -n "$token" ] || fail "no admin-plane token"
@@ -66,6 +77,15 @@ token="$(c -d grant_type=authorization_code -d client_id=stratium-pap -d "code=$
 ok "signed-in demo user reads the admin API"
 [ "$(status -X DELETE -H "Authorization: Bearer $token" "$base/v1/policies/none")" = 403 ] || fail "demo user is not refused an admin-only call"
 ok "demo user is refused an admin-only call"
+
+# A signed-in visitor cannot change the shared account. Still holding the
+# sign-in session cookie, ask for each account action the way the UI could.
+for act in UPDATE_PASSWORD UPDATE_PROFILE UPDATE_EMAIL CONFIGURE_TOTP delete_account; do
+	[ "$(auth -b "$jar" -o /dev/null -w '%{http_code}' -d code_challenge_method=S256 -d "code_challenge=$challenge" -d "kc_action=$act")" = 404 ] ||
+		fail "kc_action=$act is routed to Keycloak"
+done
+[ "$(status -b "$jar" "$realm/login-actions/required-action?execution=UPDATE_PASSWORD")" = 404 ] || fail "required-action is routed to Keycloak"
+ok "account actions on the shared login are not reachable"
 
 # gRPC reaches the PDP: an empty Decide is answered by the PDP itself, with a
 # gRPC status, not by Caddy or the admin plane.

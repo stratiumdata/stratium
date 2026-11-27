@@ -12,11 +12,18 @@
 
 	# Keycloak: sign-in for the demo realm and the static files its pages
 	# load, nothing else. The admin console and the master realm are not
-	# routed at all. Nor is the account console: the demo login is shared,
-	# and one visitor changing its password would lock out every other.
+	# routed at all.
+	#
+	# The demo login is shared, so nothing that changes an account may be
+	# reachable: one visitor changing its password, email or second factor
+	# would lock out or impersonate every other. That is the account console,
+	# and also the sign-in page's own account actions, which a signed-in user
+	# starts with a kc_action parameter. realm.json disables those actions
+	# too; either one alone would do.
 	@keycloak {
 		path /realms/stratium/* /resources/*
-		not path /realms/stratium/account*
+		not path /realms/stratium/account* /realms/stratium/login-actions/required-action*
+		not query kc_action=*
 	}
 	handle @keycloak {
 		reverse_proxy keycloak:8080

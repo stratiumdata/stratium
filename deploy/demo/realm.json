@@ -5,6 +5,17 @@
   "registrationAllowed": false,
   "resetPasswordAllowed": false,
   "editUsernameAllowed": false,
+  "requiredActions": [
+    { "alias": "UPDATE_PASSWORD", "name": "Update Password", "providerId": "UPDATE_PASSWORD", "enabled": false, "defaultAction": false, "priority": 10 },
+    { "alias": "UPDATE_PROFILE", "name": "Update Profile", "providerId": "UPDATE_PROFILE", "enabled": false, "defaultAction": false, "priority": 20 },
+    { "alias": "VERIFY_PROFILE", "name": "Verify Profile", "providerId": "VERIFY_PROFILE", "enabled": false, "defaultAction": false, "priority": 30 },
+    { "alias": "UPDATE_EMAIL", "name": "Update Email", "providerId": "UPDATE_EMAIL", "enabled": false, "defaultAction": false, "priority": 40 },
+    { "alias": "CONFIGURE_TOTP", "name": "Configure OTP", "providerId": "CONFIGURE_TOTP", "enabled": false, "defaultAction": false, "priority": 50 },
+    { "alias": "delete_account", "name": "Delete Account", "providerId": "delete_account", "enabled": false, "defaultAction": false, "priority": 60 },
+    { "alias": "delete_credential", "name": "Delete Credential", "providerId": "delete_credential", "enabled": false, "defaultAction": false, "priority": 70 },
+    { "alias": "webauthn-register", "name": "Webauthn Register", "providerId": "webauthn-register", "enabled": false, "defaultAction": false, "priority": 80 },
+    { "alias": "webauthn-register-passwordless", "name": "Webauthn Register Passwordless", "providerId": "webauthn-register-passwordless", "enabled": false, "defaultAction": false, "priority": 90 }
+  ],
   "groups": [
     { "name": "stratium-admins" },
     { "name": "stratium-editors" },
@@ -19,8 +30,9 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["https://${DEMO_HOST}/*"],
+      "redirectUris": ["https://${DEMO_HOST}/callback.html"],
       "webOrigins": ["https://${DEMO_HOST}"],
+      "attributes": { "pkce.code.challenge.method": "S256" },
       "protocolMappers": [
         {
           "name": "groups",
