@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/stratiumdata/stratium/internal/config"
+	"github.com/stratiumdata/stratium/internal/connlimit"
 	"github.com/stratiumdata/stratium/internal/pdpgrpc"
 	"github.com/stratiumdata/stratium/internal/policy"
 	"github.com/stratiumdata/stratium/internal/store"
@@ -42,8 +43,6 @@ import (
 // shutdownTimeout bounds GracefulStop. A connection that never finishes must
 // not prevent the process from exiting once a shutdown signal arrives.
 const shutdownTimeout = 10 * time.Second
-
-const maxCallsPerConnection = 256
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -157,6 +156,13 @@ func run(logger *slog.Logger) error {
 	reaperCtx, stopReaper := context.WithCancel(context.Background())
 	defer stopReaper()
 	go reapSpentProofs(reaperCtx, logger, repo.ReapSpentProofs, cfg.SpentProofReapInterval, cfg.DBTimeout)
+	// Old sessions go the same way: delegations and approvals that wholly
+	// expired longer ago than cfg.SessionRetention (session_reaper.go).
+	go reapSessions(reaperCtx, logger, repo.ReapExpiredSessions,
+		cfg.SessionRetention, cfg.SessionReapInterval, cfg.DBTimeout)
+	// And the budget rows of sessions that have gone quiet.
+	go reapSessionBudgets(reaperCtx, logger, repo.ReapSessionBudgets,
+		budgetIdleTime(cfg.SessionCallsPerSecond, cfg.SessionCallsBurst), cfg.SessionReapInterval, cfg.DBTimeout)
 
 	// policy.Multi is wired in with a real, non-empty registry (built above,
 	// from cfg.PolicyLanguages, before this process opened any network
@@ -200,6 +206,9 @@ func run(logger *slog.Logger) error {
 	// with a compiled set via PrepareAll, so repo and an engine no longer
 	// need to be passed to NewServer a second time raw.
 	srv := pdpgrpc.NewServer(repo, policy.NewMulti(repo, registry).WithEvalTimeout(cfg.PolicyEvalTimeout), cfg, signer)
+	// repo is also where each session's call budget is kept, so every PDP for
+	// this tenant draws on the same one (pdpgrpc/budget.go).
+	srv.WithSessionBudgetStore(repo)
 	if err := configurePrincipalAuth(logger, cfg, srv); err != nil {
 		return err
 	}
@@ -213,13 +222,15 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
+	// Under the TLS handshake, so a connection past a limit costs none.
+	lis = connlimit.Listen(lis, connlimit.Limits{Max: cfg.MaxConnections, MaxPerSource: cfg.MaxConnectionsPerIP})
 
-	// One connection may hold at most maxCallsPerConnection calls in flight,
-	// and one call may run at most cfg.RequestTimeout; grpc-go's own default
-	// for both is no limit. One request may be at most cfg.MaxRequestBytes.
-	grpcServer := grpc.NewServer(transport, grpc.MaxConcurrentStreams(maxCallsPerConnection),
+	// One call may run at most cfg.RequestTimeout, where grpc-go's own
+	// default is no limit, and one request may be at most cfg.MaxRequestBytes.
+	// connectionLimits (limits.go) bounds what one connection may hold open.
+	grpcServer := grpc.NewServer(append(connectionLimits(cfg), transport,
 		grpc.MaxRecvMsgSize(cfg.MaxRequestBytes),
-		grpc.UnaryInterceptor(requestDeadline(cfg.RequestTimeout)))
+		grpc.UnaryInterceptor(requestDeadline(cfg.RequestTimeout)))...)
 	pdpgrpc.RegisterPDPServiceServer(grpcServer, srv)
 
 	// The standard health service, nothing else registered alongside it: no

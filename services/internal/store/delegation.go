@@ -276,7 +276,19 @@ const listDelegationsQuery = `SELECT id, tenant_id, user_id, agent_id, approved_
 	`classification_caps, resource_constraints, purpose, expires_at, ` +
 	`created_at, revoked, revoked_at, parent_delegation_id, ` +
 	`root_delegation_id, depth, chain_agent_ids, escalate_at ` +
-	`FROM delegations ORDER BY created_at DESC, id`
+	`FROM delegations ` +
+	`WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1::timestamptz, $2::uuid)) ` +
+	`ORDER BY created_at DESC, id DESC LIMIT $3`
+
+// listActiveRootDelegationsQuery is one principal's live sessions: the root
+// delegations issued to them that are neither revoked nor expired.
+const listActiveRootDelegationsQuery = `SELECT id, tenant_id, user_id, agent_id, approved_tools, max_action_tier, ` +
+	`classification_caps, resource_constraints, purpose, expires_at, ` +
+	`created_at, revoked, revoked_at, parent_delegation_id, ` +
+	`root_delegation_id, depth, chain_agent_ids, escalate_at ` +
+	`FROM delegations ` +
+	`WHERE user_id = $1 AND parent_delegation_id IS NULL AND revoked = false AND expires_at > $2 ` +
+	`ORDER BY created_at DESC, id DESC LIMIT $3`
 
 // ListDelegations loads every delegation the tenant has, newest first,
 // revoked and expired ones included. A tenant with none is an ordinary, empty
@@ -284,20 +296,69 @@ const listDelegationsQuery = `SELECT id, tenant_id, user_id, agent_id, approved_
 //
 // No WHERE tenant_id: RLS via beginTenantTx is the only tenant boundary, as
 // everywhere else in this package. Not audited: N4 covers writes.
-func (s *Store) ListDelegations(ctx context.Context) ([]models.Delegation, error) {
+func (s *Store) ListDelegations(ctx context.Context, before *ListCursor, limit int) ([]models.Delegation, *ListCursor, error) {
+	limit = clampListLimit(limit)
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, listDelegationsQuery)
+	at, id := cursorArgs(before)
+	// One more than the page, to learn whether there is a next one.
+	rows, err := tx.QueryContext(ctx, listDelegationsQuery, at, id, int64(limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("store: list delegations: %w", err)
+		return nil, nil, fmt.Errorf("store: list delegations: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	delegations, err := collectDelegations(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("store: commit: %w", err)
+	}
 
-	// make, not var — see ListApprovals's own comment: [] not null.
+	var next *ListCursor
+	if len(delegations) > limit {
+		delegations = delegations[:limit]
+		last := delegations[limit-1]
+		next = &ListCursor{At: last.CreatedAt, ID: last.ID}
+	}
+	return delegations, next, nil
+}
+
+// ListActiveRootDelegations returns up to limit of principal's live sessions,
+// newest first, and whether there were more than that.
+func (s *Store) ListActiveRootDelegations(
+	ctx context.Context, principal string, now time.Time, limit int,
+) (delegations []models.Delegation, more bool, err error) {
+	tx, err := s.beginTenantTx(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, listActiveRootDelegationsQuery, principal, now, int64(limit+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("store: list active root delegations: %w", err)
+	}
+	delegations, err = collectDelegations(rows)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("store: commit: %w", err)
+	}
+	if len(delegations) > limit {
+		return delegations[:limit], true, nil
+	}
+	return delegations, false, nil
+}
+
+// collectDelegations scans every row of a delegation query and closes rows.
+// The result is never nil, so an empty list marshals as [].
+func collectDelegations(rows *sql.Rows) ([]models.Delegation, error) {
+	defer func() { _ = rows.Close() }()
 	delegations := make([]models.Delegation, 0)
 	for rows.Next() {
 		d, err := scanDelegation(rows)
@@ -308,10 +369,6 @@ func (s *Store) ListDelegations(ctx context.Context) ([]models.Delegation, error
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate delegation rows: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: commit: %w", err)
 	}
 	return delegations, nil
 }

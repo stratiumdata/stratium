@@ -365,13 +365,22 @@ Three rules run through all three binaries:
 | `STRATIUM_DB_TIMEOUT` | `5s` | duration > 0 | Database connect/ping deadline. |
 | `STRATIUM_DB_MAX_OPEN_CONNS` | `20` | integer ≥ 1 | Most database connections this PDP holds at once. A call that needs one while all are in use waits for it until the caller's own deadline. Add up this value for every PDP, plus `STRATIUM_PAP_DB_MAX_OPEN_CONNS` for every PAP, and keep the total under Postgres's `max_connections` (100 unless you changed it). |
 | `STRATIUM_APPROVAL_TTL` | `24h` | duration > 0 | How long an approval stays valid, from the moment it is requested: the time a person has to answer, plus the time the agent has to use the answer. An approval allows one call. |
+| `STRATIUM_MAX_PENDING_APPROVALS` | `20` | integer ≥ 1 | Most approvals one session may have waiting for an answer at once. A session is a root delegation and every delegation made under it, since all of their approvals go to the same person. A call that would need one more is denied, and the denial says so; the session can ask again once an approval is answered or expires. Asking again for a call that already has an approval waiting does not count: the PDP returns that approval. |
 | `STRATIUM_MAX_DELEGATION_TTL` | `24h` | duration > 0 | Longest lifetime a delegation may be created with. `CreateDelegation` refuses a longer `ttl_seconds` and names this maximum. Raise it if your sessions legitimately run longer. |
 | `STRATIUM_POLICY_EVAL_TIMEOUT` | `2s` | duration > 0 | Deadline on one evaluation of the tenant's policies. A policy still running at the deadline is stopped and the call is denied. |
-| `STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND` | `5` | number > 0 | How many audit rows a second `Decide` writes for calls whose token does not authenticate. A call past this rate and the burst below is still denied; it is logged instead of audited, and the next such row says how many were left out. Fractions are accepted (`0.5` is one row every two seconds). Counted per PDP process. |
+| `STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND` | `5` | number > 0 | How many audit rows a second `Decide` writes for calls whose token does not authenticate. A call past this rate and the burst below is still denied; it is logged instead of audited, and the next such row says how many were left out. Fractions are accepted (`0.5` is one row every two seconds). Counted per PDP process: with several PDPs for one tenant the tenant-wide ceiling is this rate times their number. |
 | `STRATIUM_FAILED_TOKEN_AUDIT_BURST` | `20` | integer ≥ 1 | How many of those rows may be written at once before the per-second rate applies. |
+| `STRATIUM_SESSION_CALLS_PER_SECOND` | `20` | number > 0 | How many calls a second one session may make to the PDP, sustained. A session is a root delegation and every delegation made under it, so a sub-agent draws on the same budget as the agent that delegated to it. Counted for `Decide`, `ReportToolUse` and creating a child delegation. A call past this rate and the burst below is refused before the PDP reads anything: `Decide` answers `DENY` and says so, the others fail with `RESOURCE_EXHAUSTED`. Refused calls are recorded as a `call_budget_exceeded` audit entry carrying their count, at most one entry a minute for each session. **The budget is shared by every PDP for the tenant**: it is kept in the database, and each PDP takes a session's calls from it about a second's worth at a time, so spreading calls across PDPs gains nothing. If a PDP cannot reach that table, calls are not failed for it: the PDP counts each session on its own, still at this rate, logs a warning, and goes back to the shared count when the database answers. |
+| `STRATIUM_SESSION_CALLS_BURST` | `100` | integer ≥ 1 | How many calls a session may make at once before the per-second rate applies. Raise both for a gateway that carries heavy traffic under one delegation. |
+| `STRATIUM_MAX_CONCURRENT_STREAMS` | `256` | integer ≥ 1 | Most calls one client connection may have in flight; one more waits for one of them to finish. |
+| `STRATIUM_MAX_CONNECTION_IDLE` | `5m` | duration > 0 | How long a client connection with no call in flight is kept before the PDP closes it; the client reconnects on its next call. The PDP also pings a quiet connection every minute and closes one that does not answer within 20 seconds, and closes a new connection that has not finished its handshake in 10 seconds. |
+| `STRATIUM_MAX_CONNECTIONS` | `10000` | integer ≥ 1 | Most client connections the PDP holds open at once. One more is closed as soon as it is accepted, before any TLS handshake, and the client retries. |
+| `STRATIUM_MAX_CONNECTIONS_PER_IP` | `100` | integer ≥ 1 | Most connections from one address: an IPv4 address, or an IPv6 /64. This is what stops one client taking every connection; the total above protects the PDP itself, not its availability, and the total divided by this is how many addresses it takes to fill it between them. This only tells clients apart when they connect directly. **Behind a load balancer that connects from its own addresses, every client is one address: set this as high as `STRATIUM_MAX_CONNECTIONS` and limit per client at the load balancer.** |
 | `STRATIUM_REQUEST_TIMEOUT` | `10s` | duration > 0 | Longest one call to the PDP may run, start to finish. A call still running then fails with `DEADLINE_EXCEEDED`, which a PEP treats as a denial. A caller's own shorter deadline still applies, so with the PEP's default `STRATIUM_PEP_CONNECT_TIMEOUT` of `5s` this only decides for a caller that set a longer deadline or none. Keep it above `STRATIUM_POLICY_EVAL_TIMEOUT`. |
 | `STRATIUM_MAX_REQUEST_BYTES` | `4194304` (4 MiB) | integer ≥ 1 | Largest request the PDP reads; a larger one is refused with `RESOURCE_EXHAUSTED`. This is what bounds `raw_input`, the tool call itself, so it must stay above the largest file an agent writes or patch it applies in one call. Every other request field has its own limit, listed under "Request field limits" below. |
 | `STRATIUM_SPENT_PROOF_REAP_INTERVAL` | `5m` | duration > 0 | How often the PDP sweeps its own tenant's expired `spent_proofs` rows. A longer interval cannot shorten replay protection — rows only become reapable once past the freshness window — it only delays cleanup. |
+| `STRATIUM_SESSION_RETENTION` | `2160h` (90 days) | duration > 0 | How long a session's rows are kept after the last of them expired. A session is a root delegation, the delegations made under it and their approvals; once every one of them expired longer ago than this, the PDP deletes them, and they no longer appear on the Delegations and Approvals screens or in `GET /v1/delegations` and `GET /v1/approvals`. **The audit log is not touched and keeps the whole history**, including a `sessions_reaped` entry for each sweep that deleted anything. A session with any part still live, or expired more recently than this, is left alone. Go durations have no day unit: write 30 days as `720h`. |
+| `STRATIUM_SESSION_REAP_INTERVAL` | `1h` | duration > 0 | How often the PDP looks for sessions past `STRATIUM_SESSION_RETENTION`. Each PDP sweeps its own tenant, as with spent proofs. |
 | `STRATIUM_POLICY_LANGUAGES` | `cedar,json,rego,xacml` | any comma-separated subset of those four | Which engines this PDP will evaluate. **A name with no matching engine is a startup failure.** A stray comma (`cedar,,rego`) is rejected rather than silently dropped. A tenant policy in a language this PDP does not run produces an honest deny naming the language — never a silent skip. |
 
 #### Request field limits
@@ -570,6 +579,11 @@ stratium-pep <hook|session-start|mcp|extauthz|proxy>
 | `STRATIUM_PEP_PROXY_LISTEN_ADDR` | proxy | `:9292` | Bind address. |
 | `STRATIUM_PEP_PROXY_TARGET_ADDR` | proxy | `payments.internal:50051` | The real gRPC service being fronted. |
 | `STRATIUM_PEP_PROXY_PUBLIC_URI` | proxy | `https://tools.example.com` | This proxy's own stable public identity, and the whole of a DPoP proof's `htu` authority. Deliberately **not** the target address (a proof for one target would replay at any other behind the same proxy), **not** the caller's `:authority`, and **not** the listen address (`:9292` carries no host at all). |
+| `STRATIUM_PEP_PROXY_MAX_STREAM_DURATION` | proxy | `1h` | Optional, default `1h`. Longest one proxied call may stay open; a call still open then ends with `DEADLINE_EXCEEDED` and the caller opens a new one. A call is decided once, when it opens, so this is also the longest a stream can go on after its delegation is revoked. Duration > 0. |
+| `STRATIUM_PEP_MAX_CONCURRENT_STREAMS` | extauthz, extmcp, proxy | `256` | Optional, default `256`. Most calls one client connection may have in flight on this listener; one more waits for one of them to finish. Integer ≥ 1. |
+| `STRATIUM_PEP_MAX_CONNECTION_IDLE` | extauthz, extmcp, proxy | `5m` | Optional, default `5m`. How long a client connection with no call in flight is kept before this listener closes it; the client reconnects on its next call. The listener also pings a quiet connection every minute and closes one that does not answer within 20 seconds, and closes a new connection that has not finished its handshake in 10 seconds. Duration > 0. |
+| `STRATIUM_PEP_MAX_CONNECTIONS` | extauthz, extmcp, proxy | `10000` | Optional, default `10000`. Most client connections this listener holds open at once. One more is closed as soon as it is accepted, and the client retries. Integer ≥ 1. |
+| `STRATIUM_PEP_MAX_CONNECTIONS_PER_IP` | extauthz, extmcp, proxy | `100` | Optional, default `100`. Most connections from one address: an IPv4 address, or an IPv6 /64. Behind a load balancer or gateway that connects from its own addresses, every client is one address: set this as high as `STRATIUM_PEP_MAX_CONNECTIONS`. Integer ≥ 1. |
 
 ---
 
@@ -895,10 +909,10 @@ why:
 | `GET /v1/tier-overrides/{id}` | viewer | fetch one override |
 | `PUT /v1/tier-overrides/{id}` | editor | full replace |
 | `DELETE /v1/tier-overrides/{id}` | **admin** | delete |
-| `GET /v1/approvals` | viewer | list approvals, every status |
+| `GET /v1/approvals` | viewer | list approvals, every status, newest first, a page at a time (see "Paged lists" below) |
 | `POST /v1/approvals/{id}/approve` | **admin** + identity | approve a pending escalation |
 | `POST /v1/approvals/{id}/deny` | **admin** + identity | deny it |
-| `GET /v1/delegations` | viewer | list delegations |
+| `GET /v1/delegations` | viewer | list delegations, newest first, a page at a time (see "Paged lists" below) |
 | `POST /v1/delegations/{id}/revoke` | **admin** | revoke a delegation |
 | `POST /v1/containment` | editor | does a candidate permission set allow anything a baseline forbids? Persists nothing |
 | `GET /v1/principals/{id}/effective` | viewer | the union of one principal's live root delegations |
@@ -918,6 +932,18 @@ why:
   over gRPC by `stratium-pep session-start`. Revoke is this table's sanctioned
   "delete" — it sets `revoked`/`revoked_at` rather than removing the row, so the
   audit trail stays intact.
+
+**Paged lists.** `GET /v1/approvals` and `GET /v1/delegations` return the newest rows first, 100 at a time. The body is a JSON array, as it always was.
+
+- `?limit=N` sets the page size. The most is 500; a larger value gets 500.
+- When there are older rows, the response has a `Link` header whose `rel="next"` URL is the next page. Request that URL as it is. A response with no such header is the last page.
+
+```bash
+curl -sD - -H "Authorization: Bearer $VIEWER" "http://$PAP/v1/delegations?limit=500" | grep -i '^link:'
+# link: </v1/delegations?before=2026-11-25T14%3A03%3A11.482Z~6d1f...&limit=500>; rel="next"
+```
+
+A script that read the whole list in one request now reads the newest 100 and must follow `Link` for the rest. The admin console does this itself. `GET /v1/principals/{id}/effective` counts at most a principal's newest 1,000 live sessions and says so in `imprecision` when there are more.
 
 ### 5.3 Common conventions
 
@@ -2151,6 +2177,25 @@ STRATIUM_PEP_EXTAUTHZ_ALLOWED_HOSTS=api.example.com,api.eu.example.com
 `deploy/docker/envoy.yaml` is the worked example. Catalog each endpoint as a
 "tool" and choose its `resource_field` deliberately — the PDP sees an HTTP
 request, not a tool call with named arguments.
+
+The example also shows the limits a listener in front of `stratium-pep`
+should have, each commented where it is set:
+
+- a cap on open connections, and on requests at once per connection;
+- how long a client has to send its headers and its request, how long a
+  stream may sit idle, and the longest any request may take;
+- a rate limit ahead of the `ext_authz` filter, so a flood is answered `429`
+  by Envoy and never becomes a call to `stratium-pep` or the PDP;
+- circuit breakers on each upstream, the `stratium-pep` cluster included.
+
+The numbers are starting points. Two things the example cannot decide for
+you, and says so in its header: the rate limit is one bucket for the whole
+listener, so limiting each client separately needs more configuration, and
+Envoy must be told how to read a client's address (`use_remote_address`,
+`xff_num_trusted_hops`) before any per-client limit means anything. The
+example's routes use `timeout: 0s` only because of how the integration tests
+check requests; in your own configuration a route `timeout` is the usual way
+to bound a request.
 
 **gRPC services:**
 

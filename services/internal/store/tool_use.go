@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // The audit_chain event_type values these queries read. EventTypeDecision is
@@ -50,19 +51,23 @@ func (s *Store) HasAllowDecision(ctx context.Context, delegationID uuid.UUID, to
 // ponytail: counts over the whole audit log on every list; if that gets slow,
 // add a partial index on (delegation_id) WHERE event_type = 'unmatched_tool_use'.
 const countUnmatchedToolUsesQuery = `SELECT delegation_id, COUNT(*) FROM audit_chain ` +
-	`WHERE event_type = 'unmatched_tool_use' AND delegation_id IS NOT NULL ` +
+	`WHERE event_type = 'unmatched_tool_use' AND delegation_id = ANY($1::uuid[]) ` +
 	`GROUP BY delegation_id`
 
 // CountUnmatchedToolUses returns, per delegation, how many reported tool
 // calls found no ALLOW decision. A delegation with none is absent from the map.
-func (s *Store) CountUnmatchedToolUses(ctx context.Context) (map[uuid.UUID]int, error) {
+func (s *Store) CountUnmatchedToolUses(ctx context.Context, delegationIDs []uuid.UUID) (map[uuid.UUID]int, error) {
 	tx, err := s.beginTenantTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, countUnmatchedToolUsesQuery)
+	ids := make([]string, len(delegationIDs))
+	for i, id := range delegationIDs {
+		ids[i] = id.String()
+	}
+	rows, err := tx.QueryContext(ctx, countUnmatchedToolUsesQuery, pq.Array(ids))
 	if err != nil {
 		return nil, fmt.Errorf("store: count unmatched tool uses: %w", err)
 	}

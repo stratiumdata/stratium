@@ -50,7 +50,7 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 	if err := overLong(bounded{"tool", req.GetTool(), s.cfg.Limits.ToolBytes}); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	delegationID, jkt, err := s.authenticateToken(req.GetToken())
+	delegationID, jkt, session, err := s.authenticateToken(req.GetToken())
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "token: %s", err)
 	}
@@ -60,6 +60,12 @@ func (s *Server) ReportToolUse(ctx context.Context, req *ReportToolUseRequest) (
 	if jkt != "" {
 		return nil, status.Error(codes.PermissionDenied,
 			"token is bound to a key: tool-use reports are not accepted for a key-bound delegation")
+	}
+	// Counted after the refusal above, which reads nothing, so a copy of a
+	// key-bound token spends none of its owner's budget; and before the first
+	// store read, below, so no read goes uncounted.
+	if !s.withinBudget(ctx, session, delegationID, nil, budgetActor, time.Now()) {
+		return nil, status.Error(codes.ResourceExhausted, s.errOverBudget().Error())
 	}
 	if err := s.requireDelegationKey(ctx, delegationID, jkt); err != nil {
 		if errors.Is(err, errDelegationBound) {

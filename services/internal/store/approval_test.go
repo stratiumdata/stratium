@@ -772,7 +772,7 @@ func TestStore_ListApprovals_ReturnsEveryStatus(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listApprovalsQuery)).WillReturnRows(rows)
 	mock.ExpectCommit()
 
-	got, err := s.ListApprovals(context.Background())
+	got, _, err := s.ListApprovals(context.Background(), nil, 0)
 	if err != nil {
 		t.Fatalf("ListApprovals() error = %v", err)
 	}
@@ -800,17 +800,31 @@ func TestStore_ListApprovals_ReturnsEveryStatus(t *testing.T) {
 // the check has to be on the query text. See internal/store's own package
 // doc: a second, divergent tenant check is worse than none.
 //
-// Asserted as "no WHERE clause at all," not "no tenant_id substring":
-// tenant_id is a SELECTED COLUMN in this query (models.Approval.TenantID is
-// populated from it), so a substring check would fail on the correct query.
-// This list is unconditional by design — every approval this tenant has —
-// so any WHERE appearing here is a filter someone added, tenant-shaped or
-// otherwise, and worth failing on.
+// Asserted on the WHERE clause alone, not the whole text: tenant_id is a
+// SELECTED COLUMN in this query (models.Approval.TenantID is populated from
+// it). The clause holds the page cursor and nothing else: no tenant, and no
+// status, because this list is every approval this tenant has.
 func TestStore_ListApprovals_QueryHasNoTenantPredicate(t *testing.T) {
-	if strings.Contains(strings.ToLower(listApprovalsQuery), "where") {
-		t.Errorf("listApprovalsQuery = %q, want no WHERE clause: RLS is the only tenant boundary and this list is unfiltered",
-			listApprovalsQuery)
+	where := listWhereClause(t, listApprovalsQuery)
+	for _, banned := range []string{"tenant", "status", "expires_at"} {
+		if strings.Contains(where, banned) {
+			t.Errorf("listApprovalsQuery filters on %q (%q): RLS is the only tenant boundary and this list is unfiltered",
+				banned, where)
+		}
 	}
+}
+
+// listWhereClause is the lower-cased text between a list query's WHERE and
+// its ORDER BY.
+func listWhereClause(t *testing.T, query string) string {
+	t.Helper()
+	q := strings.ToLower(query)
+	_, after, found := strings.Cut(q, " where ")
+	where, _, ordered := strings.Cut(after, " order by ")
+	if !found || !ordered {
+		t.Fatalf("query %q has no WHERE ... ORDER BY to inspect", query)
+	}
+	return where
 }
 
 // TestStore_ListApprovals_EmptyIsNotAnError pins the make([]T, 0) accumulator:
@@ -824,7 +838,7 @@ func TestStore_ListApprovals_EmptyIsNotAnError(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listApprovalsQuery)).WillReturnRows(sqlmock.NewRows(approvalColumns()))
 	mock.ExpectCommit()
 
-	got, err := s.ListApprovals(context.Background())
+	got, _, err := s.ListApprovals(context.Background(), nil, 0)
 	if err != nil {
 		t.Fatalf("ListApprovals() error = %v, want nil", err)
 	}
@@ -860,7 +874,87 @@ func TestStore_ListApprovals_ScanErrorAborts(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listApprovalsQuery)).WillReturnRows(rows)
 	mock.ExpectRollback()
 
-	if _, err := s.ListApprovals(context.Background()); err == nil {
+	if _, _, err := s.ListApprovals(context.Background(), nil, 0); err == nil {
 		t.Fatal("ListApprovals() error = nil for a row with a truncated input_digest, want an error")
 	}
+}
+
+// --- RequestApproval ---
+
+func expectApprovalRequestStart(mock sqlmock.Sqlmock, a *models.Approval, now time.Time) *sqlmock.ExpectedQuery {
+	mock.ExpectBegin()
+	expectSetTenant(mock)
+	mock.ExpectExec(regexp.QuoteMeta(approvalRequestLockQuery)).
+		WithArgs("approval-request:" + a.RootDelegationID.String()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	return mock.ExpectQuery(regexp.QuoteMeta(findPendingApprovalQuery)).
+		WithArgs(a.RootDelegationID.String(), a.DelegationID.String(), a.ToolName, a.Action,
+			int64(a.DerivedTier), a.InputDigest[:], now)
+}
+
+func TestStore_RequestApproval_NothingPending_Inserts(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+
+	expectApprovalRequestStart(mock, a, now).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(countPendingApprovalsQuery)).
+		WithArgs(a.RootDelegationID.String(), now).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	mock.ExpectExec(regexp.QuoteMeta(insertApprovalQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	id, err := s.RequestApproval(context.Background(), a, now, 3)
+	if err != nil || id != a.ID {
+		t.Fatalf("RequestApproval() = %s, %v; want the new approval %s", id, err, a.ID)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// Asking again for the same call returns the approval already waiting and
+// writes nothing, even when the session is at its maximum.
+func TestStore_RequestApproval_SameCallPending_ReturnsItAndInsertsNothing(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+	waiting := uuid.New()
+
+	expectApprovalRequestStart(mock, a, now).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(waiting.String()))
+	mock.ExpectCommit()
+
+	id, err := s.RequestApproval(context.Background(), a, now, 1)
+	if err != nil || id != waiting {
+		t.Fatalf("RequestApproval() = %s, %v; want the waiting approval %s", id, err, waiting)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+func TestStore_RequestApproval_AtTheMaximum_RefusesAndInsertsNothing(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+
+	expectApprovalRequestStart(mock, a, now).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(countPendingApprovalsQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	mock.ExpectRollback()
+
+	_, err := s.RequestApproval(context.Background(), a, now, 3)
+	if !errors.Is(err, ErrTooManyPendingApprovals) {
+		t.Fatalf("RequestApproval() error = %v, want ErrTooManyPendingApprovals", err)
+	}
+	assertExpectationsMet(t, mock)
+}
+
+// Zero is no maximum: nothing is counted.
+func TestStore_RequestApproval_NoMaximum_DoesNotCount(t *testing.T) {
+	s, mock := newMockStore(t)
+	a, now := minimalApproval(), time.Now()
+
+	expectApprovalRequestStart(mock, a, now).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec(regexp.QuoteMeta(insertApprovalQuery)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if _, err := s.RequestApproval(context.Background(), a, now, 0); err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	assertExpectationsMet(t, mock)
 }

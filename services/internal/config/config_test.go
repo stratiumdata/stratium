@@ -727,3 +727,151 @@ func TestLoad_PrincipalOIDCKeyRefresh(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_MaxPendingApprovals(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_PENDING_APPROVALS", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxPendingApprovals != 20 {
+		t.Errorf("default MaxPendingApprovals = %d, want 20", c.MaxPendingApprovals)
+	}
+
+	t.Setenv("STRATIUM_MAX_PENDING_APPROVALS", "5")
+	if c, err = Load(); err != nil || c.MaxPendingApprovals != 5 {
+		t.Errorf("Load() = %d, %v; want 5, nil", c.MaxPendingApprovals, err)
+	}
+
+	for _, bad := range []string{"0", "-1", "lots"} {
+		t.Setenv("STRATIUM_MAX_PENDING_APPROVALS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STRATIUM_MAX_PENDING_APPROVALS") {
+			t.Errorf("value %q: Load() error = %v, want one naming the variable", bad, err)
+		}
+	}
+}
+
+func TestLoad_SessionCallBudget(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_SESSION_CALLS_PER_SECOND", "")
+	t.Setenv("STRATIUM_SESSION_CALLS_BURST", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.SessionCallsPerSecond != 20 || c.SessionCallsBurst != 100 {
+		t.Errorf("defaults = %v a second, burst %d; want 20 and 100", c.SessionCallsPerSecond, c.SessionCallsBurst)
+	}
+
+	t.Setenv("STRATIUM_SESSION_CALLS_PER_SECOND", "2.5")
+	t.Setenv("STRATIUM_SESSION_CALLS_BURST", "7")
+	if c, err = Load(); err != nil || c.SessionCallsPerSecond != 2.5 || c.SessionCallsBurst != 7 {
+		t.Errorf("Load() = %v a second, burst %d, %v; want 2.5, 7, nil", c.SessionCallsPerSecond, c.SessionCallsBurst, err)
+	}
+
+	for _, bad := range [][2]string{
+		{"STRATIUM_SESSION_CALLS_PER_SECOND", "0"}, {"STRATIUM_SESSION_CALLS_PER_SECOND", "NaN"},
+		{"STRATIUM_SESSION_CALLS_PER_SECOND", "fast"}, {"STRATIUM_SESSION_CALLS_BURST", "0"},
+		{"STRATIUM_SESSION_CALLS_BURST", "1.5"},
+	} {
+		t.Setenv("STRATIUM_SESSION_CALLS_PER_SECOND", "")
+		t.Setenv("STRATIUM_SESSION_CALLS_BURST", "")
+		t.Setenv(bad[0], bad[1])
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), bad[0]) {
+			t.Errorf("%s=%q: Load() error = %v, want one naming it", bad[0], bad[1], err)
+		}
+	}
+}
+
+func TestLoad_ConnectionLimits(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_CONCURRENT_STREAMS", "")
+	t.Setenv("STRATIUM_MAX_CONNECTION_IDLE", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxConcurrentStreams != 256 || c.MaxConnectionIdle != 5*time.Minute {
+		t.Errorf("defaults = %d streams, idle %s; want 256 and 5m", c.MaxConcurrentStreams, c.MaxConnectionIdle)
+	}
+
+	t.Setenv("STRATIUM_MAX_CONCURRENT_STREAMS", "64")
+	t.Setenv("STRATIUM_MAX_CONNECTION_IDLE", "90s")
+	if c, err = Load(); err != nil || c.MaxConcurrentStreams != 64 || c.MaxConnectionIdle != 90*time.Second {
+		t.Errorf("Load() = %d streams, idle %s, %v; want 64, 90s, nil", c.MaxConcurrentStreams, c.MaxConnectionIdle, err)
+	}
+
+	for _, bad := range [][2]string{
+		{"STRATIUM_MAX_CONCURRENT_STREAMS", "0"}, {"STRATIUM_MAX_CONCURRENT_STREAMS", "-1"},
+		{"STRATIUM_MAX_CONCURRENT_STREAMS", "lots"}, {"STRATIUM_MAX_CONCURRENT_STREAMS", "5000000000"},
+		{"STRATIUM_MAX_CONNECTION_IDLE", "0s"}, {"STRATIUM_MAX_CONNECTION_IDLE", "soon"},
+	} {
+		t.Setenv("STRATIUM_MAX_CONCURRENT_STREAMS", "")
+		t.Setenv("STRATIUM_MAX_CONNECTION_IDLE", "")
+		t.Setenv(bad[0], bad[1])
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), bad[0]) {
+			t.Errorf("%s=%q: Load() error = %v, want one naming it", bad[0], bad[1], err)
+		}
+	}
+}
+
+func TestLoad_MaxConnections(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_MAX_CONNECTIONS", "")
+	t.Setenv("STRATIUM_MAX_CONNECTIONS_PER_IP", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.MaxConnections != 10000 || c.MaxConnectionsPerIP != 100 {
+		t.Errorf("defaults = %d in all, %d per address; want 10000 and 100", c.MaxConnections, c.MaxConnectionsPerIP)
+	}
+
+	t.Setenv("STRATIUM_MAX_CONNECTIONS", "500")
+	t.Setenv("STRATIUM_MAX_CONNECTIONS_PER_IP", "20")
+	if c, err = Load(); err != nil || c.MaxConnections != 500 || c.MaxConnectionsPerIP != 20 {
+		t.Errorf("Load() = %d, %d, %v; want 500, 20, nil", c.MaxConnections, c.MaxConnectionsPerIP, err)
+	}
+
+	for _, name := range []string{"STRATIUM_MAX_CONNECTIONS", "STRATIUM_MAX_CONNECTIONS_PER_IP"} {
+		for _, bad := range []string{"0", "-1", "many"} {
+			t.Setenv("STRATIUM_MAX_CONNECTIONS", "")
+			t.Setenv("STRATIUM_MAX_CONNECTIONS_PER_IP", "")
+			t.Setenv(name, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s=%q: Load() error = %v, want one naming it", name, bad, err)
+			}
+		}
+	}
+}
+
+func TestLoad_SessionRetention(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STRATIUM_SESSION_RETENTION", "")
+	t.Setenv("STRATIUM_SESSION_REAP_INTERVAL", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.SessionRetention != 90*24*time.Hour || c.SessionReapInterval != time.Hour {
+		t.Errorf("defaults = retention %s, interval %s; want 2160h and 1h", c.SessionRetention, c.SessionReapInterval)
+	}
+
+	t.Setenv("STRATIUM_SESSION_RETENTION", "720h")
+	t.Setenv("STRATIUM_SESSION_REAP_INTERVAL", "15m")
+	if c, err = Load(); err != nil || c.SessionRetention != 720*time.Hour || c.SessionReapInterval != 15*time.Minute {
+		t.Errorf("Load() = retention %s, interval %s, %v; want 720h, 15m, nil", c.SessionRetention, c.SessionReapInterval, err)
+	}
+
+	for _, name := range []string{"STRATIUM_SESSION_RETENTION", "STRATIUM_SESSION_REAP_INTERVAL"} {
+		for _, bad := range []string{"0s", "-1h", "90d"} {
+			t.Setenv("STRATIUM_SESSION_RETENTION", "")
+			t.Setenv("STRATIUM_SESSION_REAP_INTERVAL", "")
+			t.Setenv(name, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s=%q: Load() error = %v, want one naming it", name, bad, err)
+			}
+		}
+	}
+}

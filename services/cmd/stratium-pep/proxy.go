@@ -367,6 +367,13 @@ type proxyConfig struct {
 	// approval id on to the target (STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS).
 	// Off unless set: they are addressed to this proxy and the PDP.
 	ForwardCredentials bool
+
+	// MaxStreamDuration is the longest one proxied call may stay open
+	// (STRATIUM_PEP_PROXY_MAX_STREAM_DURATION, default 1h). A call is decided
+	// once, when it opens, so this is also the longest a stream can outlive a
+	// change to that decision, a revocation included. Zero, which the loader
+	// never produces, means no limit.
+	MaxStreamDuration time.Duration
 }
 
 // forwardCredentialsVar names the optional setting behind
@@ -435,12 +442,23 @@ func loadProxyConfigFromEnv() (proxyConfig, error) {
 		cfg.ForwardCredentials = forward
 	}
 
+	cfg.MaxStreamDuration = time.Hour
+	if v := os.Getenv(maxStreamDurationVar); v != "" {
+		d, err := requiredDuration(maxStreamDurationVar, v)
+		if err != nil {
+			return proxyConfig{}, err
+		}
+		cfg.MaxStreamDuration = d
+	}
+
 	return cfg, nil
 }
 
 // publicURIVar is the one variable name parsePublicURI's errors quote, named rather than repeated
 // so the string an operator greps for cannot drift between the read and the six refusals below.
 const publicURIVar = "STRATIUM_PEP_PROXY_PUBLIC_URI"
+
+const maxStreamDurationVar = "STRATIUM_PEP_PROXY_MAX_STREAM_DURATION"
 
 // parsePublicURI validates STRATIUM_PEP_PROXY_PUBLIC_URI -- already confirmed non-empty by
 // requiredEnv -- and returns the scheme-and-authority prefix decideRequestFromStream builds
@@ -554,11 +572,11 @@ type proxyServer struct {
 // found (see this task's report) before this function had a handler parameter to close it.
 // ForceServerCodec is what lets any of the three handlers receive a method this server has no
 // generated stub for at all.
-func newProxyGRPCServer(handler grpc.StreamHandler) *grpc.Server {
-	return grpc.NewServer(
+func newProxyGRPCServer(handler grpc.StreamHandler, opts ...grpc.ServerOption) *grpc.Server {
+	return grpc.NewServer(append([]grpc.ServerOption{
 		grpc.UnknownServiceHandler(handler),
 		grpc.ForceServerCodec(proxyCodec{}),
-	)
+	}, opts...)...)
 }
 
 // handleStream is the grpc.UnknownServiceHandler for every method this process ever receives --
@@ -1161,6 +1179,17 @@ func extractCredentialsFromMetadata(md metadata.MD) (token, proof, approvalID st
 func (p *proxyServer) forward(fullMethod string, serverStream grpc.ServerStream) error {
 	ctx, cancel := context.WithCancel(serverStream.Context())
 	defer cancel()
+	// The whole call, both directions, ends when it has run as long as a
+	// proxied call may. A timer here, not a deadline on ctx: a deadline would
+	// travel to the target, which would then end the call itself at the same
+	// moment, and which of the two the caller heard from would be a race.
+	// tooLong stays nil, and so never ready, when there is no limit.
+	var tooLong <-chan time.Time
+	if p.cfg.MaxStreamDuration > 0 {
+		timer := time.NewTimer(p.cfg.MaxStreamDuration)
+		defer timer.Stop()
+		tooLong = timer.C
+	}
 
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		out := md.Copy()
@@ -1206,6 +1235,11 @@ func (p *proxyServer) forward(fullMethod string, serverStream grpc.ServerStream)
 				return nil
 			}
 			return err
+		case <-tooLong:
+			cancel() // ends the target stream, and with it both relay goroutines
+			return status.Errorf(codes.DeadlineExceeded,
+				"stratium-pep: proxy: the call was ended because it ran longer than %s, the most this proxy allows one; open a new one",
+				p.cfg.MaxStreamDuration)
 		}
 	}
 	// Unreachable: the loop above always returns or continues, and a second continue on i==1
@@ -1309,6 +1343,11 @@ func runProxyCmd(stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
 		return 1
 	}
+	limits, err := loadListenerLimitsFromEnv()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "stratium-pep: %s\n", err)
+		return 1
+	}
 
 	// grpc.NewClient dials lazily -- the same non-blocking choice every other mode's PDP dial
 	// makes (runHookCmd, runMCPCmd, runExtauthzCmd) -- so this succeeding proves only that
@@ -1336,9 +1375,10 @@ func runProxyCmd(stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "stratium-pep: could not listen on %s: %s\n", cfg.ListenAddr, err)
 		return 1
 	}
+	lis = limits.listen(lis)
 
 	srv := &proxyServer{targetConn: targetConn, client: pdpgrpc.NewPDPServiceClient(pdpConn), cfg: cfg}
-	grpcServer := newProxyGRPCServer(srv.handleStream)
+	grpcServer := newProxyGRPCServer(srv.handleStream, limits.serverOptions()...)
 
 	// This process's own startup configuration, not request data -- see the package doc's NEVER
 	// LOG section, which this line does not touch. Logged once, the same way runExtauthzCmd logs

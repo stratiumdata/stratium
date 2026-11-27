@@ -89,6 +89,11 @@ func claimKeys(claims jwt.MapClaims) []string {
 // claimKeys' own sorted output.
 var identifyingClaimKeys = []string{expiryClaim, issuedAtClaim, tokenIDClaim, subjectClaim, tenantIDClaim}
 
+// mintedClaimKeys is what a token mintToken issues carries: the identifying
+// set and the session it belongs to (rootClaim). The session is another id,
+// not a scope: nothing about what a call may do is read from it.
+var mintedClaimKeys = []string{expiryClaim, issuedAtClaim, tokenIDClaim, rootClaim, subjectClaim, tenantIDClaim}
+
 // TestTokenClaims_CarriesExactlyTheIdentifyingFields is the direct,
 // narrowest-scope proof of K3: tokenClaims' output key set is EXACTLY the
 // five identifying fields, no more and no fewer. Exact-set comparison,

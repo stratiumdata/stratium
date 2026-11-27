@@ -46,6 +46,18 @@ type Config struct {
 	// what bounds raw_input, the tool call itself; every other field has a
 	// limit of its own (Limits, below). The default is grpc-go's.
 	MaxRequestBytes int // STRATIUM_MAX_REQUEST_BYTES, default 4194304 (4 MiB)
+	// MaxConcurrentStreams is the most calls one client connection may have
+	// in flight; one more waits for one of them to finish.
+	MaxConcurrentStreams uint32 // STRATIUM_MAX_CONCURRENT_STREAMS, default 256
+	// MaxConnectionIdle is how long a connection with no call in flight is
+	// kept before the PDP closes it. The client reconnects on its next call.
+	MaxConnectionIdle time.Duration // STRATIUM_MAX_CONNECTION_IDLE, default 5m
+	// MaxConnections is the most client connections the PDP holds open, and
+	// MaxConnectionsPerIP the most from one address (internal/connlimit). One
+	// past either is closed as soon as it is accepted. Zero, which Load never
+	// produces, means no limit.
+	MaxConnections      int // STRATIUM_MAX_CONNECTIONS, default 10000
+	MaxConnectionsPerIP int // STRATIUM_MAX_CONNECTIONS_PER_IP, default 100
 	// Limits is the longest each request field may be.
 	Limits RequestLimits
 	// How often Decide may write an audit row for a token that does not
@@ -54,6 +66,12 @@ type Config struct {
 	// zero burst, which Load never produces, means no cap.
 	FailedTokenAuditPerSecond float64 // STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND, default 5
 	FailedTokenAuditBurst     int     // STRATIUM_FAILED_TOKEN_AUDIT_BURST, default 20
+	// How fast one session, a root delegation and everything delegated
+	// under it, may call the PDP: a sustained rate and a burst above it. A
+	// call past both is refused before any store work (pdpgrpc/budget.go).
+	// A zero burst, which Load never produces, means no budget.
+	SessionCallsPerSecond float64 // STRATIUM_SESSION_CALLS_PER_SECOND, default 20
+	SessionCallsBurst     int     // STRATIUM_SESSION_CALLS_BURST, default 100
 
 	// gRPC transport (see tls.go). TLS is required unless GRPCInsecure is set.
 	TLSCertFile  string // STRATIUM_TLS_CERT_FILE, PEM certificate chain
@@ -97,6 +115,11 @@ type Config struct {
 	// deployment, unlike DatabaseURL/TenantID, where guessing is unsafe at
 	// any value.
 	ApprovalTTL time.Duration // STRATIUM_APPROVAL_TTL, default 24h
+	// MaxPendingApprovals is how many approvals one session, a root
+	// delegation and everything delegated under it, may have waiting for an
+	// answer at once. A call that would need one more is denied. Zero, which
+	// Load never produces, means no maximum.
+	MaxPendingApprovals int // STRATIUM_MAX_PENDING_APPROVALS, default 20
 
 	// DPoPFreshnessWindow is how far a DPoP proof's iat may sit from the PDP's
 	// own clock, in either direction, before internal/dpop.Verify refuses it as
@@ -145,6 +168,13 @@ type Config struct {
 	// is also making no decisions.
 	SpentProofReapInterval time.Duration // STRATIUM_SPENT_PROOF_REAP_INTERVAL, default 5m
 
+	// SessionRetention is how long a session's rows are kept after the last
+	// of them expired: the root delegation, the delegations made under it and
+	// their approvals. The PDP then deletes them; the audit chain keeps the
+	// history. SessionReapInterval is how often it looks.
+	SessionRetention    time.Duration // STRATIUM_SESSION_RETENTION, default 2160h (90 days)
+	SessionReapInterval time.Duration // STRATIUM_SESSION_REAP_INTERVAL, default 1h
+
 	// PolicyLanguages is the deployment's enabled set of policy engines —
 	// STRATIUM_POLICY_LANGUAGES, a comma-separated list, default every
 	// language this build ships (defaultPolicyLanguages below). Unlike
@@ -174,22 +204,32 @@ var defaultPolicyLanguages = []string{"cedar", "json", "rego", "xacml"}
 
 func Load() (Config, error) {
 	c := Config{
-		ListenAddr:        envOr("STRATIUM_LISTEN_ADDR", ":50051"),
-		MaxDepth:          5,
-		DBTimeout:         5 * time.Second,
-		DBMaxOpenConns:    20,
-		MaxDelegationTTL:  24 * time.Hour,
-		PolicyEvalTimeout: 2 * time.Second,
-		RequestTimeout:    10 * time.Second,
-		MaxRequestBytes:   4 << 20,
-		Limits:            DefaultRequestLimits(),
+		ListenAddr:           envOr("STRATIUM_LISTEN_ADDR", ":50051"),
+		MaxDepth:             5,
+		DBTimeout:            5 * time.Second,
+		DBMaxOpenConns:       20,
+		MaxDelegationTTL:     24 * time.Hour,
+		PolicyEvalTimeout:    2 * time.Second,
+		RequestTimeout:       10 * time.Second,
+		MaxRequestBytes:      4 << 20,
+		MaxConcurrentStreams: 256,
+		MaxConnectionIdle:    5 * time.Minute,
+		MaxConnections:       10000,
+		MaxConnectionsPerIP:  100,
+		Limits:               DefaultRequestLimits(),
 		// A PEP whose token expired presents it once and re-issues, so real
 		// traffic is a few of these per session.
 		FailedTokenAuditPerSecond: 5,
 		FailedTokenAuditBurst:     20,
-		ApprovalTTL:               24 * time.Hour,
-		SpentProofReapInterval:    5 * time.Minute,
-		PolicyLanguages:           defaultPolicyLanguages,
+		// An agent makes a few tool calls a second at most, each one or two
+		// calls here; the burst covers a batch of parallel ones.
+		SessionCallsPerSecond:  20,
+		SessionCallsBurst:      100,
+		ApprovalTTL:            24 * time.Hour,
+		SpentProofReapInterval: 5 * time.Minute,
+		SessionRetention:       90 * 24 * time.Hour,
+		SessionReapInterval:    time.Hour,
+		PolicyLanguages:        defaultPolicyLanguages,
 	}
 	var err error
 
@@ -254,6 +294,28 @@ func Load() (Config, error) {
 	// loaded, a deliberate and common choice outside a rotation window, not a
 	// missing required value.
 	c.TokenPreviousKeyPath = os.Getenv("STRATIUM_TOKEN_PREVIOUS_KEY_PATH")
+	if v := os.Getenv("STRATIUM_MAX_CONCURRENT_STREAMS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("STRATIUM_MAX_CONCURRENT_STREAMS must be an integer of at least 1, got %q", v)
+		}
+		c.MaxConcurrentStreams = uint32(n)
+	}
+	if c.MaxConnectionIdle, err = positiveDuration("STRATIUM_MAX_CONNECTION_IDLE", c.MaxConnectionIdle); err != nil {
+		return c, err
+	}
+	if c.MaxConnections, err = positiveInt("STRATIUM_MAX_CONNECTIONS", c.MaxConnections); err != nil {
+		return c, err
+	}
+	if c.MaxConnectionsPerIP, err = positiveInt("STRATIUM_MAX_CONNECTIONS_PER_IP", c.MaxConnectionsPerIP); err != nil {
+		return c, err
+	}
+	if c.SessionRetention, err = positiveDuration("STRATIUM_SESSION_RETENTION", c.SessionRetention); err != nil {
+		return c, err
+	}
+	if c.SessionReapInterval, err = positiveDuration("STRATIUM_SESSION_REAP_INTERVAL", c.SessionReapInterval); err != nil {
+		return c, err
+	}
 	if v := os.Getenv("STRATIUM_MAX_REQUEST_BYTES"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
@@ -278,6 +340,9 @@ func Load() (Config, error) {
 		if *l.dst, err = positiveInt(l.env, *l.dst); err != nil {
 			return c, err
 		}
+	}
+	if c.MaxPendingApprovals, err = positiveInt("STRATIUM_MAX_PENDING_APPROVALS", 20); err != nil {
+		return c, err
 	}
 	if v := os.Getenv("STRATIUM_DB_MAX_OPEN_CONNS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -308,13 +373,16 @@ func Load() (Config, error) {
 	if c.RequestTimeout, err = positiveDuration("STRATIUM_REQUEST_TIMEOUT", c.RequestTimeout); err != nil {
 		return c, err
 	}
-	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND"); v != "" {
-		r, err := strconv.ParseFloat(v, 64)
-		// The comparison is written so NaN fails it too.
-		if err != nil || !(r > 0) || math.IsInf(r, 0) {
-			return c, fmt.Errorf("STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND must be a number above zero, got %q", v)
-		}
-		c.FailedTokenAuditPerSecond = r
+	if c.FailedTokenAuditPerSecond, err = positiveFloat(
+		"STRATIUM_FAILED_TOKEN_AUDIT_PER_SECOND", c.FailedTokenAuditPerSecond); err != nil {
+		return c, err
+	}
+	if c.SessionCallsPerSecond, err = positiveFloat(
+		"STRATIUM_SESSION_CALLS_PER_SECOND", c.SessionCallsPerSecond); err != nil {
+		return c, err
+	}
+	if c.SessionCallsBurst, err = positiveInt("STRATIUM_SESSION_CALLS_BURST", c.SessionCallsBurst); err != nil {
+		return c, err
 	}
 	if v := os.Getenv("STRATIUM_FAILED_TOKEN_AUDIT_BURST"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -426,6 +494,21 @@ func DefaultRequestLimits() RequestLimits {
 		RequestedTools:  1024,
 		ResourceEntries: 64,
 	}
+}
+
+// positiveFloat reads the number setting k, falling back to def when it is
+// unset, and refuses a value that is not a finite number above zero.
+func positiveFloat(k string, def float64) (float64, error) {
+	v := os.Getenv(k)
+	if v == "" {
+		return def, nil
+	}
+	r, err := strconv.ParseFloat(v, 64)
+	// The comparison is written so NaN fails it too.
+	if err != nil || !(r > 0) || math.IsInf(r, 0) {
+		return 0, fmt.Errorf("%s must be a number above zero, got %q", k, v)
+	}
+	return r, nil
 }
 
 // positiveInt reads the integer setting k, falling back to def when it is

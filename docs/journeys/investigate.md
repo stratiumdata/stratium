@@ -41,6 +41,8 @@ reached the beginning.
 | `event_type=delegation_created` | when sessions and sub-agent delegations were issued, and the [approval threshold](require-approval.md) each one got (`action`: `escalate_at DESTRUCTIVE`, or `escalate_at none`) |
 | `event_type=containment` | edits that widened an agent's grant |
 | `event_type=unmatched_tool_use` | tool calls that ran with [no decision on record](../pep/hook.md#reporting-tool-calls) |
+| `event_type=call_budget_exceeded` | sessions that called the PDP faster than `STRATIUM_SESSION_CALLS_PER_SECOND` allows; the reason carries how many calls were refused |
+| `event_type=sessions_reaped` | sweeps that deleted old sessions' delegation and approval rows (`STRATIUM_SESSION_RETENTION`); the reason carries how many |
 | `agent_id=…` | one agent |
 | `limit=…` | page size, up to 500 |
 

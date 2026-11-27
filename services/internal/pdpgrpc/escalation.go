@@ -3,6 +3,7 @@ package pdpgrpc
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/stratiumdata/stratium/internal/authz"
+	"github.com/stratiumdata/stratium/internal/store"
 	"github.com/stratiumdata/stratium/pkg/models"
 )
 
@@ -76,7 +78,16 @@ func (s *Server) resolveEscalation(
 			InputDigest:      sha256.Sum256([]byte(action.RawInput)),
 			ExpiresAt:        now.Add(s.cfg.ApprovalTTL),
 		}
-		if err := s.store.CreateApproval(ctx, a); err != nil {
+		// An approval already waiting for this exact call is returned as it
+		// is, and a session at its maximum is denied: one agent asking over
+		// and over is one question to its approver, not a queue of them.
+		id, err := s.store.RequestApproval(ctx, a, now, s.cfg.MaxPendingApprovals)
+		if errors.Is(err, store.ErrTooManyPendingApprovals) {
+			return denyForApproval(result, fmt.Sprintf(
+				"this session already has %d approvals waiting for an answer, the most it may; "+
+					"it can ask again once one is answered or expires", s.cfg.MaxPendingApprovals)), "", nil
+		}
+		if err != nil {
 			// Matches appendAudit's own treatment of a failed durable write
 			// (server.go): a pending approval that failed to persist is a
 			// fact that did not happen, the same as an audit entry that
@@ -85,7 +96,7 @@ func (s *Server) resolveEscalation(
 			// row behind it to ever resolve.
 			return authz.Result{}, "", status.Errorf(codes.Internal, "create approval: %s", err)
 		}
-		return result, a.ID.String(), nil
+		return result, id.String(), nil
 	}
 
 	// A retry: verify every one of the five conditions. Any failure — the

@@ -140,6 +140,12 @@ Set `STRATIUM_PEP_PROXY_FORWARD_CREDENTIALS=true` to forward those three too,
 for a target that checks the Stratium token itself. The target then holds a
 token it can present to the PDP, though not a proof for it.
 
+A proxied call may stay open for `STRATIUM_PEP_PROXY_MAX_STREAM_DURATION`
+(default `1h`). The proxy decides a call once, when it opens, so a long
+stream is not looked at again; when the time is up the proxy ends it with
+`DEADLINE_EXCEEDED`, and the call the caller opens next is decided afresh.
+Lower it if a stream must not outlive a revocation by that long.
+
 ---
 
 ## What a denial looks like

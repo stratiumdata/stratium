@@ -247,9 +247,10 @@ func TestIntegration_SpentProofs_ServingRoleGrantsAreExactlyInsertSelectDelete(t
 		"UPDATE spent_proofs": `UPDATE spent_proofs SET expires_at = NOW() + INTERVAL '100 years'`,
 
 		// E7 (§4.6.1): the PDP creates pending approvals and never dispositions
-		// one, and never deletes the record of having asked.
+		// one. It may delete an expired one (migrations/000028_session_retention,
+		// proven in retention_integration_test.go), so DELETE is not in this
+		// list of refusals.
 		"UPDATE approvals": `UPDATE approvals SET status = 'approved'`,
-		"DELETE approvals": `DELETE FROM approvals`,
 
 		// T1 (§4.4.2): the catalog is control-plane configuration.
 		"INSERT tool_catalog": `INSERT INTO tool_catalog (tenant_id, tool_name, verb) ` +

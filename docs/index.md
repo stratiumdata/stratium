@@ -64,7 +64,8 @@ classification itself. The test for any change:
     From a fresh clone to a coding agent whose tool calls are authorized,
     with one script.
 
-    [Try the hosted demo](demo.md) · [Quickstart](quickstart.md) · [A default posture](default-posture.md)
+    [Try the hosted demo](demo.md) · [Quickstart](quickstart.md) ·
+    [A default posture](default-posture.md) · [What it does not stop](limits.md)
 
 -   :material-lightbulb-on: **Understand it**
 

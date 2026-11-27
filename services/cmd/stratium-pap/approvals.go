@@ -22,11 +22,16 @@ import (
 // list route in routeTable, and unaudited, matching every other GET handler
 // in this package (N4 is about writes).
 func listApprovals(s *Server, w http.ResponseWriter, r *http.Request, _ Operator) {
-	approvals, err := s.store.ListApprovals(r.Context())
+	before, limit, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+	approvals, next, err := s.store.ListApprovals(r.Context(), before, limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	linkNext(w, r, next)
 	writeJSON(w, http.StatusOK, approvals)
 }
 
