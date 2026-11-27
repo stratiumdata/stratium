@@ -32,7 +32,7 @@
 	@kc_signin {
 		method GET
 		path /realms/stratium/protocol/openid-connect/auth
-		expression `{http.request.uri.query}.matches('^((response_type|client_id|redirect_uri|scope|state|code_challenge|code_challenge_method)=[A-Za-z0-9_.~*%+-]*(&|$))+$')`
+		expression `{http.request.uri.query}.matches('^((response_type|client_id|redirect_uri|scope|state|code_challenge|code_challenge_method|audience)=[A-Za-z0-9_.~*%+-]*(&|$))+$')`
 	}
 	@kc_post {
 		method POST

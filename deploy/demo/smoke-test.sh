@@ -54,8 +54,11 @@ redirect="$base/callback.html"
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 verifier="$(openssl rand 32 | b64url)"
 challenge="$(printf %s "$verifier" | openssl dgst -sha256 -binary | b64url)"
+# Every parameter the admin UI itself sends (clients/ui/src/auth.ts), so a
+# proxy rule that drops one of them fails here and not in a visitor's popup.
 auth() { c -G "$realm/protocol/openid-connect/auth" -d client_id=stratium-pap -d response_type=code \
-	--data-urlencode 'scope=openid profile email' --data-urlencode "redirect_uri=$redirect" "$@"; }
+	--data-urlencode 'scope=openid profile email' --data-urlencode "redirect_uri=$redirect" \
+	-d state=smoke-test -d audience=stratium-pap "$@"; }
 
 # Sign-in without a proof key is refused, as is a redirect anywhere but the UI's callback.
 auth -o /dev/null -w '%{http_code} %{redirect_url}' | grep -Eq '^400|error=invalid_request' || fail "sign-in without PKCE is accepted"
