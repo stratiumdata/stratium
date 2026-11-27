@@ -91,6 +91,39 @@ a command's words and not its effects.
 
 ## Three parts
 
+```mermaid
+flowchart LR
+    subgraph beside["Beside the agent (not trusted)"]
+        agent["Agent<br/>a coding agent, an MCP client,<br/>or your own loop"]
+        pep["Enforcement point<br/>stratium-pep"]
+        tool["The tool<br/>shell, files, an MCP server, an API"]
+    end
+
+    subgraph yours["Your infrastructure (trusted)"]
+        pdp["Decision point<br/>stratium-pdp"]
+        pap["Administration point<br/>stratium-pap and its console"]
+        db[("Postgres<br/>policies, delegations,<br/>approvals, audit chain")]
+    end
+
+    people["The person the agent acts for,<br/>and operators"]
+    idp["Your identity provider<br/>(OIDC)"]
+
+    agent -- "(1) tool call" --> pep
+    pep -- "(2) Decide: the arguments, as sent" --> pdp
+    pdp -- "(3) allow, deny, or wait for approval" --> pep
+    pep -- "(4) only if allowed" --> tool
+    pdp <--> db
+    pap <--> db
+    people -- "policies, approvals, revocation" --> pap
+    people -. "sign in" .-> idp
+    idp -. "identity" .-> pap
+```
+
+The enforcement point forwards a tool call and enforces the answer. The
+decision point works out what the call is and whether it may go ahead. The two
+trusted services share one database and never take the enforcement point's
+word for anything.
+
 | Part | Binary | What it does |
 |---|---|---|
 | Decision point (PDP) | `stratium-pdp` | Answers one question, `Decide`. Owns all classification and token verification. |
