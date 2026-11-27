@@ -1,0 +1,98 @@
+{
+  "realm": "stratium",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "groups": [
+    { "name": "stratium-admins" },
+    { "name": "stratium-editors" },
+    { "name": "stratium-viewers" }
+  ],
+  "clients": [
+    {
+      "clientId": "stratium-pap",
+      "name": "Stratium admin plane",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://${DEMO_HOST}/*"],
+      "webOrigins": ["https://${DEMO_HOST}"],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "full.path": "false",
+            "claim.name": "groups",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "stratium-pap-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "stratium-pap",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "stratium-pdp",
+      "name": "Stratium sessions (principal tokens for the PDP)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "stratium-pdp-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "stratium-pdp",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "demo",
+      "email": "demo@example.com",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Visitor",
+      "enabled": true,
+      "groups": ["/stratium-editors"],
+      "credentials": [
+        { "type": "password", "value": "${DEMO_USER_PASSWORD}", "temporary": false }
+      ]
+    },
+    {
+      "username": "admin",
+      "email": "admin@example.com",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "enabled": true,
+      "groups": ["/stratium-admins"],
+      "credentials": [
+        { "type": "password", "value": "${DEMO_ADMIN_PASSWORD}", "temporary": false }
+      ]
+    }
+  ]
+}

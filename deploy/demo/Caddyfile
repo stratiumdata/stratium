@@ -1,0 +1,29 @@
+# One hostname, one certificate, three backends. Caddy obtains and renews the
+# certificate itself; DEMO_TLS is empty in production and set only by the
+# local smoke test, which has no public name to get a certificate for.
+{$DEMO_HOST} {
+	{$DEMO_TLS}
+
+	# The PDP: gRPC from every visitor's enforcement point.
+	@grpc header Content-Type application/grpc*
+	handle @grpc {
+		reverse_proxy h2c://pdp:50051
+	}
+
+	# Keycloak: sign-in for the demo realm and the static files its pages
+	# load, nothing else. The admin console and the master realm are not
+	# routed at all. Nor is the account console: the demo login is shared,
+	# and one visitor changing its password would lock out every other.
+	@keycloak {
+		path /realms/stratium/* /resources/*
+		not path /realms/stratium/account*
+	}
+	handle @keycloak {
+		reverse_proxy keycloak:8080
+	}
+
+	# Everything else is the admin plane and its embedded UI.
+	handle {
+		reverse_proxy stratium-pap:8080
+	}
+}
